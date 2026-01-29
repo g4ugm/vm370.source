@@ -45,7 +45,7 @@ INT      TITLE 'DMSINT     (CMS)       VM/370 - RELEASE 6'              00001000
 *                                                                       00049000
 *  EXTERNAL REFERENCES:                                                 00050000
 *                                                                       00051000
-*         NONE                                                          00052000
+*         DMSCRDUP - uppercase translate table in DMSCRD       HRC309DS 00052000
 *                                                                       00053000
 *  TABLES/WORKAREAS:                                                    00054000
 *                                                                       00055000
@@ -129,6 +129,18 @@ INT      TITLE 'DMSINT     (CMS)       VM/370 - RELEASE 6'              00001000
 *  TERMINATES EXECUTION,  OR IF INTSVC  CANNOT EXECUTE  IT, THE         00133000
 *  RETURN CODE  IS PASSED IN REGISTER  15, AND THE  CMS COMMAND         00134000
 *  ENVIRONMENT CONTINUES AS DESCRIBED EARLIER.                          00135000
+*                                                              HRC309DS 00135050
+*  In all of the above cases, the address of the command's     HRC309DS 00135100
+*  parameter list is passed in R1.  The high order byte of R1  HRC309DS 00135150
+*  is set to x'0B' to signal that the command was called from  HRC309DS 00135200
+*  DMSINT.  An exception is made for commands stacked by       HRC309DS 00135250
+*  DMSINS on the initial entry into DMSINT during IPL.  In     HRC309DS 00135300
+*  this case the high order byte of R1 is set to x'01'.        HRC309DS 00135350
+*                                                              HRC309DS 00135400
+*  The address of the command's extended paramter list (the    HRC309DS 00135450
+*  untranslated, untokenized command string) is passed in R0.  HRC309DS 00135500
+*  The presence of this extended parameter list is signaled by HRC309DS 00135550
+*  bit 7 (x'01') of the high order byte of R1 set to 1.        HRC309DS 00135600
 *                                                                       00136000
 *                                                                       00137000
 *  ENTRY POINT:                                                         00138000
@@ -265,6 +277,8 @@ INIT1B   LTR   R5,R5          WAS THERE A USER FIRST COMMAND?           00266000
          CH    R3,=H'1'       IS THAT ALL THAT'S LEFT?                  00268000
          BE    INIT1C         YES.  DO IT IN INIT MAINLINE     @VA04649 00269150
 INIT1A   BAL   R13,WAITREAD   GET  THE COMMAND.                         00270000
+         O     R1,=X'01000000' set EPLIST available flag       HRC309DS 00270200
+         LA    R0,NUCPLIST    pass the extended PLIST          HRC309DS 00270400
          SVC   202            AND DO IT                                 00271000
          DC    AL4(*+4)                                        @VA00871 00271100
          BCT   R3,INIT1B      REDUCE COUNT BY 1.                  P1021 00272000
@@ -334,6 +348,22 @@ CHKEEP   TM    2(R3),KEEP IS 'KEEP' FLAG SET IN FLAG-BYTE ?             00322000
          B     PGREL              GET NEXT COM. AFTER PG CK             00327000
 BXLE34   BXLE  R3,R4,CHKEEP   ITERATE THRU 'IONTABL'                    00328000
          DROP  R2                                                       00329000
+         USING SCBLOCK,R3                                      HRC404DS 00329020
+         LA    R3,NUCSCBLK        SCBLOCKs anchor word         HRC404DS 00329040
+SCDEL    DS    0H                                              HRC404DS 00329060
+         LR    R2,R3              Lagging block pointer        HRC404DS 00329080
+SCDEL2   DS    0H                                              HRC404DS 00329100
+         ICM   R3,B'1111',SCBFWPTR Point to next SCBLOCK       HRC404DS 00329120
+         BZ    SCDEL3             Bif done                     HRC404DS 00329140
+         TM    SCBSFLAG,SCBSFSYS  Should we keep this one?     HRC404DS 00329160
+         BO    SCDEL              If so, on to the next        HRC404DS 00329180
+*                                 Remove from the chain        HRC404DS 00329200
+         MVC   SCBFWPTR-SCBLOCK(L'SCBFWPTR,R2),SCBFWPTR        HRC404DS 00329220
+         MVC   SCBFWPTR,NUCXCBEE  Add to the front             HRC404DS 00329240
+         ST    R3,NUCXCBEE           of the free block list    HRC404DS 00329260
+         LR    R3,R2              Point to previous            HRC404DS 00329280
+         B     SCDEL2             Loop to process next SCBLOCK HRC404DS 00329300
+SCDEL3   DS    0H                                              HRC404DS 00329320
 *                                                                       00330000
 *   RELEASE USER-AREA PAGES IF NECESSARY                                00331000
 *        PURGESYS CMS SAVED SEGMENT IF NECESSARY                        00332050
@@ -417,7 +447,8 @@ GO       MVC   PREVCMND,LASTCMND   SAVE PREVIOUS COMMAND NAME.    P0626 00386000
          MVC   LASTCMND,0(R1) SAVE CURRENT COMMAND NAME.          P0626 00387000
          CLC   0(3,R1),=C'CP '     IS IT A CP REQUEST?            P0626 00388000
          BE    CPFUNCTN       BRANCH IF YES.                            00389000
-GOSVC    ICM   R1,B'1000',=X'0C' FLAG AS "COMMAND" FROM "INIT" @VA01154 00395100
+GOSVC    ICM   R1,B'1000',=X'0B' flag as "COMMAND" from "INIT" HRC309DS 00395120
+         LA    R0,NUCPLIST    pass the extended PLIST          HRC309DS 00395140
          SVC   202               & GO TO SPECIFIED CMS COMMAND @VA01154 00395200
          DC    AL4(*+4)       SKIP OVER ERROR                           00396000
          TM    SUBFLAG,SUBACT+SUBREJ SUBSET COMMAND REJECT ?   @V305614 00396020
@@ -457,6 +488,10 @@ FROMC2   LTR   R13,R15        RTN CODE --> R13 & SET COND CODE @VA02474 00400450
          BE    UPDAT          APPARENTLY.                         P3007 00409000
 CPFUNCTN LA    R1,CMNDLINE         PROVIDE A(COMMAND LINE)              00410000
          LR    R0,R6          AND COUNT FOR CP FUNCTION                 00411000
+         BCTR  R6,0           decrement by 1 for EX            HRC309DS 00411200
+         L     R14,NUCUPPER        Standard uppercase TR table HRC418DS 00411301
+         EX    R6,XLATEUP     translate to uppercase           HRC309DS 00411400
+         LA    R6,1(R6)       restore count in R6              HRC309DS 00411500
          L     R15,=V(DMSCPF) GET ADDRESS OF DMSCPF                     00412000
          BALR  R14,R15        SEND COMMAND TO CP                        00413000
          CH    R15,=H'1'      CHECK CP RETURN FOR UNKNOWN COMMAND       00414000
@@ -467,7 +502,16 @@ NOT4     LR    R13,R15        IF NOT, USE CP RET CODES & CONTINUE       00418000
 *                                                                       00419000
 * LOGOUT OUT ON DISK BEFORE GIVING READY MESSAGE                        00420000
 *                                                                       00421000
-UPDAT    LA    R1,FINISLST    CLOSE ALL FILES (IF ANY ARE OPEN)         00422000
+UPDAT    DS    0H                                              HRC404DS 00422020
+         ICM   R1,B'1111',NUCXEND And 'ENDCND' Nuc Extensions? HRC404DS 00422040
+         BZ    NUCXDONE           Skip this if not             HRC404DS 00422060
+         TM    SUBFLAG,SUBACT     Are we in SUBSET mode?       HRC404DS 00422080
+         BO    NUCXDONE           Skip this if so              HRC404DS 00422100
+         LA    R1,DMSSNXEC        Go call ENDCMD extensions    HRC404DS 00422120
+         SVC   202                                             HRC404DS 00422140
+         DC    AL4(*+4)                                        HRC404DS 00422160
+NUCXDONE DS    0H                                              HRC404DS 00422180
+         LA    R1,FINISLST    Close any OPEN file              HRC404DS 00422200
          SVC   202            UPDATING ANY USER FILE-DIRECTORIES        00423000
          DC    AL4(*+4)       IN THE PROCESS.                           00424000
          TM    OSSFLAGS,OSRESET    RESET OF OS-FIELDS REQUIRED?   P3038 00425000
@@ -500,18 +544,18 @@ CKPR15   LTR   R15,R15        CHECK R15 RETURN CODE            @VA02241 00436200
 *      NO ERROR MEANS THAT SOME COMMAND WAS USED SUCCESSFULLY           00438000
 *                                                                       00439000
 PRNREADY EQU   *     PRINT 'READY' MESSAGE WITH TIME & ADDED CAR-RETRN. 00440000
-         MVC   RMSGBUF+7(5),=C'R; T='                             P3047 00441000
+         MVC   RMSGBUF+7(9),=C'Ready; T='                      HRC011DS 00441490
          TM    MSGFLAGS,NORDYTIM        IS THE SHORT FORM DESIRED?      00442000
          BO    NORTMSG        YES. GO PRINT IT THEN.                    00443000
          TM    SUBFLAG,X'01'  IS IT 'SUBSET (RETURN)'?                  00444000
          BO    NORTMSG        WE'RE O.K. HERE TOO.                      00445000
          BAL   R13,TIMESUB    CALL THE TIME SUBROUTINE.                 00446000
-         LA    R1,3(,R1)      INCREMENT BYTE COUNT CORRECTLY   @VA01602 00447000
+         LA    R1,7(,R1)      INCREMENT BYTE COUNT CORRECTLY   HRC011DS 00447490
 PRNRDY1  LA    R0,RMSGBUF+7   NOW POINT TO THE WHOLE THING        P3047 00448000
          B     TYPBLK         ... AND PRINT IT.                         00449000
          SPACE                                                          00450000
 NORTMSG  LA    R1,RDYOFF      UPDATE LENGTH REGISTER.                   00451000
-         MVI   RMSGBUF+9,X'15'                                 @VA01602 00452100
+         MVI   RMSGBUF+13,X'15'                                HRC011DS 00452490
          B     PRNRDY1                                                  00453000
          SPACE                                                          00454000
 BADENV   DC    H'-5'  LOADMOD WHEN WRONG ENVIRONMENT ACTIVE    @V305066 00454100
@@ -607,8 +651,8 @@ FILSAVLP EQU   *              LOOP THOUGH ACTIVE FILES                  00516000
          SPACE                                                          00533000
 SUBSAV   EQU   *                                                        00534000
          L     R11,AFVS       LET'S GET SOME ADDRESSABILITY             00535000
-         DMSFREE DWORDS=6,TYPE=NUCLEUS,TYPCALL=BALR                     00536000
-         MVC   0(48,R1),STATEFST   PRESERVE INFO AT END OF CHAIN        00537000
+         DMSFREE DWORDS=STFSTSDW,TYPE=NUCLEUS,TYPCALL=BALR     HRC015DS 00536100
+         MVC   0(STFSTSIZ,R1),STATEFST Preserve end of chain   HRC015DS 00536600
          ST    R1,ASUBSTAT    AND REMEMBER WHERE THAT IS                00538000
          ST    R5,ASUBFST     SAVE LAST SUBFST CHAIN ADDRESS            00539000
          LA    R1,FINISLST    CLOSE ANY FILES...                        00540000
@@ -665,8 +709,8 @@ FILRESLP EQU   *              LOOP THOUGH FILES IN SUBFST CHAIN         00555000
          B     FILRESLP       LOOP                                      00566000
 SUBRET1  EQU   *                                                        00567000
          L     R1,ASUBSTAT    GET ADDRESS OF STATEFST INFO              00568000
-         MVC   STATEFST(48),0(R1)  PUT IT BACK                          00569000
-         LA    R0,6           AND RELEASE STORAGE                       00570000
+         MVC   STATEFST(STFSTSIZ),0(R1)  Put it back           HRC015DS 00569100
+         LA    R0,STFSTSDW    And release storage              HRC015DS 00570100
          DMSFRET DWORDS=(0),LOC=(1),TYPCALL=BALR                        00571000
          MVC   OSSFLAGS(1),SWTCHSAV   RESTORE ITS PREVIOUS SETTING.     00572000
          L     R1,SPIESAV     PICK UP OLD PICA                          00573000
@@ -718,12 +762,12 @@ INIT     CSECT                                                          00604000
 TIMESUB  LA    R1,CONWAIT     WAIT FOR CONSOLE TO SUBSIDE               00608000
          SVC   202                                                      00609000
          DC    AL4(*+4)                                        @VA00871 00609100
-         LA    R1,RMSGBUF+12  ADDRESS OF OUR BUFFER               P3047 00610000
+         LA    R1,RMSGBUF+16  ADDRESS OF OUR BUFFER            HRC011DS 00610490
          ST    R1,CMSTIM+16   STORE FOR CMSTIME                         00611000
          LA    R1,CMSTIM      PREPARE TO CALL CMSTIME                   00612000
          L     R15,=V(CMSTIMER)                                         00613000
          BALR  R14,R15        CALL CMSTIME TO GET TIMES                 00614000
-         LA    R1,RMSGBUF+12  ADDRESS OF BUFFFER (WITH TIMES NOW) P3047 00615000
+         LA    R1,RMSGBUF+16  ADDR OF BUFFER (WITH TIMES NOW) PHRC011DS 00615490
          LR    R15,R1         SAVE THIS ADDRESS FOR LATER.              00616000
          A     R1,CMSTIM+20   PLUS LENGTH USED MAKES NEXT FREE BYTE     00617000
          MVI   0(R1),X'15'                                     @VA01602 00618100
@@ -733,7 +777,8 @@ TIMESUB  LA    R1,CONWAIT     WAIT FOR CONSOLE TO SUBSIDE               00608000
 *                                                                       00622000
 *   READ IN LINE FROM TERMINAL                                          00623000
 *   R4=A(ZERO COUNT), R13=A(RETURN)                                     00624000
-WAITREAD MVI   CONRDCOD,C'U'  ENSURE 'U' CODE                           00625000
+WAITREAD EQU   *                                               HRC309DS 00625200
+         MVI   CONRDCOD,C'S'  don't translate to uppercase yet HRC309DS 00625400
 WTRD0    LA    R1,CONREAD     POINT TO THE READ PLIST.            P3038 00626000
          TM    OPTFLAGS,NOVMREAD AUTOREAD OFF?                 @VM08878 00627150
          BZ    RDSVC          NO..BR                           @V200714 00627200
@@ -756,7 +801,19 @@ WTRD2    EQU   *                                                        00637000
          LR    R0,R6          LOAD BYTE COUNT FOR SCAN                  00641000
          LA    R1,CMNDLINE    POINT TO INPUT LINE                       00642000
          L     R15,=V(DMSSCNN)     CONVERT INPUT LINE TO PLIST          00643000
+         L     R15,ASCANN          Call DMSSCNN to build PLIST HRC404DS 00643100
          BALR  R14,R15            (ON RETURN, R1 = A(COMBUF))           00644000
+* We must translate the tokenized PLIST into uppercase, as     HRC309DS 00644100
+* that is what the rest of CMS expects.                        HRC309DS 00644120
+         LR    R15,R1         point to start of plist          HRC309DS 00644140
+EPLOOP1  DS    0H             loop to find the fence           HRC309DS 00644160
+         LA    R15,8(R15)     next token, please               HRC309DS 00644180
+         CLI   0(R15),X'FF'   is this the fence?               HRC309DS 00644200
+         BNE   EPLOOP1        no, keep checking                HRC309DS 00644220
+         SR    R15,R1         length of tokenized plist        HRC309DS 00644240
+         BCTR  R15,0          decrement by 1 for EX            HRC309DS 00644260
+         L     R14,NUCUPPER        Standard uppercase TR table HRC418DS 00644282
+         EX    R15,XLATEUP    translate to uppercase           HRC309DS 00644300
          BR    R13                                                      00645000
 *                                                                       00646000
 CONWAIT  DS    0F                                                       00647000
@@ -798,18 +855,18 @@ INVSUB   LA    R0,INSUBMSG    POINT TO THE MESSAGE.               P3007 00678000
 *                                                                       00681000
 ERR5     EQU   *              ERROR DURING EXECUTION OF COMMAND         00682000
          CVD   R15,ERRNUM     CONVERT TO DECIMAL                  P3047 00683000
-         MVC   RMSGBUF(13),=C'R(NUMBR); T='                       P3047 00684000
-         UNPK  RMSGBUF+2(5),ERRNUM+5(3)      MOVE TO TYPEOUT      P3047 00685000
-         OI    RMSGBUF+6,X'F0'     FIX UP END CHARACTER TO BE PRINP3047 00686000
+         MVC   RMSGBUF(17),=C'Ready(NUMBR); T='                HRC011DS 00684490
+         UNPK  RMSGBUF+6(5),ERRNUM+5(3)      MOVE TO TYPEOUT   HRC011DS 00684980
+         OI    RMSGBUF+10,X'F0'    FIX UP END CHARACTER TO BE PHRC011DS 00685470
          LTR   R13,R13        GET RET CODE                     @VA02241 00686100
          BNM   PLUSRT         POSITIVE RETURN CODE             @VA02241 00686200
-         MVI   RMSGBUF+2,C'-' MINUS RETURN CODE                @VA02241 00686300
+         MVI   RMSGBUF+6,C'-' MINUS RETURN CODE                HRC011DS 00686590
 PLUSRT   TM    MSGFLAGS,NORDYTIM SHORT FORM?                   @VA02241 00687000
          BO    SHORTERR       YES, LONG ENOUGH.                         00688000
          TM    SUBFLAG,X'01'  IS IT SUBSET?                             00689000
          BO    SHORTERR       STILL LONG ENOUGH.                        00690000
          BAL   R13,TIMESUB    COMPUTE AND STORE PRINTABLE TIME IN 'T'   00691000
-         LA    R1,10(,R1)     INCR BY L' R(NUMBR)              @VA01602 00692000
+         LA    R1,14(,R1)     INCR BY L' R(NUMBR)              HRC011DS 00692490
 PRINTX   LA    R0,RMSGBUF     SET FOR ERROR-MESSAGE               P3047 00693000
 PRINT    TM    MSGFLAGS,REDERRID   RED ERR MSG ALLOWED ?                00694000
          BNO   TYPBLK              NO.                                  00695000
@@ -817,7 +874,7 @@ PRINT    TM    MSGFLAGS,REDERRID   RED ERR MSG ALLOWED ?                00694000
          B     TYPALL         GO TYPE MESSAGE & GET NEXT LINE.          00697000
          SPACE                                                          00698000
 SHORTERR LA    R1,ERROFF      USE THE ABBREVIATED LENGTH.               00699000
-         MVI   RMSGBUF+9,X'15'                                 @VA01602 00700050
+         MVI   RMSGBUF+13,X'15'                                HRC011DS 00700440
          B     PRINTX         NOW DISPLAY THE GOOD NEWS.                00701000
          SPACE 2                                                        00702000
 * RE-ENTER HERE FROM DMSABN.  WE MUST SET UP ALL REGISTERS.             00703000
@@ -840,8 +897,8 @@ DMSINTAB EQU   *                                                        00706000
 HNDILST  DC    CL8'HNDINT',CL4'PURGE'     (12 BYTES ARE ENUF)           00720000
 KEEP     EQU   X'08'          KEEP-BIT IN IONTABL ENTRY FLAG-BYTE       00721000
 *                                                                       00722000
-RDYOFF   EQU   3              LGTH OF SHORT FORM MSG           @VM08810 00723100
-ERROFF   EQU   10             LGTH OF SHORT ERROR MSG          @VM08810 00724100
+RDYOFF   EQU   7              LGTH OF SHORT FORM MSG           HRC011DS 00723390
+ERROFF   EQU   14             LGTH OF SHORT ERROR MSG          HRC011DS 00723680
 PURGESYS EQU   8                                               @V305066 00724110
 H8       DC    H'08'                                                    00725000
          SPACE                                                          00726000
@@ -849,23 +906,23 @@ H8       DC    H'08'                                                    00725000
 *                                                                       00728000
 *      INIT ERROR MESSAGES                                              00729000
 *                                                                       00730000
-CPMSG    DC    C'UNKNOWN CP COMMAND'                                    00731000
+CPMSG    DC    C'Unknown CP command'                           HRC011DS 00731490
          DC    X'15'                                           @VA01602 00732100
 LCP      EQU   *-CPMSG                                                  00733000
 *                                                                       00734000
-CMSMSG   DC    C'UNKNOWN CMS COMMAND'                                   00735000
+CMSMSG   DC    C'Unknown CMS command'                          HRC011DS 00735490
          DC    X'15'                                           @VA01602 00736100
 LCMS     EQU   *-CMSMSG                                                 00737000
 *                                                                       00738000
-CPCMSMSG DC    C'UNKNOWN CP/CMS COMMAND'                                00739000
+CPCMSMSG DC    C'Unknown CP/CMS command'                       HRC011DS 00739490
          DC    X'15'                                           @VA01602 00740100
 LCPCMS   EQU   *-CPCMSMSG                                               00741000
 *                                                                       00742000
-INCMSMSG DC    C'INVALID CMS COMMAND'                             P3007 00743000
+INCMSMSG DC    C'Invalid CMS command'                          HRC011DS 00743490
          DC    X'15'                                           @VA01602 00744100
 LINCMS   EQU   *-INCMSMSG                                         P3007 00745000
 *                                                                       00746000
-INSUBMSG DC    C'INVALID SUBSET COMMAND'                          P3007 00747000
+INSUBMSG DC    C'Invalid SUBSET command'                       HRC011DS 00747490
          DC    X'15'                                           @VA01602 00748100
 LINSUB   EQU   *-INSUBMSG                                         P3007 00749000
 *                                                                       00750000
@@ -875,10 +932,14 @@ CMS3     DC    C'CMS'                                                   00751000
 CMS4     DC    C'CMS (DOS ON)',X'15'                           @V305032 00753200
 LCMS4    EQU   *-CMS4                                          @V305032 00753300
 *                                                                       00753400
-CMS5     DC    C'CMS SUBSET',X'15'                             @VA01602 00754100
+CMS5     DC    C'CMS Subset',X'15'                             HRC011DS 00754140
 VSRLIST  DS    0D             CALL LIST FOR DMSVSR             @V305106 00754200
          DC    CL8'DMSVSR'    (FOR VSAM CLEANUP)               @V305106 00754250
          DC    8X'FF'                                          @V305106 00754300
+DMSSNXEC DS    0D                                              HRC404DS 00754310
+         DC    CL8'DMSSNXEC'                                   HRC404DS 00754320
+         DC    8X'FF'                                          HRC404DS 00754330
+XLATEUP  TR    0(*-*,R1),0(R14)    translate to uppercase      HRC418DS 00754401
          EJECT                                                          00755000
          NUCON                                                          00756000
          IO                                                             00757000
@@ -887,5 +948,6 @@ VSRLIST  DS    0D             CALL LIST FOR DMSVSR             @V305106 00754200
          SYSNAMES                                            , @V305614 00758100
          SUBSECT                                                  P3047 00759000
          IOSECT                                                         00760000
+         SCBLOCK ,                                             HRC404DS 00760100
          REGEQU                                                         00761000
          END                                                            00762000

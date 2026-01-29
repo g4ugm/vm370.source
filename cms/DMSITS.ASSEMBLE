@@ -427,6 +427,13 @@ SVC202   EQU   *                                                        00411000
                                        THE AL4(ADDRESS)                 00430000
          LA    R1,4(,R1)               SKIP OVER THE 4-BYTE CONSTANT    00431000
          ST    R1,NRMRET-SSAVE+NRMSAV  AND STORE AS NORMAL RETURN ADDR  00432000
+* Support using AL4(1) as error address after SVC 202          HRC404DS 00432100
+* to allow code blocks to be moved to a different location.    HRC404DS 00432200
+* REXX function packages and other Nucleus Extensions          HRC404DS 00432300
+* may do this.                                                 HRC404DS 00432400
+         CLC   =F'1',ERRET-SSAVE+NRMSAV Was ERRET AL4(1)??     HRC404DS 00432500
+         BNE   *+8                     Skip next if not        HRC404DS 00432600
+         ST    R1,ERRET-SSAVE+NRMSAV  Set ERRET to NRMRET      HRC404DS 00432700
          SPACE                                                          00433000
 S2A      EQU   *                                                        00434000
          SPACE                                                          00435000
@@ -440,11 +447,37 @@ S2A      EQU   *                                                        00434000
          BAL   RR,GETSAVE              ALLOCATE A SAVE AREA             00443000
          MVC   CALLEE,CALLEE-SSAVE+NRMSAV COPY CALLEE NAME INTO AREA    00444000
          MVC   NRMRET(8),NRMRET-SSAVE+NRMSAV COPY NRMRET AND ERRET      00445000
+*                                                              HRC404DS 00445030
+* Check for a call to a subcommand entry point                 HRC404DS 00445060
+         CLI   EGPR1,X'02'             SUBCOM call request?    HRC404DS 00445090
+         BL    S2EN                    Bif normal 000 or 01    HRC404DS 00445120
+         BH    S2B                     No, go check for        HRC404DS 00445150
+*                                       special X'03' or X'04' HRC404DS 00445180
+         LM    R0,R1,CALLEE            Name of callee routine  HRC404DS 00445210
+         BAL   RR,CHKSUBC              Find a SUBCOM entry     HRC404DS 00445240
+         LTR   XR,XR                   Did we?                 HRC404DS 00445270
+         BZ    GIVUP                   Not there, give error   HRC404DS 00445300
+         B     NUCX                    Process like NUCEXT     HRC404DS 00445330
+*                                                              HRC404DS 00445360
+S2B      DS    0H                                              HRC404DS 00445390
+         CLI   EGPR1,X'04'             NUCEXT prohibited?      HRC404DS 00445420
+         BH    S2EN                    Skip next if not        HRC404DS 00445450
+         NI    EGPR1,X'FF'-X'04'-X'02' Transform 3 to 1 and    HRC404DS 00445480
+*                                                4 to 0        HRC404DS 00445510
+         OI    SFLAG,SFNONUCX          Do not resolve to       HRC404DS 00445540
+*                                        a Nucleus Extension   HRC404DS 00445570
+*                                                              HRC404DS 00445600
          SPACE                                                          00446000
 * THE FOLLOWING IS THE ENTRY POINT TO SVC 202 CODE WHEN AN SVC 203 IS   00447000
 * MADE, REQUIRING AN SVC 202 LOOKUP.                                    00448000
 S2EN     EQU   *                                                        00449000
          LM    R0,R1,CALLEE            GET NAME OF CALLEE               00450000
+         TM    SFLAG,SFNONUCX          Do not resolve to NUCX? HRC404DS 00450100
+         BO    CHECKTA                 Skip next if so         HRC404DS 00450200
+         BAL   RR,CHKNUCX              Try to find NUCX        HRC404DS 00450300
+         LTR   XR,XR                   Found it?               HRC404DS 00450400
+         BNZ   NUCX                    Go to setup for call    HRC404DS 00450500
+CHECKTA  DS    0H                                              HRC404DS 00450600
          BAL   RR,CHKTRANS             SEE IF IT'S IN TRANSIENT AREA    00451000
          BE    TRANS                   GO IF IT IS                      00452000
          BAL   RR,SRCFNC               SEARCH DMSFNC FUNCTION TABLE     00453000
@@ -532,16 +565,34 @@ TRANS    EQU   *                                                        00526000
 * COME HERE IF THE ROUTINE IS IN THE NUCLEUS.                           00535000
 NUC      EQU   *                                                        00536000
          OI    SFLAG,SFSYS+SFNUC       SET SYSTEM AND NUCLEUS FLAGS     00537000
+         B     START                   and go to START up      HRC404DS 00537020
+*                                                              HRC404DS 00537040
+* Here if the routine is a Nucleus Extension or a Subcommand.  HRC404DS 00537060
+* We have the address of a Nucleus Extension block in XR from  HRC404DS 00537080
+* which we can get all the information to build a PSW. We      HRC404DS 00537100
+* skip setting the bits in SFLAG and just build the PSW here.  HRC404DS 00537120
+NUCX     DS    0H                                              HRC404DS 00537140
+         USING SCBLOCK,XR                                      HRC404DS 00537160
+         XC    ITSPSW(8),ITSPSW        Build PSW here          HRC404DS 00537180
+         MVC   ITSPSW+4(4),SCBPSW+4    Set the address         HRC404DS 00537200
+         IC    R2,SCBPSW+1             Get the PSW Key byte    HRC404DS 00537220
+         N     R2,=A(X'000000F0')      Get the PSW Key         HRC404DS 00537240
+         STC   R2,ITSPSW+1             Set the PSW Key byte    HRC404DS 00537260
+         C     R2,=A(X'000000E0')      A NUC EXT can be either HRC404DS 00537280
+         BNE   KEYSYS                  'USER' or 'SYSTEM' key  HRC404DS 00537300
+         OI    TYPFLAG,TPFUSR                                  HRC404DS 00537320
+KEYSYS   DS    0H                                              HRC404DS 00537340
+         LR    R2,XR                   SCBLOCK address to R2   HRC404DS 00537360
+         L     R15,SCBPSW+4            Entry address to R15    HRC404DS 00537380
+         B     STARTX                  Rejoin below            HRC404DS 00537400
+         DROP  XR                                              HRC404DS 00537420
+*                                                              HRC404DS 00537440
          SPACE 3                                                        00538000
 * COME HERE TO START UP THE SVC ROUTINE.  THE ROUTINE IS IN CORE SOME-  00539000
 * WHERE, WHETHER IN THE NUCLEUS, THE TRANSIENT AREA, OR THE USER AREA.  00540000
 * REGISTER 15 CONTAINS THE ADDRESS TO WHICH WE'RE SUPPOSED TO TRANSFER  00541000
 * CONTROL.  ALL WE HAVE TO DO IS CONSTRUCT A PSW AND LOAD IT.           00542000
 START    EQU   *                                                        00543000
-         L     R13,USAVEPTR                                             00544000
-         USING USAVE,R13      ADDRESS SAVE AREA                @VA06029 00545000
-         XC    USAVE(USAVESZ*8),USAVE CLEAR THE SAVE AREA      @VA06029 00546000
-         DROP  R13            FREE THE REGISTER                @VA06029 00547000
          ST    R15,RET+4               USE LOWCORE AREA FOR CONSTRUCTON 00548000
          MVC   RET(2),=AL1(ON,0)       SET SYSTEM MASK ON               00549000
          TM    SFLAG,SFTRN+SFNUC       TRANSIENT OR NUCLEUS ROUTINE?    00550000
@@ -553,6 +604,14 @@ START    EQU   *                                                        00543000
          TM    PROTFLAG,PRFPOFF        STORAGE PROTECTION ON?           00556000
          BZ    *+8                     SKIP IF SO                       00557000
          NI    RET+1,X'0F'             RESTORE NUCLEUS KEY              00558000
+*                                                              HRC404DS 00558100
+* STARTX is used to start up nucleus extensions.               HRC404DS 00558200
+*                                                              HRC404DS 00558300
+STARTX   DS    0H                                              HRC404DS 00558400
+         L     R13,USAVEPTR                                    HRC404DS 00558500
+         USING USAVE,R13          Address save area            HRC404DS 00558600
+         XC    USAVE(USAVESZ*8),USAVE Clear the save area      HRC404DS 00558700
+         DROP  R13                Finished with this           HRC404DS 00558800
          TM    OVSTAT,OVSON            SVCTRACE IN EFFECT?              00559000
          BZ    *+12                    SKIP IF NOT                      00560000
          LR    XR,R15                  SAVE R15 TEMPORARILY             00561000
@@ -588,6 +647,41 @@ RETM5    EQU   *                                               @V305032 00590000
          OI    MISFLAGS,NEGITS SET FLAG FOR INT                @V305032 00591000
          LH    R15,=H'-5'     LOAD RETURN CODE OF -5,          @V305032 00592000
          B     CMSRET         AND GO RETURN IT.                @V305032 00593000
+*                                                              HRC404DS 00593020
+* Check for a Subcommand call                                  HRC404DS 00593040
+CHKSUBC  DS    0H                                              HRC404DS 00593060
+         LA    R15,NUCSCBLK       List anchor                  HRC404DS 00593080
+         LA    XR,NUCSCBLK-(SCBFWPTR-SCBLOCK)                  HRC404DS 00593100
+*                                 Set ptr so L XR,SCBFWPTR     HRC404DS 00593120
+*                                   will point to 1st SUBCOM   HRC404DS 00593140
+         B     NUCXLP             Go search that chain         HRC404DS 00593160
+*                                                              HRC404DS 00593180
+* Check for a Nucleus Extension                                HRC404DS 00593200
+CHKNUCX  DS    0H                                              HRC404DS 00593220
+         LA    R15,NUCXCBLK       List anchor                  HRC404DS 00593240
+         LA    XR,NUCXCBLK-(SCBFWPTR-SCBLOCK)                  HRC404DS 00593260
+*                                 Set ptr so L XR,SCBFWPTR     HRC404DS 00593280
+*                                   will point to 1st NUCX     HRC404DS 00593300
+NUCXLP   DS    0H                                              HRC404DS 00593320
+         LR    R14,XR             Remember this element.       HRC404DS 00593340
+         L     XR,SCBFWPTR-SCBLOCK(,R14) Check next element    HRC404DS 00593360
+         LTR   XR,XR              Not found if end of chain    HRC404DS 00593380
+         BZR   RR                 Return 0 ptr to caller       HRC404DS 00593400
+         USING SCBLOCK,XR                                      HRC404DS 00593420
+         CL    R0,SCBNAME         Check                        HRC404DS 00593440
+         BNE   NUCXLP               SCBNAME for                HRC404DS 00593460
+         CL    R1,SCBNAME+4            a match                 HRC404DS 00593480
+         BNE   NUCXLP             No match, go check next      HRC404DS 00593500
+SEARCHGD DS    0H                                              HRC404DS 00593520
+         C     R14,NUCXCBLK       If found block is first on   HRC404DS 00593540
+         BER   RR                   chain, return to caller    HRC404DS 00593560
+         MVC   SCBFWPTR-SCBLOCK(4,R14),SCBFWPTR                HRC404DS 00593580
+*                                 Remove element from chain    HRC404DS 00593600
+         MVC   SCBFWPTR,0(R15)    Link to prior 1st element    HRC404DS 00593620
+         ST    XR,0(,R15)         Update chain anchor          HRC404DS 00593640
+         BR    RR                 Return to caller             HRC404DS 00593660
+         DROP  XR                                              HRC404DS 00593680
+*                                                              HRC404DS 00593700
 * CHECK TO SEE IF SPECIFIED NAME IS CURRENTLY LOADED INTO THE TRANSIENT 00594000
 * AREA.                                                                 00595000
 CHKTRANS EQU   *                                                        00596000
@@ -1440,6 +1534,9 @@ MIN16    DC    H'-16'         SVC 203 CODE FOR SPECIAL CALL    @VM03048 01436000
 ENDITS   EQU   *                                                        01439000
          EJECT                                                          01440000
          SVCSECT                       GENERATE DSECT                   01441000
+SFNONUCX EQU   X'02'              SFLAG bit for no Nucleus     HRC404DS 01441100
+*                                   Extension use wanted       HRC404DS 01441200
+         SCBLOCK ,                                             HRC404DS 01441300
          OVSECT                                                         01442000
          FSTB                                                  @V305665 01443000
          SYSNAMES                                              @V305665 01444000

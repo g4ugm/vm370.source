@@ -24,7 +24,9 @@ DMKVAT   START                                                          00016000
          ENTRY DMKVATPX,DMKVATSX,DMKVATEX                               00024000
          ENTRY DMKVATAT,DMKVATZP,DMKVATZS                               00024500
          ENTRY DMKVATPF                                        @V2A3135 00025000
-         EXTRN DMKPRGSM,DMKPERIL                                        00026000
+         EXTRN DMKERMSG                                        HRC068DK 00025100
+         EXTRN DMKSLC                                          HRC068DK 00025200
+         EXTRN DMKPRGSM                                          PER001 00026000
          EXTRN DMKPTRPW                                        @VA08037 00026505
          EXTRN DMKSTKDE                                        @V407593 00026510
          AIF (NOT &AP).DSPRU4                                           00026515
@@ -157,6 +159,8 @@ DMKVATAB EQU   *                                               %V3M5012 00139000
          DROP  R15                                             %V3M5012 00143000
          USING DMKVAT,R12                                      %V3M5012 00144000
          L     R10,VMECEXT    EXTENSION BLOCK ADDRESS          %V3M5012 00145000
+         TM    VMCXSTAT,VMSTBYPS       STBYPASS VR enabled?    HRC068DK 00145100
+         BO    VAVR                    Y, no shadow table maintHRC068DK 00145200
          SPACE 2                                                        00146000
          AIF (NOT &AP).APCHK4                                           00146080
          TM    APSTAT1,APUOPER     RUNNING AS AP               %V4M0178 00146100
@@ -196,6 +200,49 @@ VATCKC1  EQU   *                                               @VA01719 00171000
          ST    R1,EXTSTOLD    RESET OUR MEMORY OF PREVIOUS VALUE        00175000
          BAL   R8,SHADOWS     RESET SHADOW SEGMENT TABLE                00176000
          B     VACLEAN        GO CLEAN UP AND EXIT                      00177000
+VAVR     EQU   *                                               HRC068DK 00177100
+         TM    EXTCR0+1,X'40'          Is page size 2k?        HRC068DK 00177110
+         BO    STBOFF                  Yes, not elig for STBYPSHRC068DK 00177120
+         ICM   R1,15,EXTCR1            Get user's STO in CR1   HRC068DK 00177130
+         BZ    VAVRCR1                 Zero is ok              HRC068DK 00177140
+         CLM   R1,7,F4096+1            New STO in guest page 0?HRC068DK 00177150
+         BNL   VAVRCR1                 N, CR1 check is ok      HRC068DK 00177160
+*                                                                       00177170
+STBOFF   EQU   *                                               HRC068DK 00177180
+         NI    VMCXSTAT,255-VMSTBYPS   Else turn off STBYPASS  HRC068DK 00177190
+         CLC   VMMADDR,ZEROES          Is ECPS:VM active?      HRC068DK 00177200
+         BE    VACLEAN                 Zeros...so no           HRC068DK 00177210
+         ICM   R1,7,VMMADDR            -> MICBLOK              HRC068DK 00177220
+         USING MICBLOK,R1                                      HRC068DK 00177230
+         MVI   MICEVMA2,0              Set off all STB assists HRC068DK 00177240
+         DROP  R1                                              HRC068DK 00177250
+         B     VACLEAN                 And exit w/o shadow tblsHRC068DK 00177260
+*                                      (they will be built latrHRC068DK 00177270
+VAVRCR1  EQU   *                                               HRC068DK 00177280
+         ST    R1,EXTSHCR1             Use user's actual STO   HRC068DK 00177290
+         SR    R5,R5                   Clear for IC            HRC068DK 00177300
+         IC    R5,EXTCR1               Get segment table len   HRC068DK 00177310
+         LA    R5,1(0,R5)              Make relative to 1      HRC068DK 00177320
+         SLL   R5,6(0)                 Compute length in bytes HRC068DK 00177330
+         STH   R5,EXTVSEGS             Save user's seg tbl len HRC068DK 00177340
+         TM    3(R1),X'01'             Segment invalid?        HRC068DK 00177350
+         BO    VACLEAN                 Yes                     HRC068DK 00177360
+         L     R1,0(,R1)               -> PTE for page 0       HRC068DK 00177370
+         TM    1(R1),X'08'             Page invalid?           HRC068DK 00177380
+         BO    VACLEAN                 Yes                     HRC068DK 00177390
+         ICM   R0,3,0(R1)              Load the page 0 PTE     HRC068DK 00177400
+         N     R0,=X'0000FFF0'         Keep only page addr bitsHRC068DK 00177410
+         BNZ   VACLEAN                 Br if PTE .NE. frame 0  HRC068DK 00177420
+         L     R15,=A(DMKSLC-4096)     Real addr of V=R page 0 HRC068DK 00177430
+         SRL   R15,8                   Adjust for PTE use      HRC068DK 00177440
+         ICM   R0,3,0(R1)              Load the page 0 PTE     HRC068DK 00177450
+         N     R0,=X'0000000F'         Keep guest bit settings HRC068DK 00177460
+         OR    R0,R15                  Adjust PTE to V=R pag 0 HRC068DK 00177470
+         STCM  R0,3,0(R1)              Store updated guest PTE HRC068DK 00177480
+         OI    APSTAT2,CPPTLBR         Set PTLB required       HRC068DK 00177490
+         L     R15,PREFIXB             -> Other processor pfx  HRC068DK 00177500
+         OI    APSTAT2-PSA(R15),CPPTLBR  (If there is another) HRC068DK 00177510
+         B     VACLEAN                                         HRC068DK 00177520
          SPACE                                                          00178000
 VATABPG  EQU   *                                               %V3M5012 00179000
          TM    VMESTAT,VMSHADT     ARE SHADOW TABLES PRESENT   %V3M5012 00180000
@@ -422,6 +469,21 @@ GETPAGT  EQU   *              ALLOCATE A SHADOW PAGE TABLE              00328000
 *---------------------------------------------------------------------* 00338000
 DMKVATBC EQU   *                                                        00339000
          USING *,R15                                                    00340000
+*-- If we are in DMKVATBC with VMSTBVR set, then the PSW has   HRC068DK 00340100
+*-- transitioned into BC-mode.  STBYPASS must be turned off.   HRC068DK 00340110
+         TM    VMCXSTAT,VMSTBYPS       STBYPASS VR enabled?    HRC068DK 00340120
+         BZ    NOSTB                   No                      HRC068DK 00340130
+         NI    VMCXSTAT,255-VMSTBYPS   Turn off STBYPASS       HRC068DK 00340140
+         CLC   VMMADDR,ZEROES          Is ECPS:VM active?      HRC068DK 00340150
+         BE    NOSTB                   Zeros...so no           HRC068DK 00340160
+         ST    R1,BALR1                Need a register         HRC068DK 00340170
+         ICM   R1,7,VMMADDR            -> MICBLOK              HRC068DK 00340180
+         USING MICBLOK,R1                                      HRC068DK 00340190
+         MVI   MICEVMA2,0              Set off all STB assists HRC068DK 00340200
+         DROP  R1                                              HRC068DK 00340210
+         L     R1,BALR1                Restore register        HRC068DK 00340220
+*                                                              HRC068DK 00340230
+NOSTB    EQU   *                                               HRC068DK 00340240
          TM    VMESTAT,VMSHADT     ARE SHADOW TABLES PRESENT?           00341000
          BCR   8,R14          NO - EXIT IMMEDIATELY                     00342000
          STM   R0,R15,BALRSAVE     SAVE REGISTERS IN PSA                00343000
@@ -967,6 +1029,8 @@ DMKVATSX EQU   *                                                        00777000
          USING DMKVAT,R12                                               00780000
          SPACE 2                                                        00781000
          BAL   R6,SETUPEX     SET UP FOR EXCEPTION PROCESSING           00782000
+         TM    VMCXSTAT,VMSTBYPS        STBYPASS VR enabled?   HRC068DK 00782100
+         BO    VATEXIT         VATSX    Reflect seg trans excp HRC068DK 00782200
          SPACE                                                          00783000
          L     R2,0(0,R2)     ENTRY DATA FROM VIRTUAL SEGTABLE ENTRY    00784000
          STCM  R2,B'1000',EXTCOPY  SAVE PAGE-TABLE LENGTH CODE          00785000
@@ -1047,6 +1111,8 @@ DMKVATPX EQU   *              PAGING EXCEPTION ON V370R                 00819000
          LCTL  C1,C1,VMSEG    GET SECOND-LEVEL SEGTABLE ORIGIN @V2A3120 00846000
          LRA   R2,0(0,R6)     TRY FOR PAGE AVAILABLE           @V2A3120 00847000
          BNZ   CHEKSPF        NOPE - MAYBE PSEUDO PAGE FAULT   @V2A3120 00848000
+         TM    VMCXSTAT,VMSTBYPS        STBYPASS VR enabled?   HRC068DK 00848100
+         BO    VATEXIT         VATPX    Just reflect page faultHRC068DK 00848200
          BAL   R8,SHADSET     GO FILL IN SHADOW PAGE TABLE              00849000
          SPACE 2                                                        00850000
 VATEXIT  EQU   *              FAST DISPATCH EXIT                        00851000
@@ -1144,12 +1210,6 @@ VATEXCP  EQU   *              TRANSLATION EXCEPTION OF SOME VARIETY     00926000
          BAL   R3,TRANS21     GET USER'S PAGE ZERO                      00928000
          ST    R7,TREXADD-PSA(,R2) EXCEPTION ADDRESS                    00929000
 VATPRGI  EQU   *              SIMULATE ADDRESSING EXCEPTION    @V2A3120 00930000
-         TM    VMTRCTL,VMTRPER     IS PER TRACING ACTIVE ?              00931000
-         BZ    VATSPRG             NO -- JUST REFLECT PROGRAM INT.      00932000
-         TM    VMPEND,VMPERPND     IS A TRACE EVENT PENDING ?           00933000
-         BZ    VATSPRG             NO -- JUST REFLECT INTERRUPT         00934000
-         CALL  DMKPERIL       EDIT THE TRACE EVENT                      00935000
-VATSPRG  EQU   *              SIMULATE PROGRAM INTERRUPT                00936000
          LR    R0,R6          INTERRUPT CODE INTO R0                    00937000
          GOTO  DMKPRGSM       GO SIMULATE PROGRAM INTERRUPT             00938000
          EJECT                                                          00939000
@@ -1266,6 +1326,7 @@ CLRBITS  DC    X'00FFFFF8'    MASK TO CLEAR FLAG BITS - STE    @V4M0233 01044200
          EJECT                                                          01046000
          COPY  EQU                                                      01047000
          COPY  VMBLOK                                                   01048000
+         COPY  MICBLOK                                         HRC068DK 01048050
          COPY  CORE                                            @VA06156 01048100
          COPY  PGBLOK                                          @V2A3135 01049000
          EJECT                                                          01050000

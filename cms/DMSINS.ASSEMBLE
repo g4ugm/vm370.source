@@ -90,16 +90,36 @@ INS      TITLE 'DMSINS     (CMS)       VM/370 - RELEASE 6'              00001000
 *                                                                       00090000
 *        15. IF THE FIRST COMMAND WAS ANYTHING ELSE                     00091000
 *               A. ACCESS THE YDISK (IF PRESENT)                        00092000
-*               B. ACCESS THE USER ADISK                                00093000
-*               C.STACK A PLIST FOR THE PROFILE EXEC (IF PRESENT)       00094000
-*               D. ACCESS THE DDISK   OR                                00095000
-*                  STACK A FORMAT PLIST FOR THE DDISK (IF PRESENT)      00096000
+*               B. Load the GCC runtime library into high      HRC371DS 00093000
+*                  memory and update a pointer in NUCON with   HRC371DS 00093100
+*                  its address.                                HRC371DS 00093200
+*               C. Load REXX into high memory and establish it HRC371DS 00093300
+*                  as a nucleus command.  Now all EXECs can be HRC371DS 00093400
+*                  written in REXX.                            HRC371DS 00093500
+*               D. Access the user's A disk.                   HRC371DS 00093600
+*               E. Stack a plist LIFO for "PROFILE EXEC"       HRC371DS 00093700
+*                  (if present and if "ACCESS ( NOPROFILE" was HRC371DS 00093800
+*                  not entered as the first command)           HRC371DS 00093900
+*               F. Stack a plist LIFO for "SYSPROF EXEC"       HRC371DS 00094000
+*                  (if present and if "ACCESS ( NOPROFILE" was HRC371DS 00094100
+*                  not entered as the first command)           HRC371DS 00094200
+*               G. Access the D disk or, if not formatted,     HRC371DS 00094300
+*                  stack a plist LIFO to format the D disk     HRC371DS 00094400
+*                  (if present)                                HRC371DS 00094500
+*                                                              HRC371DS 00094600
+*            Thus the command EXEC SYSPROF will be executed    HRC371DS 00094700
+*            before the PROFILE EXEC is executed.  Eventually, HRC371DS 00094800
+*            we may first stack a "RELEASE A" command so that  HRC371DS 00094900
+*            we can ensure that SYSPROF EXEC S is executed...  HRC371DS 00095000
+*                                                              HRC371DS 00095100
 *                                                                       00097000
 *        16. SETS VALUE OF BLIP TIMER.                                  00098000
 *                                                                       00099000
 *        17. DETERMINES VIRTUAL MACHINE SIZE AND ALLOCATES              00100000
 *            2 PAGES OF LOADER TABLES IF MACHINE SIZE IS                00101000
 *            NOT OVER 320K. 3 PAGES ARE OTHERWISE ALLOCATED             00102000
+*            But if the machine is 4MB or larger, allocate     HRC371DS 00102100
+*            64 pages of loader tables.                        HRC371DS 00102200
 *                                                                       00103000
 *        18. CALLS DMSFRES FOR FINAL STORAGE INITIALIZING               00104000
 *        19. GOTO INIT.                                                 00105000
@@ -239,6 +259,23 @@ CHKAUTO  CLC   0(L'AUTOPRM,R5),AUTOPRM   AUTOCR OPTION         @V60C6BE 00236100
          OI    INSFLAG2,AUTOCR      SET SPECIAL FLAG           @V60C6BE 00236600
          B     INITLOOP           LOOK FOR MORE                @V60C6BE 00236700
 GETCON1  EQU   *                                               @V305665 00237000
+         TM    NUCSTORG,NUCHIGH   Is CMS in high memory?       HRC415DS 00237020
+         BZ    SEGNORES           Skip this if not             HRC415DS 00237040
+* If CMS was generated to load in high memory, then the DMSSEG HRC415DS 00237060
+* contents (OS simulation, EXEC, and EDIT) are in the load     HRC415DS 00237080
+* list and resident in memory. The DMSSEG list of the entry    HRC415DS 00237100
+* points of the old segment is loaded immediately after        HRC415DS 00237120
+* DMSALP. Setup pointers to indicate that CMSSEG is loaded, so HRC415DS 00237140
+* DMSSEG is Nucleus resident. Setup pointers to indicate the   HRC415DS 00237160
+* the rest of CMS never tries to load it.                      HRC415DS 00237180
+         L     R15,=V(DMSSEG)     DMSSEG CSECT is resident     HRC415DS 00237200
+         ST    R15,ACMSSEG        Pretend DCSS was loaded      HRC415DS 00237220
+         OI    DCSSFLAG,DCSSLDED+DCSSJLNS+DCSSAVAL             HRC415DS 00237240
+*        Pretend CMSSEG was loaded                             HRC415DS 00237260
+*        Set DCSSJLNS to prevent DMSINT from purging the ..    HRC415DS 00237280
+*                                segment at command end        HRC415DS 00237300
+         B     GETCON            Continue below                HRC415DS 00237320
+SEGNORES DS    0H                                              HRC415DS 00237340
          USING SYSNAMES,R3                                     @V305665 00238000
          L     R3,ASYSNAMS        GET SYSNAMES TABLE ADDRESS   @V305665 00239000
          LA    R3,CMSSEG          GET ADDRESS OF NAMED SYSTEM  @V305665 00240000
@@ -366,6 +403,18 @@ SKIPBLNK EQU   *                                               @V305665 00352000
 *        VIRTUAL CORE, AND STORE WHERE NEEDED IN NUCON...               00360000
 *                                                                       00361000
 CORINIT  DC    X'83DE0060'    DIAGNOSE MACHINE SIZE            @V305001 00362000
+* If CMS is loaded in high memory, but inside the virtual      HRC415DS 00362050
+* machine, move the loader tables so that FREELOWE does not    HRC415DS 00362100
+* end up being higher than the CMS system in memory. If this   HRC415DS 00362150
+* happened, the Diagnose 10 in DMSINT would release the pages  HRC415DS 00362200
+* which contain the nucleus. This would be bad :-)             HRC415DS 00362250
+         TM    NUCSTORG,NUCHIGH   Is CMS in high memory?       HRC415DS 00362300
+         BZ    NOTNSIDE           Skip this if not             HRC415DS 00362350
+         L     R15,=V(DMSALP)     Where it is loaded           HRC415DS 00362400
+         CR    R13,R15            Is it inside the machine?    HRC415DS 00362450
+         BL    NOTNSIDE           Proceed noramlly if not      HRC415DS 00362500
+         LR    R13,R15            Create LDRTBLS below CMS     HRC415DS 00362550
+NOTNSIDE DS    0H                                              HRC415DS 00362600
          ST    R13,VMSIZE     STORE VIRTUAL MEMORY SIZE                 00363000
          ST    R13,ALDRTBLS   ..                                        00364000
 *                                                                       00365000
@@ -383,10 +432,15 @@ CORINIT  DC    X'83DE0060'    DIAGNOSE MACHINE SIZE            @V305001 00362000
          C     R13,MINSIZE    IS THIS A "LARGE MACHINE"           P0515 00377000
          BNH   SR1314         TRF IF NOT - USE 2 PAGES PER USUAL.       00378000
          AH    R14,H4096      BUT IF YES MAKE IT 3 PAGES = 12288 BYTES  00379000
-SR1314   SR    R13,R14        DECREMENT BY 2 OR 3 PAGES                 00380000
+*        C     R13,FOURMEG    is it 4 megabytes or more?       HRC371DS 00379100
+*        BL    SR1314         no, so we are good to go         HRC371DS 00379200
+*        L     R14,K256       set LDRTBLS=64 pages (256K)      HRC371DS 00379300
+SR1314   SR    R13,R14        decrement by LDRTBLS space       HRC371DS 00380000
          ST    R13,FREELOWE   INITIALIZE LOWEXT                         00381000
          SRL   R14,12         MAKE THAT 8192 OR 12288 BYTES INTO PAGES  00382000
          STC   R14,ALDRTBLS       STORE IN 1ST BYTE LDRTBLS    @V305665 00383000
+         TM    DCSSFLAG,DCSSLDED  Is CMSSEG already loaded?    HRC415DS 00383100
+         BO    CORINIT1           Yes, skip over load testing  HRC415DS 00383200
          TM    DCSSFLAG,DCSSAVAL  IS DCSS PRESENT?             @V305665 00384000
          BZ    CORINIT1           BRANCH IF NOT                @V305665 00385000
          CLC   ACMSSEG,VMSIZE     NAMED SYSTEM OVERLAP CMS?    @V305665 00386000
@@ -550,7 +604,42 @@ TSTDISK  SR    R3,R3          CLEAR COMMAND COUNT REGISTER        V0254 00533000
          LA    R1,YPLIST      ACCESS THE YDISK.                         00536000
          SVC   202            ...                                       00537000
          DC    AL4(*+4)       ERROR CONDITION IS IMMATERIAL             00538000
-TESTA    SR    R0,R0          INITIALIZE FIRST COMMAND INDICATOR        00539000
+         SPACE 1                                               HRC371DS 00539000
+TESTA    DS    0H                                              HRC371DS 00539010
+* Now we load GCCLIB and REXX into memory, establishing them   HRC371DS 00539020
+* as nucleus extensions.  But RESLIB will first load GCCLIB    HRC371DS 00539030
+* into the user area, overlaying us (DMSINS).  So we change    HRC371DS 00539040
+* the user area pointer in NUCON so that it does not overlay   HRC371DS 00539050
+* us.  Yes, this is a kludge!  I apologize profusely.          HRC371DS 00539060
+*        MVC   MAINHIGH(4),OUTOFWAY                            HRC371DS 00539070
+*        LA    R1,GLOBALTX    "GLOBAL TXTLIB GCCLIB"           HRC371DS 00539080
+*        SVC   202                                             HRC371DS 00539090
+*        DC    AL4(BADGLOB)   error address                    HRC371DS 00539100
+*        MVC   MAINHIGH(4),OUTOFWAY                            HRC371DS 00539110
+*        LA    R1,RESLOAD     "RESLIB LOAD GCCLIB"             HRC371DS 00539120
+*        SVC   202                                             HRC371DS 00539130
+*        DC    AL4(BADGCC)    error address                    HRC371DS 00539140
+*        ST    R1,DOSTRANS    store GCC runtime addr here      HRC371DS 00539150
+*        MVC   MAINHIGH(4),OUTOFWAY                            HRC371DS 00539160
+*        MVC   RESWHO(8),REXXNAME                              HRC371DS 00539170
+*        LA    R1,RESLOAD     "RESLIB LOAD DMSREX"             HRC371DS 00539180
+*        SVC   202                                             HRC371DS 00539190
+*        DC    AL4(BADREXX)   error address                    HRC371DS 00539200
+*        MVC   MAINHIGH(4),REALUSER restore user area address  HRC371DS 00539210
+*        B     THATSALL                                        HRC371DS 00539220
+BADGCC   DS    0H                                              HRC371DS 00539230
+*        MVC   MAINHIGH(4),REALUSER restore user area address  HRC371DS 00539240
+*        DMSERR TEXT='GCC runtime not available',NUM=098,LET=W HRC371DS 00539250
+*        B     THATSALL                                        HRC371DS 00539260
+BADGLOB  DS    0H                                              HRC371DS 00539270
+*        DMSERR TEXT='GCCLIB TXTLIB not found',NUM=098,LET=W   HRC371DS 00539280
+*        B     THATSALL                                        HRC371DS 00539290
+BADREXX  DS    0H                                              HRC371DS 00539300
+*        MVC   MAINHIGH(4),REALUSER restore user area address  HRC371DS 00539310
+*        DMSERR TEXT='REXX executor not available',NUM=098,LET=W C371DS 00539320
+THATSALL DS    0H                                              HRC371DS 00539330
+         SPACE 1                                               HRC371DS 00539340
+         SR    R0,R0          INITIALIZE FIRST COMMAND INDICATOR        00539350
          TM    INSFLAG,GOTFIRST    WAS THERE A FIRST COMMAND?           00540000
          BNO   POINTA         NO. WE'RE ALL SET THEN.                   00541000
          LA    R0,CMNDLIST    PICK UP THE SCANNED LINE POINTER          00542000
@@ -565,8 +654,8 @@ POINTA   LA    R1,APLIST      POINT TO THE ADISK PLIST                  00543000
          BO    SKLOAD         YES, SKIP THE FOLLOWING          @V305614 00551000
          L     R14,ASYSNAMS   POINT TO SYSNAMES TABLE          @VA04293 00552000
          USING SYSNAMES,R14   .....                            @VA04293 00553000
-         DMSERR NUM=100,LET=W,SUB=(CHARA,(R14)),TEXT='CMSSEG SYSTEM NAMX00554000
-               E ''........'' NOT AVAILABLE'                   @VA04293 00555000
+         DMSERR NUM=100,LET=W,SUB=(CHARA,(R14)),TEXT='CMSSEG system namX00554000
+               e ''........'' not available'                   @VA04293 00555000
          LA    R1,SVTST       POINT TO SVT STATE PLIST         @V305614 00556000
          L     R15,ASTATE     SEE IF DMSSVT TEXT EXISTS        @V305614 00557000
          BALR  R14,R15        .....                            @V305614 00558000
@@ -616,7 +705,17 @@ HALFBYTE SRDL  R2,FOURBITS    MOVE HALF BYTE TO R3             @V305614 00584000
 FINALOAD EQU   *              HERE WHEN FINAL LOAD DONE        @VA05055 00602000
          OI    DCSSFLAG,DCSSVTLD   RUN UP THE FLAG             @V305614 00603000
          SPACE 1                                                        00604000
-SKLOAD   LM    R0,R3,REGSAV   RESTORE REGISTERS                @V305614 00605000
+SKLOAD   DS    0H                                              HRC404DS 00605020
+************************************************************** HRC404DS 00605040
+* Initialize the 'CMS' subcommand entry point                  HRC404DS 00605060
+************************************************************** HRC404DS 00605080
+         L     R1,ADMSCSF     CMS subcommand entry point       HRC404DS 00605100
+         ST    R1,SUBCEPT     Set address in the plist         HRC404DS 00605120
+         LA    R1,SUBCPLST    Point to SUBCOM plist            HRC404DS 00605140
+         SVC   202                                             HRC404DS 00605160
+         DC    AL4(*+4)                                        HRC404DS 00605180
+*                                                              HRC404DS 00605200
+         LM    R0,R3,REGSAV   Restore registers                HRC404DS 00605220
          TM    BATFLAGS,BATRUN     BATCH RUNNING ?             @V305614 00606000
          BO    TESTD          IF SO, NO PROFILE PLEASE         @V305614 00607000
          LTR   R0,R0          IS THERE A FIRST COMMAND?                 00608000
@@ -630,12 +729,24 @@ SKLOAD   LM    R0,R3,REGSAV   RESTORE REGISTERS                @V305614 00605000
          LA    R3,1(,R3)      UP THE COMMAND-COUNT                      00616000
          LR    R1,R0          WE CAN REMEMBER NOW                       00617000
 CKPROF   LTR   R1,R1          DID  ACCESS FIND A PROFILE?               00618000
+         BZ    CKSYSPRF       (NOPROF not specified            HRC373DS 00618100
          BNM   TESTD          APPARENTLY NOT                            00619000
          LA    R1,ATTN1       POINT TO THE STACK PLIST                  00620000
          L     R2,PROFINFO    POINT TO PROFILE COMMAND                  00621000
          ST    R2,STCKINFO    IN ATTN PLIST                             00622000
          SVC   202            STACK IT                                  00623000
          LA    R3,1(,R3)      UP THE COMMAND-COUNT                      00624000
+CKSYSPRF EQU   *                                               HRC373DS 00624010
+         SPACE 1                                               HRC371DS 00624050
+*        If SYSPROF EXEC S exists, stack a line to execute it. HRC371DS 00624100
+         FSSTATE 'SYSPROF EXEC S'                              HRC371DS 00624150
+         LTR   R15,R15                                         HRC371DS 00624200
+         BNZ   TESTD          no SYSPROF EXEC found            HRC371DS 00624250
+         LA    R1,ATTN1       point to the stack plist         HRC371DS 00624300
+         L     R2,SYSPINFO    point to "EXEC SYSPROF" command  HRC371DS 00624350
+         ST    R2,STCKINFO    put it in ATTN plist             HRC371DS 00624400
+         SVC   202            stack "EXEC SYSPROF" lifo        HRC371DS 00624450
+         LA    R3,1(,R3)      up the command-count             HRC371DS 00624500
 TESTD    TM    MISFLAGS,X'04'  WAS NODISK SPECIFIED ?             V0743 00625000
          BO    ENTERSYS       YES..BR                             V0743 00626000
          LA    R2,5           MAX LGTH OF COMPARE              @VA01116 00627000
@@ -695,7 +806,7 @@ BATSTACK EQU   *              STACK THE 'BATCH' COMMAND           V0742 00673000
          LA    R3,1(,R3)           COMMAND COUNT FOR DMSINT       V0742 00681000
 ENTERSYS TM    DCSSFLAG,DCSSAVAL+DCSSVTLD OS SIMULATION OK ?   @VM03024 00682000
          BNZ   OSOK          YES, BRANCH                       @VM03024 00683000
-         DMSERR TEXT='CMS OS SIMULATION NOT AVAILABLE',NUM=098,LET=W    00684000
+         DMSERR TEXT='CMS OS simulation not available',NUM=098,LET=W    00684000
          ICM   R1,ALL,AOSMODL  GET OS SIMUL. ADDR              @VA05055 00685000
          BZ    OSOK           NOT THERE, DON'T FRET...         @VA05055 00686000
          L     R0,OSMODLDW    GET OS SIM LENGTH(DWORDS)        @VA05055 00687000
@@ -708,6 +819,8 @@ OSOK     LM    R10,R12,JREGS  RESTORE REGISTERS FOR DMSINT     @VM03024 00691000
 H4096    DC    H'4096'        PAGE SIZE AS HALFWORD            @V305001 00694000
 F8192    DC    A(8192)        STANDARD LOADER TABLE ALLOC.     @V305001 00695000
 MINSIZE  DC    A(393216)      MINIMUM CMS MACHINE SIZE         @V305001 00696000
+FOURMEG  DC    A(4194304)     4 megabyte machine size          HRC371DS 00696100
+K256     DC    A(262144)      64 pages (256K) loader tbl alloc HRC371DS 00696200
          DS    0F                                                       00697000
 APRG     EQU   *                                                        00698000
          DC    H'4,0'                                                   00699000
@@ -759,7 +872,6 @@ LDPLIST  DS    0F             PLIST TO LOAD DMSSVT & FRIENDS   @VM03154 00741000
          DC    CL8'DMSSMN'                                     @VM03154 00745000
          DC    CL8'DMSSLN'                                     @VM03154 00746000
          DC    CL8'DMSLGT'                                     @VM03154 00747000
-         DC    CL8'DMSOLD'                                     @VM03154 00748000
          DC    CL8'DMSLSB'                                     @VM03154 00749000
          DC    CL8'DMSLIB'                                     @VM03154 00750000
          DC    CL8'DMSLSY'                                     @VM03154 00751000
@@ -832,6 +944,25 @@ YPLIST   DC    CL8'ACCESS'                                              00814000
          DC    CL8'*'                                                   00818000
          DC    CL8'Y2'                                                  00819000
 BIGTIME  DC    X'FFFFFFFF'                                              00820000
+*                                                              HRC371DS 00820020
+SYSPROF  DC    CL8'EXEC'      plist for EXEC SYSPROF           HRC371DS 00820030
+         DC    CL8'SYSPROF'                                    HRC371DS 00820040
+         DC    8X'FF'                                          HRC371DS 00820050
+SYSPINFO DC    AL1(*-SYSPROF)                                  HRC371DS 00820060
+         DC    AL3(SYSPROF)   plist to load GCCLIB runtime     HRC371DS 00820070
+RESLOAD  DC    CL8'RESLIB'                                     HRC371DS 00820080
+         DC    CL8'LOAD'                                       HRC371DS 00820090
+RESWHO   DC    CL8'GCCLIB'                                     HRC371DS 00820100
+         DC    CL8'('                                          HRC371DS 00820110
+         DC    CL8'PERM'                                       HRC371DS 00820120
+         DC    8X'FF'                                          HRC371DS 00820130
+GLOBALTX DC    CL8'GLOBAL'    plist to access GCCLIB TXTLIB    HRC371DS 00820140
+         DC    CL8'TXTLIB'                                     HRC371DS 00820150
+         DC    CL8'GCCLIB'                                     HRC371DS 00820160
+         DC    8X'FF'                                          HRC371DS 00820170
+REXXNAME DC    CL8'DMSREX'                                     HRC371DS 00820180
+OUTOFWAY DC    AL4(139264)    relocate user area to x22000     HRC371DS 00820190
+REALUSER DC    AL4(131072)    real user area is at x20000      HRC371DS 00820200
 *                                                                       00821000
 ATTN1    DC    CL8'ATTN'                                                00822000
          DC    CL4'LIFO'                                                00823000
@@ -840,6 +971,17 @@ STCKINFO DC    AL1(16)                                                  00824000
 *                                                                       00826000
 CMNDINFO DC    AL1(130)                                                 00827000
          DC    AL3(CMNDLINE-NUCON)                                      00828000
+*                                                              HRC404DS 00828020
+SUBCPLST DS    0F                                              HRC404DS 00828040
+SUBCFNC  DC    CL8'SUBCOM  '                                   HRC404DS 00828060
+SUBCNME  DC    CL8'CMS     '  Subcom name                      HRC404DS 00828080
+         DC    X'00'          Interrupts off                   HRC404DS 00828100
+         DC    X'00'          Key zero                         HRC404DS 00828120
+         DC    X'80'          FLAGS                            HRC404DS 00828140
+         DC    X'00'                                           HRC404DS 00828160
+SUBCEPT  DS    AL4            Entry point address              HRC404DS 00828180
+SUBCUSR  DC    CL4' '         User provided information        HRC404DS 00828200
+         DC    8X'FF'                                          HRC404DS 00828220
 *                                                                       00829000
 *  THE FOLLOWING 5 MUST BE KEPT IN ORDER (USED VIA 'LM) ..              00830000
 FREEADS  DC    V(NUCEND)      R7                                        00831000

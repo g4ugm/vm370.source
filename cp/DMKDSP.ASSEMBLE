@@ -79,7 +79,7 @@ DSP      TITLE 'DMKDSP     (CP)        VM/370 - RELEASE 6'              00001000
 *        DMKCFMBK - CALLED TO PLACE USER IN CONSOLE FUNCTION MODE       00079000
 *        DMKCVTBH - CALLED TO CONVERT BINARY TO HEX                     00080000
 *        DMKSCHDL - CALLED TO MAINTAIN SCHEDULER LISTS OF ACTIVE USERS  00081000
-*        DMKPERT  - CALLED TO RESET PER TRACING                         00082000
+*        DMKPERIL - CALLED TO HANDLE PER TRACING                 PER001 00082100
 *        DMKVATAB - CALLED TO MAINTAIN VIRTUAL RELOCATE SIMULATION      00083000
 *                   TABLES FOR VIRTUAL MACHINES WITH THE VR FEATURE     00084000
 *        DMKVATBC - CALLED WHEN A VIRTUAL MACHINE GOES FROM EXTENDED    00085000
@@ -187,7 +187,7 @@ DMKDSP   CSECT                                                          00164000
          EXTRN DMKCVTBH                                        @VA03802 00185000
          EXTRN DMKSCHDL                                                 00186000
          EXTRN DMKSCHRL                                                 00187000
-         EXTRN DMKPERT                                                  00188000
+         EXTRN DMKPERIL                                          PER001 00188100
          EXTRN DMKPRGSM                                        @VA05647 00189000
          EXTRN DMKPTRRC                                        @VA01321 00190000
          EXTRN DMKPTRFD,DMKPTRFE,DMKPTRFP,DMKIOSER,DMKIOSRC    @VA02760 00191000
@@ -416,6 +416,8 @@ DMKDSPA  DS    0H             FAST REFLECT AFTER INSTR.        @V213235 00384000
          L     R2,VMSTKCNT    GET COUNT OF STACKED BLOCKS      @V4M0173 00399000
          LTR   R2,R2          ARE ANY BLOCKS STACKED FOR VM?   @V4M0173 00400000
          BNZ   TESTSYS        YES, GO TEST FOR SYSTEM LOCK     @V4M0173 00401000
+         TM    VMPEND,VMPERPND     PER PENDING?                  PER001 00401100
+         BO    TESTSYS             YES, TEST FOR SYSTEM LOCK     PER001 00401200
          LM    R0,R2,QUANTUMR RESID., CURRENT, AND ORIG.       @V408246 00402000
 *                             TIME-SLICE                                00403000
          LTR   R1,R1          ANY CURRENT LEFT?                @V408246 00404000
@@ -481,8 +483,8 @@ DMKDSPA2 DS    0H                                              @V408246 00447000
          LCTL  C7,C13,EXTCR7-ECBLOK(R2) . .                    @V408246 00452000
          TM    VMTRCTL,VMTRPER IS "PER" TRACING ACTIVE ?       @V408246 00453000
          BZ    *+12           NO.                              @V408246 00454000
-         L     R2,VMTREXT     TRACE EXTENSION                  @V408246 00455000
-         LCTL  C9,C11,TREXCR9-TREXT(R2) LOAD TRACE C-REGS      @V408246 00456000
+         L     R2,VMPERCTL    POINT TO PER BLOCK                 PER001 00455100
+         LCTL  C9,C11,PERCR9-PERBLOK(R2)                         PER001 00456100
          TM    VMESTAT,VMEXTCM EXTENDED MODE PSW?              @V408246 00457000
          BZ    DMKDSPA3       NO                               @V408246 00458000
          ICM   R0,B'0010',VMPSW+2 GET CURRENT C.C.             @V408246 00459000
@@ -739,7 +741,7 @@ B2       EQU   *                                               %V408246 00663000
          S     R0,QUANTUMR    CALCULATE TIME SPENT IN PROBLEM  %V408246 00672000
 UPVIRT   DS    0H             UPDATE VIRTUAL LOCATION 80 TIMER %V408246 00673000
          BNM   DSP3A          ACCEPTABLE                       %V408246 00674000
-         ABEND 3                                               %V408246 00675000
+         L     R0,=F'1'  STOP DSP003 ABEND - JUST FIDDLE TIMER HRC006DK 00675010
 DSP3A    DS    0H                                              %V408246 00676000
          LCTL  C1,C1,VMSEG    INSURE CORRECT MEMORY SPACE      %V408246 00677000
          LRA   R2,TIMER-PSA   VIRTUAL TIMER AVAILABLE?         %V408246 00678000
@@ -920,6 +922,8 @@ CKPEND   EQU   *  HERE TO TEST FOR INTERRUPTS PENDING          %V3M4038 00848000
          SPACE                                                          00851000
 CKPER    TM    VMPEND,VMPERPND   IS IT A DELAY PER INT ?       @V386198 00852000
          BZ    CKPPF          NO - MUST BE PSEUDO PAGE FAULT   @V213135 00853000
+         TM    VMTRCTL,VMTRPER     WERE WE USING THE P.E.R?      PER001 00853050
+         BO    OURPER         YES. CALL DMKPERIL TO FIGURE IT OUTPER001 00853100
          SR    R1,R1                    PAGE 0 --                       00854000
          TRANS 2,1,OPT=(BRING,DEFER)    FETCH IT --                     00855000
          L     R1,VMPSW       SWAP PSW'S                                00856000
@@ -939,8 +943,6 @@ CKPER    TM    VMPEND,VMPERPND   IS IT A DELAY PER INT ?       @V386198 00852000
          L     R0,EXTPERAD-ECBLOK(,R1)  GET PER ADDRESS                 00870000
          ST    R0,PERADD-PSA(,R2)  STORE FOR USER                       00871000
          NI    VMPEND,X'FF'-VMPERPND    UNFLAG PER PENDING              00872000
-         TM    VMTRCTL,VMTRPER     PER TRACING ACTIVE                   00873000
-         BO    CKPSW          YES - CHECK OUT NEW PSW                   00874000
          AIF   (NOT &TRACE(6)).NOPC1    AIF TRACING PROG INTERRUPTS     00875000
          TM    VMTRCTL,VMTRPRG+VMTRBRIN TRACE ALL OR P.C.               00876000
          BZ    CKPSW          IF NOT TRACING...BRANCH                   00877000
@@ -951,6 +953,11 @@ CKPER    TM    VMPEND,VMPERPND   IS IT A DELAY PER INT ?       @V386198 00852000
 .NOPC1   ANOP                                                           00882000
          SPACE                                                          00883000
          B     CKPSW          GO CHECK OUT NEW PSW                      00884000
+OURPER   OI    VMRSTAT,VMEXWAIT    TAKE MACHINE OUT OF RUNNING.  PER001 00884100
+         CALL  DMKPERIL       CALL INTERRUPT HANDLER.            PER001 00884200
+         NI    VMPEND,255-VMPERPND KILL THE PENDING BIT.         PER001 00884300
+         NI    VMRSTAT,255-VMEXWAIT     REMOVE THE MACHINE FROM  PER001 00884400
+         GOTO  DMKDSPCH       GO TO GROUND FLOOR ZERO.           PER001 00884500
          EJECT                                                          00885000
 CKPPF    EQU   *              HERE TO UNSTACK PSEUDO PAGE      @V213135 00886000
 *                             AVAILBLE INTERRUPTS                       00887000
@@ -1036,6 +1043,8 @@ UPCNT    LA    R0,1           ADD ONE TO THE PROPER COUNTER    @V2B2638 00965000
          ST    R0,0(R1)       AND PUT IT BACK                  @V2B2638 00967000
          B     UNSTCONT       CONTINUE                         @V2B2638 00968000
 UNCHAINX EQU   *                                               @V2B2638 00969000
+         CLC   XINTCODE,=X'2402'       LDF interrupt?          HRC065DK 00969100
+         BE    LDFINT                  Yes                     HRC065DK 00969200
          CLC   XINTCODE,=AL2(VMCXCODE) VMCF INTERRUPT ?        @V387045 00970000
          BNE   DSPFRT         NO..FRET THE BLOCK               @V387045 00971000
          L     R1,VMCPNT      MASTER BLOCK...                  @V387045 00972000
@@ -1056,6 +1065,10 @@ VMCDSPN  EQU   *                                               @V387045 00973000
          TM    VMCCSTAT-VMCBLOK(R1),VMCCXINT XINT BLOK ?       @V387045 00976000
          BZ    VMCDSPN        NO..KEEP LOOKING ?               @V387045 00977000
          B     UNSTCONT       SAVE FOR NEXT INTERRUPT...       @V387045 00978000
+*                                                              HRC065DK 00978100
+LDFINT   EQU   *                                               HRC065DK 00978200
+         MVC   PSA+128(4),XINTPARM LDF indication to loc X'80' HRC065DK 00978300
+*                                                              HRC065DK 00978400
 DSPFRT   EQU   *                                               @V387045 00979000
          L     R0,XINTNEXT                                     @V200198 00980000
          ST    R0,XINTNEXT-XINTBLOK(,R5)                       @V200198 00981000
@@ -1416,20 +1429,14 @@ PSWCKSUB EQU   *              SUBROUTINE TO CHECK ANY NEW PSW  @VA05647 01313000
 CKEXTPSW EQU   *  CHECK OUT EXTENDED MODE PSW                           01326000
          OI    VMESTAT,VMEXTCM     FLAG EXTENDED                        01327000
          TM    VMPSW,TRANMODE ADDRESS TRANSATE MODE ALSO ??             01328000
-         BZ    CKTRPER        NO                                        01329000
+         BZ    GETMASK        NO                                 PER001 01329050
+         TM    VMCXSTAT,VMSTBYPS       STBYPASS VR enabled?    HRC068DK 01329060
+         BO    GETMASK                 Y, skip shadow maint    HRC068DK 01329070
          TM    VMOSTAT,VMSHR  IS USER EC,TRANSLATE AND SHARED? @VA09151 01329100
          BNO   NOTSHR         NO NOT SHARED.......             @VA09151 01329300
          CALL  DMKVATBC       YES MUST THROW AWAY SHADOW TABLES@VA09151 01329500
 NOTSHR   DS    0H                                              @VA09151 01329700
          CALL  DMKVATMD       ENTER ADDRESS TRANSLATE MODE              01330000
-CKTRPER  EQU   *              CHECK FOR PER INTERLOCK                   01331000
-         NI    VMESTAT,X'FF'-VMPERCM ZERO PER (DEFAULT)        @V408246 01332000
-         TM    VMPSW,PERMODE  IS USER IN 'PER' MODE                     01333000
-         BZ    GETMASK        NO - CHECK OUT PSW                        01334000
-         OI    VMESTAT,VMPERCM FLAG PER                        @V408246 01335000
-         TM    VMTRCTL,VMTRPER     IS 'PER' TRACING ACTIVE              01336000
-         BZ    GETMASK        NO - CHECK OUT PSW                        01337000
-         CALL  DMKPERT        FORCIBLY RESET TRACING                    01338000
 GETMASK  L     R0,EXTZBIT     GET MASK OF "MUST BE ZERO" BITS           01339000
          N     R0,VMPSW       TEST 1ST WORD OF PSW                      01340000
          BNZ   BADPSW         ILLEGAL PSW FORMAT                        01341000
@@ -1437,6 +1444,22 @@ GETMASK  L     R0,EXTZBIT     GET MASK OF "MUST BE ZERO" BITS           01339000
          BNZ   BADPSW         ILLEGAL PSW IF BIT SET - GO GIVE MESSAGE  01343000
 CKTRACE  EQU   *              HERE TO CHECK OUT TRACING        @VA04140 01344000
          AIF   (NOT &TRACE(6)).TR4                              **AIF** 01345000
+         NI    VMTRCTL,255-VMTRPER      ...                      PER001 01345050
+         NI    VMESTAT,255-VMPERCM ...                           PER001 01345100
+         TM    VMPSW+1,EXTMODE     IN EXT MODE?                  PER001 01345150
+         BNO   OUROWN         THEN USER CAN'T HAVE OWN PER       PER001 01345200
+         TM    VMPSW,PERMODE  IS USER PER ON?                    PER001 01345250
+         BNO   OUROWN         NO, GO CHECK FOR CP PER            PER001 01345300
+         OI    VMESTAT,VMPERCM     AND USER PER FLAG             PER001 01345350
+         B     CKTRACE2       AND CONTINUE                       PER001 01345400
+OUROWN   TM    VMPERFLG,VMPERUSE   IS PER TRACE ACTIVE?          PER001 01345450
+         BNO   CKTRACE2       NO, SKIP THIS NONSENSE             PER001 01345500
+         L     R1,VMPERCTL    LOAD POINTER TO TRACE CTL BLOCK    PER001 01345550
+         CLI   PERCR9-PERBLOK(R1),00    ANY STOPS ACTIVE?        PER001 01345600
+         BE    CKTRACE2       NO, SKIP OI                        PER001 01345650
+         OI    VMESTAT,VMPERCM     TURN ON ANY BIT               PER001 01345700
+         OI    VMTRCTL,VMTRPER     ...                           PER001 01345750
+CKTRACE2 EQU   *              HERE TO CHECK TRACE                PER001 01345800
          TM    VMTRCTL,VMTRBRIN  INSTRUCTION TRACING SET ?              01346000
          BZ    CKPSWOK        NOPE - OK TO GET OUT NOW         @VA05647 01347000
          L     R1,VMTREXT     YES - REFERENCE TRACE CNTRL BLOCK@VA04140 01348000
@@ -1741,6 +1764,8 @@ DSP1EXIT DS    0F             "DSP1" & "DSP2" ASSIST EXIT LIST @V3M4026 01620000
          EJECT                                                          01630000
 SCHDL    CALL  DMKSCHDL       CALL THE SCHEDULER                        01631000
 UNLOCK   DS    0H             UNLOCK THE CURRENT USER          %V407508 01632000
+         TM    VMTRCTL,VMTRPER     CP PER?                     HRC074DK 01632400
+         BO    UNLOCK1             Yes, no ECPS; use CP code   HRC074DK 01632600
          SPACE                                                          01633000
          DS    0H             EXECUTE CP ASSIST DSP2           %V407508 01634000
 DMKDSP2  DC    X'E611',S(DSP1LIST,DSP1EXIT)                 ***%V407508 01635000
@@ -2605,8 +2630,8 @@ TAKEOFF  EQU   *              ALMOST READY TO DISPATCH HIM     %V3M4038 02442000
          TM    VMTRCTL,VMTRPER   IS "PER" TRACING ACTIVE ?     %V3M4038 02443000
          BZ    RELPSW         NO.                              %V3M4038 02444000
 RELPER   DS    0H                                              %V3M4038 02445000
-         L     R2,VMTREXT     TRACE EXTENSION                  %V3M4038 02446000
-         LCTL  C9,C11,TREXCR9-TREXT(R2)   LOAD TRACE C-REGS    %V3M4038 02447000
+         L     R2,VMPERCTL    TRACE EXTENSION                  % PER001 02446000
+         LCTL  C9,C11,PERCR9-PERBLOK(R2)     LOAD TRACE C-REGS % PER001 02447000
          OI    RUNPSW,PERMODE ENABLE PER IN RUNPSW             %V3M4038 02448000
          SPACE                                                          02449000
 RELPSW   EQU   *              FINAL STRETCH BEFORE WE GO...    %V3M4038 02450000
@@ -2974,6 +2999,7 @@ OFFR15   EQU   12             OFFSET OF R15 IN DSPSAVE         @V407508 02761000
          COPY  PGBLOK                                          @V213135 02767000
          EJECT                                                          02768000
          COPY  TREXT                                                    02769000
+         COPY  PERBLOKS                                          PER001 02769500
          COPY  VBLOKS                                                   02770000
          PSA                                                            02771000
          COPY  SAVE                                                     02772000

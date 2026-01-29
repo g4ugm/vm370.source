@@ -329,7 +329,11 @@ WAIT     EQU   *                                                        00298000
          SPACE                                                          00305000
 * READ A LINE FROM THE TERMINAL.                                        00306000
 TCMS     EQU   *                                                        00307000
+         L     R1,ABNCOMND    ADDR ABEND COMMAND               HRC009DS 00307200
+         LTR   R1,R1          ANYTHIN THERE?                   HRC009DS 00307400
+         BNZ   TCMS1          YES, DONT TYPE THIS GARBAGE THEN HRC009DS 00307600
          LINEDIT TEXT='CMS',TYPCALL=BALR,DOT=NO                         00308000
+TCMS1    EQU   *                                               HRC009DS 00308500
          BAL   RR,KXCHK                TEST FOR KX'S                    00309000
          TM    BATFLAGS,BATRUN+BATLOAD   BATCH MONITOR RUNNING?   V0742 00309100
          BC    11,NOTBAT           IF NOT, FORGET THIS...         V0742 00309110
@@ -347,6 +351,21 @@ WAITPSW  DC    X'00020000',A(*-4)                              @VA05162 00309600
 BATABEND OI    BATFLAG2,BATSYSAB   SET RECURSION FLAG ...      @VA05162 00309700
          B     REC                 AND TRY TO RECOVER...       @VA05162 00309750
 NOTBAT   EQU   *                                               @VA05162 00309800
+         L     R1,ABNCOMND    ADDR ABEND COMMAND               HRC009DS 00309810
+         LTR   R1,R1          SOMETHIN THERE                   HRC009DS 00309820
+         BZ    READSTK        NO, DON'T STACK ABEND COMMAND    HRC009DS 00309830
+         MVC   ABNPAS13(16),ATTNLIST   A SKELETON PLIST        HRC009DS 00309840
+         MVC   ABNPAS13+12,0(R1)   LENGTH TO PLIST             HRC009DS 00309850
+         LA    R1,1(,R1)      BUMP PAST LENGTH                 HRC009DS 00309860
+         STCM  R1,B'0111',ABNPAS13+13  ADDRESS TO BUFFER       HRC009DS 00309870
+         LA    R1,ABNPAS13    ADDR PLIST                       HRC009DS 00309880
+         L     R15,=V(DMSCAT) ADDR STACK ROUTINE               HRC009DS 00309890
+         BAL   RR,NUCCALL     CALL STACK                       HRC009DS 00309900
+         L     R1,ABNCOMND    ADDR BUFFER AGAIN                HRC009DS 00309910
+         LA    R0,17          NUMBER OF DWORDS                 HRC009DS 00309920
+         DMSFRET DWORDS=(0),LOC=(1),TYPCALL=BALR               HRC009DS 00309930
+         ST    R15,ABNCOMND   CKEAR IT NOW                     HRC009DS 00309940
+READSTK  EQU  *                                                HRC009DS 00309950
          L     R1,AOPSECT              POINT TO OPSECT                  00310000
          USING OPSECT,R1                                                00311000
          MVI   CONRDCOD,C'U'           FORCE UPPERCASE CONVERSION       00312000
@@ -441,7 +460,7 @@ SUBLOOP  LTR   R1,R7          END OF CHAIN                        V0375 00351225
          DMSFRET DWORDS=(0),LOC=(1),TYPCALL=BALR                  V0375 00351325
          B     SUBLOOP                                            V0375 00351350
 SUBRET   L     R1,ASUBSTAT    GET ADDR OF STATEFST INFO           V0375 00351375
-         LA    R0,6           FREE 6 DBLWDS.                      V0375 00351400
+         LA    R0,STFSTSDW    Free STATEFST doubleword size    HRC015DS 00351410
          DMSFRET DWORDS=(0),LOC=(1),TYPCALL=BALR                  V0375 00351425
          DROP  RR                                                 V0375 00351450
 NOSUB    EQU   *                                                  V0375 00351475
@@ -449,6 +468,8 @@ NOSUB    EQU   *                                                  V0375 00351475
 * CALL INTER-COMMAND CLEANUP ROUTINE                                    00353000
          SVC   203                                                      00354000
          DC    H'12'                   DMSSMNCL (CLEANUP ROUTINE) CODE  00355000
+         L     R15,=V(DMSSNXAB)   NUCX ABEND handler routine            00355100
+         BAL   RR,NUCCALL         Go cleanup extensions                 00355200
 * FREE ALL USER STORAGE                                        @VA04752 00355300
          DMSFRES UREC,TYPCALL=BALR                             @VA04752 00355700
          SPACE                                                          00356000
@@ -520,7 +541,28 @@ TRYOUT   L     XR,AOUTRTBL    OUTPUT TABLE IF ANY              @VA01054 00402400
          BZ    NOTABLE        NO, SKIP IT                      @VA01054 00402500
          LA    SUM,32(SUM)    ACCOUNT FOR IT                   @VA01054 00402550
 NOTABLE  DS    0H                                              @VA01054 00402600
-         SPACE 2                                                        00403000
+*                                                                       00403020
+* Account for any Nucleus Extension storage not released at    HRC404DS 00403040
+* end of command.                                              HRC404DS 00403060
+         LA    R15,NUCXCBLK       Point to NUCEXT chain        HRC404DS 00403080
+NUCXNXT  DS    0H                                              HRC404DS 00403100
+         ICM   R15,B'1111',SCBFWPTR-SCBLOCK(R15) Next SCBLOCK  HRC404DS 00403120
+         BZ    NUCXDONE                                        HRC404DS 00403140
+         ICM   R14,B'1111',SCBXORG-SCBLOCK(R15) Is it loaded?  HRC424DS 00403145
+         BZ    NUCXNXT            If not, skip to next         HRC424DS 00403150
+         LA    R14,7                                           HRC404DS 00403160
+         A     R14,SCBXLEN-SCBLOCK(,R15) Add in any storage    HRC404DS 00403180
+         SRL   R14,3              Amount in dwords             HRC404DS 00403200
+         AR    SUM,R14                                         HRC404DS 00403220
+         B     NUCXNXT            On to next block             HRC404DS 00403240
+NUCXDONE DS    0H                                              HRC404DS 00403260
+*                                                              HRC404DS 00403280
+* Account for any Nucleus Extension storage on the cache       HRC404DS 00403300
+         ICM   R15,B'1111',NUCXCBEE  Point to NUCEXT cache     HRC404DS 00403320
+         BZ    *+8                                             HRC404DS 00403340
+         A     SUM,=A(4096/8)     It is one page               HRC404DS 00403360
+*                                                              HRC404DS 00403380
+         A     SUM,NUCXFRES       Account for any workareas    HRC404DS 00403400
 * FOR EACH ACTIVE DISK, WE COMPUTE THE SPACE ALLOCATED BY THE           00404000
 * USER FILE DIRECTORY FOR THE DISK.                                     00405000
          SR    ADR,ADR                 NO ADT YET                       00406000
@@ -851,6 +893,7 @@ MINSIZE  DC    A(393216)      MINIMUM CMS MACHINE ... 384K ... @VA11938 00593800
          SPACE 1                                                        00599100
          SUBSECT                                                  V0375 00599200
          SVCSAVE                                                        00600000
+         SCBLOCK ,                                             HRC404DS 00600100
          IO                                                             00601000
          CMSCB                                                          00602000
          ADT                                                            00603000

@@ -317,6 +317,11 @@ REFMC    EQU   *                                                        00314000
          LH    R8,MONCLASS    YES, MONITOR CLASS INTO R8,               00317000
          L     R9,MONCODE     AND MONITOR CODE INTO R9,                 00318000
          B     4(0,R7)          AND CONTINUE BELOW.                     00319000
+CHEKPER  BAL   R9,CHECKPER    GO CHECK FOR PER EVENT.            PER001 00319100
+         CLI   INTPR+1,00     ANY INTERRUPTS LEFT NOW?           PER001 00319200
+         BNZ   PRNSTAT        GO CHECK FOR OTHER INTERRUPTS.     PER001 00319300
+         SLR   R6,R6          CLEAR THE INTERUPT CODE.           PER001 00319400
+         B     PRGSIMI        GO FINISH UP NOW, FOLKS.           PER001 00319500
 PRG01    EQU   *                                               %V3M4038 00320000
          L     R8,FFS         -1 IN R8 = "NOT A MONITOR CALL"  %V3M4038 00321000
          LH    R6,INTPR       GET INTERRUPT CODE INTO R6       %V3M4038 00322000
@@ -329,10 +334,10 @@ GOTOPRV  GOTO  DMKPRVLG       LET DMKPRV HANDLE IT             %V3M4038 00328000
          SPACE 2                                                        00329000
 PRGSVCPE EQU   *              SVC AND PER INTERRUPTS SEQUENTIALLY       00330000
          TM    VMTRCTL,VMTRPER     PER TRACING ACTIVE ?                 00331000
-         BO    TRAPSVC        YES - DEFER SVC INTERRUPT                 00332000
+         BO    OKEVENT        YES. INTERUPT WAS VALID            PER001 00332100
          TM    VMESTAT,VMPERCM     HE BETTER BE USING VIRTUAL PER       00333000
          BZ    PRG255         NO - HALT AND DISIST PROCESSING           00334000
-         BAL   R9,PRGEVEN     RECORD PER DATA + SET PENDING             00335000
+OKEVENT  BAL   R9,PRGEVEN     RECORD PER DATA + SET PENDING      PER001 00335100
          SPACE                                                          00336000
 *        THE FOLLOWING CODE RESTORES THE VIRTUAL MACHINE STATUS AND     00337000
 *        SIMULATES A REAL SVC INTERRUPT VIA 'LPSW'. DMKSVCIN WILL       00338000
@@ -359,87 +364,22 @@ PRGSVCPE EQU   *              SVC AND PER INTERRUPTS SEQUENTIALLY       00330000
 *        OTHERWISE, THE REMAINING INTERRUPT CODE IS DECODED NORMALLY  * 00359000
 *        AND THE PER INTERRUPT REFLECTED AT A LATER TIME.             * 00360000
 *---------------------------------------------------------------------* 00361000
-CHEKPER  EQU   *              SEE IF PER INTERRUPT INCLUDED             00362000
-         TM    INTPR+1,X'80'  IS THE PER BIT ON?                        00363000
-         BZ    PRG01          NO - REFLECT IT ARBITRARILY               00364000
-         NI    VMDSTAT,255-VMDSP NO FAST REDSP                 @V408246 00365000
-         TM    VMTRCTL,VMTRPER     IS PER TRACING ACTIVE ?              00366000
-         BO    TRAPPER        YES - RECORD PER DATA IN 'TREXT'          00367000
-         TM    VMESTAT,VMPERCM     HE BETTER BE USING VIRTUAL PER       00368000
-         BZ    PRG255         NO - WE'RE IN REAL TROUBLE                00369000
-         BAL   R9,PRGEVEN     RECORD PER DATA AND SET PENDING           00370000
-         L     R8,FFS             "NOT A MONITOR CALL"                  00371000
-         LH    R6,INTPR       GET NEEDED INTERRUPT CODE INTO R6         00372000
-         BZ    PRGSIMI        PER BY ITSELF - REFLECT TO USER           00373000
-         B     PRNSTAT        GO ANALYZE OTHER CODE - R7 STILL O.K.     00374000
-         SPACE 2                                                        00375000
-PRGEVEN  EQU   *              SAVE "PROGRAM-EVENT-RECORDING" DATA       00376000
-         L     R10,VMECEXT    EXTENSION BLOCK ADDRESS                   00377000
-         USING ECBLOK,R10                                               00378000
-         LH    R1,PERCODE     REAL PER CODE BITS                        00379000
-         STH   R1,EXTPERCD    ...                                       00380000
-         L     R1,PERADD      ADDRESS OF PER EVENT                      00381000
-         ST    R1,EXTPERAD    ...                                       00382000
-         OI    VMPEND,VMPERPND     SET PER DATA AVAILABLE               00383000
-         NI    INTPR+1,X'FF'-X'80' TURN OFF REAL PER BIT                00384000
-         BR    R9             ...RETURN WITH CONDITION CODE SET         00385000
-         DROP  R10                                                      00386000
+CHECKPER TM    INTPR+1,X'80'  PER EVENT RECORDED?                PER001 00362000
+         BZR   R9             NO. DON'T WORRY ABOUT IT.          PER001 00363000
+PRGEVEN  OI    VMPEND,VMPERPND     SET FLAG FOR PER PENDING.     PER001 00364000
+         TM    VMTRCTL,VMTRPER     WAS CP USING THE PERSON'S PER?PER001 00365000
+         BZ    OWNPER         NO. BETTER REFLECT IT TO HIM, THEN.PER001 00366000
+         L     R10,VMPERCTL   LOAD ADDRESS OF THE CONTROL BLOCK. PER001 00367000
+         LA    R10,PERADDR-PERBLOK(,R10) LOAD ADDR TO RECORD EVENPER001 00368000
+         B     PERJOIN        AND JOIN WITH REFLECTION SECTION.  PER001 00369000
+OWNPER   L     R10,VMECEXT    LOAD ADDR OF EXT CNTRL BLOCK.      PER001 00370000
+         LA    R10,EXTPERAD-ECBLOK(,R10)     LOAD ADDR TO RECORD PER001 00371000
+PERJOIN  MVC   4(2,R10),PERCODE    SET THE INTERRUPTION CODE NOW.PER001 00372000
+         MVC   0(4,R10),PERADD     SET THE INTERRUPTION ADDRESS, PER001 00373000
+         NI    INTPR+1,X'FF'-X'80' TURN OFF THE P.E.R. BIT.      PER001 00374000
+         BR    R9             AND RETURN TO OUR CALLER.          PER001 00375000
          SPACE 2                                                        00387000
          ABEND 255            BY - BY                                   00388000
-         EJECT                                                          00389000
-*---------------------------------------------------------------------* 00390000
-*        PROGRAM EVENT RECORDING - FOR VIRTUAL MACHINE TRACING        * 00391000
-*                  -------------------------------                    * 00392000
-*        WHEN A VIRTUAL MACHINE HAS 'VMTRPER' SET IN THE VMBLOK,      * 00393000
-*        PER EVENTS CAN OCCUR FOR BASIC-CONTROL MACHINES. ALL SUCH    * 00394000
-*        EVENTS MUST BE SEPARATED FROM ANY CONCURRENT INTERRUPTS      * 00395000
-*        AND PROCESSED BY THE TRACING MODULE, DMKPERIL. THE SVC-PER   * 00396000
-*        SERIAL INTERRUPT IS HANDLED BY DEFERRING THE SVC INTER-      * 00397000
-*        RUPTION UNTIL AFTER THE PER EVENT IS PROCESSED. ANY CON-     * 00398000
-*        CURRENT PROGRAM INTERRUPTS ARE ALSO DEFERRED, UNLESS THEY    * 00399000
-*        ARE THE RESULT OF A PAGING EXCEPTION. PER EVENTS CONCURRENT  * 00400000
-*        WITH PAGING EXECPTIONS ARE DISCARDED SINCE THEY WILL BE      * 00401000
-*        REPEATED AFTER THE PAGING REQUEST IS SERVICED.               * 00402000
-*---------------------------------------------------------------------* 00403000
-TRAPSVC  EQU   *              SVC-PER SERIAL INTERRUPT W/TRACING        00404000
-         L     R10,VMTREXT    TRACE EXTENSION TO VMBLOK                 00405000
-         USING TREXT,R10                                                00406000
-         L     R1,SVCOPSW     SAVE THE SVC OLD PSW...                   00407000
-         ST    R1,TREXPSW     ...IN THE TREXT BLOCK                     00408000
-         L     R1,SVCOPSW+4   ...SINCE 'VMPSW' IS NOW                   00409000
-         ST    R1,TREXPSW+4   ...INCORRECTLY SET                        00410000
-         L     R1,INTSVCL     GET ILC AND INTRP CODE FOR SVC            00411000
-         ST    R1,TREXINTL    ...ALSO INTO THE TREXT BLOCK              00412000
-         OI    VMPEND,VMSVCPND     SVC INTERRUPT DEFERRED               00413000
-         SPACE                                                          00414000
-TRAPPER  EQU   *              RECORD PER DATA FOR TRACING ROUTINE       00415000
-         L     R10,VMTREXT    TRACE EXTENSION BLOCK                     00416000
-         LH    R1,PERCODE     REAL PER CODE BITS                        00417000
-         STH   R1,TREXPERC    ...                                       00418000
-         L     R1,PERADD      REAL PER INSTRUCTION ADDRESS              00419000
-         ST    R1,TREXPERA    ...                                       00420000
-         OI    VMPEND,VMPERPND     PER DATA AVAILABLE                   00421000
-         NI    INTPR+1,X'FF'-X'80' TURN OFF REAL PER BIT                00422000
-         BZ    TRAPPIT        NO CONCURRENT INTERRUPTS - TRACE EVENT    00423000
-         BAL   R7,PRNSTAT     GO ANALYZE OTHER INTERRUPT                00424000
-         L     R8,FFS         "NOT A MONITOR CALL"                      00426000
-         L     R10,VMTREXT    TRACE EXTENSION BLOK             @VA09731 00426500
-*    IF IT IS A MONITOR CALL, R8, R9 NOW CONTAIN MC DATA                00427000
-         LH    R1,INTPR       PICK UP PROG. INT. CODE                   00428000
-         STH   R1,TREXINTC    SAVE FOR LATER REFLECT                    00429000
-         OI    VMPEND,VMPRGPND     PROGRAM INTERRUPT DEFERRED           00430000
-TRAPPIT  EQU   *              TRACE THE PER EVENT                       00431000
-         BAL   R10,OBSLOCK    OBTAIN SYSTEM LOCK               @V4M0133 00432000
-         CALL  DMKPERIL                                                 00433000
-         NI    VMPEND,X'FF'-(VMSVCPND+VMPERPND)   REMOVE PENDING FLAGS  00434000
-         TM    VMPEND,VMPRGPND     WAS A PROGRAM INTERRUPT DEFERRED ?   00435000
-         BZ    NRFEXIT        NO - GO TO DISPATCH                       00436000
-         NI    VMPEND,X'FF'-VMPRGPND    PROGRAM INT NO LONGER PENDING   00437000
-         L     R10,VMTREXT    TRACE EXTENSION TO VMBLOK        @V4M0133 00438000
-         LH    R6,TREXINTC    INTERRUPT CODE                            00439000
-*        R8, R9 STILL HAVE MONITOR CALL OR FLAG DATA                    00440000
-         B     PRGSIMLK       SIMULATE PROGRAM INTERRUPT       @V4M0133 00441000
-         DROP  R10                                                      00442000
          EJECT                                                          00443000
 *---------------------------------------------------------------------* 00444000
 *                                                                     * 00445000
@@ -469,6 +409,11 @@ DMKPRGSM DS    0D                                                       00452000
 PRGSIMI  EQU   *              REFLECT REAL PROGRAM INTERRUPT            00469000
          BAL   R10,OBSLOCK    SYSTEM LOCKED CODE BEYOND HERE***@V407579 00470000
 PRGSIMLK EQU   *                                               @V407579 00471000
+         LTR   R6,R6          IS IT A REGULAR INTERRUPT?         PER001 00471100
+         BNZ   REGULAR        YES. DON'T WORRY ABOUT A THING.    PER001 00471200
+         TM    VMTRCTL,VMTRPER     WAS CP USING THE P.E.R?       PER001 00471300
+         BO    PRGEXT         YES. GO TO DMKDSP TO HANDLE IT.    PER001 00471400
+REGULAR  DS    0H             HERE IF WE MUST REFLECT THE THING. PER001 00471500
          LA    R1,PROPSW      OLD PSW ADDRESS                           00472000
          BAL   R10,PSWTRAN     "TRANS 2,1,OPT=(BRING,DEFER)"            00473000
          L     R3,VMPSW       MOVE CURRENT VMPSW...                     00474000
@@ -501,6 +446,8 @@ CHKECMD  EQU   *              CHECK FOR EC-MODE PSW FORMAT              00489000
 CHKPEND  EQU   *              TEST FOR PENDING 'PER' EVENT              00501000
          TM    VMPEND,VMPERPND     IS THERE PER DATA ALSO?              00502000
          BZ    PRG04          NO - HANDLE AS USUAL                      00503000
+         TM    VMTRCTL,VMTRPER     WERE WE DOING CP PER TRACING? PER001 00503100
+         BO    PRG04          YES. DON'T TRY TO REFLECT IT, THEN.PER001 00503200
          L     R10,VMECEXT    EXTENSION BLOCK ADDRESS                   00504000
          USING ECBLOK,R10                                               00505000
          LH    R1,EXTPERCD    PER CODE BITS                             00506000
@@ -784,6 +731,6 @@ TRACELNG EQU   *-TRACETBL     ENTRY LENGTH                     @V407579 00769000
          COPY  EQU                                                      00771000
          COPY  SAVE                                            @V407579 00772000
          COPY  VMBLOK         USER MACHINE DEFINITION.                  00773000
-         COPY  TREXT          TRACE EXTENSION BLOCK                     00774000
+         COPY  PERBLOKS       "PER" EXTENSION BLOCK              PER001 00774000
          PSA                                                            00775000
          END                                                            00776000

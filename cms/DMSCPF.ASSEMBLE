@@ -22,6 +22,19 @@ CPF      TITLE 'DMSCPF     (CMS)       VM/370 - RELEASE 6'              00001000
 *|       GPR  1 = ADDRESS OF COMMAND LINE                               00022000
 *|       GPR 14 = RETURN ADDRESS                                        00023000
 *|       GPR 15 = ADDRESS OF DMSCPF                                     00024000
+*                                                              HRC419DS 00024010
+*        The high order byte of R1 is checked to provide       HRC419DS 00024020
+*        extended plist support. The high order byte of R1     HRC419DS 00024030
+*        is checked to determine the caller environment.       HRC419DS 00024040
+*                                                              HRC419DS 00024050
+*        X'01' called from an EXEC processor. Do not uppercase HRC419DS 00024060
+*              the command string                              HRC419DS 00024070
+*        X'0B' called from an EXEC processor. Uppercase the    HRC419DS 00024080
+*              command string                                  HRC419DS 00024090
+*                                                              HRC419DS 00024100
+*        When the high order byte is set, then:                HRC419DS 00024110
+*        R0 = Address of the extended plist                    HRC419DS 00024120
+*        R1 = Address of the tokenized plist (It is not used.) HRC419DS 00024130
 *                                                                       00025000
 * EXIT CONDITIONS -                                                     00026000
 *                                                                       00027000
@@ -82,6 +95,13 @@ CPF      TITLE 'DMSCPF     (CMS)       VM/370 - RELEASE 6'              00001000
 *|       INSTRUCTION WITH A CODE OF 8 TO PASS THE CONSOLE FUNCTION TO   00077000
 *|       CP TO EXECUTE.  UPON RETURN FROM CP, DMSCPF EXITS WITH THE     00078000
 *|       RETURN CODE IN REGISTER 15.                                    00079000
+*                                                              HRC350DS 00079020
+*|       If the first argument is FIFO or LIFO, the output     HRC350DS 00079040
+*|       from the CP command is placed in the console stack.   HRC350DS 00079060
+*|       If the first argument is DISCARD, the output from the HRC350DS 00079080
+*|       CP command is discarded.  In either of these cases if HRC350DS 00079100
+*|       the CP command issues a prompt (for a password), that HRC350DS 00079120
+*|       prompt is not stacked or discarded.                   HRC350DS 00079140
 *                                                                       00080000
 *.                                                                      00081000
          EJECT                                                          00082000
@@ -114,6 +134,28 @@ NOTBATA  DS    0H                                              @V60BBBB 00087500
          BNZ   CPRETURN       NOT ALLOWED BY BATCH                V0742 00091500
          SPACE                                                          00091550
 NOTBAT   EQU   *              PROCESS THE CP COMMAND              V0742 00091600
+         CLI   BALRSAVE+4,X'01'  Check R1 high order byte at   HRC419DS 00091610
+         BE    USEEPL               at entry for EPLIST        HRC419DS 00091620
+         CLI   BALRSAVE+4,X'0B'  Check other form              HRC419DS 00091630
+         BNE   NOEPL             Skip down if no EPLIST        HRC419DS 00091640
+USEEPL   DS    0H                                              HRC419DS 00091650
+         L     R15,BALRSAVE   Point to the EPLIST              HRC419DS 00091660
+         L     R14,0(,R15)    Address of command line          HRC419DS 00091670
+         L     R15,8(,R15)    Past end of command line         HRC419DS 00091680
+         SR    R15,R14        Length of command line           HRC419DS 00091690
+         LA    R0,CMNDLINE    Where to copy the line           HRC419DS 00091700
+         LA    R1,131         Max length                       HRC419DS 00091710
+         CR    R1,R15         Check max against true length    HRC419DS 00091720
+         BNH   *+8            If length < max,                 HRC419DS 00091730
+         LR    R1,R15            use the true length           HRC419DS 00091740
+*                                                              HRC419DS 00091750
+         LR    R3,R1          Hold length                      HRC419DS 00091760
+         ICM   R14,B'1000',=C' ' Pad with blanks               HRC419DS 00091770
+         MVCL  R0,R14         Copy command line to CMNDLINE    HRC419DS 00091780
+         LA    R2,CMNDLINE    Address to pass to DMSCPF        HRC419DS 00091790
+         LR    R0,R3          Length to pass to DMSCPF         HRC419DS 00091800
+         B     RUNCMD         Rejoin below                     HRC419DS 00091810
+NOEPL    DS    0H                                              HRC419DS 00091820
          LA    R3,CMNDLINE    POINT TO THE COMMAND LINE BUFFER          00092000
          LA    R4,1           LOAD THE POINTER INCREMENT                00093000
          LA    R5,131(,R3)    LOAD MAXIMUM BUFFER ENDING ADDRESS        00094000
@@ -161,6 +203,7 @@ FINDCHAR CLI   0(R2),C' '     IS THIS CHARACTER A BLANK ?               00131000
          SPACE                                                          00136000
 CHKIMPCP IC    R6,=C' '       MOVE A BLANK TO END OF COMMAND LINE       00137000
          STC   R6,0(R2,R3)    ...                                       00138000
+RUNCMD   DS    0H                                              HRC419DS 00138100
          CLC   0(3,R2),=C'CP '     IS 'CP' THE FIRST ARGUMENT ?         00139000
          BE    FOUNDCP        YES,GO TO IT                     @VA06272 00140050
          LA    R0,72        GET STORAGE TO PROTECT USER'S REGS @VA12652 00140057
@@ -195,11 +238,96 @@ FINDFUNC CLI   0(R2),C' '     IS THIS THE START OF THE NEXT ARGUMENT ?  00144000
          BCT   R3,FINDFUNC    SUBTRACT 1 FROM THE LENGTH AND CONTINUE   00147000
 PASSTOCP LA    R1,=CL8'CONWAIT'    POINT TO DMSCWT PLIST                00148000
          SVC   202            WAIT FOR ALL CONSOLE I/O TO COMPLETE      00149000
-         LTR   R10,R10        COMMAND FROM MODULE/EXEC?        @V60BBBB 00149200
-         BZ    MODOREX        BR IF YES                        @V60BBBB 00149400
-         O     R3,=X'80000000' REQUEST PASSWORD SUPPRESSION    @V60BBBB 00149600
-MODOREX  DS    0H                                              @V60BBBB 00149800
+* Now check the first word of the command line.  Is it FIFO,   HRC350DS 00149802
+* LIFO, or DISCARD?                                            HRC350DS 00149804
+         CLC   0(5,R2),FIFO   is it 'FIFO'                     HRC350DS 00149806
+         BNE   CKLIFO         nope                             HRC350DS 00149808
+         LA    R6,1           remember FIFO                    HRC350DS 00149810
+         LA    R2,5(R2)       skip past 'FIFO '                HRC350DS 00149812
+         S     R3,FIVE        decrement CP command length      HRC350DS 00149814
+         B     SPECIAL                                         HRC350DS 00149816
+CKLIFO   DS    0H                                              HRC350DS 00149818
+         CLC   0(5,R2),LIFO   is it 'LIFO'                     HRC350DS 00149820
+         BNE   CKDISC         nope                             HRC350DS 00149822
+         LA    R6,2           remember LIFO                    HRC350DS 00149824
+         LA    R2,5(R2)       skip past 'LIFO '                HRC350DS 00149826
+         S     R3,FIVE        decrement CP command length      HRC350DS 00149828
+         B     SPECIAL                                         HRC350DS 00149830
+CKDISC   DS    0H                                              HRC350DS 00149832
+         CLC   0(8,R2),DISCARD is it 'DISCARD'                 HRC350DS 00149834
+         BNE   NORMAL         nope                             HRC350DS 00149836
+         SR    R6,R6          remember DISCARD                 HRC350DS 00149838
+         LA    R2,8(R2)       skip past 'DISCARD '             HRC350DS 00149840
+         S     R3,EIGHT       decrement CP command length      HRC350DS 00149842
+* We will issue the DIAGNOSE instruction with output directed  HRC350DS 00149844
+* to a buffer so we can stack it or discard it.                HRC350DS 00149846
+SPECIAL  DS    0H                                              HRC430DS 00149847
+         LTR   R3,R3          anything left in the buffer?     HRC430DS 00149848
+         BNP   CPRET2         Ignore command if not            HRC430DS 00149849
+         LTR   R10,R10        Command from MODULE/EXEC?        HRC430DS 00149850
+         BZ    MODOREX        Skip next if so                  HRC430DS 00149851
+         O     R3,=X'80000000' Request password suppression    HRC430DS 00149852
+MODOREX  DS    0H                                              HRC430DS 00149853
+         L     R0,BUFSIZE     buffer for CP output (in DWORDs) HRC430DS 00149854
+         DMSFREE DWORDS=(0),TYPCALL=BALR                       HRC350DS 00149856
+         LR    R4,R3          move CP command length to R4     HRC350DS 00149858
+         LR    R3,R1          address of buffer for CP output  HRC350DS 00149860
+         LR    R9,R1          and save it                      HRC350DS 00149862
+         LR    R7,R1          and again                        HRC350DS 00149864
+         L     R5,EIGHTK      length of output buffer          HRC350DS 00149866
+* At last we issue the CP command.                             HRC350DS 00149868
+* R2 = command, R3 = buffer, R4 = command len, R5 = buffer len HRC350DS 00149870
+         ICM   R4,8,=X'40'    request CP output to our buffer  HRC350DS 00149872
+         DIAG  R2,R4,8        issue the CP command             HRC350DS 00149874
+         LTR   R8,R4          save return code from CP command HRC350DS 00149876
+         BNZ   THATSALL       if error, don't stack result     HRC350DS 00149878
+         LTR   R6,R6          are we stacking the result?      HRC350DS 00149880
+         BZ    THATSALL       no, so we are done               HRC350DS 00149882
+* Prepare the ATTN plist that will stack the CP command output HRC350DS 00149884
+         A     R9,EIGHTK      R9 = space for ATTN plist        HRC350DS 00149886
+         USING ATTNPL,R9                                       HRC350DS 00149888
+         MVC   ATTNPL(8),ATTN move in 'ATTN    '               HRC350DS 00149890
+         BCT   R6,SPECIAL1                                     HRC350DS 00149892
+         MVC   ATTNHOW(4),FIFO stacking FIFO                   HRC350DS 00149894
+         B     SPECIAL2                                        HRC350DS 00149896
+SPECIAL1 DS    0H                                              HRC350DS 00149898
+         MVC   ATTNHOW(4),LIFO stacking LIFO                   HRC350DS 00149900
+SPECIAL2 DS    0H                                              HRC350DS 00149902
+         BCTR  R3,0           prime the pump                   HRC350DS 00149904
+* Loop to place each output line from CP on the stack.         HRC350DS 00149906
+CPNXTLIN DS    0H                                              HRC350DS 00149908
+         LA    R3,1(R3)       skip previous linend character   HRC350DS 00149910
+         LR    R2,R3          start of this line               HRC350DS 00149912
+* Loop to find the end of this line.                           HRC350DS 00149914
+CPNXTCHR DS    0H                                              HRC350DS 00149916
+         CLI   0(R3),X'15'    are we at the end of this line?  HRC350DS 00149918
+         BE    CPSTACK1       yes, go stack it                 HRC350DS 00149920
+         LA    R3,1(R3)       no, on to next character         HRC350DS 00149922
+         BCT   R5,CPNXTCHR    continue loop until buffer end   HRC350DS 00149924
+* We have a line, now stack it.                                HRC350DS 00149926
+CPSTACK1 DS    0H                                              HRC350DS 00149928
+         LR    R10,R3         save scan pointer                HRC350DS 00149930
+         SR    R3,R2          length of this line of output    HRC350DS 00149932
+         BCTR  R5,0           account for linend character     HRC350DS 00149934
+         ST    R2,ATTNLEN     address of line to stack         HRC350DS 00149936
+         STC   R3,ATTNLEN     put line length in ATTN plist    HRC350DS 00149938
+         LR    R1,R9                                           HRC350DS 00149940
+         SVC   202            stack the line                   HRC350DS 00149942
+         DC    AL4(THATSALL)  go here if an error              HRC350DS 00149944
+         LR    R3,R10         restore scan pointer             HRC350DS 00149946
+         LTR   R5,R5          more lines to process?           HRC350DS 00149948
+         BP    CPNXTLIN       yes, go scan and stack them      HRC350DS 00149950
+         DROP  R9                                              HRC350DS 00149952
+* Our work here is done.                                       HRC350DS 00149954
+THATSALL DS    0H                                              HRC350DS 00149956
+         L     R0,BUFSIZE     buffer size                      HRC350DS 00149958
+         LR    R1,R7          get address of buffer to free    HRC350DS 00149960
+         DMSFRET DWORDS=(0),LOC=(1),TYPCALL=BALR               HRC350DS 00149962
+         LR    R3,R8          CP return code into R3           HRC350DS 00149964
+         B     WRAPUP                                          HRC350DS 00149966
+NORMAL   DS    0H                                              HRC350DS 00149968
          DC    X'83230008'    PASS COMMAND LINE TO CP TO EXECUTE        00150000
+WRAPUP   DS    0H                                              HRC350DS 00150020
          LA    R3,0(R3)        CLEAR HIGH ORDER BYTE           @VA10582 00150100
          TM    BATFLAGS,BATRUN     IS BATCH ACTIVE?            @VA12384 00150180
          BNO   CPRETURN            NO - OK PLAIN RETURN        @VA12384 00150260
@@ -231,9 +359,23 @@ CPRET2   EQU *                                                 @VA12652 00151600
          BR    R14            RETURN TO THE CALLER                      00153000
          SPACE 3                                                        00154000
 BS       EQU   X'16'                                                    00155000
+EIGHTK   DC    A(8192)        size of buffer for CP output     HRC350DS 00155020
+BUFSIZE  DC    A(1026)        size of buffer in doublewords    HRC350DS 00155040
+FIVE     DC    A(5)                                            HRC350DS 00155060
+EIGHT    DC    A(8)                                            HRC350DS 00155080
+FIFO     DC    C'FIFO '                                        HRC350DS 00155100
+LIFO     DC    C'LIFO '                                        HRC350DS 00155120
+DISCARD  DC    C'DISCARD '                                     HRC350DS 00155140
+ATTN     DC    C'ATTN    '                                     HRC350DS 00155160
          SPACE                                                          00156000
          LTORG                                                          00157000
          EJECT                                                          00158000
          NUCON                                                          00159000
          REGEQU                                                         00160000
+         SPACE 1                                               HRC350DS 00160020
+ATTNPL   DSECT                ATTN parameter list              HRC350DS 00160040
+         DS    CL8            'ATTN'                           HRC350DS 00160060
+ATTNHOW  DS    CL4            'FIFO' or 'LIFO'                 HRC350DS 00160080
+ATTNLEN  DS    AL1            length of line to be stacked     HRC350DS 00160100
+ATTNADD  DS    AL3            address of line to be stacked    HRC350DS 00160120
          END                                                            00161000

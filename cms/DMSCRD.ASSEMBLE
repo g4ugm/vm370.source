@@ -31,6 +31,9 @@ CRD      TITLE 'DMSCRD     (CMS)       VM/370 - RELEASE 6'              00001000
 *                    DC   AL1(1)                                        00031000
 *                    DC   AL3(INPUT BUFFER)                             00032000
 *                    DC   CL1'CODE'                                     00033000
+*                    DC   CL1'CODE1'                           HRC417DS 00033100
+*                    DC    AL2(0) BYTE COUNT RECEIVED PUT      HRC417DS 00033200
+*                                                              HRC417DS 00033300
 *                    DC    AL3(0) BYTE COUNT RECEIVED PUT      @V2D4598 00034000
 *                                 HERE ON EXIT                 @V2D4598 00035000
 *                                                                       00036000
@@ -43,6 +46,9 @@ CRD      TITLE 'DMSCRD     (CMS)       VM/370 - RELEASE 6'              00001000
 *           * = READ PHYS. LINE TO CALLER'S BUFFER             @V2D4598 00043000
 *           $ = READ TO CALLER'S BUFFER, AND DON'T RETRY       @V2D4598 00044000
 *               THE READ IF IT ENDS IN ATTENTION               @V2D4598 00045000
+*             WHERE CODE1:                                     HRC417DS 00045100
+*           D = DO A DIRECT READ TO THE CONSOLE (BYPASS THE    HRC417DS 00045200
+*               PROGRAM STACK AND THE TERMINAL INPUT BUFFER).  HRC417DS 00045300
 *                                                                       00046000
 * EXIT CONDITIONS:                                                      00047000
 *                                                                       00048000
@@ -165,26 +171,63 @@ TYPFND   MVC   MSK,1(R3)      SET OPTION-FLAGS                 @V2D4598 00162000
          USING NUCDSECT,5                                               00165000
 REREAD   L     R5,=V(CONSOLE)                                           00166000
          LH    9,NCDEVAD      SET R9 TO 1052 ADDRESS                    00167000
-CKFINRD  ICM   R2,B'0011',NUMFINRD ANY FINISHED READS?         @V2D4598 00168000
-         BZ    CKPENRD        NO, GO CHECK FOR PENDING READS            00169000
-         BCTR  2,0            YES, DECRIMENT NUMBER                     00170000
-         STH   2,NUMFINRD     OF FINISHED READS                         00171000
-         L     1,FSTFINRD     GET LOCATION OF FINISHED READ             00172000
+         CLI   RDTYPE2,C'D'   Read Direct?                     HRC417DS 00167100
+         BE    DIRECT                                          HRC417DS 00167200
+*                                                                  99DS 00167300
+CKFINRD  DS    0H                                              HRC406DS 00168100
+         ICM   R15,B'1111',NUCNLSTK  Any messages stacked?     HRC406DS 00168200
+         BZ    CKPENRD        No, check for a pending read     HRC406DS 00168300
+         LM    R1,R2,NUCFSTLN Get 1st and last stk ptr         HRC406DS 00168400
+*                                                              HRC406DS 00168500
+         LTR   R2,R2          This particular stack            HRC406DS 00168600
+*                             might be empty                   HRC406DS 00168700
+         BNZ   READSTK        If not, go get a line            HRC406DS 00168800
+*                             Backup to previous stack level   HRC406DS 00168900
+         MVC   NUCFSTLN(8),0(R1) Get rid of this stack level   HRC406DS 00169000
+         LA    R0,1                                            HRC406DS 00169100
+         LR    R6,R1          Copy address of our buffer       HRC406DS 00169200
+         DMSFRET DWORDS=(0),LOC=(1),TYPCALL=BALR               HRC406DS 00169300
+         L     R15,NUCNBSTK   Decrement                        HRC406DS 00169400
+         BCTR  R15,0            stack level                    HRC406DS 00169500
+         ST    R15,NUCNBSTK       number                       HRC406DS 00169600
+         B     CKFINRD        Keep trying                      HRC406DS 00169700
+*                                                              HRC406DS 00169800
+* Read a line from the stack.                                  HRC406DS 00169900
+*                                                              HRC406DS 00170000
+READSTK  DS    0H                                              HRC406DS 00170100
+         MVC   NUCFSTLN,0(R1) Dechain the stacked line         HRC406DS 00170200
+         SR    R3,R3                                           HRC406DS 00170300
+         IC    R3,5(,R1)      Get the length                   HRC406DS 00170400
+         LA    R0,5+7(R3)     Convert length + 5 to deds       HRC406DS 00170500
+         SRL   R0,3                                            HRC406DS 00170600
+         LA    R2,6(,R1)      point to the data                HRC406DS 00170700
+         L     R15,NUCNLSTK   Decrement the                    HRC406DS 00170800
+         BCTR  R15,0            number of lines                HRC406DS 00170900
+         ST    R15,NUCNLSTK       in this stack level          HRC406DS 00171000
+         LH    R15,NUMFINRD   Decrement the                    HRC406DS 00171100
+         BCTR  R15,R0           total lines                    HRC406DS 00171200
+         STH   R15,NUMFINRD       stacked                      HRC406DS 00171300
+         C     R1,NUCLSTLN    If we are removing the           HRC406DS 00171400
+         BNE   NOTLAST          last stacked line then         HRC406DS 00171500
+         SLR   R15,R15             reset the last              HRC406DS 00171600
+         ST    R15,NUCLSTLN           line pointer             HRC406DS 00171700
+NOTLAST  DS    0H                                              HRC406DS 00171800
          TM    4(1),X'40'     WAS IT AN ATTN READ?                      00173000
          BZ    CKSTK          NO, THEN DATA ALREADY IN MY BUFFER        00174000
          MVC   CONINBUF,6(R1) YES, MOVE DATA TO MY BUFFER               00175000
 CKSTK    ICM   R4,B'1111',0(R1)    LOAD & TEST NEXT-READ PTR   @V2D4598 00176000
          ST    R4,FSTFINRD         MAKE IT HEAD OF CHAIN       @V2D4598 00177000
          BNZ   CKFRET         YES, BRANCH                               00178000
-         ST    4,LSTFINRD     NO, RESET POINTER TO LAST FINISHED        00179000
-         STH   4,NUMFINRD     READ AND INSURE ZERO COUNT                00180000
 CKFRET   TM    4(1),X'40'     WAS READ VIA ATTN?                        00181000
          BZ    SCAN           NO, GO SCAN INPUT LINE                    00182000
          LA    0,17           YES, RETURN WORK AREA TO FREE STORAGE     00183000
          DMSFRET DWORDS=(0),LOC=(1),TYPCALL=BALR                        00184000
          B     SCAN           THEN GO SCAN THE INPUT LINE               00185000
          EJECT                                                          00186000
-CKPENRD  NI    MSGFLAGS,255-NOTYPING    RESET NO TYPING                 00187000
+CKPENRD  DS    0H                                              HRC417DS 00187100
+         LA    R7,CKFINRD     Address to go to after WAIT      HRC417DS 00187200
+         NI    MSGFLAGS,255-NOTYPING    Reset no typing        HRC417DS 00187300
+*                                                              HRC417DS 00187400
          CLC   PENDREAD,=F'0' IS THERE A PENDING READ                   00188000
          BNE   WAIT           IF YES, GO WAIT FOR IT.                   00189000
          CLC   NUMPNDWR,=F'0' ANY PENDING WRITES                  P3108 00190000
@@ -215,6 +258,7 @@ LONGSTCM STCM  R0,B'0111',4+TOLNGADR(R2)                       @V2D4598 00210000
 RETRY    LA    R1,4(,R2)      SET R1 FOR 'STNEWCON'                     00214000
          L     R15,=V(DMSCITB)     CALL IT                              00215000
          BALR  14,15                                                    00216000
+         LA    R7,CKFINRD     Address to go to after WAIT      HRC417DS 00216100
          LTR   15,15          WAS SIO SUCCESSFUL?                       00217000
          BZ    WAIT           YES, GO WAIT FOR COMPLETION               00218000
          CLI   CSW+4,X'90'    PENDING ATTENTION                         00219000
@@ -223,13 +267,71 @@ CRDERR   DMSERR TEXT='PERMANENT CONSOLE ERROR',NUM=171,                X00221000
                TYPCALL=BALR,HALT=YES,LET=T                              00222000
          B     CRDERR                                                   00223000
 *                                                                       00224000
+DIRECT   EQU   *                                               HRC417DS 00224010
+         LA    R7,DIRECT      Wait until nothing is pending    HRC417DS 00224020
+         NI    MSGFLAGS,255-NOTYPING    Reset no typing        HRC417DS 00224030
+         CLC   PENDREAD,=F'0' Is there a pending read?         HRC417DS 00224040
+         BNE   WAIT           Wait for it if so                HRC417DS 00224050
+         CLC   NUMPNDWR,=F'0' Is there a pending write         HRC417DS 00224060
+         BNE   WAIT           Wait for it if so                HRC417DS 00224070
+         LA    R2,CONINBLK    Set PENDREAD to input buffer     HRC417DS 00224080
+         ST    R2,PENDREAD                                     HRC417DS 00224090
+         XC    CONINBUF,CONINBUF Clear the input buffer        HRC417DS 00224100
+         TM    MSK,LONGOP     LONG read operation desired?     HRC417DS 00224110
+         BNO   SIODIR         Skip this if not                 HRC417DS 00224120
+         MVZ   4(1,R2),MSK    Set 'LONGOP', 'NOATTN'           HRC417DS 00224130
+         L     R0,RDBUFADD-1  Get buffer address               HRC417DS 00224140
+         LH    R1,RDSIZE3+1   Get buffer length                HRC417DS 00224150
+         LTR   R1,R1          Test for zero length             HRC417DS 00224160
+         BP    DIRLONG        Positive OK                      HRC417DS 00224170
+         L     R1,BUFLNG      Set default buffer length        HRC417DS 00224180
+         STH   R1,RDSIZE3+1     into PLIST                     HRC417DS 00224190
+         B     DIR001         Go read                          HRC417DS 00224200
+DIRLONG  DS    0H                                              HRC417DS 00224210
+         CH    R1,=H'2030'    Max allowed length               HRC417DS 00224220
+         BNH   DIR001         Skip if within the max           HRC417DS 00224230
+         LH    R1,=H'2030'    Use the max                      HRC417DS 00224240
+DIR001   DS    0H                                              HRC417DS 00224250
+         STCM  R0,B'0111',4+TOLNGADR(R2)                       HRC417DS 00224260
+         STH   R1,4+TOLNGLEN(,R2)                              HRC417DS 00224270
+         SLR   R15,R15        Zero out buffer so we can        HRC417DS 00224280
+         MVCL  R0,R14           count the bytes read           HRC417DS 00224290
+SIODIR   DS    0H                                              HRC417DS 00224300
+         LA    R1,4(,R2)      SET R1 FOR 'STNEWCON'            HRC417DS 00224310
+         OI    OPTFLAGS,RDTDRCT Tell CIT about DIRECT read     HRC417DS 00224320
+         L     R15,=V(DMSCITB)                                 HRC417DS 00224330
+         BALR  14,15                                           HRC417DS 00224340
+         L     R11,AOPSECT    Restore OPSECT pointer           HRC417DS 00224350
+         LA    R2,CONINBLK    Restore input buffer pointer     HRC417DS 00224360
+         LA    R7,RDONE       Where to go when complete        HRC417DS 00224370
+         LTR   15,15          SIO successful?                  HRC417DS 00224380
+         BZ    WAIT           Yes, wait until it is done       HRC417DS 00224390
+         CLI   CSW+4,X'90'    Pending ATTN?                    HRC417DS 00224400
+         BE    SIODIR         Yes, ignore it                   HRC417DS 00224410
+         B     CRDERR         Permanent error                  HRC417DS 00224420
+*                                                              HRC417DS 00224430
          EJECT                                                          00225000
 WAIT     LA    1,WAITLST      GET WAIT PARAM LIST                       00226000
          L     15,=V(WAIT)    CALL WAIT VIA BALR (FASTER)               00227000
          BALR  14,15          (24 SEPTEMBER 1968)                       00228000
          TM    TSOFLAGS,TSOATCNL   ATTENTION DURING READ ?        P3108 00229000
-         BNO   CKFINRD        NO, GO CHECK FOR FINISHED READ            00230000
-         B     SCAN           CLEAN UP BUFFER AND EXIT                  00231000
+         BO    SCAN           Clean up buffer and exit         HRC417DS 00230100
+         BR    R7             Return to processing             HRC417DS 00230200
+*                                                              HRC417DS 00230300
+         SPACE 2                                               HRC417DS 00230400
+RDONE    EQU   *                                               HRC417DS 00230500
+         LH    R2,NUMFINRD    Are there any                    HRC417DS 00230600
+         C     R2,NUCNLSTK      finished reads                 HRC417DS 00230700
+         BH    CRD0001        Go process if so                 HRC417DS 00230800
+         CLC   PENDREAD,=F'0' Any pending read?                HRC417DS 00230900
+         BNE   WAIT           Go wait for it if so             HRC417DS 00231000
+         CLC   NUMPNDWR,=F'0' Any pending writes?              HRC417DS 00231100
+         BNE   WAIT           Go wait for it if so             HRC417DS 00231200
+         B     SCAN           Clean up the buffer and exit     HRC417DS 00231300
+CRD0001  DS    0H                                              HRC417DS 00231400
+         BCTR  2,0            Decrement the                    HRC417DS 00231500
+         STH   2,NUMFINRD       finished read count            HRC417DS 00231600
+         EJECT                                                 HRC417DS 00231700
 *                                                                       00232000
          EJECT                                                          00233000
 SCAN     EQU   *                                                        00234000
@@ -483,6 +585,7 @@ READSECT DSECT                                                          00471000
 RDTERMNO DS    AL1                                                      00473000
 RDBUFADD DS    AL3                                                      00474000
 RDTYPE   DS    C                                                        00475000
+RDTYPE2  DS    0C            Redefine RDSIZE3 byte 1           HRC417DS 00475100
 RDSIZE3  DS    AL3                                                      00476000
 *                                                                       00477000
          SPACE 2                                                        00478000
