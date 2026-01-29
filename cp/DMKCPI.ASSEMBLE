@@ -309,7 +309,8 @@ CPI      TITLE 'DMKCPI     (CP)        VM/370 - RELEASE 6'              00001000
 *                                                                       00309000
 * MESSAGES -                                                            00310000
 *                                                                       00311000
-*        DMKCPI185E CP ASSIST LEVEL XXXX DOES NOT MATCH CP LEVEL YYYY   00312000
+*        DMKCPI185E CP ASSIST LEVEL XXXX NOT SUPPORTED - CP ASSIST      00312000
+*                   DISABLED                                            00312500
 *        DMKCPI913I CP OWNED VOLID XXXXXX INVALID FOR 3330V             00313000
 *        DMKCPI950A AUTO LOGON FAILED; EXPLICIT LOGON REQUIRED          00314000
 *        DMKCPI951I CP VOLID XXXXXX NOT MOUNTED                         00315000
@@ -331,6 +332,7 @@ CPI      TITLE 'DMKCPI     (CP)        VM/370 - RELEASE 6'              00001000
 *        006 - SYSTEM SHUTDOWN COMPLETE                                 00331000
 *        00D - REAL MACHINE TOO SMALL FOR VM/370                        00332000
 *        015 - SIGP ERROR                                               00333000
+*        016 - CHANNEL SET SWITCHING ERROR                              00333100
 *.                                                                      00334000
          EJECT                                                          00335000
          COPY  OPTIONS                                                  00336000
@@ -348,7 +350,7 @@ DMKCPI   CSECT                                                          00340000
          EXTRN DMKDSPNP,DMKFRELO,DMKFREHI,DMKPTRF1,DMKSYSOW,DMKCFMEN    00348000
          EXTRN DMKSYSOC,DMKLOGOP,DMKSCNVS,DMKCVTBD,DMKFRETR    @V408246 00349000
          EXTRN DMKALGON,DMKUDRFU,DMKPAGST                      @V407595 00350000
-         EXTRN DMKQCNRD,DMKPSAEX,DMKPRGIN,DMKMCHIN,DMKIOSIN    @V407595 00351000
+         EXTRN DMKQCNRD,DMKPSAEX,DMKPRGIN,DMKMCHIN,DMKIOTIN    @VA09587 00351000
          EXTRN DMKPGTP4,DMKPGTT4,DMKPGTP0,DMKPGTT0,DMKPGTP5,DMKPGTT5    00352000
          EXTRN DMKPGTTM,DMKWRMST,DMKSYMTB,DMKDMPSF,DMKSYSDU,DMKIOSQR    00353000
          EXTRN DMKDMPDV,DMKCQRFI,DMKSCNRD,DMKDMPRC             @V200930 00354000
@@ -380,6 +382,7 @@ DMKCPI   CSECT                                                          00340000
          EXTRN DMKCLKCK                                        @V407595 00380000
          EXTRN DMKAPIPR                                        @V407595 00381000
 .CLKCK4  ANOP                                                           00382000
+         EXTRN DMKPTRSN                                        @VA08341 00382100
          EXTRN DMKSYSAT,DMKSYSUR,DMKSYSTS,DMKSYSTE,DMKMNIST    @VMD0138 00383000
          EXTRN DMKSVCIN                                        @V407595 00384000
          EXTRN DMKHVDPP       INITIALIZATION FOR PP BIT MAP    @VMD0161 00385000
@@ -415,6 +418,7 @@ N63      EQU   63             HIGHEST VALID PROCESSOR ADDR     @V407595 00414000
 FF       EQU   X'FF'               @V407595                             00415000
 LOGICADR EQU   X'40'          COMPUTE LOGICAL PROCESSOR ADDR   @V407595 00416000
 CONDCODE EQU   X'08'          TO STCM CONDITION CODE IN PSW    @V407595 00417000
+SENRETCT EQU   X'100'         SENSE RETRY COUNT                @VA11565 00417500
          EJECT                                                          00418000
          ENTRY DMKCPINT                                                 00419000
 DMKCPINT DS    0H                                                       00420000
@@ -436,8 +440,8 @@ DMKCPINT DS    0H                                                       00420000
          LA    R2,PSBCLR2     START OF 2ND AREA TO CLEAR       @V407595 00436000
          LA    R3,PSECLR2-PSBCLR2  NUMBER OF BYTES TO CLEAR    @V407595 00437000
          MVCL  R2,R4          CLEAR STORAGE AREA               @V407595 00438000
-         OI    APSTAT1,PROCIO INDICATE THIS PROCESSOR HAS I/O  @V407595 00439000
-*                             CAPABILITY                                00440000
+         OI    APSTAT1,PROCIO+PROCIPL INDICATE THIS PROCESSOR  @V60B7AA 00439100
+*                             HAS I/O CAPABILITY AND IS IPL PROCESSOR   00440100
          MVI   CPIFLAG1,N0    CLEAR INTERNAL FLAGS             @V407595 00441000
          SR    R0,R0          LOAD ZEROES                      @V407595 00442000
          STH   R0,IPUADDR     ENSURE ZEROES FOR LPUADDR BELOW  @V407595 00443000
@@ -463,7 +467,11 @@ DMKCPINT DS    0H                                                       00420000
          SPT   PROBTIME            INITIALIZE SYSTEM CPU TIMER          00463000
          STIDP CPUID               STORE REAL CPU IDENTIFIER            00464000
          CLI   CPUID,FF       ARE WE RUNNING UDER VM/370 ?     @VMH0034 00465000
-         BE    CPIPINTA       YES - INIT IN UNIPROCESSOR ONLY  @VMH0034 00466000
+         BNE   INITREAL       NO BRANCH                        @VA11615 00466020
+         LA    R1,8           SET DIAGNOSE REG                 @VA11615 00466030
+         DC    X'83120048'    DIAG 48 TO SET VIRTUAL BIT       @VA11615 00466040
+         B     CPIPINTA       INIT IN UNIPROCESSOR ONLY        @VA11615 00466050
+INITREAL DS    0H                                              @VA11615 00466060
          SPACE 2                                                        00467000
 *  HERE TO STORE CPU ADDRESS                                            00468000
          LA    R1,CPIPINTA    SET UP PROGRAM CHECK ADDRESS     @V213135 00469000
@@ -483,7 +491,61 @@ DMKCPINT DS    0H                                                       00420000
          CLI   N0(R2),YES     IS SYSTEM GEN'D FOR ATTACHED     @V407595 00483000
 *                             PROCESSOR SUPPORT (SYSCOR AP=YES)@V407595 00484000
          BNE   CPIPINTB       NO - CONTINUE WITHOUT AN APU     @V4M0206 00485000
-*                             YES - DETERMINE ADDRESS OF APU   @V407595 00486000
+         SPACE                                                          00485020
+         LA    R2,SENRETCT    LOAD LOOP CONTROL FOR SIO        @VA11565 00485041
+         LA    R5,CPINOCSS    GET ADDRESS OF CPINOCSS          @V60B7AB 00485060
+         ST    R5,PRNPSW+4    SET UP PROGRAM CHECK ADDRESS     @V60B7AB 00485080
+         LH    R15,SYSIPLDV   GET ADDRESS OF IPL DEVICE        @VMV0001 00485100
+         LA    R5,CPICCW1     GET ADDRESS OF SENSE CCW         @V60B7AB 00485120
+         ST    R5,CAW         STORE ADDRESS OF SENSE CCW       @V60B7AB 00485140
+         LA    R5,N63         HIGHEST CHANNEL ADDRESS, X'003F' @V60B7AB 00485160
+         L     R1,FFS         PUT A NEGATIVE 1 IN REGISTER 1   @V60B7AB 00485180
+*                             THE NEXT INSTRUCTION INCREMENTS           00485200
+*                             R1 BY 1.  CHANNEL SET ADDRESS 0           00485220
+*                             WILL BE ATTEMPTED FIRST                   00485240
+CSSAVAIL DS    0H                                              @V60B7AB 00485260
+         LA    R1,1(0,R1)     INCREMENT CHANNEL ADDRESS BY ONE @V60B7AB 00485280
+         SPACE                                                          00485300
+*        CONCS 0(R1)          CONNECT THIS CHANNEL SET         @V60B7AB 00485320
+         DC    X'B2001000'                                     @V60B7AB 00485340
+         SPACE                                                          00485360
+         BZ    SENSEIPL       BRANCH, IF CONNECT SUCCESSFUL    @V60B7AB 00485380
+         CLR   R5,R1          TRIED ALL CHANNEL SET ADDRESSES? @V60B7AB 00485400
+         BNE   CSSAVAIL       NO, BRANCH                       @V60B7AB 00485420
+         B     WAITCHER       GO LOAD A WAIT STATE             @V60B7AB 00485440
+SENSEIPL DS    0H                                              @V60B7AB 00485460
+         SIO   0(R15)         DO SENSE TO THE IPL DEVICE       @V60B7AB 00485480
+         BZ    CHKSENSE       BRANCH ON CONDITION CODE 0       @V60B7AB 00485500
+*                             (SUCCESSFUL)                              00485520
+         BC    1,NEXTADDR     BRANCH ON CONDITION CODE 3       @V60B7AB 00485540
+*                             (NOT OPERATIONAL)                         00485560
+         BC    2,SENSEIPL     LOOP ON CONDITION CODE 2         @V60B7AB 00485580
+*                             (SUBCHANNEL BUSY)                         00485600
+*        HERE ON CONDITION CODE 1 (CSW STORED)                          00485620
+         TM    CSW+4,UC       UNIT CHECK?                      @V60B7AB 00485640
+         BO    TRYSIO         YES, BRANCH                      @V60B7AB 00485660
+         TM    CSW+5,CCC+IFCC PERMANENT ERRORS?                @V60B7AB 00485680
+         BO    NEXTADDR       YES, BRANCH                      @V60B7AB 00485700
+TRYSIO   DS    0H                                              @V60B7AB 00485720
+         BCT   R2,SENSEIPL    TRY SIO 16 TIMES                 @V60B7AB 00485740
+         LA    R2,SENRETCT    LOAD LOOP CONTROL FOR SIO        @VA11565 00485761
+         B     NEXTADDR       PERMANENT ERRORS, TRY NEXT ADDR. @V60B7AB 00485780
+CHKSENSE DS    0H                                              @V60B7AB 00485800
+         TM    CPISNS,INTREQ  IS IPL DEVICE ACCESSIBLE?        @V60B7AB 00485820
+         BNO   SETCSSON       YES, BRANCH                      @V60B7AB 00485840
+NEXTADDR DS    0H                                              @V60B7AB 00485860
+         MVI   CPISNS,00      CLEAR FIRST BYTE OF SENSE DATA   @V60B7AB 00485880
+         CLR   R5,R1          TRIED ALL CHANNEL SET ADDRESSES? @V60B7AB 00485900
+         BNE   CSSAVAIL       NO, BRANCH                       @V60B7AB 00485920
+         SPACE                                                          00485940
+WAITCHER LPSW XWAITCSS        LOAD WAIT STATE CODE X'016'      @V60B7AB 00485960
+         SPACE                                                          00485980
+SETCSSON DS    0H                                              @V60B7AB 00486000
+         OI    APSTAT1,CSSFEAT INDICATE CHANNEL SET SWITCHING  @V60B7AB 00486020
+*                             FACILITY IS AVAILABLE                     00486040
+         STH   R1,CSADDR      SAVE CHANNEL SET ADDRESS         @V60B7AB 00486060
+         XC    CPISNS(24),CPISNS CLEAR SENSE DATA AREA         @V60B7AB 00486080
+CPINOCSS DS    0H                                              @V60B7AB 00486100
          LA    R5,N63         HIGHEST VALID PROCESSOR ADDRESS  @V407595 00487000
          LA    R4,N1          INCREMENT FOR BXLE               @V407595 00488000
          SR    R2,R2          CURRENT PROCESSOR ADDRESS IN     @V407595 00489000
@@ -549,7 +611,7 @@ APIPRCOM EQU   *                                               @V407595 00537000
          B     CPIPINTB       CONTINUE WITH SYSTEM INIT        @V4M0206 00549000
 APNXTADR EQU   *              ISSUE IPR TO EACH VALID          @V407595 00550000
 *                             PROCESSOR ADDRESS.               @V407595 00551000
-*                                                              @V407595 00552000
+*        R5 CONTAINS THE HIGHEST POSSIBLE PROCESSOR ADDRESS, X'003F'.   00552100
          BXLE  R2,R4,APCHKADR UNTIL ONE IS FOUND ONLINE.       @V407595 00553000
          OI    CPIFLAG1,CPIAPOFF INDICATE THE APU WAS REQUESTED@V4M0206 00554000
 *                             BUT IS OFFLINE. THIS INTERNAL BIT         00555000
@@ -594,6 +656,7 @@ KEYLOOP  SSK   R2,R5          AND SET STORAGE KEYS                      00593000
          LTR   R5,R5          DID STORAGE WRAP AT 16 MEG                00595000
          BNZ   KEYLOOP        NO- BRANCH                                00596000
          L     R5,=X'01000000'     SET TO 16 MEG                        00597000
+         LPSW  PRNPSW         LOAD EC PSW                      @VA12591 00597500
          SPACE 2                                                        00598000
 CPIPINT  EQU   * HERE WHEN PROGRAM INTERRUPT OCCURS            @VA03799 00599000
          MVC   PRNPSW(8),CPIPSWS+2*8    RESTORE PROGRAM INT. NEW PSW    00600000
@@ -607,16 +670,84 @@ CPIPINT  EQU   * HERE WHEN PROGRAM INTERRUPT OCCURS            @VA03799 00599000
          LCTL  C6,C6,CPCREG6  ENABLE CP ASSIST FEATURE         @V386198 00608000
          LA    R2,CPIPINT2    SET FOR POSSIBLE PROGRAM CHECK   @V386198 00609000
          ST    R2,PRNPSW+4    - IF CP ASSIST NOT ON CPU        @V386198 00610000
+         MVI   PSAEVMA,MICLPSW+MICPTLB+MICSCSP+MICSIO+MICSTSM+MICSTPT+M*00610200
+               ICTCH        ENABLE ALL EVMA EXCEPT DIAG ASSIST @VA14280 00610400
+*  NOTE DIAG NOT ENABLED BECAUSE NOT SUPPORTED IN RELEASE 6 SCP         00610600
          L     R3,=A(DMKCPEML)   LOCATION TO SAVE LEVEL NUMBER @V3M4026 00611000
          DS    0H             ISSUE 'ST CP ASSIST LEVEL' INST. @V3M4026 00612000
          DC    X'E612',S(0(R3),0)   CP ASSIST FEATURE PRESENT? @V3M4026 00613000
          OI    CPSTAT2,CPASTAVL+CPASTON   (CHECK LEVEL LATER)  @V386198 00614000
          LCTL  C6,C6,ZEROES   NO CP ASSIST UNTIL IPL COMPLETE  @V386198 00615000
-         B     CPINTFRE       CONTINUE WITH INITIALIZATION...  @V386198 00616000
+******************************************************************      00616000
+*                                                                *      00616010
+*    CHECK OUT LEVEL OF CP ASSIST AND TAKE ACTION AS FOLLOWS:    *      00616020
+*                                                                *      00616030
+*    BELOW LEVEL 18:  DISABLE CP ASSIST                          *      00616040
+*                                                                *      00616050
+*    LEVEL 18 OR 19:  USE CP ASSIST, BUT MODIFY FREE/FRET AND    *      00616060
+*                     DISABLE TCH ASSIST                         *      00616070
+*                                                                *      00616080
+*    LEVEL 20:        USE CP ASSIST                              *      00616090
+*                                                                *      00616100
+*    ABOVE LEVEL 20:  DISABLE CP ASSIST                          *      00616110
+*                                                                *      00616120
+******************************************************************      00616130
+         SPACE ,                                                        00616140
+         CLC   F20,0(R3)      CHECK FOR LEVEL 20 ASSIST        @VA14280 00616150
+         BL    CPIPINT3       GREATER THAN 20... DON'T USE IT  @VA14280 00616160
+         BE    CPINTFRE       ASSIST IS LEVEL 20. GOOD, USE IT @VA14280 00616170
+         CLC   F18,0(R3)      CHECK FOR LEVEL 18 OR 19 ASSIST  @VA14280 00616180
+         BH    CPIPINT3       LESS THAN 18... DON'T USE IT     @VA14280 00616190
+*                                                                       00616200
+*    ASSIST LEVEL 18 OR 19... MUST CHANGE FREEX/FRETX INSTRUCTIONS BACK 00616210
+*    TO REGULAR FREE/FRET, AND ADJUST FIRST OPERAND LOCATION.           00616220
+*                                                                       00616230
+         L     R15,CPATFREE   ADDRESS OF DMKFREE INSTRUCTION   @VA14280 00616240
+         MVI   OP1(R15),OLDFREE RESTORE OLD DMKFREE OPCODE     @VA14280 00616250
+         LH    R14,OP2(,R15)  GET S(MAXSIZE)                   @VA14280 00616260
+         AL    R14,F4         POINT IT TO S(SUBTABLE)          @VA14280 00616270
+         STH   R14,OP2(,R15)  STORE IT BACK                    @VA14280 00616280
+         L     R15,CPATFRET   ADDRESS OF DMKFRET INSTRUCTION   @VA14280 00616290
+         MVI   OP1(R15),OLDFRET RESTORE OLD DMKFRET OPCODE     @VA14280 00616300
+         LH    R14,OP2(,R15)  GET S(MAXSIZE)                   @VA14280 00616310
+         AL    R14,F4         POINT IT TO S(SUBTABLE)          @VA14280 00616320
+         STH   R14,OP2(,R15)  STORE IT BACK                    @VA14280 00616330
+*                                                                       00616340
+*    ASSIST LEVEL 18 OR 19... MUST CHANGE OPERANDS OF DSP2 AND UNTFR    00616350
+*    INSTRUCTIONS TO POINT TO SUBTABLE INSTEAD OF MAXSIZE.              00616360
+*                                                                       00616370
+         L     R15,ADSPRQ     POINT TO DSP2 DATA LIST          @VA14280 00616380
+         L     R14,DSPRQD(,R15)   GET POINTER TO MAXSIZE       @VA14280 00616390
+         AL    R14,F4         INCREMENT, POINT TO SUBTABLE     @VA14280 00616400
+         ST    R14,DSPRQD(,R15)   PUT IT BACK                  @VA14280 00616410
+         L     R15,AUNTF1     POINT TO UNTFR DATA LIST         @VA14280 00616420
+         L     R14,UNTF1D(,R15)   GET POINTER TO MAXSIZE       @VA14280 00616430
+         AL    R14,F4         INCREMENT, POINT TO SUBTABLE     @VA14280 00616440
+         ST    R14,UNTF1D(,R15)   PUT IT BACK                  @VA14280 00616450
+*                                                                       00616460
+*    ASSIST LEVEL 18 OR 19... MUST DISABLE TEST CHANNEL (TCH) ASSIST    00616470
+*    BECAUSE IT DOESN'T MATCH THE SOFTWARE.                             00616480
+*                                                                       00616490
+         NI    PSAEVMA,255-MICTCH DISABLE TCH ASSIST           @VA14280 00616500
+         B     CPINTFRE       CONTINUE... USE ASSISTS          @VA14280 00616510
+         SPACE ,                                                        00616520
+F18      DC    F'18'          USED TO CHECK CP ASSIST LEVEL    @VA14280 00616530
+ADSPRQ   DC    V(DMKDSPRQ)    ADDRESS OF DSP2 ASSIST DATA LIST @VA14280 00616540
+DSPRQD   EQU   28             DISP TO MAXSIZE POINTER          @VA14280 00616550
+AUNTF1   DC    V(DMKUNTF1)    ADDRESS OF UNTFR ASSIST DATA LIST@VA14280 00616560
+UNTF1D   EQU   4              DISP TO MAXSIZE POINTER          @VA14280 00616570
+OLDFREE  EQU   X'00'          2ND BYTE OF OLD 'FREE' OPCODE    @VA14280 00616580
+OLDFRET  EQU   X'01'          2ND BYTE OF OLD 'FRET' OPCODE    @VA14280 00616590
+OP1      EQU   1              DISPLACEMENT TO 2ND OPCODE BYTE  @VA14280 00616600
+OP2      EQU   2              DISPLACEMENT TO FIRST OPERAND    @VA14280 00616610
+         SPACE ,                                                        00616620
+CPIPINT3 DS    0H             HERE IF CP ASSIST ON CPU, BUT    @VA14280*00616630
+                              WRONG LEVEL                      @VA14280 00616640
+         NI    CPSTAT2,255-CPASTON     SET FLAG, WILL SEND     @VA14280*00616650
+                              MESSAGE LATER                    @VA14280 00616660
          SPACE                                                          00617000
 CPIPINT2 EQU   *              HERE IF CP ASSIST NOT ON THE CPU @V386198 00618000
          MVC   CPCREG6,ZEROES   CLEAR CP ASSIST ENABLE FLAG    @V386198 00619000
-         NI    CPSTAT2,X'FF'-(CPASTAVL+CPASTON)   SET UNAVAIL. @V386198 00620000
          LA    R3,CPATABLE    POINT TO LIST OF CP ASSIST ADDRS @V386198 00621000
          LA    R4,4           TABLE INCREMENT                  @V386198 00622000
          LA    R5,CPATBLND    ADDRESS OF END OF TABLE          @V386198 00623000
@@ -787,19 +918,19 @@ TRLOOP   MVC   CORFPNT,ASYSVM TRACE TABLE BELONGS TO SYSTEM    @V408246 00767000
          SR    R8,R5          FIND OUT HOW MANY PAGES AVAILABLE         00788000
          CH    R8,=H'64'      AT LEAST FOUR FREE PAGES ?       @VA03799 00789000
          BNL   *+8            YES -                            @VA03799 00790000
-         OI    CPI955SW+1,X'F0'  NO -- VM/370 TOO LARGE FOR MACHINE     00791000
+         OI    CPI955SW,FF    NO--VM/370 TOO LARGE FOR MACHINE @V60B7AB 00791100
          L     R10,=A(DMKPTRCP) ANCHOR LIST FOR DMKPTR         @V408246 00792000
          LR    R6,R3          SAVE CURRENT CORETBL POINTER     @V408246 00793000
          SL    R6,ACORETBL    FIND THE PAGE NUMBER             @V408246 00794000
          SLL   R6,8           AND MULTIPLY IT BY 256.          @V408246 00795000
          ST    R6,0(,R10)     STORE HIGHEST PAGE NUMBER IN     @V408246 00796000
 *                             TABLES                                    00797000
-         ST    R6,20(,R10)    THAT ARE MAINTAINED BY           @V408246 00798000
-         ST    R6,40(,R10)    DMKPTR....                       @V408246 00799000
+         ST    R6,20(,R10)    THAT ARE MAINTAINED BY           @VA08341 00798100
+         ST    R6,60(,R10)    DMKPTR....                       @VA08341 00799100
          SPACE 1                                                        00800000
          ST    R3,4(,R10)     ALSO SAVE THE HIGHEST USER       @V408246 00801000
-         ST    R3,24(,R10)    CORETABLE ENTRY FOR              @V408246 00802000
-         ST    R3,44(,R10)    DMKPTR...                        @V408246 00803000
+         ST    R3,24(,R10)    CORETABLE ENTRY FOR              @VA08341 00802100
+         ST    R3,64(,R10)    DMKPTR....                       @VA08341 00803100
          SPACE 1                                                        00804000
          SPACE                                                          00805000
          L     R7,=A(DMKPTRF1)     GET PTR TO FREELIST                  00806000
@@ -842,13 +973,21 @@ USERLOOP STM   R6,R9,0(R3)    INITIALIZE CORTABLE ENTRY        @V408246 00838000
          BCTR  R3,0           DECREMENT ONE FOR LIMIT          @V408246 00843000
          ST    R3,12(,R10)    STORE THE LOWEST USER CORETABLE  @V408246 00844000
 *                             ENTRY                                     00845000
-         ST    R3,32(,R10)    FOR DMKPTR...                    @V408246 00846000
-         ST    R3,52(,R10)    .......                          @V408246 00847000
+         ST    R3,32(,R10)    FOR DMKPTR....                   @VA08341 00846100
+         ST    R3,72(,R10)    ............                     @VA08341 00846200
          LA    R3,1(,R3)      RESTORE ORIGINAL COUNT           @V408246 00848000
          SPACE 1                                                        00849000
          LA    R15,1(,R15)    AND COUNT IT                              00850000
          L     R7,=A(DMKDSPNP)     GET PAGABLE PAGE COUNTER             00851000
          ST    R15,0(,R7)     SAVE COUNT                                00852000
+         L     R10,=A(DMKPTRSN)  ADDRESS OF PAGE SELECTION DATA@VA08341 00852100
+         LA    R15,2          NUMBER OF BLOCKS OF FRAMES FOR   @VA08341 00852200
+*                             PAGE SELECTION TO SCAN                    00852300
+         STH   R15,0(R10)     SET UP SCANNUM FIELD IN DMKPTR   @VA08341 00852400
+         STH   R15,2(R10)     SET UP SCANBLOK FIELD IN DMKPTR  @VA08341 00852500
+         SLR   R15,R15        ZERO REGISTER                    @VA08341 00852600
+         STC   R15,6(R10)     INITIALIZE FLAGS FOR DMKPTR PAGE @VA08341 00852700
+*                             SELECTION ROUTINE                         00852800
          LA    R2,4095(,R1)                                             00853000
          SRL   R2,12                                                    00854000
          SPACE 3                                                        00855000
@@ -974,6 +1113,9 @@ XCFREE   XC    0(SAVESIZE*8,R1),0(R1)  CLEAR ONE SAVE-AREA              00925000
          IC    R0,N0(R10)     OBTAIN NUMBER OF BYTES IN DBW'S  @V407595 00975000
          CALL  DMKFREE        OBTAIN STORAGE                   @V407595 00976000
          STCM  R1,N7,N1(R10)  SAVE ADDRESS FOR DMKFRE          @V407595 00977000
+         LA    R0,CPEXSIZE    MUST GET CPEXBLOK TOO            @VA12596 00977100
+         CALL  DMKFREE                                         @VA12596 00977300
+         ST    R1,4(,R10)     PUT CPEX POINTER IN DMKFREAP     @VA12596 00977500
 NOAP1    EQU   *                                               @V407595 00978000
 .APCHK6  ANOP                                                           00979000
          SPACE 2                                                        00980000
@@ -1187,6 +1329,11 @@ SAVESER  EQU   *  HERE TO SAVE VOLUME SERIAL IN RDEVBLOK                01183000
          BZ    DUPVOLD        DUPLICATE VOLUME ALREADY MOUNTED          01188000
          LM    R14,R15,TEMPR14     RESTORE REGISTERS                    01189000
          MVC   RDEVSER,0(R14)       SAVE VOLSER IN RDEVBLOK             01190000
+         TM    RDEVFTR,SYSVIRT+VIRTUAL  THIS AN MSS VUA?       @VA11344 01190100
+         BZ    SAVESER2       NO - THEN DON'T TURN ON          @VA11344 01190200
+*                             'MTD-BY-CP' FLAG                 @VA11344 01190300
+         OI    RDEVFLAG,RDEVVMNT   ELSE TURN IT ON!            @VA11344 01190400
+SAVESER2 DS    0H                                              @VA11344 01190500
          CLC   CPIATABL+46(5),=C'CP370' CP OWNED VOLUME ??              01191000
          BNE   CPIDEVEN       NO --                                     01192000
          SPACE                                                          01193000
@@ -1439,6 +1586,8 @@ NOALTP   EQU   *                                               @V407438 01429000
          BH    *+6            YES - USE REAL SIZE AS MAX       @VA00919 01440000
          LR    R3,R4          NO - USE SYSGEN SIZE AS MAX      @VA00919 01441000
          L     R2,0(,R3)      SIZE OF REAL STORAGE USED BY VM  @VA00919 01442000
+         S     R2,=A(DMKSLC)  MINUS THE V=R SIZE               @VA11813 01442300
+* R2 CONTAINS THE REAL CP STORAGE SIZE MINUS THE V=R AREA               01442600
          L     R1,=A(X'81000') DEFAULT SIZE - 128 BUFFERS      @VA00919 01443000
          CL    R2,=A(X'A0000') 655,360 OR LESS REAL STORAGE?   @VA00919 01444000
          BNH   VBUFF          YES -- 128 VIRTUAL BUFFERS       @VA00919 01445000
@@ -1456,6 +1605,18 @@ SETBUF   L     R3,=A(DMKPGTBN) ADDRESS OF VIRTUAL BUFFER CTR   @VA00919 01456000
          STC   R0,0(,R3)      STORE VALUE                      @VA00919 01457000
 VBUFF    A     R1,=A(DMKCKP)  VIRTUAL BUFFER SIZE PLUS ADDRESS @VA00919 01458000
 *                             OF 'DMKCKP'.                              01459000
+         CL    R1,=A(X'FFF000') STORAGE OVER 16M VIRTUAL?      @VA11813 01459080
+         BNH   VBUFFOK        NO WE ARE OK                     @VA11813 01459160
+         L     R1,=A(X'FFF000') SET VIRTUAL STOR TO 16M        @VA11813 01459240
+         LR    R0,R1          INTO R0 ALSO                     @VA11813 01459320
+         S     R0,=A(DMKCKP)  MINUS THE END OF THE CP NUC      @VA11813 01459400
+         BNP   CPI955         ERROR-CP IS TOO LARGE            @VA11813 01459480
+         SRL   R0,15          NUMBER OF VIRTUAL BUFFERS        @VA11813 01459560
+*                             DIVIDED BY 8                              01459640
+         C     R0,F16         AT LEAST 128 VIRTUAL BUFFERS?    @VA11813 01459720
+         BL    CPI955         NOT ENOUGH STOR FOR CP           @VA11813 01459800
+         STC   R0,0(,R3)      STORE VALUE IN DMKPGUBN          @VA11813 01459880
+VBUFFOK  EQU   *                                               @VA11813 01459960
          ST    R1,VMSIZE           SAVE SIZE IN SYSTEM'S VMBLOK.        01460000
          SRL   R1,12          BEGIN/ENDING VALUE FOR TABLES    @V304635 01461000
          BCTR  R1,R0          MINUS 1 PAGE (BLD WILL           @V304635 01462000
@@ -1563,7 +1724,7 @@ VMINDEX  EQU   *              INDEX UP SWAP AND PAGE TABLES             01552000
 CPISNSEX LA    R14,CPIDEVEN   HERE TO GO TO "CPIDEVEN" WHEN THRU        01564000
 *                                                                       01565000
 CPISNSUB MVC   CAW(4),=A(CPICCW1)  "ISSUE SENSE CMD TO CLEAR INV. REQ." 01566000
-         LA    R1,16          COUNT OF RETRIES                 @VA01504 01567000
+         LA    R1,SENRETCT    LOAD RETRY COUNT                 @VA11565 01567500
 SNSIO    SIO   0(R15)         ISSUE SENSE COMMAND              @VA01504 01568000
          ST    R1,BALR1       SAVE R1 TEMPORARILY              @V407466 01569000
          BAL   R1,TRACESUB    GO TRACE THIS EVENT              @V407466 01570000
@@ -1747,7 +1908,7 @@ SELDCHAN DS    H              SHIFT TO PROPER CHANNEL MASK     @VA08072 01744000
          STCTL C2,C2,CTRLSAV  SAVE THE CHANNEL CTRL REG        @VA08072 01748000
          LCTL  C2,C2,CHANMASK LOAD OUR NEW MASK                @VA08072 01749000
          LPSW  CHANWT         WAIT FOR 3277 INTERUPT           @VA08072 01750000
-CHANRET  MVC   IONPSW+4(4),=A(DMKIOSIN) RETURN TO NORMAL       @VA08072 01751000
+CHANRET  MVC   IONPSW+4(4),=A(DMKIOTIN) RETURN TO NORMAL       @VA09587 01751000
          LCTL  C2,C2,CTRLSAV  RESTORE CTRL REG                 @VA08072 01752000
          LM    R3,R9,CHASAVE  RESTORE REGS                     @VA08072 01753000
          B     STRTGRF        TRY AGAIN                        @VA08072 01754000
@@ -1791,11 +1952,18 @@ CPIERR1  EQU   *              HERE WHEN IMPOSSIBLE TO GET TO   @VM03170 01789000
          SPACE                                                          01792000
 CPI955   EQU   *              HERE WHEN VM/370 IS TOO LARGE    @VM03170 01793000
 *                             FOR MACHINE                               01794000
+         USING DMKCPINT,R12,R13 MUST SPECIFY THIS SINCE WE     @VA11813 01794100
+*                             CAN COME HERE                             01794200
+*                             FROM VBUFF ROUTINE                        01794300
+         LM    R12,R13,BASEREGS SET UP BASE REGISTERS          @VA11813 01794400
+         USING DMKCPIEM,R12,R13 NOW BASE REGS ARE OK           @VA11813 01794500
+         L     R11,ASYSOP     POINT TO OPERATOR VMBLOK         @VA11813 01794600
          LA    R0,CPI955LN    LENGTH OF MESSAGE                @VM03170 01795000
          LA    R1,CPI955MG    ADDRESS OF THE MESSAGE           @VM03170 01796000
          CALL  DMKQCNWT,PARM=NOTIME+ALARM SEND MESSAGE         @VM03170 01797000
          SPACE                                                          01798000
 NOSTOR   LPSW  XWAIT3         LOAD DISABLED WAIT STATE PSW     @V407466 01799000
+CPI955SW DC    X'00'          SWITCH FOR ISSUE OF MSG 955W     @V60B7AB 01799100
          EJECT                                                          01800000
 *        DISPATCH TIME SLICE TABLE - CPU TIMER UNITS                    01801000
          DS    0H                                              @VM03170 01802000
@@ -1898,6 +2066,7 @@ XWAIT2   DC    X'0002000000000005'                             @VM03170 01899000
 XWAIT3   DC    X'000200000000000D' REAL MACHINE TOO SMALL FOR  @VM03170 01900000
 *                             VM/370                                    01901000
 XWAIT4   DC    X'0002000000000015'                             @V407595 01902000
+XWAITCSS DC    X'0002000000000016' FAILED TO CONNECT CHANNELS  @V60B7AB 01902100
          SPACE                                                          01903000
 SUSP     CCW   X'87',SUSPORD,CC,4 EXEC MSC ORDER               @V50A2B5 01904000
          CCW   X'03',0,SILI,1 MUST BE CHAINED TO NOP           @V407466 01905000
@@ -1910,7 +2079,7 @@ CPIPSWS  DC    A(MCHEKENB,DMKPSAEX) EXTERNAL NEW PSW           @VM03170 01911000
          DC    A(MCHEKENB,DMKSVCIN) SVC NEW PSW                @V407595 01912000
          DC    A(MCHEKENB,DMKPRGIN) PROGRAM  NEW PSW           @VM03170 01913000
          DC    A(WAITON,X'000000B') MACHINE  NEW PSW (INITIAL) @VM03170 01914000
-         DC    A(MCHEKENB,DMKIOSIN) I/O      NEW PSW           @VM03170 01915000
+         DC    A(MCHEKENB,DMKIOTIN) I/O      NEW PSW           @VA09587 01915000
 MCKPSW   DC    A(XMODEON,DMKMCHIN) MACHINE  NEW PSW (FINAL)    @VM03170 01916000
 RESTPSW  DC    A(MCHEKENB,DMKPSADU) RESTART  NEW PSW           @VM03170 01917000
          SPACE                                                          01918000
@@ -1983,11 +2152,9 @@ CHASAVE  DS    7F             REG SAVE AREA 3 TO 9             @VA08072 01984000
          DS    0D             ALIGNMENT                        @VA08072 01985000
 CHANWT   DC    X'020A000000000004' WAIT FOR 3277'S TO CLEAR    @VA08072 01986000
          EJECT                                                          01987000
-CPALEVEL DC    F'19'           LEVEL OF THIS REL. OF CP ASSIST @V60A6B6 01988000
-         SPACE                                                          01989000
 CPATABLE DS    0F             CP ASSIST INSTRUCTION ADDRESSES: @V386198 01990000
-         DC    V(DMKFREE)     E600                             @V386198 01991000
-         DC    V(DMKFRET)     E601                             @V386198 01992000
+CPATFREE DC    V(DMKFREE)     E614                             @VA14280 01991000
+CPATFRET DC    V(DMKFRET)     E615                             @VA14280 01992000
          DC    V(DMKPTRLK)    E602                             @V386198 01993000
          DC    V(DMKPTRUL)    E603                             @V386198 01994000
          DC    V(DMKCCW0)     E604                             @V3M4026 01995000
@@ -2110,8 +2277,7 @@ TMSGMPL  EQU   *-TMSGMP                                        @V407595 02110000
 CPAMSG   DC    X'151515'                                       @V386198 02112000
          DC    C'DMKCPI185E CP ASSIST LEVEL '                  @V386198 02113000
 CPALVLNO DC    CL4' '                                          @V386198 02114000
-         DC    C' DOES NOT MATCH CP LEVEL '                    @VA06445 02115000
-CPALEVNO DC    CL4' '                                          @VA06445 02116000
+         DC    C' NOT SUPPORTED - CP ASSIST DISABLED'          @VA14280 02115100
          DC    X'1515'                                         @V386198 02117000
 CPAMSGL  EQU   *-CPAMSG                                        @V386198 02118000
          SPACE                                                          02119000
@@ -2124,7 +2290,7 @@ NMSGL    EQU   *-NMSG                                          @VM03170 02125000
          SPACE                                                          02126000
 CORMSG   DC    X'151515'                                       @VM03170 02127000
          DC    C'DMKCPI952I '                                  @VM03170 02128000
-CORSMSG  DC    CL4' '                                          @VM03170 02129000
+CORSMSG  DC    CL5' '                                          @VA11619 02129100
          DC    C'K SYSTEM STORAGE'                             @VM03170 02130000
          DC    X'1515'                                         @VM03170 02131000
 CORMSGL  EQU   *-CORMSG                                        @VM03170 02132000
@@ -2189,7 +2355,7 @@ CMSG     DC    C'SET TIME HH:MM:SS :'                          @VM03170 02190000
 CMSGL    EQU   *-CMSG                                          @VM03170 02191000
          SPACE                                                          02192000
 SHUTM1   DC    X'151515'                                       @VM03170 02193000
-         DC    C'DMKCPI960I SYSTEM WARM START DATA SAVED'      @VM03170 02194000
+         DC    C'DMKCPI968I NO WARM START, PREVIOUS DATA STILL VALID'   02194000
          DC    X'1515'                                         @VM03170 02195000
 SHUTM1L  EQU   *-SHUTM1                                        @VM03170 02196000
          SPACE                                                          02197000
@@ -2269,7 +2435,8 @@ ONLINEA  EQU   *                                               @VA00944 02265000
          BZ    *+8            NO --                                     02271000
          ST    R11,IOBUSER    STORE ADDRESS OF VMBLOK                   02272000
          SPACE                                                          02273000
-CPI955SW BC    0,CPI955  ISSUE DMKCPI955W IF VM/370 TOO LARGE FOR MACH. 02274000
+         CLI   CPI955SW,FF    IS SYSTEM TOO BIG FOR MACHINE?   @V60B7AB 02274100
+         BE    CPI955         YES, BRANCH.  ISSUE DMKCPI955W   @V60B7AB 02274200
          SPACE                                                          02275000
          SPACE                                                          02276000
 *              WRITE INITIAL CONSOLE MESSAGE                            02277000
@@ -2774,7 +2941,8 @@ MEMCK    EQU   *  VERIFY THAT ALL OF MAIN MEMORY IS AVAILABLE           02769000
          L     R1,0(,R15)     HIGH, USE LIMITING SYSGEN VALUE           02776000
          SRL   R1,10          /1024                                     02777000
          CALL  DMKCVTBD       CONVERT TO DECIMAL                        02778000
-         STCM  R1,B'1111',CORSMSG  PLACE IN WARNING MESSAGE             02779000
+         STC   R0,CORSMSG     SAVE HIGH ORDER DIGIT OF SIZE    @VA11619 02779100
+         STCM  R1,B'1111',CORSMSG+1 SAVE THE REST              @VA11619 02779200
          LA    R0,CORMSGL     GET MESSAGE LENGTH                        02780000
          LA    R1,CORMSG      GET MESSAGE PTR                           02781000
          CALL  DMKQCNWT,PARM=NORET                                      02782000
@@ -2802,41 +2970,12 @@ NOMPMSG  EQU   *                                               @V407595 02800000
          B     TLOOP1         GO CHECK AGAIN                   @VA02179 02804000
          SPACE                                                          02805000
 TIMERON  EQU   *              CHECK CP AND CP ASSIST LEVELS             02806000
-         TM    CPSTAT2,CPASTAVL   IS CP ASSIST AVAILABLE ?     @V386198 02807000
-         BZ    WARMTEST       NO, DON'T WORRY ABOUT LEVELS.    @V386198 02808000
+*   IF CP ASSIST WAS AVAILABLE ON THE MACHINE, BUT IT IS THE WRONG      02807000
+*   LEVEL, WE SHOULD SEND A MESSAGE.                                    02807400
+         TM    CPSTAT2,CPASTAVL+CPASTON  CHECK AVAIL. BITS     @VA14280 02807800
+         BNM   WARMTEST       ALL IS OK, NO MESSAGE                     02808200
+         NI    CPSTAT2,255-CPASTAVL    TURN IT OFF NOW                  02808600
          L     R2,=A(DMKCPEML)   GET ADDRESS OF LEVEL NUMBER   @V3M4026 02809000
-         CLC   CPALEVEL,0(R2) DO CP AND ASSIST LEVELS MATCH?   @V3M4026 02810000
-         BE    WARMTEST       IF YES, EVERYTHING ALREADY SET   @V3M4026 02811000
-*********************************************************************** 02811050
-**  THE NEXT FEW LINES OF CODE WILL DETERMINE IF CPUMODEL IS 135,138 ** 02811100
-**  145,OR 148. IF THE CPU MATCHES ONE OF THESE MODELS, THEN A CHECK ** 02811150
-**  OF THE HARDWARE LEVEL IS NECESSARY.       IF THE HARDWARE LEVEL  ** 02811200
-**  IS X'12 AND THE SOFTWARE LEVEL IS X'13', THEN PROCESS AS IF THE  ** 02811250
-**  SOFTWARE AND HARDWARE LEVELS MATCH. OTHERWISE DO NOT TURN ON     ** 02811300
-**  THE ASSISTS.                                                     ** 02811350
-*********************************************************************** 02811400
-         SPACE                                                          02811450
-         CLC   CPUMODEL,TS135A IS THE CPUMODEL LESS THAN 135   @V60A6B6 02811500
-         BL    NOASSIST        YES THEN NO ASSISTS             @V60A6B6 02811550
-         CLC   CPUMODEL,TS148A IS THE CPUMODEL GREATER 148     @V60A6B6 02811600
-         BH    NOASSIST        YES THEN NO ASSISTS             @V60A6B6 02811650
-         CLC   F18,0(R2)       IS THE HARDWARE LEVEL X'12      @V60A6B6 02811700
-         BNE   NOASSIST        NO THEN NO ASSISTS              @V60A6B6 02811750
-         CLC   CPALEVEL,F19     IS THE SOFTWARE X'13'          @V60A6B6 02811800
-         BE    WARMTEST         YES THEN GIVE ASSISTANCE       @V60A6B6 02811850
-NOASSIST EQU   *                                               @V60A6B6 02811900
-         SPACE                                                          02812000
-         MVC   CPCREG6,ZEROES CLEAR CP ASSIST ENABLE FLAG ...  @V3M4026 02813000
-         NI    CPSTAT2,X'FF'-(CPASTAVL+CPASTON)  FLAG UNUSABLE @V3M4026 02814000
-         LA    R3,CPATABLE    POINT TO LIST OF CP ASSIST ADDRS @VA08139 02815000
-         LA    R4,4           TABLE INCREMENT                  @VA08139 02816000
-         LA    R5,CPATBLND    ADDRESS OF END OF TABLE          @VA08139 02817000
-CPALVLCL L     R6,0(,R3)      GET CP ASSIST INSTRUCTION ADDR   @VA08139 02818000
-         MVC   0(6,R6),=X'0700,47000000' AND REMOVE IT         @VA08139 02819000
-         BXLE  R3,R4,CPALVLCL GET ALLOF THEM                   @VA08139 02820000
-         L     R1,CPALEVEL    GET CP LEVEL                     @VA06445 02821000
-         CALL  DMKCVTBD       CONVERT TO DECIMAL               @VA06445 02822000
-         STCM  R1,15,CPALEVNO PUT NUMBER IN MESSAGE TEXT       @VA06445 02823000
          L     R1,0(,R2)      GET ASSIST LEVEL NO. FOR CONVERT @V3M4026 02824000
          CALL  DMKCVTBD       CONVERT CP ASSIST LEVEL TO DEC.  @V386198 02825000
          STCM  R1,15,CPALVLNO PUT NUMBER INTO MESSAGE TEXT     @V386198 02826000
@@ -2909,7 +3048,7 @@ WARMOK   MVC   CPID,=C'CPCP'  SYSTEM NOW RUNNING               @V200730 02890000
 DMPALLOC DS    0H             ALLOCATE DUMP FILE               @V200730 02893000
          L     R10,=A(DMKSYSRM)    GET REAL MACHINE SIZE                02894000
          L     R10,0(,R10)    ...                                       02895000
-         LA    R10,2048(,R10) ROUND UP TO 4K BOUNDRY                    02896000
+         AL    R10,=X'00000800'  ROUND UP TO 4K BOUNDRY        @VA09916 02896500
          SRL   R10,12         GET NUMBER OF PAGES OF MEMORY-1           02897000
          LA    R10,1+4(,R10)  GET NUMBER OF RECORDS IN DUMP FILE        02898000
          XC    CPIATABL(176),CPIATABL   THIS AREA IS USED IN COMPARE   *02899000
@@ -3288,31 +3427,47 @@ PPMAP    DS    0H             INITIALIZE PP BIT MAP            @VMD0161 03270000
          SPACE 2                                                        03272000
 STARTSYS DS    0H                                              @V200730 03273000
 *                                                                       03274000
-*        HERE TO READ IN ALL PAGABLE MODULES BETWEEN DMKSAV AND         03275000
+*        CHECK IF A SYMBOL TABLE (DMKSYM) EXISTS.  IF ONE DOES,         03274400
+*        WRITE IT OUT TO THE PAGING DEVICE TO ENSURE WE HAVE A          03274800
+*        COPY OF IT.  IN ADDITION, WRITE OUT MODULE DMKVMI.             03275200
+*        READ IN ALL PAGABLE MODULES BETWEEN DMKSAV AND                 03275600
 *        DMKCKP FROM SYSRES DEVICE AND FORCE TO BACKING DEVICE.         03276000
 *                                                                       03277000
+         L     R1,=A(DMKSYM)  GET ADDR OF SYMBOL TABLE         @VA13364 03277090
+         LTR   R1,R1          DO WE HAVE ONE                   @VA13364 03277180
+         BZ    GETVMI         NO, GO TO GET DMKVMI MODULE      @VA13364 03277270
+         BAL   R3,WRTOUT      GO WRITE OUT THE SYMBOL TABLE    @VA13364 03277360
+GETVMI   DS    0H                                              @VA13364 03277450
+         L     R1,=A(DMKVMI)  GET ADDR OF DMKVMI               @VA13364 03277540
+         LTR   R1,R1          MAKE SURE WE HAVE A DMKVMI       @VA13364 03277630
+         BZ    STRTLOOP       DON'T HAVE A VMI, SKIP THIS      @VA13364 03277720
+         BAL   R3,WRTOUT      GO WRITE OUT THE SYMBOL TABLE    @VA13364 03277810
+STRTLOOP DS    0H                                              @VA13364 03277900
          L     R1,=A(DMKSAV)       LOCATE FIRST PAGABLE MODULE          03278000
 TRANSLP  A     R1,F4096            POINT TO NEXT PAGE                   03279000
          C     R1,=A(DMKCKP)       REACH LAST PAGABLE MODULE ??         03280000
          BNL   CPIEXIT             YES -                                03281000
          C     R1,=A(DMKVMI)  IS IT VMI?                       @VA03106 03282000
-         BE    WRTOUT         YES--PAGE IT OUT NOW             @VA03106 03283000
+         BE    TRANSLP        YES, NO NEED TO WRITE IT AGAIN   @VA13364 03283000
          C     R1,=A(DMKSYM)  IS IT SYM?                       @VA03106 03284000
-         BE    WRTOUT         YES--PAGE IT OUT                 @VA03106 03285000
+         BE    TRANSLP        YES, NO NEED TO WRITE IT AGAIN   @VA13364 03285000
 TRANSIN  EQU   *                                               @VA03106 03286000
          TRANS 2,1,OPT=(BRING,DEFER,SYSTEM)   PAGE IT IN                03287000
          B     TRANSLP             GET NEXT PAGE                        03288000
-WRTOUT   LR    R2,R1          SAVE THE ADDR IN R2              @VA03106 03289000
+WRTOUT   LA    R6,20          TRY 20 TIMES IF I/O ERROR        @VA13167 03289000
+GETCCPD  LR    R2,R1          SAVE THE ADDR IN R2              @VA13167 03289500
          CALL  DMKPGTPG       GET A DASD PAGE                  @VA03106 03290000
          LTR   R1,R1          IS THE SPACE AVAILABLE?          @VA03106 03291000
          BNZ   RPACALL        WRITE IT OUT NOW                 @VA04083 03292000
          LR    R1,R2          RESTORE ADDR                     @VA04083 03293000
-         B     TRANSIN        BYPASS THE SPECIAL HANDLING      @VA04083 03294000
+         B     CPI4           TERMINATE SYS - SPACE NOT AVAIL  @VA13167 03294000
 RPACALL  EQU   *                                               @VA04083 03295000
          LR    R0,R1          RPA EXPECT R0 CONTAIN DASD ADDR  @VA03106 03296000
          LR    R1,R2          R1 HAS THE VIRT. ADDR            @VA03106 03297000
          CALL  DMKRPAPT,PARM=SYSTEM                            @VA03106 03298000
-         B     TRANSLP                                         @VA03106 03299000
+         BZR   R3             WRITE SUCCESSFUL,RETURN TO CALLER@VA13364 03299000
+         BCT   R6,GETCCPD     IF FATAL ERROR, TRY ANOTHER CCPD @VA13167 03299300
+         ABEND 4              ABEND 4 - PAGING ERRORS          @VA13167 03299600
          SPACE 2                                                        03300000
 CPIEXIT  EQU   *                                                        03301000
 *        INITIALIZE THE I/O ERROR RECORDING, MACHINE CHECK HANDLER      03302000
@@ -3466,11 +3621,6 @@ RMSTAT   EQU   *              VARY REMOTE STATION ONLINE                03444000
          AH    R7,=AL2(NICSIZE*8) UPDATE TO NEXT NICBLOK ADDR           03450000
          B     RMSTAT         GET RESOURCE ID.                          03451000
          DROP  R8             DROP BASE REGISTER FOR RDEVBLOK           03452000
-         EJECT                                                          03453000
-TS135A   DC    X'0135'                                         @V60A6B6 03454000
-TS148A   DC    X'0148'                                         @V60A6B6 03455000
-F18      DC    F'18'                                           @V60A6B6 03455350
-F19      DC    F'19'                                           @V60A6B6 03455700
          EJECT                                                          03456000
          SPACE                                                          03457000
          LTORG                                                          03458000

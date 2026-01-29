@@ -59,7 +59,7 @@ CFP      TITLE 'DMKCFP     (CP)        VM/370 - RELEASE 6'              00001000
 *        DMKPERT  - TO RESET TRACING FUNCTION                           00059000
 *        DMKSTKCP - TO STACK CPEXBLOK FOR VIRTUAL CTCA RESET            00060000
 *        DMKPTRPW - TO WAIT FOR PAGING COMPLETION BEFORE SYSTEM RESET   00061100
-*        DMKDIADR - TO DROP A DIALED LINE                               00062000
+*        DMKDIBDR - TO DROP A DIALED LINE                               00062000
 *        DMKVCARD - TO RESET A NOT-BUSY VIRTUAL CTCA                    00063000
 *        DMKSTKIO - TO STACK AN I/O BLOCK FOR PROCESSING                00064000
 *        DMKUNTFR - TO RELEASE A CCW PACKAGE                            00065000
@@ -140,11 +140,11 @@ MODID    DC    CL8'DMKCFP'                                              00115000
          EXTRN DMKVATBC                                                 00140000
          EXTRN DMKVATMD                                                 00141000
          EXTRN DMKSCHRT                                                 00142000
-         EXTRN DMKDIADR                                                 00143000
+         EXTRN DMKDIBDR                                        @VA13704 00143000
          EXTRN DMKIOSRW                                        @VA04026 00144000
          EXTRN DMKIOSHA                                                 00145000
          EXTRN DMKVIOIN                                        @V407438 00146000
-         EXTRN DMKSSSCF                                        @V60B6B8 00146100
+         EXTRN DMKSSUCF                                        @VA11455 00146110
          AIF   (NOT &ISAM).NOUNTS                               **AIF** 00147000
          EXTRN DMKUNTIS       INTERRUPT RETURN FOR ISAM I/O    @VA02130 00148000
 .NOUNTS  ANOP                                                           00149000
@@ -383,6 +383,31 @@ RESLOG   EQU   *              RESET AS PART OF LOGOFF PROCESS  @VM08908 00378000
          STH   R9,VDEVADD                                      @VA01881 00382000
 RESXDV   BXLE  R3,R4,RESNDV   BRANCH IF MORE DEVICES ON THIS CU         00383000
 RESXCU   BXLE  R2,R4,RESNCU   BRANCH IF MORE CONTROL UNITS ON THIS CHAN 00384000
+         TM    VMRSTAT,VMLOGOFF IS USER LOGGING OFF ?          @VA13280 00384100
+         BZ    RESXCH         NO, SKIP DEDICATED CHAN. CHECK   @VA13280 00384200
+         TM    VCHSTAT,VCHDED IS THIS A DEDICATED CHANNEL ?    @VA13280 00384300
+         BZ    RESXCH         NO, SKIP DEDICATED CHAN. CHECK   @VA13280 00384400
+*-------RESET DEDICATED CHANNEL FLAG IN RCHBLOK-------*                 00384500
+         L     R9,VCHRCHAD    GET RCHBLOK ADDRESS              @VA13280 00384600
+         NI    RCHSTAT-RCHBLOK(R9),X'FF'-RCHDED                @VA13280 00384700
+*DETACH CHANNEL MSG TO OPERATOR AT LOGOFF IF NO DET CMD ISSUED          00384710
+         LR    R3,R1          SAVE R1 TEMPORARILY              @VA13588 00384720
+         LH    R1,RCHADD-RCHBLOK(R9) REAL CHANNEL ADDRESS      @VA13588 00384730
+         CALL  DMKCVTBH       CONVERT CHAN ADDR TO HEX         @VA13588 00384740
+         LR    R9,R1          SAVE R1 TEMPORARILY              @VA13588 00384750
+         LA    R0,DETDSIZE    SEZE OF THE MSG                  @VA13588 00384760
+         CALL  DMKFREE        GET FREE STORAGE                 @VA13588 00384770
+         USING DETMSG,R1      TEMP ADDRESSABILITY              @VA13588 00384780
+         MVC   DETMSG(DETSIZE1),=C'CHAN X  DETACHED  '         @VA13588 00384790
+         MVC   DETUSER(8),VMUSER THE USERID                    @VA13588 00384800
+         STCM  R9,B'0100',DETRADD CHANNEL NUMBER               @VA13588 00384810
+         LA    R0,DETSIZE     SIZE OF THE MESSAGE              @VA13588 00384820
+         CALL  DMKQCNWT,PARM=NORET+OPERATOR WRITE TO OPERATOR  @VA13588 00384830
+         LA    R0,DETDSIZE    SIZE OF THE MSG                  @VA13588 00384840
+         CALL  DMKFRET        FRET THE MSG STORAGE             @VA13588 00384850
+         DROP  R1             DROP TEMP ADDRESSABILITY         @VA13588 00384860
+         SLR   R0,R0          RESTORE R0                       @VA13588 00384870
+         LR    R1,R3          RESTORE R1                       @VA13588 00384880
 RESXCH   BXLE  R1,R4,RESNCH   BRANCH IF MORE CHANNELS ON THIS MACHINE   00385000
          STC   R0,VMPEND           RESET SUMMARY PENDING FLAGS          00386000
          STH   R0,VMIOINT     CLEAR IO INTERRUPTS              @V200198 00387000
@@ -459,7 +484,7 @@ CPTPEND  DC    X'10500000',X'10050400',XL4'00'   CPU TIMER     @V240820 00442000
 *        DEVICE HANDLER (DMKVSP, DMKVCA, DMKDIA, ETC.).                 00458000
 *        SPECIAL HANDLING IS AS FOLLOWS:                                00459000
 *        DIALED LINES OR DIALED GRAPHIC DEVICES ARE RELEASED            00460000
-*        VIA A CALL TO DMKDIADR.                                        00461000
+*        VIA A CALL TO DMKDIBDR.                                        00461000
 *        VIRTUAL CTCA DEVICES ARE RESET VIA A CALL TO DMKVCARD.         00462000
 *        VIRTUAL SPOOL INPUT DEVICES ARE CLOSED VIA A CALL TO           00463000
 *        DMKVSPCR (CLOSE READER).                                       00464000
@@ -502,11 +527,26 @@ RESIOER  SR    R0,R0          CLEAR WORK REGISTER                       00499000
          NI    VDEVFLAG,255-VDEVUC TURN OFF UNIT CHECK FLAG             00501000
          ST    R0,VDEVCSW     ZERO THE VIRTUAL CSW                      00502000
          ST    R0,VDEVCSW+4   ..                                        00503000
-         TM    VDEVSTAT,VDEVPEND+VDEVCHAN+VDEVCUE ANYTHING PENDING ?    00504000
+         SLR   R2,R2          CLEAR                            @VA08629 00503100
+         ICM   R2,7,VDEVIO    ANY PENDING I/O?                 @VA08629 00503200
+         BZ    CHKPEND        NO, CONTINUE                     @VA08629 00503300
+         LR    R1,R2          IOBLOK ADDRESS TO R1             @VA08629 00503400
+CFPRUNQ  L     R2,IOBFPNT-IOBLOK(R1) ADDRESS OF NEXT ON QUEUE  @VA08629 00503500
+         LA    R0,IOBSIZE     PREPARE TO FRET IOBLOKS          @VA08629 00503600
+         CALL  DMKFRET        RELEASE BLOCK                    @VA08629 00503700
+         LTR   R2,R2          ANY MORE?                        @VA08629 00503800
+         BZ    CFPCLR         NO                               @VA08629 00503900
+         LR    R1,R2          PREPARE TO GO THRU LOOP AGAIN    @VA08629 00504000
+         B     CFPRUNQ        REPEAT                           @VA08629 00504100
+CFPCLR   STCM  R2,7,VDEVIO    CLEAR CHAIN POINTER              @VA08629 00504200
+CHKPEND  TM    VDEVSTAT,VDEVPEND+VDEVCHAN+VDEVCUE ANYTHING     @VA08629 00504300
+*                             PENDING?                                  00504400
          BNZ   RESPEND           YES -- CLEAR ALL PENDING INTERRUPTS    00505000
 RESCONT  EQU   *              TEST FOR RESET MSS DEVICE        @V60B6B8 00506010
          TM    PSAMSS,MSSPRES IS MSS DEFINED IN THIS SYSTEM    @V60B6B8 00506020
          BZ    NOTVUA         CAN'T BE A VUA                   @V60B6B8 00506030
+         TM    VDEVTYPC,CLASDASD                               @VA11970 00506032
+         BNO   NOTVUA                                          @VA11970 00506034
          L     R1,VDEVREAL    GET RDEVBLOK                     @V60B6B8 00506040
          USING RDEVBLOK,R1    ASSEMBLER ADDRESSABILITY         @V60B6B8 00506050
          CLI   RDEVCLAS,CLASDASD IS THIS A DASD DEVICE         @V60B6B8 00506060
@@ -515,7 +555,7 @@ RESCONT  EQU   *              TEST FOR RESET MSS DEVICE        @V60B6B8 00506010
          BNE   NOTVUA         CAN'T BE A VUA                   @V60B6B8 00506090
          TM    RDEVFTR,VIRTUAL+SYSVIRT IS IT A VUA             @V60B6B8 00506100
          BZ    NOTVUA         NOPE                             @V60B6B8 00506110
-         CALL  DMKSSSCF       CHECK FOR CYL FAULTS             @V60B6B8 00506120
+         CALL  DMKSSUCF                                        @VA11455 00506121
 NOTVUA   EQU   *              PROCESS OTHER DEVICE STATUS      @V60B6B8 00506130
          TM    VDEVSTAT,VDEVBUSY IS THE DEVICE BUSY ?          @V60B6B8 00506140
          BO    RESBUSY        BRANCH IF YES                             00507000
@@ -555,7 +595,7 @@ RESEXIT  EXIT                 RETURN TO THE CALLER                      00539000
 RESDIAL  EQU   *              CHECK TO DROP DIALED LINE                 00541000
          TM    VDEVFLAG,VDEVDIAL   CONNECTED VIA 'DIAL' ?               00542000
          BZ    TESTDED        NO--NOT HANDLED HERE             @VA03191 00543000
-         CALL  DMKDIADR       DROP THE LINE                             00544000
+         CALL  DMKDIBDR       DROP THE LINE                    @VA13704 00544000
          B     RESEXIT        AND NOW EXIT                              00545000
          EJECT                                                          00546000
 SUSPMSC  LA    R0,SUSPENDL    ACQ. IOBLOK PLUS EXTENSION       @V407466 00547000
@@ -892,7 +932,7 @@ NOCALL   CLI   VDEVTYPC,CLASTERM TERMINAL TYPE DEVICE ?        @VA00996 00874000
 TSTDIAL2 DS    0H                                              @V200730 00878000
          TM    VDEVFLAG,VDEVDIAL   WAS IT CONNECTED VIA DIAL            00879000
          BZ    FRETIOB        NO --                                     00880000
-         CALL  DMKDIADR       IF SO, INFORM THE PREVIOUS USER           00881000
+         CALL  DMKDIBDR       IF SO, INFORM THE PREVIOUS USER  @VA13704 00881000
 FRETIOB  BAL   R5,FRETIOER    RETURN ANY IOERBLOK              @VA00884 00882000
          LR    R1,R10         POINT TO THE IOBLOK              @VA00884 00883000
          LA    R0,IOBSIZE     AND GET ITS SIZE                          00884000
@@ -970,7 +1010,10 @@ NOTCONS  EQU   *              HERE IF CONTASK IS NON-EXISTANT. @V200730 00946000
          AL    R8,VMDVSTRT    VDEVBLOK ADDRESS                 @VA01460 00956000
          B     RESIOER        CLEAR THE FLAGS AGAIN                     00957000
          EJECT                                                          00958000
-RESCSPL  NI    VDEVFLAG,X'FF'-VDEVCSPL RESET CONS SPOOL FLAG   @VA04165 00959000
+RESCSPL  DS    0H                                              @VA10854 00959010
+         TM    VDEVTYPE,TYPSS COMMUN CONSOL ?                  @VA10854 00959020
+         BM    RESEXIT        TTY OR SS                        @VA10854 00959030
+         NI    VDEVFLAG,X'FF'-VDEVCSPL                         @VA10854 00959040
 RESOPUT  EQU   *              RESET OUTPUT SPOOL DEVICE        @V240820 00960000
          ICM   R0,15,VDEVSPL  IS THERE AN ACTIVE SPOOL FILE ?  @V240820 00961000
          BZ    RESEXIT             NO -- JUST EXIT             @V240820 00962000
@@ -1038,4 +1081,12 @@ SUSPENDL EQU   (*-SUSPEND)/8                                   @V407466 01012000
          COPY  VCTCA                                           @V306638 01024000
          COPY  VMBLOK                                          @V306638 01025000
          COPY  XINTBLOK                                        @V306638 01026000
+DETMSG   DSECT       RESPONSE FOR DETACH CHANNEL AT LOGOFF TIME@VA13588 01026090
+         DS    CL4,CL1        CHANNEL,BLANK                    @VA13588 01026140
+DETRADD  DS    CL1,CL2        CHANNEL ADDRESS,BLANK            @VA13588 01026190
+         DS    CL8,CL2        DETACHED,BLANK                   @VA13588 01026240
+DETSIZE1 EQU   *-DETMSG       MSG SIZE(MINUS USERID)           @VA13588 01026290
+DETUSER  DS    CL8            USERID                           @VA13588 01026340
+DETSIZE  EQU   *-DETMSG       MSG SIZE                         @VA13588 01026390
+DETDSIZE EQU   (DETSIZE+7)/8  SIZE IN DOUBLE WORDS             @VA13588 01026440
          END                                                            01027000

@@ -125,10 +125,13 @@ VCH      TITLE 'DMKVCH     (CP)        VM/370 - RELEASE 6'              00001000
 * ERROR MESSAGES -                                                      00125000
 *                                                                       00126000
 *        DMKVCH034E CHANNEL MISSING OR INVALID                          00127000
+*        DMKVCH040E DEV ADDR DOES NOT EXIST                    @VA13060 00127500
 *        DMKVCH048E CHANNEL X DOES NOT EXIST                            00128000
 *        DMKVCH129E CHANNEL X DEVICES IN USE                            00129000
+*        DMKVCH130E CHANNEL X <PROC NN> NOT ATTACHED TO USERID @VA13060 00129500
 *        DMKVCH132E CHANNEL X ALREADY DEFINED BY USERID                 00130000
 *        DMKVCH138E CHANNEL X NOT ATTACHED; INSUFFICIENT FREE STORAGE   00131000
+*        DMKVCH153E DEVICE VADDR EXCEEDS MAX NO. OF VIRTUAL DEVICES     00131500
 *.                                                                      00132000
          COPY  OPTIONS                                         @V407510 00133000
          EJECT                                                          00134000
@@ -175,7 +178,7 @@ DMKVCHDC RELOC                                                          00159000
          LR    R1,R2          PUT CHANNEL INTO GPR-1.                   00175000
          CALL  DMKSCNRU       DOES REAL CHANNEL EXIST ?                 00176000
          BC    4,VCH048         ERROR IF CHANNEL BLOCK NOT FOUND        00177000
-         LR    R4,R6          SAVE THE RCHBLOK ADDRESS         @VA01382 00178000
+         ST    R6,SAVERCH     SAVE THE RCHBLOK ADDRESS         @VA13280 00178000
          TM    VDBITS+1,DETACH     DETACH COMMAND ISSUED ?     @VA01382 00179000
          BO    CHANDET             YES - CHECK VIRTUAL CHANNEL @VA01382 00180000
          STM   R1,R2,SAVEWRK2      SAVE REGS ACROSS 'TRANS'    @VA01382 00181000
@@ -185,7 +188,7 @@ DMKVCHDC RELOC                                                          00159000
          LM    R1,R2,SAVEWRK2      RESTORE CHANNEL ADDR REGS   @VA01382 00185000
          CALL  DMKSCNVU       DOES VIRTUAL CHANNEL EXISTS               00186000
          BC    11,VCH132      YES - ERROR IF CHANNEL BLOK FOUND         00187000
-         LR    R6,R4          USE THE RCHBLOK NOW              @VA01382 00188000
+         L     R6,SAVERCH     RESTORE RCHBLOK ADDRESS          @VA13280 00188000
          SLR   R10,R10        CLEAR R10                        @V407466 00189000
          SPACE                                                          00190000
 STRTSCAN B     PASS1          FIRST PASS FOR 'ATTACH CHANNEL'  @V407466 00191000
@@ -199,7 +202,7 @@ CHANDET  EQU   *              CHECK FOR CHANNEL ATTACHED       @VA01382 00197000
          BC    4,VCH130       CHANNEL NOT ATTACHED             @VA02709 00199000
          TM    VCHSTAT-VCHBLOK(R6),VCHDED    DEDICATED CHAN ?  @VA01382 00200000
          BZ    VCH130                        NO -- ERROR       @VA01382 00201000
-         LR    R6,R4          BACK TO THE RCHBLOK FOR SCAN     @VA01382 00202000
+         L     R6,SAVERCH     BACK TO THE RCHBLOK FOR SCAN     @VA13280 00202000
          SPACE 2                                                        00203000
          EJECT                                                          00204000
 * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 00205000
@@ -306,6 +309,14 @@ CHKDEV2  EQU   *              SCAN ALL REAL DEVICE BLOKS       @V407466 00299000
          BO    INCRDEV2       YES, PROCEED TO NEXT DEVICE      @V407466 00306000
          OI    RDEVADD,DEVCOUNT IND. RDEVBLOK COUNTED          @V407466 00307000
          LA    R14,1(,R14)    UP COUNT OF NO. UNIQUE RDEVBLOKS @V407466 00308000
+*  MUST RESET MY 'DEVCOUNT' MARK IN 'RDEVADD' (OF A 2305) FOR ALL       00308100
+*  THE RDEVBLOKS EXCEPT THE FIRST ONE.  DMKVDS ATTACHES ALL 8 OF THEM   00308200
+*  WITH ONE CALL.  (FIRST ONE IS RESET WHEN I CALL DMKVDS).             00308300
+         CLC   RDEVTYPC(2),=AL1(CLASDASD,TYP2305)              @VA12940 00308400
+         BNE   INCRDEV2       NOT A 2305;  WE'RE OK            @VA12940 00308500
+         TM    RDEVADD+1,7    IS THE ADDRESS 1-7 OR 9-F?       @VA12940 00308600
+         BZ    INCRDEV2       ADDRESS IS 0 OR 8:  MARK IS OK   @VA12940 00308700
+         NI    RDEVADD,X'FF'-DEVCOUNT RESET 'MARK'             @VA12940 00308800
 INCRDEV2 LA    R5,30(0)       16 DEVICE SLOTS PER RCUBLOK      @V407466 00309000
          BXLE  R3,R4,CHKDEV2  GET NEXT DEVICE                  @V407466 00310000
 INCRCU2  LA    R5,62(0)       32 CONTROL UNIT SLOTS PER RCHBLOK@V407466 00311000
@@ -350,6 +361,18 @@ INCRCU3  LA    R5,62(0)       32 CONTROL UNIT SLOTS PER RCHBLOK@V407466 00338000
 PASS4    EQU   *                                               @V407466 00350000
          STM   R6,R9,SAVEWRK6 SAVE REGS FOR LATER              @V407466 00351000
          BAL   R5,LOKUSER     THROW A LOCK ON DEVICE BLOCKS    @V407466 00352000
+         SLR   R7,R7          CLEAR R7 FOR NEXT COUNTER        @VA13217 00352050
+         LA    R0,VDEVSIZE    SIZE OF VDEVBLOK                 @VA13217 00352100
+         L     R1,VMDVSTRT    POINT TO VDEVBLOK TABLE          @VA13217 00352150
+         LH    R2,VMDVCNT     NUMBER OF VDEVBLOKS IN TABLE     @VA13217 00352200
+         BAL   R5,EMPSLOT     FIND EMPTY SLOTS IN VDEVBLOKS    @VA13217 00352250
+         STH   R7,SAVEWRK2    REMEMBER THIS FOR LATER          @VA13217 00352300
+         LH    R1,DEVNUM      WILL THE REQ'D NO. OF VDEVBLOKS  @VA13217 00352350
+         AH    R1,VMDVCNT     FIT IN THE HALFWORD OFFSET       @VA13217 00352400
+         SLR   R1,R7          ALLOWED?                         @VA13217 00352450
+         MH    R1,=Y(VDEVSIZE*8)                               @VA13217 00352500
+         CL    R1,=A(X'8000')                                  @VA13217 00352550
+         BH    ERR153         .. NO, VIRT DEV MAX EXCEEDED     @VA13217 00352600
          LA    R0,VCHSIZE     SIZE OF VCHBLOK                  @V407466 00353000
          SLR   R2,R2          MAKE SURE R2 ZERO TO START       @V407466 00354000
          L     R1,VMCHSTRT    VCHBLOK TABLE POINTER            @V407466 00355000
@@ -378,6 +401,7 @@ EMPVCU   SLR   R7,R7          CLEAR R7 FOR NEXT COUNTER        @V407466 00361000
          L     R8,VMCUSTRT    PTR. TO TABLE OF VCUBLOKS        @V407466 00373000
          OI    DEDBITS,CUBLD  BUILDING CU BLOCKS               @VA07711 00373100
          BAL   R5,BLDBLOK     CREATE TAB. OF VCUBLOKS (OLD+NEW)@V407466 00374000
+         NI    DEDBITS,X'FF'-CUBLD RESET VCUBLOK INDICATOR     @VA11369 00374100
          SLR   R8,R8          CLEAR R8 FOR 'LH'                @V407466 00375000
          LA    R7,VCUSIZE     SIZE OF VCUBLOK IN DBL. WDS.     @V407466 00376000
          LH    R8,VMCUCNT NUMBER VCUBLOKS IN OLD TABLE         @V407466 00377000
@@ -388,14 +412,10 @@ EMPVCU   SLR   R7,R7          CLEAR R7 FOR NEXT COUNTER        @V407466 00361000
          CALL  DMKFRET        RETURN THE STORAGE               @V407466 00382000
          ST    R5,VMCUSTRT    STORE POINTER TO NEW TABLE       @V407466 00383000
          STH   R3,VMCUCNT     STORE NO. OF VCUBLOKS IN TABLE   @V407466 00384000
-EMPVDEV  SLR   R7,R7          CLEAR R6 FOR NEXT COUNTER        @V407466 00385000
-         LA    R0,VDEVSIZE    SIZE OF VDEVBLOK                 @V407466 00386000
-         L     R1,VMDVSTRT    POINT TO VDEVBLOK TABLE          @V407466 00387000
-         LH    R2,VMDVCNT     NUMBER OF VDEVBLOKS IN TABLE     @V407466 00388000
-         BAL   R5,EMPSLOT     FIND EMPTY SLOTS IN VDEVBLOKS    @V407466 00389000
+EMPVDEV  DS    0H                                              @VA13217 00385100
          LH    R6,DEVNUM      GET NO. OF REQUIRED VDEVBLOKS    @VA07240 00390000
-         SR    R6,R7          ACTUAL NO. VDEVBLOKS TO ACQUIRE  @V407466 00391000
-         BC    12,ENDPASS4    < OR = 0; NO VDEVBLOKS TO ACQUIRE@V407466 00392000
+         SH    R6,SAVEWRK2    ACTUAL NO. VDEVBLOKS TO ACQUIRE  @VA13217 00391100
+         BNP   ENDPASS4       IF .LE. 0, THIS PASS DONE        @VA13217 00392100
          SLR   R3,R3          R3 ZERO TO START                 @V407466 00393000
          LH    R2,VMDVCNT     NO. EXISTING VDEVBLOKS           @V407466 00394000
          LA    R9,VDEVSIZE    VDEVBLOK SIZE IN DBL. WORDS      @V407466 00395000
@@ -403,6 +423,7 @@ EMPVDEV  SLR   R7,R7          CLEAR R6 FOR NEXT COUNTER        @V407466 00385000
          L     R8,VMDVSTRT    PTR. TO EXISTING VDEVBLOK TABLE  @V407466 00397000
          OI    DEDBITS,DEVBLD BUILDING VDEVBLOKS               @VA07711 00397100
          BAL   R5,BLDBLOK     CREATE NEW VDEVBLOK TAB (OLD+NEW)@V407466 00398000
+         NI    DEDBITS,X'FF'-DEVBLD RESET VDEVBLOK INDICATOR   @VA11369 00398100
          SLR   R8,R8          CLEAR R8                         @V407466 00399000
          LA    R7,VDEVSIZE    SIZE OF VDEVBLOK IN DBL.WDS.     @V407466 00400000
          LH    R8,VMDVCNT     NUMBER VDEVBLOKS IN OLD TABLE    @V407466 00401000
@@ -526,12 +547,12 @@ BLDCHCK  CR    R8,R14         DOES IT PT TO OLD BLOK??         @V407466 00492000
          ST    R1,VDEVLINK-VDEVBLOK(,R15) POINT IT TO NEW ONE  @V407466 00494000
          B     BLDNEXT        MOVE & BUILD NEXT BLOCK          @V407466 00495000
          SPACE                                                          00496000
-CLRDEV   NI    DEDBITS,X'FF'-DEVBLD     CLEAR VDEVBLOK IND.    @V407466 00498000
+CLRDEV   DS    0H                                              @VA11369 00498100
          XC    VDEVADD+2(VDEVSIZE*8-2),VDEVADD+2 CLEAR VDEVBLOK@V407466 00499000
          B     NEXTBLK        CLEAR NEXT EMPTY SLOT            @V407466 00500000
          SPACE                                                          00501000
          USING VCUBLOK,R1     ADDRESSABILITY                            00502000
-CLRCU    NI    DEDBITS,X'FF'-CUBLD RESET VCUBLOK IND.          @V407466 00503000
+CLRCU    DS    0H                                              @VA11369 00503100
          MVC   VCUBLOK+2(6),ZEROES CLEAR VCUBLOK               @V407466 00504000
          MVC   VCUDVTBL(8),FFS     FFS                         @V407466 00505000
          MVC   VCUDVTBL+8(24),VCUDVTBL  FFS ...                @V407466 00506000
@@ -581,6 +602,8 @@ NEXTCH   CL    R6,0(R1)       R6 REPRESENT THIS CU -> CH PATH? @V407438 00539000
          LA    R2,DEVADDR     POINT TO 'UDEVBLOK' FOR VDS      @V407466 00553000
          LR    R1,R8          RDEVBLOK ADDRESS TO GR1 FOR VDS  @V407466 00554000
          CALL  DMKVDSAT,AFFINITY  ATTACH THIS DEVICE           @V407510 00555000
+         CH    R2,=H'124'     EXCEEDED MAX VIRTUAL DEVICES?    @VA13217 00555300
+         BE    ERR153         YES, WE MUST'VE GOOFED--ABEND    @VA13217 00555600
          LM    R2,R8,SAVEWRK2 RESTORE SCAN REGISTERS           @V407466 00556000
          SPACE                                                          00557000
 INCRDEV5 EQU   *              ADVANCE TO NEXT RDEVBLOK SLOT    @V407466 00558000
@@ -596,6 +619,7 @@ ATCHCOMP EQU   *              CHANNEL HAS BEEN DEDICATED       @V407466 00566000
          CALL  DMKSCNVU       NOW GET THE VIRTUAL BLOCKS       @V407466 00568000
          USING VCHBLOK,R6                                      @V407466 00569000
          OI    VCHSTAT,VCHDED INDICATE VIRTUAL CHANNEL ALSO DED@V407466 00570000
+         MVC   VCHRCHAD,SAVERCH SAVE RCHBLOK ADDRESS           @VA13280 00570500
          USING RCHBLOK,R6     BACK TO STANDARD ABBRESSABILITRY @V407466 00571000
          CALL  DMKSCNRU       GET REAL DEVICE ADDRESS BACK     @V407466 00572000
          BAL   R5,FREUSER     UNLOCK USER'S BLOCKS             @V407466 00573000
@@ -610,6 +634,7 @@ DETCHAN  EQU   *              DETACH DEDICATED CHANNEL DEVICES @VA01382 00581000
          STM   R2,R8,SAVEWRK2 SAVE REGISTERS                            00582000
          LH    R1,RDEVATT     LOAD VIRTUAL DEVICE ADDRESS.              00583000
          CALL  DMKSCNVU       GET VIRTUAL CONTROL BLOCKS                00584000
+         BC    7,VCH040       BRANCH IF CC=1, 2, OR 3          @VA13060 00584150
          SPACE                                                          00585000
          USING VCHBLOK,R6                                      @VA01382 00586000
          USING VCUBLOK,R7     ADDRESS THE VIRTUAL BLOCKS       @VA01382 00587000
@@ -712,9 +737,21 @@ VCH034   SLR   R0,R0          NO PARM'S BEING PASSED                    00666000
          SLR   R1,R1          ...                                       00667000
          LA    R2,34          MESSAGE NUMBER DMKVCH034                  00668000
          B     NODATA                                                   00669000
+VCH040   DS    0H                                              @VA09651 00669100
+         LA    R2,40          MESSAGE NUMBER DMKVCH040E        @VA09651 00669500
+         CALL  DMKCVTBH                                        @VA09651 00669600
+         SR    R0,R0          R0, BYTE 3 = 0 => DATA IN R1     @VA13217 00669610
+         B     NODATA                                          @VA09651 00669700
          SPACE                                                          00670000
 VCH048   LA    R2,48          MESSAGE NUMBER DMKVCH048                  00671000
          B     CALLERM                                                  00672000
+         SPACE 1                                                        00672100
+ERR153   LA    R2,EMSG153     MSG ID                           @VA13217 00672200
+         L     R1,CHANADDR    GET CHANNEL NUMBER               @VA13217 00672300
+         CALL  DMKCVTBH       CONVERT TO EBCDIC                @VA13217 00672400
+         ICM   R1,B'1110',=C'CH ' DATA IS "CH N"               @VA13217 00672500
+         SR    R0,R0          R0 LOW ORDER=0:DATA IN R1        @VA13217 00672600
+         B     NODATA         GO SET UP OTHER THINGS           @VA13217 00672700
          SPACE                                                          00673000
 VCH129   LA    R2,129         MESSAGE NUMBER DMKVCH129                  00674000
          B     CALLERM                                                  00675000
@@ -798,12 +835,13 @@ CHBLD    EQU   X'10'          BUILDING VCHBLOK                 @VA07711 00749300
          SPACE                                                          00750000
 *        MISCELLANEOUS EQUATES                                          00751000
 DEVCOUNT EQU   X'80'          RDEVBLOK COUNTED PREVIOUSLY IND. @V407466 00752000
+EMSG153  EQU   153            EXCEEDED MAX VIRTUAL DEVICES     @VA13217 00752500
 MSG138   EQU   138            DMKVCH138E                       @V407466 00753000
          SPACE 2                                                        00754000
          LTORG                                                          00755000
          SPACE 2                                                        00756000
 SAVEVCH  DSECT                                                          00757000
-         DS    0CL64                                                    00758000
+         DS    0CL68                                           @VA13280 00758000
 DEVADDR  DS    1H                                                       00759000
          ORG   SAVEVCH+9                                       @VA03957 00760000
 VCHMODE  DS    1X             DUMMY UDEVMODE FIELD             @VA03957 00761000
@@ -814,6 +852,7 @@ VDSTYPC  DS    1H                                                       00764000
 CHANADDR DS    1F             CHANNEL ADDRESS - LOW BYTE                00766000
          DS    1F             BINARY ZEROES                             00767000
 CHANUSER DS    1D             USERID WANTING THIS CHANNEL (DET/ATT)     00768000
+SAVERCH  DS    1F             RCHBLOK ADDRESS                  @VA13280 00768500
          SPACE 2                                                        00769000
          COPY  SAVE                                                     00770000
 VDBITS   EQU   SAVEWRK1                                                 00771000

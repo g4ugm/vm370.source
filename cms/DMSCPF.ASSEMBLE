@@ -34,6 +34,9 @@ CPF      TITLE 'DMSCPF     (CMS)       VM/370 - RELEASE 6'              00001000
 * CALLS TO OTHER ROUTINES -                                             00034000
 *                                                                       00035000
 *|       DMSCWT - TO WAIT FOR ALL CONSOLE I/O TO COMPLETE               00036000
+*|       DMSBTP - TO CHECK FOR VALID CP COMMAND AND TO NOTIFY  @VA12652 00036200
+*|                BATCH OF LINK COMMAND FAILURE.               @VA12652 00036400
+*|       DMSINA - TO CHECK FOR SYNONYM OF CP COMMANDS.         @VA12652 00036600
 *                                                                       00037000
 * EXTERNAL REFERENCES -                                                 00038000
 *                                                                       00039000
@@ -43,6 +46,8 @@ CPF      TITLE 'DMSCPF     (CMS)       VM/370 - RELEASE 6'              00001000
 *                                                                       00043000
 *|       BALRSAVE - SAVE AREA FOR CALLER'S REGISTERS 0 - 15             00044000
 *|       CMNDLINE - COMMAND LINE MOVED HERE BEFORE CALLING CP           00045000
+*|       BATFLAGS - NOTIFY BATCH DMSCPF IS CALLING             @VA12652 00045300
+*|       BATFLAG3 - NOTIFY BATCH OF FAILED LINK COMMAND        @VA12652 00045600
 *                                                                       00046000
 * REGISTER USAGE -                                                      00047000
 *                                                                       00048000
@@ -57,7 +62,7 @@ CPF      TITLE 'DMSCPF     (CMS)       VM/370 - RELEASE 6'              00001000
 *|       GPR  8 = CONSTANT 8                                            00057000
 *|       GPR  9 = ADDR OF COMMAND LIST                                  00058000
 *|       GPR 10 = INDICATES ORIGIN OF COMMAND                           00059000
-*|       GPR 11 = NOT USED                                              00060000
+*|       GPR 11 = TEMP STORAGE FOR BALRSAVE REGS               @VA12652 00060000
 *|       GPR 12 = BASE REGISTER                                         00061000
 *|       GPR 13 = NOT USED                                              00062000
 *|       GPR 14 = RETURN ADDRESS                                        00063000
@@ -86,6 +91,7 @@ DMSCPF   START 0              EXECUTE A CP CONSOLE FUNCTION             00083000
          LR    R12,R15        LOAD THE PROGRAM BASE REGISTER            00086000
          USING DMSCPF,R12                                               00087000
          LR    R10,R12        INITIALIZE R10 NON-ZERO          @V60BBBB 00087100
+         SR    R11,R11        INITIALIZE R11                   @VA12652 00087150
          TM    BATFLAGS,BATRUN IS THIS COMMAND FROM BATCH?     @V60BBBB 00087200
          BZ    NOTBATA        BR IF NOT                        @V60BBBB 00087300
          SLR   R10,R10        SET FOR NO PASSWORD-SUPPRESSION  @V60BBBB 00087400
@@ -117,7 +123,7 @@ NOTBAT   EQU   *              PROCESS THE CP COMMAND              V0742 00091600
          B     CHECKXFF       MOVE THE COMMAND LINE TO 'CMNDLINE'       00098000
          SPACE                                                          00099000
 FINDARGS AR    R1,R4          POINT TO NEXT CHARACTER IN INPUT LINE     00100000
-         CLI   0(R1),X'FF'    IS IT THE INPUT END OF THE LINE ?         00101000
+         CLC   0(4,R1),=X'FFFFFFFF' IS IT THE INPUT LINE END?  @VA09492 00101000
          BE    COMPTLEN       YES, COMPUTE LINE LENGTH AND CONTINUE     00102000
          CLI   0(R1),C' '     IS THIS THE START OF AN ARGUMENT ?        00103000
          BE    FINDARGS       NO, LOOK AT THE NEXT CHARACTER            00104000
@@ -141,7 +147,7 @@ FINDARGE CLI   0(R1),C' '     IS THIS THE END OF THE ARGUMENT ?         00116000
          STC   R6,0(,R3)      ...                                       00122000
          BXH   R3,R4,COMPTLEN POINT TO NEXT CHARACTER IN THE BUFFER     00123000
          AR    R1,R4          POINT TO NEXT CHARACTER IN INPUT LINE     00124000
-CHECKXFF CLI   0(R1),X'FF'    IS THIS THE END OF THE INPUT LINE ?       00125000
+CHECKXFF CLC   0(4,R1),=X'FFFFFFFF'  END OF INPUT LINE?        @VA09492 00125000
          BNE   FINDARGE       NO, CONTINUE SCANNING THE LINE            00126000
 COMPTLEN LR    R0,R3          SAVE POINTER TO LAST CHARACTER            00127000
          SR    R0,R2          COMPUTE THE LENGTH OF THE CP COMMAND      00128000
@@ -157,6 +163,12 @@ CHKIMPCP IC    R6,=C' '       MOVE A BLANK TO END OF COMMAND LINE       00137000
          STC   R6,0(R2,R3)    ...                                       00138000
          CLC   0(3,R2),=C'CP '     IS 'CP' THE FIRST ARGUMENT ?         00139000
          BE    FOUNDCP        YES,GO TO IT                     @VA06272 00140050
+         LA    R0,72        GET STORAGE TO PROTECT USER'S REGS @VA12652 00140057
+         SRL   R0,3                CHANGE TO DOUBLE WORDS      @VA12652 00140064
+         DMSFREE DWORDS=(0),TYPCALL=BALR                       @VA12652 00140071
+         LR    R11,R1              SAVE GOTTEN AREA ADDRESS    @VA12652 00140078
+         ST    R0,0(,R11)          SAVE DOUBLE WORD SIZE       @VA12652 00140085
+         MVC   4(64,R11),BALRSAVE  PROTECT CALLER'S REGS       @VA12652 00140092
          LA    R9,CMNDLIST    POINT TO COMMAND LIST            @VA06272 00140100
          LM    R0,R1,0(R9)    GET THE NAME...                  @VA06272 00140150
          L     R15,=V(ABBREV) TO CHECK FOR SYNONYM...          @VA06272 00140200
@@ -188,7 +200,33 @@ PASSTOCP LA    R1,=CL8'CONWAIT'    POINT TO DMSCWT PLIST                00148000
          O     R3,=X'80000000' REQUEST PASSWORD SUPPRESSION    @V60BBBB 00149600
 MODOREX  DS    0H                                              @V60BBBB 00149800
          DC    X'83230008'    PASS COMMAND LINE TO CP TO EXECUTE        00150000
-CPRETURN LTR   R15,R3         LOAD RETURN CODE AND SET CONDITION CODE   00151000
+         LA    R3,0(R3)        CLEAR HIGH ORDER BYTE           @VA10582 00150100
+         TM    BATFLAGS,BATRUN     IS BATCH ACTIVE?            @VA12384 00150180
+         BNO   CPRETURN            NO - OK PLAIN RETURN        @VA12384 00150260
+         LTR   R15,R3              GOOD RETURN FROM CP?        @VA12384 00150340
+         BZ    CPRETURN            OK - DON'T BOTHER BATCH.    @VA12384 00150420
+         CLC   0(4,R2),=CL4'LINK'  WAS IT LINK CMD?            @VA12384 00150500
+         BNE   CPRETURN      NOT CP CMD BATCH INTERESTED IN.   @VA12384 00150580
+         LA    R9,101              SET LOWER LIMIT TEST        @VA14158 00150588
+         CR    R3,R9               IS THE RET CODE 101 -103?   @VA14158 00150596
+         BL    MODOR1              NO - VALID ERROR            @VA14158 00150604
+         LA    R9,103              SET UPPER LIMIT             @VA14158 00150612
+         CR    R3,R9               IS THE RET CODE 101 -103?   @VA14158 00150620
+         BH    MODOR1              NO - VALID ERROR            @VA14158 00150628
+         B     CPRETURN            OK - DO NOT NOTIFY BATCH    @VA14158 00150636
+MODOR1   EQU   *                                               @VA14158 00150644
+         OI    BATFLAG3,BATCPFNG   TELL BATCH OF LINK ERROR    @VA12384 00150660
+         OI    BATFLAGS,BATCPEX    TELL BATCH CPF CALLING      @VA12384 00150740
+         L     R15,ABATPROC        GET BATCH ADDRESS           @VA12384 00150820
+         BALR  R14,R15             GO TO BATCH.                @VA12384 00150900
+CPRETURN EQU *                                                 @VA12652 00151000
+         LTR   R1,R11    TEST AND SET GOTTEN AREA              @VA12652 00151100
+         BZ    CPRET2    NO AREA GOTTEN - DON'T FREE           @VA12652 00151200
+         L     R0,0(,R1)           GET DWORD SIZE              @VA12652 00151300
+         MVC   BALRSAVE(64),4(R1)  RESTORE CALLERS REGS        @VA12652 00151400
+         DMSFRET DWORDS=(0),LOC=(1),TYPCALL=BALR               @VA12652 00151500
+CPRET2   EQU *                                                 @VA12652 00151600
+         LTR   R15,R3         LOAD RETURN CODE AND SET CONDITIO@VA12652 00151700
          LM    R0,R14,BALRSAVE     RESTORE THE CALLER'S REGISTERS       00152000
          BR    R14            RETURN TO THE CALLER                      00153000
          SPACE 3                                                        00154000

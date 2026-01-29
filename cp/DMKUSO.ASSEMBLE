@@ -147,6 +147,12 @@ DMKUSO   CSECT                                                          00019000
 DMKUSOLG RELOC                ENTER 'LOGOFF' COMMAND.                   00140000
          TM    VMRSTAT,VMLOGOFF IS USER ALREADY IN LOGOFF?     @VA01827 00141000
          BO    USO99X         YES--EXIT                        @VA04404 00142000
+         TM    VMRSTAT,VMEXWAIT IS USER IN EXECUTION WAIT ?    @VA13025 00142100
+         BZ    USO06          NO, CONTINUE LOGOFF PROCESS      @VA13025 00142200
+         BAL   R8,USOSUB      CHECK CMD LINE                   @VA13025 00142300
+         LR    R10,R11        SET UP R10 FOR DELAYED LOGOFF    @VA13025 00142400
+         OI    VMOSTAT,VMKILL DELAY THE LOGOFF UNTIL COMPLETE  @VA13025 00142500
+         B     DELAYOFF       GO SET UP TO DELAY THE LOGOFF    @VA13025 00142600
 USO06    MVI   SAVEWRK1,ELOGOFF    SIGNAL: LOGOFF ENTERED.              00143000
          BAL   R8,USOSUB      AND CALL SUBROUTINE TO CHECK COMMAND LINE 00144000
 *                             COMMAND LINE WAS OK, PROCEED:             00145000
@@ -282,20 +288,25 @@ DMKUSOFL RELOC                ENTER 'FORCE' COMMAND.                    00261000
          TM    VMOSTAT-VMBLOK(R10),VMKILL MAKE DOUBLE SURE...  @VA04404 00272300
          BO    ERROR45        DONT DOIT TWICE.                 @VA04404 00272600
          CLR   R10,R11        IS THE CALLER = THE USER (NOT ILLEGAL)    00273000
-         BE    USO08          YES - TREAT JUST LIKE A NORMAL LOGOFF.    00274000
+         BNE   FRCUSER        NO, THEN GO FORCE THE USER       @VA13025 00274000
+         TM    VMRSTAT,VMEXWAIT IS USER IN EXECUTION WAIT      @VA13025 00274100
+         BZ    USO08          NO, JUST TREAT LIKE NORMAL LOGOFF@VA13025 00274200
+         OI    VMOSTAT,VMKILL TURN ON KILL BIT                 @VA13025 00274300
+         B     DELAYOFF       AND GO TO DELAY THE LOGOFF       @VA13025 00274400
+FRCUSER  DS    0H             HERE TO FORCE A USER             @VA13025 00274500
          SPACE                                                          00275000
          OI    VMOSTAT-VMBLOK(R10),VMKILL    LOGOFF THIS USER A@V200820 00276000
+         OI    VMSVSTAT-VMBLOK(R10),VMLGFORC FORCE             @VA13026 00276500
          SPACE                                                          00277000
+DELAYOFF DS    0H             DELAY THE FORCE/LOGOFF           @VA13025 00277500
          LA    R0,CPEXSIZE                                     @V200820 00278000
          CALL  DMKFREE        GET FREE STORAGE FOR A CPEXBLOK  @V200820 00279000
          USING CPEXBLOK,R1                                     @V200820 00280000
          XC    CPEXBLOK(16),CPEXBLOK    CLEAR HEADER PORTION   @V200820 00281000
          ST    R10,CPEXR11    SET GR11 = FORCED USER VMBLOK    @V200820 00282000
-         L     R2,ADSPCH      ENTRY TO DMKDSPCH                @V200820 00283000
+         L     R2,ADSPCH      ENTRY TO DMKDSP                  @VA13026 00283100
          ST    R2,CPEXR12     ...SET FOR 'GOTO DMKDSPCH'       @V200820 00284000
          ST    R2,CPEXADD     ...                              @V200820 00285000
-         LA    R2,FORCE       INDICATE FORCE                   @VA08667 00285200
-         ST    R2,CPEXR2      TO DMKUSOFF                      @VA08667 00285400
          CALL  DMKSTKCP       STACK THE CPEXBLOK               @V200820 00286000
          SPACE                                                          00287000
          EXIT  ,              RETURN TO DMKCFM                 @V200820 00288000
@@ -321,11 +332,6 @@ DMKUSOFL RELOC                ENTER 'FORCE' COMMAND.                    00261000
 *                                                                       00308000
 * ENTRY CONDITIONS -                                                    00309000
 *                                                                       00310000
-*        GPR  2 = PARAMETERS TO LOGOFF ROUTINE, AS FOLLOWS:             00311000
-*                      1 = LINE ERROR LOGOFF - NO MSG TO USER           00312000
-*                      2 = CP FORCED LOGOFF - BREAK READ                00313000
-*                      4 = HOLD LINE AFTER MSG - KEEP ENABLED           00314000
-*                      8 = FORCED LOGOFF BY THE SYSTEM                  00315000
 *        GPR 11 = ADDRESS OF USER'S VMBLOK                              00316000
 *        GPR 12 = ADDRESS OF DMKUSOFF                                   00317000
 *        GPR 13 = ADDRESS OF STANDARD SAVE AREA                         00318000
@@ -368,7 +374,6 @@ DMKUSOFL RELOC                ENTER 'FORCE' COMMAND.                    00261000
 *                                                                       00354000
 * REGISTER USAGE -                                                      00355000
 *                                                                       00356000
-*        GPR  2 = PARAMETERS AS GIVEN AT INPUT                          00357000
 *        GPR  9 = 0                                                     00358000
 *        GPR 11 = ADDRESS OF USER'S VMBLOK                              00359000
 *        GPR 12 = BASE REGISTER                                         00360000
@@ -378,7 +383,7 @@ DMKUSOFL RELOC                ENTER 'FORCE' COMMAND.                    00261000
 *                                                                       00364000
 * NOTES -                                                               00365000
 *                                                                       00366000
-*        DMKUSOFF IS CALLED DIRECTLY BY DMKDSPCH OR DMKCNSIN IF         00367000
+*        DMKUSOFF CALLED DIRECTLY BY DMKDSPCH IF                        00367500
 *        NECESSARY TO LOGOFF A USER BECAUSE OF A DROPPED LINE OR        00368000
 *        BECAUSE HIS VIRTUAL MACHINE STOPPED RUNNING WHEN IN THE        00369000
 *        DISCONNECTED MODE.                                             00370000
@@ -386,7 +391,6 @@ DMKUSOFL RELOC                ENTER 'FORCE' COMMAND.                    00261000
 * OPERATION -                                                           00372000
 *                                                                       00373000
 *        1. SETS R9 = 0 (TO INDICATE NOT INVOKED FROM DMKUSOLG)         00374000
-*        AND PASSES R2 FROM CALLER ALONG TO STEP 2.                     00375000
 *                                                                       00376000
 *        2. BY CALLING APPROPRIATE SUBROUTINES, COMPUTES NEEDED         00377000
 *        INFORMATION FOR MESSAGES SENT TO USER AND SYSTEM OPERATOR,     00378000
@@ -428,11 +432,27 @@ DMKUSOFL RELOC                ENTER 'FORCE' COMMAND.                    00261000
 *********************************************************************** 00414000
          SPACE                                                          00415000
 DMKUSOFF RELOC                                                          00416000
+         SR    R2,R2          CLEAR REG FOR INSERT OF PARMS    @VA13026 00416200
+         TM    VMSVSTAT,VMLGFORC FORCE?                        @VA13026 00416280
+         BZ    NOFORCE                                         @VA13026 00416360
+         O     R2,=A(FORCE)   INDICATE FORCE                   @VA13026 00416440
+NOFORCE  DS    0H                                              @VA13026 00416520
+         TM    VMSVSTAT,VMLGNMSG NO OPERATOR MESSAGE PARM SET  @VA13026 00416600
+         BZ    NONMSG         PARM NOT SET, DON'T SUPPRESS     @VA13026 00416680
+         O     R2,=A(NOOPMSG) SUPPRESS OPERATOR MESSAGE        @VA13026 00416760
+NONMSG   DS    0H                                              @VA13026 00416840
+         STC   R2,SAVEWRK1    AND STORE PARM FROM CALLER IN R2 @VA13026 00416920
          N     R2,F15         ENSURE USE OF ONLY THE LOW 4 BITS OF R2   00417000
          STC   R2,SAVEWRK1    AND STORE PARM FROM CALLER IN R2          00418000
 USOJOIN  SR    R9,R9          R9=0 MEANS NO FREE STORAGE IN USE FOR MSG 00419000
          ST    R9,SAVEWRK4    CLEAR WORK AREA                  @VA04579 00419500
-         OI    VMRSTAT,VMLOGOFF    SIGNAL:  IN LOGOFF PROCESS           00420000
+         LA    R0,8           LENGTH OF USERID                 @VA13441 00420000
+         LA    R1,VMUSER      POINT TO USERID                  @VA13441 00420100
+         CALL  DMKSCNAU       SEE IF VMBLOK STILL VALID        @VA13441 00420200
+         BZ    LOGOFF         STILL THERE - LOG HIM OFF        @VA13441 00420300
+         BM    USO96          ALREADY GONE - EXIT              @VA13441 00420400
+LOGOFF   DS    0H                                              @VA13441 00420700
+         OI    VMRSTAT,VMLOGOFF SIGNAL: IN LOGOFF PROCESS      @VA13441 00420800
          NI    VMOSTAT,VMSYSOP+VMDISC+VMSHR  SAVE ONLY THESE FL@V200820 00421000
          LA    R0,CPEXSIZE                                     @V408246 00421010
          CALL  DMKFREE                                         @V408246 00421060
@@ -458,13 +478,26 @@ USO04    EQU   *              CHECK FOR VIRTUAL TRACE          @V200820 00428000
 USO05    EQU   *                                               @V200820 00432000
          L     R4,=V(DMKSSSVM) ADDR OF THE DMKMSS VIRT MACH    @V60B6B8 00432010
 *                             NAME                                      00432020
+         LTR   R4,R4          IS VCON EQUAL TO ZERO?           @VA09319 00432022
+         BZ    USO05A         YES, INDICATES DMKSSS NOT IN SYS @VA09319 00432024
+         OC    0(8,R4),0(R4)    IS MSS INIT ?                  @VA13088 00432026
+         BZ    USO05A         BRANCH, INDICATES MSS NOT INIT.@VA13088   00432028
          CLC   VMUSER,0(R4)   IS HE LOGGING OFF                @V60B6B8 00432030
          BNE   USO05A         NO                               @V60B6B8 00432040
          CALL  DMKSSSUS       GO PURGE MSS QUEUES, IF ANY      @V60B6B8 00432050
          NI    PSAMSS,X'FF'-MSSPRES SET MSS FLAG OFF           @V60B6B8 00432060
 USO05A   EQU   *                                               @V60B6B8 00432070
          TM    VMOSTAT,VMDISC IS THIS USER DISCONNECTED ?               00433000
-         BO    DISCUSER       YES, HE CAN'T HERE US THEN       @VA05738 00434000
+         BZ    US009             NO, CONTINUE                  @VA09408 00434050
+         LH    R8,VMVTERM        YES, MAY BE CONSOLE SPOOLED   @VA09408 00434100
+         LTR   R8,R8             VIRTUAL CONSOLE AVAILABLE?    @VA09408 00434150
+         BM    DISCUSER          NO, HE CAN'T HEAR US          @VA09408 00434200
+         AL    R8,VMDVSTRT       YES, GET VDEVBLOK POINTER     @VA09408 00434250
+         USING VDEVBLOK,R8       FOR ADDRESSABILITY            @VA09408 00434300
+         TM    VDEVFLAG,VDEVCSPL CONSOLE SPOOLING ACTIVE?      @VA09408 00434350
+         BZ    DISCUSER          NO, GO TELL OPERATOR          @VA09408 00434400
+         DROP  R8                                              @VA09408 00434450
+US009    EQU   *                                               @VA09408 00434500
          TM    VMRSTAT,VMLOGON     IF THE USER WAS LOGGING ON,          00435000
          BO    USO11          DO NOT CALL THE ACCOUTNING ROUTINE        00436000
          CALL  DMKACOTM       CALL ACCOUNTING ROUTINE FOR CONNECT MSG   00437000
@@ -476,6 +509,8 @@ USO11    LA    R0,(LNR5+7)/8  GET ENOUGH FREE STORAGE FOR LONGEST MSG   00438000
          BAL   R3,MSGSUBR     FILL IN MSG TO BE SENT TO THE USER        00443000
          SPACE                                                          00444000
          CALL  DMKQCNWT       SEND MESSAGE, WAIT FOR IT        @V200820 00445000
+         TM    VMOSTAT,VMDISC    IS USER DISCONNECTED?         @VA09408 00445020
+         BO    DISCUSER          YES, RDEVBLOK ALREADY CLEARED @VA09408 00445040
          L     R8,VMTERM      GET TERM RDEVBLOK                @VA04579 00445100
          ST    R8,SAVEWRK4    SAVE IT FOR LATER USE            @VA04579 00445200
          SR    R15,R15                                         @VA04579 00445300
@@ -492,15 +527,10 @@ DISCUSER BAL   R4,MSGOP       GO TELL OPERATOR HE'S GONE       @VA05738 00445560
          ST    R3,CPEXADD     INSERT INTO THE BLOCK            @VA05738 00445770
          CALL  DMKSTKCP       ENSURE THAT EVERYONES DONE WITH  @VA05738 00445800
 *                             THIS USER BEFORE WE PURGE HIM.            00445830
-         CALL  DMKPTRLK,PARM=USOCONT LOCK OURSELVES..ENSURE    @VA05738 00445860
-*                             WE'RE STILL HERE WHEN WE RETURN           00445890
-         EXIT                 RETURN FOR NOW.. WE'LL BE BACK   @VA05738 00445920
-*                             LATER TO FINISH THIS USER OFF             00445950
+         GOTO  DMKDSPCH                                        @VA08501 00445910
          EJECT                                                          00446000
 USOCONT  DS    0H   CONTINUE AFTER MSG TO USER (IF ANY) HAS BEEN GIVEN: 00447000
          NI    VMMLEVEL,255-(VMMSGON+VMWNGON)     NO SPOOL MSGS@VM08714 00448000
-         L     R13,FFS        ENSURE WE CATCH ALL USES OF THE  @VA05738 00449100
-*                             SAVE AREA THAT WE NO LONGER HAVE          00449200
          OI    VMQSTAT,VMINHMIG PREVENT MIGRATION              @V408246 00449300
 USO20A   TM    VMOSTAT,VMSHR  WAS USER RUNNING A SHARED SYSTEM @V304735 00454000
          BZ    USO21          IF NOT - RESET THE VIRTUAL       @V304735 00455000
@@ -524,7 +554,11 @@ USOPRST  DS    0H             PRELIMINARY RESET OF VIRTUAL     @V408246 00468500
 USO21A   DS    0H                                              @V408246 00468800
          CALL  DMKCFPRR       RESET THE VIRTUAL MACHINE        @V304735 00469000
          TM    VMRSTAT,VMLOGON     VIRTUAL MACHINE LOGGING ON ?         00470000
-         BO    USO22               YES -- SKIP NEXT CALL                00471000
+         BNO   USO21C         NO....BRANCH                     @VA13304 00471150
+*        ERROR WHEN USER LOGGING ON                                     00471300
+         TM    VMSPMFLG,VMLOGON2 HAD THE LOGON GOTTEN VEDV ?   @VA13304 00471450
+         BNO   USO22          NO....BRANCH AROUND              @VA13304 00471600
+USO21C   DS    0H                                              @VA13304 00471750
          SR    R2,R2          TELL PAGE OUT TO CLEAR                    00472000
          CALL  DMKPGSPO       AND RESET USERS PAGES                     00473000
 *                             NOTE - ALSO CLEARS AN ADSTOP IF ANY THERE 00474000
@@ -649,7 +683,9 @@ USO32    LA    R2,8(R2)       POINT TO NEXT ENTRY              @V200730 00568000
 * NOW SEND MESSAGE TO SYSTEM OPERATOR (AS A RULE):                      00575000
 MSGOP    L     R10,ASYSOP     GET THE OPERATOR'S VMBLOK        @VA05738 00576100
          CLR   R10,R11        IS HE THE ONE LOGGING OFF ?      @VA05738 00576200
-         BER   R4             YES, HE ALREADY KNOWS HE'S GONE  @VA05738 00576300
+         BE    OPOFF          YES, DECREMENT NUMBER OF USERS   @VA11749 00576300
+         TM    VMRSTAT,VMLOGON NOT COMPLETELY LOGGED ON?       @VA11389 00576320
+         BOR   R4             YES, NO MESSAGE TO OPERATOR      @VA11389 00576340
          TM    SAVEWRK1,NOOPMSG SHOULD WE SKIP THE OP MSG?     @VM03066 00579000
          BOR   R4             YES, NO MESSAGE..                @VA05738 00580100
          LTR   R9,R9          DO WE HAVE ANY FREE STORAGE FOR A MSG ?   00581000
@@ -681,13 +717,16 @@ USO83    EQU   *                                               @V200820 00605000
          CALL  DMKSCNRN       GET DEVICE NAME                  @V200930 00609000
          STCM  R1,15,0(R9)    PUT IN MESSAGE                   @V200930 00610000
 USO84    MVC   DMOP3(8,R9),VMUSER  STORE USERID IN THE MSG,             00611000
-         L     R3,ASYSLC      REFERENCE SYSLOCS INFORMATION,            00612000
+OPOFF    L     R3,ASYSLC      REFERENCE SYSLOCS INFORMATION    @VA11749 00612000
          USING SYSLOCS,R3     ...                                       00613000
          L     R1,DMKSYSNM    PICK UP NO. OF USERS,                     00614000
-         DROP  R3                                                       00615000
          TM    VMRSTAT,VMLOGON     WAS THIS GUY 'NOT YET LOGGED ON' ?   00616000
          BO    USO85               YES                                  00617000
          BCTR  R1,0           LESS ONE (IN THE REGISTER ONLY)           00618000
+         ST    R1,DMKSYSNM                                     @VA09339 00618050
+         DROP  R3                                              @VA09339 00618100
+         CLR   R10,R11        OPERATOR LOGGING OFF ??          @VA11749 00618200
+         BER   R4             YES, HE ALREADY KNOWS HE'S GONE  @VA11749 00618300
 USO85    CALL  DMKCVTBD       BINARY TO DECIMAL PLEASE,                 00619000
          STCM  R1,7,DMOP4(R9) STORE IN MSG                              00620000
          LA    R0,LMOP234     LENGTH OF MESSAGE,                        00621000
@@ -729,12 +768,6 @@ USO92A   ST    R4,VMPNT-VMBLOK(,R2) STORE NEW ANCHOR FOR CHAIN IN SYSVM 00649000
 USO92B   DS    0H                                              @V408246 00649100
          TM    VMRSTAT,VMLOGON     WAS THIS GUY 'NOT YET LOGGED ON' ?   00650000
          BO    USO93               YES                                  00651000
-         L     R3,ASYSLC      NOW REFERENCE SYSLOCS INFO,               00652000
-         USING SYSLOCS,R3     ...                                       00653000
-         L     R4,DMKSYSNM    GET NO. OF USERS,                         00654000
-         BCTR  R4,0           LESS 1 FOR DELETED VMBLOK,                00655000
-         ST    R4,DMKSYSNM    STORE BACK AGAIN                          00656000
-         DROP  R3                                                       00657000
          TM    VMPSTAT,VMACCOUN IS THE ACCOUNTING OPTION SET ? @VA00881 00658000
          BZ    USO93          NO, GO CHECK FOR OPERATOR        @VA00881 00659000
          ICM   R1,15,VMACOUNT GET THE ADDRESS OF THE           @VA00881 00660000
@@ -769,12 +802,15 @@ USO94    L     R1,VMDFTPNT    LOAD DEFERRED TASK POINTER       @V407594 00685000
          BZ    USO95          NO                               @V407594 00685200
          LA    R0,CPEXSIZE    SIZE OF BLOCK                    @V407594 00685300
          CALL  DMKFRET        RETURN TO FREE STORAGE           @V407594 00685400
-USO95    LR    R1,R11         POINT TO VMBLOK                  @V407594 00685500
+USO95    LA    R4,VMDELAY     GET POSSIBLE TRQBLOK POINTER     @VA12770 00685502
+         BAL   R7,FRETRQB     RETURN IT IF IT'S THERE          @VA12770 00685504
+         LR    R1,R11         RESTORE VMBLOK POINTER           @VA12770 00685506
          C     R11,STACKVM    IS VMBLOK=STACKVM                @VA08126 00685510
          BNE   USO95A         NO-DONT CLEAR STACKVM            @VA08126 00685520
          MVC   STACKVM,ZEROES CLEAR OUT STACKVM                @VA08126 00685530
 USO95A   EQU   *                                               @VA08126 00685540
          LA    R0,VMBSIZE     SIZE IN DBL-WORDS                         00686000
+         MVI   VMUSER-VMBLOK+7(R1),X'00' NULLIFY USERID        @VA13441 00686500
          CALL  DMKFRET        GIVE IT BACK TO FREE STORAGE.             00687000
 *                                                                       00688000
 USO96    L     R11,ASYSVM      IF NOT, POINT R11 TO SYSTEM VMBLOK, AND  00689000
@@ -786,9 +822,19 @@ USO98A   LA    R0,(LNR5+7)/8  THIS WAS THE NO. DBL-WORDS WE USED        00695000
          CALL  DMKFRET        GIVE IT BACK (WE DIDN'T FORGET)           00696000
 USO99    EQU   *              ALMOST DONE ...                  @VA00881 00697000
          CALL  DMKUSOFM       DO FREE STORAGE CLEAN UP         @VA05738 00699100
-         CALL  DMKPTRUL,PARM=USOCONT UNLOCK OURSELVES          @VA05738 00699200
-         GOTO  DMKDSPCH       ALL DONE - NO WHERE ELSE TO GO   @VA05738 00699300
-USO99X   EXIT                 AND THEN REALLY EXIT.            @VA00881 00700000
+         TM    SAVEWRK1,ELOGOFF+EFORCE FORCE/LOGOFF VIA CFM?   @VA08501 00699250
+         BZ    USO99X         NO, NO COMMAND BUFFER TO FRET    @VA08501 00699300
+         LA    R0,BUFSIZE     SIZE OF COMMAND BUFFER           @VA08501 00699350
+         L     R1,SAVER9      GET ITS ADDRESS FROM CFM         @VA08501 00699400
+         CALL  DMKFRET        THROW IT AWAY                    @VA08501 00699450
+         SVC   16             ELIMINATE RETURN TO CFM          @VA08501 00699500
+         LTR   R13,R13        DID CFM HAVE A CALLER?           @VA08501 00699550
+         BNZ   USO99X         YES, RETURN TO HIM               @VA08501 00699600
+         GOTO  DMKDSPCH       NO, NEXT BATTER UP, PLEASE       @VA08501 00699650
+         SPACE 1                                                        00699700
+USO99X   DS    0H                                              @VA08501 00699750
+         ST    R11,SAVER11    PASS SYSTEM'S VMBLOK BACK        @VA08501 00699800
+         EXIT                                                  @VA08501 00699850
          SPACE 2                                                        00701000
 FRETRQB  EQU   *              RESET AND FRET A TRQBLOK         @V200820 00702000
          L     R1,0(0,R4)     POINTER TO THE BLOCK             @V200820 00703000
@@ -1002,7 +1048,7 @@ FREMREX  LA    R1,CKSLOCK     UNLOCK US BEFORE WE EXIT         @V304298 00907000
          CALL  DMKLOCKD                                        @V304298 00908000
 FREMREX1 DS    0H                                              @V408246 00909010
          L     R10,=A(DMKPAGSK) AVAILABLE PAGE I/O BLOCKS      @V408246 00909060
-PGSKL    DS    0H                                              @V408246 00909110
+PGSKL    DS    0H                                              @VA10137 00909139
          ICM   R1,B'1111',0(R10) 1ST ON THE CHAIN?             @V408246 00909160
          BNP   FRMXIT         NONE                             @V408246 00909210
          MVC   0(4,R10),IOBMISC-IOBLOK(R1) UNCHAIN 1ST         @V408246 00909260
@@ -1295,7 +1341,7 @@ USOSUB   DS    0H             CHECK FOR POSSIBLE 'HOLD' OPTION:         01184000
          LA    R15,1          MINIMUM ABBREVIATION IS 'HO'              01191000
          EX    R15,CKHOLD     CHECK FOR AT LEAST THAT ..                01192000
          BNE   ERROR3         CLOSE, BUT NO CIGAR                       01193000
-         OI    SAVEWRK1,LDHOLD  SET FLAG-BIT IF IT WAS 'HOLD'           01194000
+         OI    VMSVSTAT,VMLGHOLD SET FLAG BIT IF IT WAS 'HOLD' @VA13025 01194100
          BR    R8               AND EXIT.                               01195000
          SPACE 2                                                        01196000
 CKHOLD   CLC   HOLD(*-*),0(R1)     EXECUTED FOR OPTION TEST             01197000
@@ -1337,7 +1383,7 @@ MSGSUBR8 LR    R1,R9          R1 = R9 = ADDRESS OF MESSAGE              01232000
          LA    R0,LNR5        SET R0 FOR LENGTH OF WORST CASE MESSAGE   01233000
          LA    R15,LNR5-1(,R1) POINT TO LAST BYTE OF MESSAGE            01234000
          LA    R2,PRIORITY+LOGDROP SET TENTATIVE PARM FOR DMKQCNWT      01235000
-         TM    SAVEWRK1,LDHOLD     DID CALLER WANT 'HOLD' ?             01236000
+         TM    VMSVSTAT,VMLGHOLD DID CALLER WANT 'HOLD' ?      @VA13025 01236100
          BCR   8,R3                NOPE - GR2 HAS THE RIGHT PAR@V200820 01237000
          LA    R2,PRIORITY+LOGHOLD YES - SET HOLD OPTION INSTEAD.       01238000
          BR    R3             RETURN                           @V200820 01239000
@@ -1397,7 +1443,6 @@ DMOP4    EQU   MOP4-MOP2      DISP. OF NNN FROM BEGINNING OF MSG        01287000
 ELOGOFF  EQU   X'80'          LOGOFF ENTRY                              01293000
 EDISCON  EQU   X'40'          DISCONNECT ENTRY                          01294000
 EFORCE   EQU   X'20'          FORCE ENTRY                               01295000
-LDHOLD   EQU   X'04'          'HOLD' LINE AFTER MSG - KEEP ENABLED      01296000
 FORCE    EQU   X'02'          FORCED LOGOFF BY THE SYSTEM      @V200820 01297000
 NOOPMSG  EQU   X'01'          SKIP MESSAGE TO OPERATOR         @VM03066 01298000
          EJECT                                                          01299000
@@ -1409,6 +1454,8 @@ NOOPMSG  EQU   X'01'          SKIP MESSAGE TO OPERATOR         @VM03066 01298000
          COPY  IOBLOKS                                         @V408246 01304100
 IOBLOK   DSECT CONTINUE       THE DSECT                        @V408246 01304200
          ORG   ,              LOCATE END OF BLOCK              @V408246 01304300
+*        ANY CHANGES IN PAGESIZE MUST ALSO BE REFLECTED                 01304325
+*        IN DMKPAG AND DMKMON                                           01304375
 *        FOLLOWING SIZE MUST CORRESPOND WITH DMKPAG                     01304400
          DS    7D             SIZE OF PAGE EXTENDED I/O BLOCK  @V408246 01304500
 PAGESIZE EQU   (*-IOBLOK)/8   SIZE OF EXTENDED BLOCK           @V408246 01304600
@@ -1420,4 +1467,5 @@ PAGESIZE EQU   (*-IOBLOK)/8   SIZE OF EXTENDED BLOCK           @V408246 01304600
          PSA                                                            01310000
          SYSLOCS                                                        01311000
          COPY  MICBLOK                                                  01312000
+         COPY  CONBUF                                          @VA08501 01312100
          END   DMKUSO                                                   01313000

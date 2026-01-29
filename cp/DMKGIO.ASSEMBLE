@@ -176,6 +176,8 @@ DEVFREE  EQU   *              HERE WHEN ACCESS TO MDISK IS FREE@V407438 00128680
          ST    R9,IOBIRA      SET RETURN ADDR. IN IRA                   00140000
          OI    VMRSTAT,VMIOWAIT    FORCE USER TO WAIT FOR I/O TO FINISH 00141000
          ST    R13,IOBMISC2   HANG ONTO SAVEAREA POINTER       @V200020 00142000
+         LA    R9,0           STORE INITIAL CCWADDR (0)        @VA13292 00142300
+         ST    R9,SAVEWRK8    OF CSW IN SAVEAREA               @VA13292 00142600
          L     R2,IOBCAW      CCWTRANS NEEDS CAW+KEY IN GPR2.           00143000
          LA    R9,0(,R2)      CCWTRANS NEEDS CAW-KEY IN GPR9.           00144000
          SL    R8,VMDVSTRT    MAKE GPR 8 FOR RELATIVE DISPLACEMENT.     00145000
@@ -189,6 +191,7 @@ DEVFREE  EQU   *              HERE WHEN ACCESS TO MDISK IS FREE@V407438 00128680
          SPACE                                                          00148500
 TRANSOK  EQU   *              HERE IF CCWTRANS WENT OK         @V407438 00148600
          ST    R10,VDEVIOB    STORE ADDRESS OF ACTIVE IOBLOK            00149000
+         XC    VDEVCSW(8),VDEVCSW ZERO VDEVCSW                 @VA08386 00149500
          OI    VDEVSTAT,VDEVBUSY   MAKE VIRTUAL DEVICE BUSY             00150000
          LA    R15,1          *    ADD 1 TO THE VIRTUAL START I/O COUNT 00151000
          AL    R15,VMIOCNT    *    FOR ACCOUNTING.                      00152000
@@ -202,10 +205,18 @@ DIAGRTN  DS    0H                                                       00157000
          USING DMKGIO,R12                                      @V200020 00160000
          NI    VMQLEVEL,X'FF'-(VMCOMP+VMLOPRI)    UNFLAG COMPUTE BOUND  00161000
          L     R13,IOBMISC2   RESTORE SAVEAREA BASE ADDRESS    @V200020 00162000
-         CL    R10,IOBLINK    IS THIS THE FINAL INTERRUPT ??            00163000
-         BNE   FRETCOPY       NO -- GO FRET THE COPIED BLOCK            00164000
          L     R8,IOBMISC     GET DISPLACEMENT TO VDEVBLOK              00165000
          AL    R8,VMDVSTRT    POINT TO VDEVBLOK                         00166000
+         CLI   VDEVTYPC,CLASTAPE IS THIS A TAPE DEVICE?        @VA12173 00166010
+         BNE   COMPLETE       NO- COMPLETE                     @VA12173 00166040
+         L     R9,IOBCSW      LOAD CCWADDRESS FROM CSW         @VA13292 00166080
+         LA    R9,0(R9)       CLEAR HIGH ORDER BYTE            @VA13292 00166095
+         LTR   R9,R9          CCWADDRESS PRESENT               @VA13292 00166110
+         BZ    COMPLETE       STORE IT FOR DMKTAP IF NOT ZERO  @VA13292 00166125
+         MVC   SAVEWRK8,IOBCSW                                 @VA12173 00166130
+COMPLETE DS    0H                                              @VA12173 00166160
+         CL    R10,IOBLINK    FINAL INTERRUPT?                 @VA08386 00166300
+         BNE   FRETCOPY       NO, FRET COPIED IOB              @VA08386 00166600
          SR    R0,R0          CLEAR VDEVIOB RIGHT NOW          @VA03384 00167000
          ST    R0,VDEVIOB     TO AVOID POSSIBLE RESET PROBLEM  @VA03384 00168000
          TM    IOBSTAT,IOBCC3 REAL CC = 3 ON STARTIO OR DEVICE OFFLINE  00169000
@@ -222,7 +233,6 @@ GIOCONT  EQU   *                                               @VA01599 00178000
          BAL   R9,RTNCC3      SET PSW CONDITION CODE =3                 00180000
          L     R2,SAVER2      RESTORE POINTER TO USER'S 'R2'   @V200020 00181000
          ST    R7,VDEVIOER    STORE IN VIRTUAL DEV. BLOCK.              00182000
-         OI    VDEVFLAG,VDEVUC     DMKCCW WILL FRET THE IOERBLOK        00183000
          SR    R1,R1          AND CLEAR IOBIOER                         00184000
          ST    R1,IOBIOER     (SINCE WE'VE HUNG IT ON ANOTHER HOOK)     00185000
          USING IOERBLOK,R7                                              00186000
@@ -244,11 +254,22 @@ NOT3340  EQU   *                                               @V56BDA8 00187650
          DROP  R7                                                       00189000
          SRL   R7,16          SHIFT OUT SENSE BYTES 3-4                 00190000
          ST    R7,0(,R2)      STORE SENSE BYTES 1-2 IN USER'S CAW REG.  00191000
+         LA    R0,IOERSIZE    GET IOERROR BLOK SIZE            @VA10489 00191100
+         L     R1,VDEVIOER    GET ADDRESS OF IOERROR POINTER   @VA10489 00191200
+         USING IOERBLOK,R1    LET ASSEMBLER KNOW               @VA10489 00191300
+         AH    R0,IOEREXT     ADD EXTENSION IF NECCERARY       @VA10489 00191400
+         DROP  R1                                              @VA10489 00191500
+         CALL  DMKFRET        FREE THE BLOCK                   @VA10489 00191600
+         SLR   R0,R0          ZERO R0                          @VA10489 00191700
+         ST    R0,VDEVIOER    ZERO OUT POINTER TO ERROR BLOCK  @VA10489 00191800
          B     UNTRAN         GO UNTRANS THE CSW                        00192000
 TESTWLR  TM    IOBCSW+4,UE    DID A UNIT EXCEPTION OCCUR ?              00193000
          BO    MOVECSW        YES, SAVE THE CSW FOR THE USER            00194000
+         TM    VDEVCSW+5,IL   DID IL OCCUR IN 1ST INTERRUPT?   @VA08386 00194200
+         BNO   *+8            NO                               @VA08386 00194400
+         OI    IOBCSW+5,IL    PUT IN FINAL INTERRUPT           @VA08386 00194600
          TM    IOBCSW+5,IL    WAS IT A WRONG LENGTH RECORD ?            00195000
-         BZ    GDSTATUS       NO., BRANCH                               00196000
+         BZ    MOVECSW        NO,BRANCH                        @VA12728 00196100
          LA    R15,3          SET RETURN CODE TO 3                      00197000
          BAL   R9,RTNCC2      SET PSW CONDITION CODE =2                 00198000
 MOVECSW  MVC   VDEVCSW,IOBCSW MOVE IOBCSW TO VIRTUAL CSW.               00199000
@@ -288,6 +309,9 @@ GIOEXIT  EQU   *                                               @V200020 00231000
          EXIT                                                  @V200020 00233000
          EJECT                                                          00234000
 FRETCOPY EQU   *              RELEASE COPIED IOBLOK, WAIT FOR LAST      00235000
+         TM    IOBCSW+5,IL    GET AN IL ?                      @VA08386 00235200
+         BNO   *+8            NO                               @VA08386 00235400
+         OI    VDEVCSW+5,IL   SAVE FOR FINAL INTERRUPT         @VA08386 00235600
          BAL   R9,FRETIOB     FRET IOBLOK, POSSIBLE IOERBLOK   @V200020 00236000
          GOTO  DMKDSPCH       WAIT FOR FINAL INTERRUPT         @V200020 00237000
          SPACE                                                          00238000
@@ -305,8 +329,9 @@ RTNCCS   EQU   *              SET VIRTUAL PSW CONDITION CODE   @V200020 00249000
          ST    R15,VMGPRS+R15*4    RETURN CODE TO VIRTUAL GR15 @V200020 00250000
          LA    R2,VMPSW+4     BC-MODE COND. CODE LOCATION      @V200020 00251000
          TM    VMESTAT,VMEXTCM     IN EC-MODE NOW ?            @V200020 00252000
-         BZ    *+8                 NO --                       @V200020 00253000
+         BZ    CLEARCC             NO --                       @VA13076 00253000
          LA    R2,VMPSW+2     EC-MODE COND. CODE LOCATION      @V200020 00254000
+CLEARCC  NI    0(R2),X'FF'-X'30'   CLEAR CONDITION CODE        @VA13076 00254500
          EX    R1,RTNSCC      SET VIRTUAL CONDITION CODE       @V200020 00255000
          BR    R9                                              @V200020 00256000
 RTNSCC   OI    0(R2),*-*      . . .                            @V200020 00257000

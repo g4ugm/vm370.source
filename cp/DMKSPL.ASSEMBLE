@@ -34,6 +34,7 @@ DMKSPL   CSECT                                                          00023000
          EXTRN DMKCKSPL                                        @V304298 00034000
          EXTRN DMKRPAGT,DMKRPAPT                               @V293598 00035000
          EXTRN DMKUDRMD                                        @V407466 00035100
+         EXTRN DMKPGTVR                                        @VA11232 00035200
          SPACE 3                                                        00036000
          USING PSA,R0                                                   00037000
          USING SPLINK,R2                                                00038000
@@ -137,8 +138,12 @@ DMKSPLOV RELOC                                                          00126000
          BAL   R6,GETID            GET SPOOL ID NUMBER                  00135000
          MVC   SFBTYPE,VDEVTYPE    MOVE DEVICE TYPE TO SFBBLOK          00136000
          CLI   VDEVTYPE,TYP3210    CONSOLE DEVICE ?                     00137000
-         BNE   *+8                 NO -- DEVICE TYPE OK                 00138000
+         BNE   SPNOCON        NOT CONSOLE CONTINUE             @VA11560 00138100
          MVI   SFBTYPE,TYPPRT FLAG AS CONSOLE PRINTER TYPE     @V200930 00139000
+         TM    VDEVSFLG,VDEVHOLD HOLD ON DEVICE                @VA11560 00139100
+         BZ    SPNOCON        NO-HOLD CONTINUE                 @VA11560 00139150
+         OI    SFBFLAG,SFBUHOLD SET USER HOLD                  @VA11560 00139200
+SPNOCON  EQU   *                                               @VA11560 00139250
          SPACE                                                          00140000
          MVC   SFBORIG,VMUSER      SET UP ORIGINATING USER              00141000
          MVC   SFBUSER,VMUSER      AND OWNING USER                      00142000
@@ -421,6 +426,9 @@ SKIPALL  EQU   *                                               @V60B9BA 00391000
          DROP  R1                                              @V200930 00402000
 SPLTEST  TM    VDEVSFLG,VDEVFOR+VDEVXFER 'FOR' OR 'TO' USERID  @V200930 00403000
          BZ    SETHOLD        NO, CONT                         @V200930 00404000
+         TM    VDEVSFLG,VDEVXFER   SPOOL TO ?                  @VA09714 00404100
+         BO    SETHOLD        IF SO, DON'T CHANGE DISTCODE AND @VA09714 00404200
+*                             NO NEED TO SEARCH DIRECTORY               00404300
          LA    R0,UDBFSIZE    GET DIRECT BUFFER SIZE           @V200930 00405000
          CALL  DMKFREE                                         @V200930 00406000
          LR    R2,R1          BUFFER ADDRESS                   @V200930 00407000
@@ -448,8 +456,6 @@ UDRDIST  LA    R1,UDIRDISP    GET DASD DISP                    @V200930 00428000
          CALL  DMKUDRMD       READ ACCOUNT BLOCK               @V407466 00429000
          BNZ   UNDIST         NO GO, GET OUT                   @V200930 00430000
          USING UMACBLOK,R2                                     @V200930 00431000
-         TM    VDEVSFLG,VDEVXFER SPOOL TO ?                    @VA04909 00431330
-         BO    UNDIST         IF SO, DON'T CHANGE DISTCODE     @VA04909 00431660
          MVC   SFBDIST,UMACDIST SET FOR USERID DIST            @V200930 00432000
          B     UNDIST         RETRUN BUFFER AND CONT           @V200930 00433000
          DROP  R2                                              @V200930 00434000
@@ -835,6 +841,7 @@ RDRPEND  EQU   *              HERE TO QUEUE  DEVICE END        @VM01016 00801000
          AH    R5,VCHADD      ..                               @VM01016 00813000
          STH   R5,IOBVADD     PUT ADDRESS IN IOBLOK            @VM01016 00814000
          OI    VDEVSTAT,VDEVPEND SET PENDING FLAG              @VM01016 00815000
+         OI  IOBSPEC,IOBUNSL       INDICATE UNSOLICITED INTERRUPT       00815050
          MVC   VDEVCSW(8),IOBCSW MOVE IN DEVICE END CSW        @VM01016 00816000
          CALL  DMKSTKIO       GO STACK IO                      @VM01016 00817000
          SPACE 3                                                        00818000
@@ -1093,13 +1100,10 @@ TSTCHAIN ICM   R1,B'1111',0(R3) ANY FILES IN DELETE CHAIN ??   @V304298 00995000
          OI    DELSW,X'80'         INDICATE DELETE ROUTINE RUNNING      01008000
          SPACE                                                          01009000
          CALL  DMKSTKCP            HAVE CP STACK BLOK                   01010000
-         LR    R15,R12        ADDRESS OF THIS MODULE INTO R15           01011000
-         N     R15,=A(X'FFF000')   REMOVE DISPLACEMENT VALUE            01012000
-         SRL   R15,8          DIVIDE BY 256 TO GET INDEX OF CORE-TBL    01013000
-         AL    R15,ACORETBL   DEVELOP ADDRESS OF CORE-TABLE ENTRY       01014000
-         L     R15,0(,R15)    PICK UP THE FORWARD POINTER               01015000
-         CL    R15,=C'*CP*'   IS THIS MODULE RESIDENT ?                 01016000
-         BE    DLEXIT         YES -- DON'T ISSUE CALL TO LOCK PAGE      01017000
+         L     R15,APAGCP     GET END OF RESIDENT NUCLEUS      @VA11259 01011100
+         CR    R12,R15        IS THIS MODULE PAGEABLE ?        @VA11259 01011200
+         BL    DLEXIT         YES...DON'T ISSUE CALL TO LOCK   @VA11259 01011300
+*                             PAGE                                      01011400
          SPACE                                                          01018000
          LR    R2,R12              LOCK PAGE                            01019000
          CALL  DMKPTRLK            FOR DMKSPLDR ROUTINE                 01020000
@@ -1131,10 +1135,20 @@ NEXTSFB  XC    IOBLOK(DELSIZE*8),IOBLOK CLEAR BLOK                      01040000
          BZ    DREXIT              YES - LEAVE                          01047000
          MVC   0(4,R4),0(R7)       REMOVE THIS SFBLOK FROM THE CHAIN    01048000
          ST    R7,IOBMISC2         SAVE ADDRESS OF SFBLOK IN IOBLOK     01049000
+         TM    SFBFLAG2,SFBPURGE IS THIS A PURGE OF AN OPEN    @VA11439 01049200
+*                             SPOOL FILE?                               01049400
+         BO    NOCKPT         YES THEN IT HASNT BEEN CHECK     @VA11439 01049600
+*                             POINTED                                   01049800
          CALL  DMKCKSPL,PARM=DELSFB CHECKPOINT                 @V304298 01050000
+NOCKPT   DS    0H                                              @VA11439 01050500
          L     R1,SFBRECS          GET ADDRESS OF ALLOCATION CHAIN      01051000
-         TM    SFBFLAG,SFBDUMP     SYSTEM DUMP FILE ??                  01052000
-         BO    DUMPFILE            YES --                               01053000
+         TM    SFBFLAG,SFBDUMP     SYSTEM DUMP OR VMDUMP?      @V67CAH7 01052000
+         BNO   NOTDUMP             NO...CONTINUE PROCESSING    @V67CAH7 01052200
+* NOW TEST IF IT IS VMDUMP...IF SO CONTINUE NORMAL PROCESSING           01052400
+         CLI   SFBMISC1+1,C'V'     IS THIS DUMP FILE A VMDUMP? @V67CAH7 01052600
+         BNE   DUMPFILE            NO...IT'S A CP DUMP, BRANCH @V67CAH7 01052800
+*                                  YES...DELETE AS NORMAL FILE          01053000
+NOTDUMP  DS    0H                                              @V67CAH7 01053200
          TM    SFBFLAG2,SFBPURGE   PROCESSING OPEN SPOOL FILE ?         01054000
          BO    DELOPEN             YES -- DELETE OPEN FILE              01055000
          TM    SFBFLAG,SFBRECER    ALLOCATION CHAIN IN-COMPLETE ??      01056000
@@ -1181,7 +1195,33 @@ LASTBUFF OI    DELSW,X'10'    INDICATE 1 BUFFER BEYOND LAST    @VA03437 01082000
 DELRESET EQU   *  HERE TO FIND FIRST BUFFER OF FILE                     01085000
          TM    SFBFLAG2,SFBMON IS THIS A MONITOR SPOOL FILE    @VA08245 01085500
          BO    DELSTART                                        @VA08245 01085600
-         MVC   SFBSTART,SFBLAST POINT TO LAST BUFFER OF FILE   @VA08245 01086000
+         CLI   SFBTYPE,TYPRDR REAL RDR FILE                    @VA11232 01085700
+         BE    TRYLAST        YES, SPRMISC MAY NOT = START CCPD@VA11232 01085725
+         L     R0,SFBSTART    IS STARTING CCPD = ZERO ?        @VA11232 01085750
+         LTR   R0,R0          ZERO                             @VA11232 01085775
+         BZ    TRYLAST        INVALID SFBSTART - TRY SFBLAST   @VA11232 01085800
+         USING SPLINK,R2      ADDRESSABILITY                   @VA11232 01085825
+         CALL  DMKPGTVG       GET A VIRTUAL BUFFER             @VA11232 01085850
+         LTR   R1,R1          DID WE GET A BUFFER ?            @VA11232 01085875
+         BZ    TRYLAST        NO, MUST START BY READING SFBLAST@VA11232 01085900
+         TRANS 2,1,OPT=(BRING,DEFER,LOCK,SYSTEM),IOER=RELVIRT  @VA11232 01085925
+         CALL  DMKRPAGT,PARM=(BRING+SYSTEM) BRING IN START CCPD@VA11232 01085950
+         BNZ   RELBUFF        BUFFER READ ERROR                @VA11232 01085975
+         L     R3,SPRMISC     START CCPD SAVED IN SPRMISC?     @VA11232 01086000
+         SLR   R0,R0          ...                              @VA11232 01086025
+         CALL  DMKRPAGT,PARM=SYSTEM RELEASE STORAGE PAGE       @VA11232 01086050
+         CALL  DMKPGTVR       RELEASE VIRTUAL BUFFER           @VA11232 01086075
+         LTR   R3,R3          SPRMISC CONTAIN START CCPD ?     @VA11232 01086100
+         BZ    TRYLAST        NO, MUST USE SFBLAST             @VA11232 01086125
+         ST    R3,SFBSTART    BE SAFE AND USE SPRMISC          @VA11232 01086150
+         B     DELSTART       CONTINUE TO DEALLOCATE CCPDS     @VA11232 01086175
+         DROP  R2                                              @VA11232 01086200
+         SPACE                                                          01086225
+RELBUFF  SLR   R0,R0          ...                              @VA11232 01086250
+         CALL  DMKRPAGT,PARM=SYSTEM RELEASE STORAGE PAGE       @VA11232 01086275
+RELVIRT  CALL  DMKPGTVR       RELEASE VIRTUAL BUFFER           @VA11232 01086300
+         SPACE                                                          01086325
+TRYLAST  MVC   SFBSTART,SFBLAST POINT TO LAST BUFFER OF FILE   @VA11232 01086350
          OI    DELSW,X'20'         INDICATE READING LAST BUFFER         01087000
          SPACE 2                                                        01088000
 DELSTART EQU   *  HERE TO BEGIN DELETING THE FILE                       01089000
@@ -1323,13 +1363,9 @@ DREXIT   EQU   *  HERE TO FRET IOBLOK AND EXIT TO DISPATCHER            01217000
          CALL  DMKFRET                                                  01220000
          SPACE                                                          01221000
          MVI   DELSW,X'00'         INDICATE DELETE ROUTINE FINISHED     01222000
-         LR    R15,R12        ADDRESS OF THIS MODULE INTO R15           01223000
-         N     R15,=A(X'FFF000')   REMOVE DISPLACEMENT VALUE            01224000
-         SRL   R15,8          DIVIDE BY 256 TO GET INDEX TO CORE-TBL    01225000
-         AL    R15,ACORETBL   GET ADDRESS OF CORE-TABLE ENTRY           01226000
-         L     R15,0(,R15)    PICK UP THE FORWARD POINTER               01227000
-         CL    R15,=C'*CP*'   IS THIS MODULE RESIDENT                   01228000
-         BE    DRDSP          YES - DO NOT UNLOCK IT                    01229000
+         L     R15,APAGCP     GET END OF RESIDENT NUCLEUS      @VA11259 01223100
+         CR    R12,R15        IS MODULE RESIDENT ?             @VA11259 01223200
+         BL    DRDSP          YES...DON'T UNLOCK IT            @VA11259 01223300
          LR    R2,R12              UNLOCK PAGE                          01230000
          CALL  DMKPTRUL            ..                                   01231000
 DRDSP    EQU   *  HERE TO EXIT TO DISPATCHER                            01232000
@@ -1346,7 +1382,7 @@ HDTABLE  DS    0H                  TABLE OF HEAD NUMBER FOR 2314 PAGES  01236000
 SEEK     CCW   7,DELADDR-IOBLOK,CC,6 MODEL SEEK CCW                     01243000
 SEARCH   CCW   49,DELCYL-IOBLOK,CC,5 MODEL SEARCH CCW                   01244000
 TIC      CCW   8,DELSERCH-IOBLOK,0,0 MODEL TIC CCW                      01245000
-READ     CCW   6,*-*,SILI,8        MODEL READ CCW                       01246000
+READ     CCW   6,*-*,SILI,12  MODEL READ CCW                   @VA11232 01246000
          SPACE 2                                                        01247000
 DELSW    DC    X'00'               SWITCH FOR DELETE ROUTINE            01248000
          LTORG                                                          01249000

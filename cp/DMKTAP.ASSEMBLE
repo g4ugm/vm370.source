@@ -189,6 +189,7 @@ DMKTAP   CSECT                                                          00187000
          EXTRN DMKIOEST       STATISTICAL COUNTER UPDATE       @VA03757 00189000
          EXTRN DMKIOSQR                                        @V407466 00190000
          EXTRN DMKPTRUL                                        @V407466 00191000
+         EXTRN DMKSTKCP                                        @VA12941 00191100
          USING SAVEAREA,R13                                             00192000
          USING PSA,R0                                                   00193000
          USING RDEVBLOK,R8                                              00194000
@@ -297,15 +298,15 @@ INTREQID EQU   *                                               @VM08812 00287000
          CLI   0(R4),X'0F'    IS THIS A REWIND-UNLOAD CMD      @VM08812 00297000
          BE    FINISH         YES, THIS IS A NORMAL CONDITION  @VM08812 00298000
          OI    IOERFLG1,IOERPEND SET DEVICE END PENDING FLAG   @VM08812 00299000
+         OI    RDEVSTAT,RDEVNRDY MARK DEVICE NOT READY         @VA12941 00299100
          OI    IOERIND3,IOERACT TURN ON ACTION FLAG FOR        @VM08812 00300000
 *                             OPERATOR                                  00301000
          MVI   IOERNUM,INTREQU INDICATE INTERV. REQUEST MSG.   @VM08812 00302000
          B     CALLWTR        GO CALL MESSAGE WRITER           @VM08812 00303000
-PENDING  EQU   *                                               @VM08812 00304000
+PENDING  TM    IOERFLG2,IOERMSW MESSAGE WRITER IN PROGRESS     @VA12941 00304000
+         BO    BLDCPEX        WAIT FOR MSW TO FINISH           @VA12941 00304100
          NI    IOERFLG1,X'FF'-IOERPEND TURN OFF D.E. PENDING   @VM08812 00305000
          NI    RDEVSTAT,X'FF'-RDEVNRDY RESET NOT READY FLAG    @VM08812 00306000
-         TM    IOERFLG2,IOERMSW TOO BUSY FOR DE NOW?           @VA04628 00307000
-         BO    EXIT4          YES, LEAVE                       @VA04628 00308000
          BAL   R9,CKIOB       FRET IOERBLOK                    @VA04628 00309000
          NI    IOBFLAG,X'FF'-IOBERP CLEAR ERP IN CONTROL FLAG  @VA04628 00310000
          OI    IOBFLAG,IOBRSTRT SET IOS RESTART FLAG           @VM08812 00311000
@@ -331,6 +332,34 @@ TRYREJ   EQU   *                                               @VM08812 00320000
          LR    R4,R2          WITH REG 4, PLEASE               @VA04842 00331000
          BAL   R5,CTLWRTRD    CHECK FOR WRITE & CONTROL CCW    @VM08812 00332000
          B     RDREP          GO TO READ REPOSITION SECTION    @VM08812 00333000
+         SPACE 1                                                        00333025
+BLDCPEX  LA    R0,CPEXSIZE    SIZE OF CPEXBLOK                 @VA12941 00333050
+         CALL  DMKFREE        GET STORAGE FOR CPEXBLOK         @VA12941 00333075
+         USING CPEXBLOK,R1    CPEXBLOK ADDRESSABILIY           @VA12941 00333100
+         XC    CPEXBLOK(CPEXSIZE*8),CPEXBLOK CLEAR BLOCK       @VA12941 00333125
+         MVC   CPEXR0(CPEXR12-CPEXR0),SAVER0 SETUP CPEXBLOK    @VA12941 00333150
+         LR    R15,R12        INCREM R12 BY 8 FOR TAPER REENTRY@VA12941 00333175
+         A     R15,F8         ...                              @VA12941 00333200
+         ST    R15,CPEXR12    SAVE NEW R12 IN CPEXBLOK         @VA12941 00333225
+         ST    R13,CPEXR13    R13 AS WELL                      @VA12941 00333250
+         ST    R15,CPEXADD    CPEXBLOK RETURN ADDRESS          @VA12941 00333300
+         DROP  R1             ...                              @VA12941 00333325
+         L     R5,IOERCPEX    ANCHOR FOR CPEXBLOKS             @VA12941 00333350
+         USING CPEXBLOK,R5    ADDRESSABILITY                   @VA12941 00333375
+         LTR   R5,R5          ANY CPEXBLOKS ON QUEUE           @VA12941 00333400
+         BNZ   NEXTCPEX       YES, FIND END OF CHAIN           @VA12941 00333425
+         ST    R1,IOERCPEX    ADD TO THE CHAIN                 @VA12941 00333450
+         B     GOTODSP        GOTO THE DISPATCHER              @VA12941 00333475
+         SPACE 1                                                        00333500
+NEXTCPEX L     R14,CPEXFPNT   GET POINTER TO NEXT ONE ON CHAIN @VA12941 00333525
+         LTR   R14,R14        END OF QUEUE                     @VA12941 00333550
+         BZ    QUEUE          END OF QUEUE - ADD CPEXBLOK      @VA12941 00333575
+         LR    R5,R14         CONTINUE TO LOOK FOR END         @VA12941 00333600
+         B     NEXTCPEX       ...                              @VA12941 00333625
+         SPACE 2              ...                              @VA12941 00333650
+QUEUE    ST    R1,CPEXFPNT    ADD CPEXBLOK TO QUEUE AT END     @VA12941 00333675
+GOTODSP  GOTO  DMKDSPCH       EXIT TO DISPATCHER FOR NOW       @VA12941 00333700
+         DROP  R5             DROP CPEXBLOK ADDRESSABILITY     @VA12941 00333725
 TRYLDPNT EQU   *                                               @VM08812 00334000
          MVI   IOERNUM,LDPNT  INDICATE LOAD POINT ERROR MESSAGE@VM08812 00335000
          TM    IOERDATA+1,LDPONT IS THIS AT LOAD POINT         @VM08812 00336000
@@ -749,13 +778,21 @@ TSTWLR   EQU   *                                               @VM08812 00737000
          NI    IOERFLG1,X'FF'-IOERSUPP RESET SUPPRESS FLAG     @VM08812 00748000
 SPFWD    EQU   *                                               @VM08812 00749000
          MVI   IOERNUM,DATAER INDICATE DATA CHECK MESSAGE      @VM08812 00750000
-         CLC   IOBRCNT,=H'80' ERROR COUNT REACH 80             @VM08812 00751000
-         BNL   CALLWTR1       YES, GO WRITE ERROR MESSAGE      @VM08812 00752000
+         CLC   IOBRCNT,=H'81' ERROR COUNT REACH 81             @VA13107 00751100
+         BE    FORWARD        IF OVER 81, GO FORWARD ONE RECORD@VA13107 00751200
+         BH    CALLWTR1       IF OVER 81, WRITE ERROR RECORD   @VA13107 00751300
          ICM   R3,15,IOBIOER  IS THERE A SECOND IOERBLOK       @VM08812 00753000
          BZ    CHANPRG1       NO, BUILD CHANNEL PROG. & RETRY  @VM08812 00754000
          MVC   IOERADR-IOERBLOK(1,R7),IOERDATA-IOERBLOK+2(R3)  @VM08812 00755000
 *                             GET TRACK-IN-ERROR DATA                   00756000
          B     CHANPRG1       GO BUILD CHANNEL PROGRAM & RETRY @VM08812 00757000
+FORWARD  DS    0H                                              @VA13107 00757100
+         LH    R4,IOBRCNT     LOAD ERROR COUNT                 @VA13107 00757200
+         LA    R4,1(R4)       AND INCREASE BY 1                @VA13107 00757300
+         STH   R4,IOBRCNT     STORE RESULT IN IOBRCNT          @VA13107 00757400
+         BAL   R5,CHANFSR     SET UP FORWARD SPACE CCW         @VA13107 00757500
+         NI    IOERFLG1,X'FF'-IOERFSR NO FORWARD FLAG          @VA13107 00757600
+         B     RETRY1         GO RERTY OPERATION               @VA13107 00757700
 ENTRYNSK EQU   *                                               @VM08812 00758000
          TM    IOERFLG2,IOERRBK IS THIS A READ BACKWARD CMD    @VM08812 00759000
          BZ    TSTFLAG1       NO, CHECK FOR OPPOSITE RECOVERY  @VM08812 00760000
@@ -825,9 +862,17 @@ CALLWTR  EQU   *                                               @VM08812 00818000
          TM    IOERFLG1,IOERPEND WAS INTERVENTION REQUEST SET  @VM08812 00824000
          BZ    NOTINT         NO, CHECK OPERATOR RESPONSE      @VM08812 00825000
          NI    IOBFLAG,X'FF'-IOBRSTRT TURN OFF RESTART FLAG    @VM08812 00826000
-         OI    RDEVSTAT,RDEVNRDY SET DEVICE INTERVENTION       @VM08812 00827000
-*                             REQUIRE                                   00828000
-         B     EXIT4          GO RETURN TO IOS                 @VM08812 00829000
+         L     R1,IOERCPEX    SEE IF DEVICE END I/O TO REDRIVE @VA12941 00827000
+         LTR   R1,R1          ANY CPEXBLOKS ON QUEUE           @VA12941 00827100
+         BZ    TAPEXIT4       NO DE I/O TO REDRIVE             @VA12941 00827200
+UNSTKNXT L     R5,CPEXFPNT-CPEXBLOK(R1) NEXT CPEX ON CHAIN     @VA12941 00827300
+         CALL  DMKSTKCP       STACK CPEXBLOK                   @VA12941 00827400
+         LTR   R5,R5          ANY MORE ON CHAIN                @VA12941 00827500
+         BZ    CLEARPNT       NO, ZERO ANCHOR AND EXIT         @VA12941 00827600
+         LR    R1,R5          CPEXBLOK ADDRESS TO R5           @VA12941 00827700
+         B     UNSTKNXT       STACK THEM ALL                   @VA12941 00827800
+CLEARPNT ST    R5,IOERCPEX    CLEAR ANCHOR                     @VA12941 00827900
+TAPEXIT4 B     EXIT4          EXIT                             @VA12941 00828000
 NOTINT   EQU   *                                               @VM08812 00830000
          TM    IOERIND4,IOERSTRT WAS OPERATOR RESPONSE (RETRY) @VM08812 00831000
          BZ    IGNORE         NO, CHECK FOR IGNORE AND CANCEL  @VM08812 00832000
@@ -890,8 +935,15 @@ GETCUCCW EQU   *                                               @VM08812 00888000
          L     R4,IOERCSW     GET FAILING CCW ADDRESS PLUS 8   @VM08812 00889000
          LA    R4,0(R4)       CLEAR HIGH ORDER BYTE            @VM08812 00890000
          S     R4,F8          GET FAILING CCW ADDRESS          @VM08812 00891000
-         BM    NOCCW          IF NEGATIVE, WRITE ERROR MESSAGE @VM08812 00892000
-         BR    R5             RETURN TO IN LINE CODE           @VM08812 00893000
+         BM    TESTCCW        TEST CCW ADDRESS                 @VA12173 00892100
+         BR    R5             RETURN TO INLINE CODE            @VA12173 00892200
+TESTCCW  DS    0H                                              @VA12173 00892300
+         L     R4,IOBMISC2    GET SAVE AREA BASE ADDRESS       @VA12173 00892400
+         L     R4,SAVEWRK8-SAVERETN(R4) GET SAVED CSW          @VA12173 00892500
+         LA    R4,0(R4)       CLEAR HIGH ORDER BYTE            @VA12173 00892600
+         S     R4,F8          GET FAILING CCW ADDRESS          @VA12173 00892700
+         BM    NOCCW          IF STILL NEG WRITE ERR. MSG.     @VA12173 00892800
+         BR    R5             RETURN TO INLINE CODE            @VA12173 00892900
 ******************************************************************      00894000
          SPACE 4                                                        00895000
 CTLWRTRD EQU   *                                               @VM08812 00896000
@@ -1150,8 +1202,7 @@ DMKTAPRL DS    0H                                              @VA07763 01121000
          USING IOBLOK,R10                                      @V407466 01149000
          XC    IOBLOK(IOBSIZE*8),IOBLOK CLEAR BLOCK            @V407466 01150000
          ST    R10,IOBLINK    LINK TO ITSELF                   @V407466 01151000
-         L     R1,ASYSVM      LOAD ADDR OF SYSTEM VMBLOK       @V407466 01152000
-         ST    R1,IOBUSER     STORE IN IOBLOK                  @V407466 01153000
+         ST    R11,IOBUSER    STORE VMBLOK                     @VA10443 01152500
          STH   R2,IOBRADD     STORE ADDR PASSED FROM DMKCPS    @V407466 01154000
 * ACQUIRE CPEXBLOK TO STORE CALLER'S REGISTERS                          01155000
          LA    R0,CPEXSIZE    SIZE OF CPEXBLOK IN DWDS.        @V407466 01156000

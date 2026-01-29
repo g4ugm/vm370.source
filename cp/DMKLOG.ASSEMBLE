@@ -82,7 +82,8 @@ LOG      TITLE 'DMKLOG     (CP)        VM/370 - RELEASE 6'              00001000
 *        DMKQCNSY - SYNCHRONIZE CONSOLE ACTIVITY                        00082000
 *        DMKSCHDL - MAKE AN AUTOLOGGED USER RUNNABLE                    00083000
 *        DMKUSOFF - FORCE OFF AN ILL FATED AUTOLOGGED USER              00084000
-*                                                                       00085000
+*        DMKLOHRC - SPLIT FROM THIS ROUTINE. RECONNECT DISC USER        00085000
+*                                                                       00085500
 * EXTERNAL REFERENCES -                                                 00086000
 *                                                                       00087000
 *        DMKSYSNM - NUMBER OF ACTIVE USERS                              00088000
@@ -473,6 +474,7 @@ DMKLOG   CSECT                                                          00448000
          EXTRN DMKFRERC                                        @V407466 00473000
          EXTRN DMKSLC                                          @VA07315 00474000
          EXTRN DMKSYSJR,DMKJRLLO                               @V60BBBB 00475000
+         EXTRN DMKLOHRC          RECONNECT DISC USER           @VA13723 00475500
          SPACE                                                          00476000
          USING PSA,R0         FOR ALL ENTRIES                           00477000
          USING VMBLOK,R11          "                                    00478000
@@ -561,7 +563,9 @@ LOG03    DS    0H             OPTION IS 'MASK' -                        00552000
          BNE   LOG02          LET MASK BE ENJOYED BY ALL       @V60BBBB 00561000
          TM    RDEVTYPE,TYPBSC IS THIS A BISYNC LINE           @V2D3931 00562000
          BO    LOG03A         YES, ...                         @V2D3931 00563000
+         OI    RDEVSTA3,RDEVATSW PREVENT ATTN DURING SWITCH    @VA10462 00563500
          SWITCH              MAKE SURE WE'RE ON THE IO PROC    @V4075A0 00564000
+         NI    RDEVSTA3,X'FF'-RDEVATSW ALLOW ATTN AFTER SWITCH @VA10462 00564500
          NI    RDEVFLAG,255-RDEVPSUP  FLAG TERMINAL:  NO PRINT-SUPPRESS 00565000
          B     LOG02          GET NEXT FIELD IF ANY                     00566000
 LOG03A   EQU   *              CHECK PRINT SUPPRESS FOR 3705 DEV@V200820 00567000
@@ -644,6 +648,13 @@ LOG07    EQU   *              START BUILDING VIRTUAL MACHINE   @V200820 00642000
          CALL  DMKFREE        PLUS 2 EXTRA WORDS FOR USE BY DMKLNKSB    00644000
          LR    R9,R1       REMEMBER THE ADDRESS IN R9.                  00645000
          OI    SAVEWRK1,R9FRE  SIGNAL:  RETURN FREE STORAGE AT EXIT.    00646000
+         TM    SAVEWRK1,AUTOLOG+PSWRDCK AUTOLOG CMD?           @VA09172 00646100
+         BNZ   LOG070AA       YES, BYPASS FOLLOWING CHECKS     @VA09172 00646200
+         CALL  DMKQCNSY       FINISH UP ALL CONSOLE REQUESTS   @VA09172 00646300
+         L     R8,VMTERM      GET TERMINAL RDEVBLOK ADDRESS    @VA09172 00646400
+         LTR   R8,R8          TERMINAL STILL THERE?            @VA09172 00646500
+         BZ    LOGEXIT        NO, ABORT LOGON                  @VA09172 00646600
+LOG070AA DS    0H                                              @VA09172 00646700
          LA    R0,8           POINT TO 8-BYTE USERID                    00647000
          LA    R1,UDIRUSER    ...                                       00648000
          CALL  DMKSCNAU       SEE IF THIS USERID IS ACTIVE              00649000
@@ -666,118 +677,16 @@ LOG070A  EQU   *                                               @VA02849 00661000
          EJECT                                                          00666000
 * GET RID OF R11 VMBLOK IN FAVOR OF R10 (DISCONNECTED/OPERATOR) VMBLOK: 00667000
 * NOTE - WE KNOW THERE ARE AT LEAST 2 VMBLOKS (R10 & R11) IN THE CHAIN  00668000
-LOG07A   EQU   *                                               @V200820 00669000
-         TM    SAVEWRK1,AUTOLOG+PSWRDCK AUTOLOG CMD?           @VA05283 00670000
-         BNZ   LOG07AB        YES--BYPASS THE FOLLOWING CHECKS @VA05283 00671000
-         NI    VMOSTAT-VMBLOK(R10),X'FF'-VMDISC PREVENT 2ND    @VA07471 00672000
-*                             USER FROM RECONNECT                       00673000
-         CALL  DMKQCNSY       FINISH UP ALL CONSOLE REQUESTS.  @VA01731 00674000
-         OI    VMOSTAT-VMBLOK(R10),VMDISC RESET VMDISC         @VA07471 00675000
-         L     R8,VMTERM      TERMINAL RDEVBLOK ADDRESS        @V200820 00676000
-         LTR   R8,R8          IS TERMINAL STILL THERE?         @VA04453 00677000
-         BZ    LOGEXIT        NO--ABORT RECONNECT              @VA04453 00678000
-         USING RDEVBLOK,R8                                     @V200820 00679000
-         ST    R8,VMTERM-VMBLOK(,R10) SET IN "OLD" USER VMBLOK @V200820 00680000
-         CLI   RDEVTYPC,CLASSPEC        LOGON VIA 370X NCP  ?  @V200820 00681000
-         BE    LOG07AA                  YES - DIFFERENT        @V200820 00682000
-         SWITCH              MAKE SURE WE'RE ON THE IO PROC    @V4075A0 00683000
-         CLI   RDEVTYPC,CLASTERM IS THIS A TERMINAL CLASS      @V2D3931 00684000
-         BNE   *+12           NO, CONTINUE                     @V2D3931 00685000
-         TM    RDEVTYPE,TYPBSC IS THIS A BISYNC LINE           @V2D3931 00686000
-         BO    LOG07AA        YES, ...                         @V2D3931 00687000
-         ST    R10,RDEVUSER   RESET RDEVBLOK POINTER TO VMBLOK @V200820 00688000
-         L     R15,RDEVAIOB   CHECK FOR AN ACTIVE IOBLOK       @V200820 00689000
-         LTR   R15,R15        IS THERE ONE RIGHT NOW ?         @V200820 00690000
-         BNP   LOG07AB        NO -- GO GET RID OR R11 VMBLOK   @V200820 00691000
-         ST    R10,IOBUSER-IOBLOK(,R15)  IOBLOK PTR TO VMBLOK  @V200820 00692000
-         B     LOG07AB                                         @V200820 00693000
-LOG07AA  EQU   *              RECONNECT VIA 3705 TERMINAL      @V200820 00694000
-         LH    R7,VMTRMID     RESOURCE I.D. FROM LOGON VMBLOK  @V200820 00695000
-         STH   R7,VMTRMID-VMBLOK(,R10)  SET INTO GR10 VMBLOK   @V200820 00696000
-         N     R7,F4095       EXTRACT THE ACTUAL RESOURCE I.D. @V200820 00697000
-         MH    R7,=AL2(NICSIZE*8)  COMPUTE INDEX FOR NICBLOK   @V200820 00698000
-         AL    R7,RDEVNICL    GR7 = ADDRESS OF TERMINAL NICBLOK@V200820 00699000
-         USING NICBLOK,R7                                      @V200820 00700000
-         ST    R10,NICUSER    RESET NICBLOK POINTER TO VMBLOK  @V200820 00701000
-         DROP  R8,R7                                           @V200820 00702000
-LOG07AB  EQU   *              RELEASE GR11 VMBLOK              @V200820 00703000
-         TM    VMOSTAT,VMSLEEP LOGONXXX ASLEEP ???             @VA07417 00704000
-         BNO   LOG07AC        NO, REAL FAST SKIP               @VA07417 00705000
-         L     R1,VMDELAY     GET POSSIBLE TRQBLOK POINTER     @VA07417 00706000
-         LTR   R1,R1          WAS SLEEP WITH TIME INTERVAL ??  @VA07417 00707000
-         BNP   LOG07AC        NO, STILL EASY                   @VA07417 00708000
-         CALL  DMKSCHRT       PREVENT WAKEUP TO LOGONXXX       @VA07417 00709000
-         LA    R0,TRQBSIZE    AND FRET TRQBLOK                 @VA07417 00710000
-         CALL  DMKFRET                                         @VA07417 00711000
-LOG07AC  EQU   *              LOGONXXX TRQBLOKS CLEANED UP     @VA07417 00712000
-         L     R5,ASYSVM      LET R5 START FROM THE SYSTEM VMBLOK       00713000
-         L     R3,VMPNT-VMBLOK(,R5) AND R3 STARTS WITH THE FIRST USER   00714000
-         L     R7,VMPNT       GET POINTER TO NEXT VMBLOK                00715000
-LOG07B   C     R11,RUNUSER    DOES RUNUSER BY ANY CHANCE POINT TO US ?  00716000
-         BNE   LOG08          NO (WE DIDN'T THINK IT WOULD).            00717000
-         ST    R5,RUNUSER     YES, USE SYSTEM VMBLOK (NOT FRET'D BLOCK) 00718000
-LOG08    LR    R4,R3          REMEMBER PREVIOUS BLOCK                   00719000
-         L     R3,VMPNT-VMBLOK(,R3) GET PNTR TO NEXT BLOCK              00720000
-         CLR   R3,R11         IS IT US ?                                00721000
-         BNE   LOG08          IF NOT, KEEP LOOKING.                     00722000
-         ST    R7,VMPNT-VMBLOK(,R4) PATCH CHAIN TO LEAVE US OUT         00723000
-         ST    R4,VMPNT-VMBLOK(,R5) STORE NEW ANCHOR FOR CHAIN IN SYSVM 00724000
-         L     R1,VMDFTPNT    GET ADDRESS OF DEFERRED TASK     @V4M0148 00725000
-         LTR   R1,R1          IS THERE ONE?                    @V4M0148 00726000
-         BZ    NODFT          NO, SKIP FRET OF DEFERRED TASK   @V4M0148 00727000
-         LA    R0,CPEXSIZE    GET SIZE OF DEFERRED TASK        @V4M0148 00728000
-         CALL  DMKFRET        FRET DEFERRED TASK               @V4M0148 00729000
-NODFT    DS    0H                                              @V4M0148 00730000
-         LR    R1,R11         'NEW' VMBLOK INTO R1                      00731000
-         LR    R11,R5        SWITCH TO ASYSVM                  @V407593 00732000
-         CHARGE START                                          @V407593 00733000
-         DROP R11                                              @V407593 00734000
-         USING VMBLOK,R10                                      @V407593 00735000
-         LA    R0,VMBSIZE     NOW RETURN THE ONE WE WON'T BE USING      00736000
-         CALL  DMKFRET        TO FREE STORAGE                           00737000
-         NI    VMOSTAT,255-VMDISC  RESET DISCONNECTED BIT               00738000
-         ST    R10,SAVER11  RETURN RECONNECTED VMBLOK TO CALLER@V407593 00739000
-         OI    VMRSTAT,VMCFWAIT PUT HIM IN CF WAIT             @VA02059 00740000
-         OI    VMOSTAT,VMCF   .... AND FLAG CONS FUNC RUNNING  @VA02811 00741000
-         EJECT                                                          00742000
-         TM    SAVEWRK1,RECON WAS THIS A RECONNECT ?                    00743000
-         BZ    LOG8A          IF NO, INITIALIZE TIMERS                  00744000
-         DROP R10                                              @V407593 00745000
-         LR    R1,R10         SWITCH TO RECONNECTED VMBLOK     @V407593 00746000
-         USING VMBLOK,R11                                      @V407593 00747000
-         BAL   R5,SWVM        GO TO SWITCH VMBLOKS             @V4M0193 00748000
-         L     R1,VMDELAY     CHECK FOR DISCONNECT TRQBLOK     @V200820 00749000
-         LTR   R1,R1          IS THERE A PENDING INTERRUPT ?   @V200820 00750000
-         BNP   LOG50          NO -- CONTINUE RECONNECT PROCESS @V200820 00751000
-         CALL  DMKSCHRT       REMOVE TRQBLOK FROM REQUEST QUEUE@V200820 00752000
-         LA    R0,TRQBSIZE    SIZE OF BLOCK IN DOUBLE-WORDS    @V200820 00753000
-         CALL  DMKFRET        RETURN TRQBLOK TO FREE STORAGE   @V200820 00754000
-         SLR   R1,R1                                           @V200820 00755000
-         ST    R1,VMDELAY     CLEAR VMBLOK POINTER TO BLOCK    @V200820 00756000
-         NI    VMOSTAT,255-VMSLEEP REMOVE USER FROM SLEEP MODE @V200820 00757000
-         B     LOG50          GO COMPLETE RECONNECT PROCESS    @V200820 00758000
-         DROP R11                                              @V407593 00759000
-         USING VMBLOK,R10                                      @V407593 00760000
-LOG8A    MVC   VMTIMER,=X'FFFFFF00'          ...                        00761000
-*        SET VARIOUS FLAGS, ETC. SAME AS DMKBLDVM WOULD HAVE DONE       00762000
-         OI    VMOSTAT,VMCF   FLAG AS EXEC. CONS. FUNC....     @VA02059 00763000
-         OI    VMRSTAT,VMLOGON ...LOGGING ON AND...            @VA02059 00764000
-         OI    VMMLEVEL,VMMSGON+VMWNGON+VMMCODE+VMMTEXT        @VA02059 00765000
-         OI    VMMLVL2,VMMIMSG AND THIS                        @V2A3663 00766000
-         MVI   VMPSW+1,WAIT             ...                             00767000
-         MVC   VMVTIME,ZEROES ZERO OUT TOTAL PROBLEM TIME. FOR START    00768000
-         MVC   VMTMOUTQ,=X'7FFFFFFFFFFFF000' INITIALIZE VMTMOUTQ        00769000
-         MVC   VMTTIME(16),VMTMOUTQ     VMTTIME AND VMTMINQ             00770000
-         TM    APSTAT1,APUOPER IS THIS AN AP SYSTEM?           @V4M0203 00771000
-         BZ    LOG8B          NO, SKIP INIT OF CPTIME & APTIME @V4M0203 00772000
-         MVC   VMCPTIME,HALFTIME  INITIALIZE VMCPTIME          @V4M0203 00773000
-         MVC   VMAPTIME,HALFTIME  INITIALIZE VMAPTIME          @V4M0203 00774000
-LOG8B    DS    0H                                              @V4M0203 00775000
-         DROP R10                                              @V407593 00776000
-         LR    R1,R10         SWITCH TO NEW VMBLOK             @V407593 00777000
-         USING VMBLOK,R11                                      @V407593 00778000
-         BAL   R5,SWVM        GO TO SWITCH VMBLOKS             @V4M0193 00779000
-         BR    R6             AND RETURN TO LOG11A.                     00780000
+LOG07A   DS    0H                                              @VA13723 00669000
+         L     R2,SAVEWRK1    LOAD STATUS BITS FOR DMKLOHRC    @VA13723 00679000
+         LR    R1,R10         ADDR OF DISCONNECTED VMBLOK      @VA13723 00689000
+         CALL  DMKLOHRC       GO RECONNECT THE USER            @VA13723 00699000
+         ST    R11,SAVER11    PASS RETURNED VMBLOK TO CALLER   @VA13723 00709000
+         B     *+4(R1)        BRANCH ON RETURN CODE            @VA13723 00719000
+         B     LOG50          RC=0, CONTINUE RECONNECT         @VA13723 00729000
+         B     LOGEXIT        RC=4, TERMINAL GONE, ABORT       @VA13723 00739000
+         B     0(R6)          RC=8, OPERATOR IS LOGGING ON     @VA13723 00749000
+         DROP  R7,R8                                           @VA13723 00759000
          EJECT                                                          00781000
 * USERID IN DIRECTORY, PASSWORD CORRECT, & NOT LOGGED ON ELSEWHERE:     00782000
 LOG10    DS    0H                                              @V408246 00783000
@@ -851,7 +760,9 @@ NOAFF    EQU   *                                               @V4075A0 00820000
          L     R7,VMPNT       GET PNTR TO NEXT VMBLOK FROM R11 VMBLOK   00851000
          ST    R10,VMPNT      PATCH CHAIN TO INCLUDE OPERATOR'S VMBLOK  00852000
          ST    R7,VMPNT-VMBLOK(,R10)    AND ...                         00853000
-         BAL   R6,LOG07A      GET RID OF R11 VMBLOK, THEN RETURN HERE:  00854000
+*                                     USER FROM RECONNECTING            00854400
+         CALL  DMKQCNSY       FINISH UP ALL CONSOLE REQUESTS   @VA09172 00854500
+         BAL   R6,LOG07A   CONTINUE CONNECT PROCESSING         @VA13723 00854600
          TM    SAVEWRK1,AUTOLOG+PSWRDCK AUTOLOG CMD?           @VA05283 00855000
          BNO   LOG11A         NO--CONTINUE                     @VA05283 00856000
          OI    VMOSTAT,VMDISC SHOULD BE DISCONNECTED           @VA05283 00857000
@@ -990,6 +901,7 @@ LOG20    LA    R1,UDEVDISP    R1 POINTS TO DISPLACEMENT OF NEXT BLOCK   00988000
          CALL  DMKUDRRD       READ IN NEXT UDEVBLOK                     00990000
          BNZ   LOG49          STOP READING IF "EOF" (CC NOT ZERO)       00991000
          OI    SAVEWRK1,NONFATAL  OK - ANY ERRORS NONFATAL FROM NOW ON  00992000
+         OI    VMSPMFLG,VMLOGON2 INDICATE VDEV GOTTEN ON LOGON @VA13304 00992500
          LH    R3,UDEVADD     VIRTUAL DEVICE ADDRESS INTO R3            00993000
          LR    R1,R3          VIRTUAL DEVICE INTO R1,                   00994000
          CALL  DMKSCNVU       SEE IF WE ALREADY HAVE IT                 00995000
@@ -1028,21 +940,22 @@ LOG21    DS    0H                                                       01019000
          SPACE                                                          01028000
 LOG24    DS    0H             ATTACH A DEDICATED DEVICE:                01029000
          LH    R1,UDEVLINK    GET REAL DEV ADDRESS                      01030000
+         XC    SAVEWRK9,SAVEWRK9   CLEAR A FLAG FIELD          @VA11344 01030500
 *                                                                       01031000
 *        TEST THE VARIOUS COMBINATIONS THAT INDICATE THAT               01032000
 *        MSS ACTIVITY MAY BE REQUIRED. IF SO, CALL THE                  01033000
 *        APPROPRIATE ENTRY POINT IN DMKSSS.                             01034000
 *                                                                       01035000
-         TM    UDEVFTR,VIRTUAL DOES VIRTUAL MACHINE WANT       @V60B6B8 01036000
-*                               A VIRTUAL VUA                           01037000
-         BO    CALLMSSA       YES, CALL DMKSSS                 @V60B6B8 01038000
          LTR   R1,R1          WAS AN 'RADDR' SPECIFIED         @V60B6B8 01039000
-         BZ    NORADDR        NO, GO TEST FOR 'VOLSER'         @V60B6B8 01040000
+         BM    NORADDR        NO, CHECK FOR VOLSER             @VA11411 01040010
          CLI   UDEVVSER,BLANK IS THERE AN 'RADDR' AND 'VOLSER' @V60B6B8 01041000
-         BNE   CALLMSSB       YES, MUST BE MSS VOLUME          @V60B6B8 01042000
-         B     LOGDEV         'RADDR', NO VOLSER               @V60B6B8 01043000
-NORADDR  EQU   *              NO 'RADDR' GIVEN, MUST BE        @V60B6B8 01044000
-*                             'VOLSER'                                  01045000
+         BE    LOGDEV         'RADDR',NO VOLSER                @VA10511 01042000
+         TM    UDEVFTR,VIRTUAL VIRTUAL MACHINE WANTS VUA       @VA10511 01042500
+         BO    CALLMSSA       CALL DMKSSSL1                    @VA10511 01043000
+         B     CALLMSSB       CALL DMKSSSL2                    @VA10511 01043500
+NORADDR  EQU   *              NO RADDR GIVEN                   @VA10511 01044000
+         TM    UDEVFTR,VIRTUAL VIRTUAL MACHINE WANTS VUA       @VA10511 01044500
+         BO    ERROR93        DIRECTORY ERROR                  @VA10511 01045000
          CLI   UDEVVSER,BLANK IS 'VOLSER' FIELD BLANK?         @V60B6B8 01046000
          BNE   FINDVOL        NO, LOOK FOR MOUNTED VOLUME      @V60B6B8 01047000
          B     ERROR93        DIRECTORY ERROR,                 @V60B6B8 01048000
@@ -1062,6 +975,11 @@ NXTRBLOK LA    R5,RDEVSIZE*8(,R5) POINT TO NEXT RDEVBLOK       @VA04098 01060000
          B     CALLMSSC       SEE IF WE CAN MOUNT A 3330V      @V60B6B8 01062000
 LOGDEV   CALL  DMKSCNRU       FIND REAL DEV BLOK                        01063000
          BNZ   ERROR90        GIVE ERROR MESSAGE IF NOT FOUND.          01064000
+         LR    R5,R8          GET RDEVBLOK ADDR INTO R5        @VA11344 01064100
+         TM    RDEVFTR,VIRTUAL THIS AN MSS VIRTUAL VUA?        @VA11344 01064200
+         BZ    CHK3330V      NO - THEN DON'T TURN OFF FLAG     @VA11344 01064300
+         L     R5,F4          PUT 'TURN OFF MTD-BY-CP FLAG'    @VA11344 01064400
+         ST    R5,SAVEWRK9    INDICATOR INTO FLAG FIELD        @VA11344 01064500
          LR    R5,R8          RDEVBLOK ADDR TO R5              @VA04098 01065000
 CHK3330V EQU   *              RDEVBLOK FOUND, IS IT 3330V      @V60B6B8 01066000
          CLC   RDEVTYPC(2),=AL1(CLASDASD,TYP3330) IS IT 3330   @V60B6B8 01067000
@@ -1088,11 +1006,24 @@ PRESCAN  CALL  DMKSCNVU       CHECK FOR EXISTANCE OF ALL 8 EXPS@VA04098 01087000
          BZ    LOG20A         BAD NEWS, GO SET UP ERROR MSG    @VA04098 01088000
 NXTADD   LA    R1,1(R1)       INCREMENT TO NEXT EXPOSURE       @VA04098 01089000
          BCT   R4,PRESCAN     KEEP LOOKING.                    @VA04098 01090000
-SETVDS   LR    R1,R5          BASE RDEVBLOK TO R1 FOR VDS      @VA04098 01091000
+SETVDS   DS    0H                                              @VA11344 01091000
+         CLC   SAVEWRK9(4),F4 WE NEED TO TURN OFF 'MTD-BY-CP'? @VA11344 01091100
+         BNE   SETVDS1        NO - THEN DON'T DO IT!           @VA11344 01091200
+         NI    RDEVFLAG,X'FF'-RDEVVMNT  ELSE TURN IT OFF       @VA11344 01091300
+SETVDS1  DS    0H                                              @VA11344 01091400
+         LR    R1,R5          BASE RDEVBLOK TO R1 FOR VDS      @VA11344 01091500
          DROP  R5             NO MORE RDEVBLOK                 @VA04098 01092000
          SPACE                                                          01093000
 LOGATT   CALL  DMKVDSAT       ATTACH DEVICE                             01094000
-         BZ    LOG20          IF SUCCESSFUL, GET NEXT DEVICE.           01095000
+         BNZ   NOCHEK         NO NEED TO CHECK                 @VA11558 01095100
+         TM    UDEVFTR,VIRTUAL IS 3330V PARM NEEDED            @VA11558 01095175
+         BNO   LOG20          NO                               @VA11558 01095250
+         LH    R1,UDEVADD     GET VIRTUAL DEVICE ADDRESS       @VA11558 01095325
+         CALL  DMKSCNVU                                        @VA11558 01095400
+         OI    VDEVFLG2-VDEVBLOK(R8),VDEVVIRT CYL FAULT TO USER@VA11558 01095475
+         OI    RDEVFLAG-RDEVBLOK(R5),RDEV333V DED AS 3330V     @VA11558 01095550
+         B     LOG20          GET NEXT DEVICE                  @VA11558 01095625
+NOCHEK   EQU   *                                               @VA11558 01095700
          CH    R2,=H'32'      INSUFFICIENT FREE STORAGE        @V407466 01096000
          BE    ERROR95        YES, MSG DMKLOG095E              @V407466 01097000
          B     ERROR90        ERROR IF ATTEMPTED ATTACH FAILED.         01098000
@@ -1138,6 +1069,8 @@ LOG30    MVC   0(UDEVSIZE*8,R10),0(R9) MOVE UDEVBLOK TO ALTERNATE AREA  01112000
 *                                                                       01138000
 CALLMSSA EQU   *              DEDICATE A VUA TO USER           @V60B6B8 01139000
          BAL   R4,SAVUDEV     SAVE CURRENT UDEVBLOK            @V60B6B8 01140000
+         TM    PSAMSS,MSSPRES IS MSS PRESENT IN THIS SYSTEM?   @VA09319 01140010
+         BZ    ERROR90        NO,INDICATE DEVICE NOT AVAIL.    @VA09319 01140020
          CALL  DMKSSSL1       PROCESS MSS REQUESTS             @V60B6B8 01141000
 CHKMSSRC EQU   *              TEST RETURN CODE FROM DMKSSS     @V60B6B8 01142000
          LTR   R0,R0          WAS IT SUCCESSFUL                @V60B6B8 01143000
@@ -1146,7 +1079,7 @@ CHKMSSRC EQU   *              TEST RETURN CODE FROM DMKSSS     @V60B6B8 01142000
 RDEVRDY  EQU   *              RDEVICE HAS MOUNTED SYSTEM VOL   @VMI2018 01146000
          LH    R1,UDEVLINK-UDEVBLOK(R5) REAL DEVICE ADDR       @V60B6B8 01147000
          LTR   R1,R1          IS THERE AN RADDR                @VMI2009 01148000
-         BNZ   GETRBLOK       YES, USER SUPPLIED               @VMI2009 01149000
+         BNM   GETRBLOK       YES, GO GET IT                   @VA11411 01149010
          LA    R1,UDEVVSER-UDEVBLOK(R5) USER VOL SER           @VMI2009 01150000
          LA    R0,6           VOL SER LENGTH                   @VMI2009 01151000
          CALL  DMKSCNVS       FIND RBLOK WE ALLOCATED          @VMI2009 01152000
@@ -1162,10 +1095,14 @@ RBLOKOK  EQU   *                                               @VMI2009 01157000
          B     SETVDS         AND COMPLETE THE DEDICATE        @V60B6B8 01162000
 CALLMSSB EQU   *              TRY TO MOUNT VOLSER ON RUA       @V60B6B8 01163000
          BAL   R4,SAVUDEV     SAVE CURRENT UDEVBLOK            @V60B6B8 01164000
+         TM    PSAMSS,MSSPRES IS MSS PRESENT IN THIS SYSTEM?   @VA09319 01164010
+         BZ    ERROR90        NO,INDICATE DEVICE NOT AVAIL.    @VA09319 01164020
          CALL  DMKSSSL2       PROCESS AN MSS REQUEST           @V60B6B8 01165000
          B     CHKMSSRC       AND TEST THE RETURN CODE         @V60B6B8 01166000
 CALLMSSC EQU   *              SEE IF VOLSER EXISTS IN MSS      @V60B6B8 01167000
          BAL   R4,SAVUDEV     SAVE CURRENT UDEVBLOK            @V60B6B8 01168000
+         TM    PSAMSS,MSSPRES IS MSS PRESENT IN THIS SYSTEM?   @VA09319 01168010
+         BZ    ERROR90        NO,INDICATE DEVICE NOT AVAIL?    @VA09319 01168020
          CALL  DMKSSSL3       PROCESS MSS REQUESTS             @V60B6B8 01169000
          B     CHKMSSRC       AND TEST THE RETURN CODE         @V60B6B8 01170000
 SAVUDEV  EQU   *              SAVE THE CURRENT UDEVBLOK        @V60B6B8 01171000
@@ -1188,10 +1125,10 @@ MSSMOUNT EQU   *              SEE IF AN MSS MOUNT IN PROCESS   @V60B6B8 01177000
          LA    R15,RC4        TEST FOR CODE 4                  @V60B6B8 01188000
          CR    R15,R0         DMKSSS RC IN GPR 15              @V60B6B8 01189000
          BNE   ERROR90        IT IS AN ERROR                   @V60B6B8 01190000
-         TM    MSSFLAGS+1-OSVSCOM(R1),MSGPROC IS MOUNT NOW     @VMI2018 01191000
+         TM    MSSFLAG2-OSVSCOM(R1),MSGPROC IS MOUNT NOW       @VA09302 01191000
 *                             COMPLETE                                  01192000
          BZ    PCINOW         YES, DMKDSB HAS THE PCI          @VMI2018 01193000
-         NI    MSSFLAGS+1-OSVSCOM(R1),X'FF'-MSGPROC            @VMI2018 01194000
+         NI    MSSFLAG2-OSVSCOM(R1),X'FF'-MSGPROC              @VA09302 01194000
          B     LOG20          PROCESS NEXT STATEMENT           @V60B6B8 01195000
 PCINOW   EQU   *              SYSTEM VOLUME NOW MOUNTED        @VMI2018 01196000
          L     R14,=V(DMKSSSMQ) ADDR OF MSSCOM Q               @VMI2018 01197000
@@ -1208,71 +1145,6 @@ DEQIT    EQU   *              REMOVE MSSCOM                    @VMI2018 01205000
          CALL  DMKFRET        RETURN MSSCOM TO SYSTEM          @VMI2018 01208000
          B     RDEVRDY        CONTINUE THE DEDICATE            @VMI2018 01209000
          EJECT                                                          01210000
-DMKLOGSS RELOC ENTRY          FROM THE DISPATCHER              @V60B6B8 01211000
-*                                                                       01212000
-*        DMKLOGSS IS ENTERED FROM DMKDSP AFTER A REQUESTED              01213000
-*              MSS VOLUME HAS BEEN MOUNTED. THE ADDRESS OF              01214000
-*              LABEL 'DMKLOGSS' IS PLACED IN THE CPEXADD                01215000
-*              FIELD OF A CPEXBLOK BY DMKSSS WHEN AN MSS                01216000
-*              MOUNT IS REQUIRED TO SATISFY A DED REQUEST.              01217000
-*              WHEN THE VOLUME HAS BEEN MOUNTED, MODULE                 01218000
-*              DMKDSB FINDS THE CPEXBLOK CHAINED FROM AN                01219000
-*              MSSCOM BLOCK AND GOES TO DMKDSP.                         01220000
-*                                                                       01221000
-*              THIS ROUTINE WILL RESET THE ENVIRONMENT AS IF            01222000
-*              THERE HAD BEEN NO ASYNCHRONOUS MSS MOUNT AND             01223000
-*              THEN PROCEED TO COMPLETE THE DISK ALLOCATION.            01224000
-*                                                                       01225000
-         LH    R1,MSSVUA-OSVSCOM(R3) RDEV ADDR                 @VMI2009 01226000
-         CALL  DMKSCNRU       GET THE RDEVBLOK                 @V60B6B8 01227000
-         LR    R1,R8          ADDR TO GPR 1                    @V60B6B8 01228000
-         LR    R2,R5          UDEVBLOK ADDR FOR DMKVDSAT       @V60B6B8 01229000
-         CALL  DMKVDSAT       ATTACH THE DEVICE                @V60B6B8 01230000
-         BZ    TSTV333V       GOOD RETURN FROM VDS             @V60B6B8 01231000
-         LA    R2,CON95       ERROR MSG ID                     @V60B6B8 01232000
-         LH    R1,UDEVADD-UDEVBLOK(R5) VIRTUAL ADDRESS         @V60B6B8 01233000
-         CALL  DMKCVTBH       CONVERT TO PRINTABLE HEX         @V60B6B8 01234000
-         ICM   R1,8,BLANKS    BLANK FIRST CHAR                 @V60B6B8 01235000
-         ICM   R0,14,DMKLOG+3 MODULE ID                        @V60B6B8 01236000
-         ICM   R2,8,=X'80'    INDICATE RETURN TO DMKLOG        @V60B6B8 01237000
-         CALL  DMKERMSG       WRITE ERROR MSG                  @V60B6B8 01238000
-         B     FREEUDEV                                        @V60B6B8 01239000
-TSTV333V EQU   *              SEE IF USER WANTS VIRTUAL 3330V  @V60B6B8 01240000
-         TM    UDEVFTR-UDEVBLOK(R5),VIRTUAL VIRT 3330V         @V60B6B8 01241000
-         BZ    FREEUDEV       NO, ALL DONE                     @V60B6B8 01242000
-         LH    R1,UDEVADD-UDEVBLOK(R5) VIRTUAL DEVICE ADDR     @V60B6B8 01243000
-         CALL  DMKSCNVU       GET THE VDEVBLOK                 @V60B6B8 01244000
-         OI    VDEVFLG2-VDEVBLOK(R8),VIRTUAL SET FLAG          @V60B6B8 01245000
-         L     R1,VDEVREAL-VDEVBLOK(R8) REAL DEV BLOK ADDR     @V60B6B8 01246000
-         OI    RDEVSTAT-RDEVBLOK(R1),RDEV333V SET RBLOK FLAG   @V60B6B8 01247000
-FREEUDEV EQU   *                                               @V60B6B8 01248000
-         LA    R0,UDEVSIZE    UDEVBLOK SIZE                    @V60B6B8 01249000
-         LR    R1,R5          ADDR OF SAVED BLOCK              @V60B6B8 01250000
-         CALL  DMKFRET        RETURN THE MEMORY                @V60B6B8 01251000
-*                                                                       01252000
-*        NOW CHECK TO SEE IF THERE IS ANY PENDING I/O FOR               01253000
-*              THE VIRTUAL DEVICE JUST ATTACHED. IF THERE               01254000
-*              IS, THEN A CPEXBLOK REPRESENTING THE I/O                 01255000
-*              WILL HAVE BEEN CHAINED FROM THE MSSCOM BLOCK             01256000
-*              WHEN THE USER SIO WAS RECEIVED.                          01257000
-*                                                                       01258000
-*              NOTE: WHEN DMKDSB QUEUES THE MSSCOM BLOCK                01259000
-*              FROM FIELD DMKSSSMQ, AND CREATES THE CPEXBLOK            01260000
-*              FOR DMKLOGSS, IT PLACES THE ADDRESS OF                   01261000
-*              THE MSSCOM BLOCK IN THE GPR 3 FIELD OF THE               01262000
-*              CPEXBLOK.                                                01263000
-*                                                                       01264000
-         USING OSVSCOM,R3     R3 SET BY DMKSSS                 @VMI2009 01265000
-         L     R1,MSSTASK3    CPEXBLOK IF SIO FROM USER        @V60B6B8 01266000
-         LTR   R1,R1          IS THERE A SIO PENDING           @V60B6B8 01267000
-         BZ    FREECOM        NO                               @V60B6B8 01268000
-         CALL  DMKSTKCP       STACK THE CPEXBLOK FOR DMKDSP    @V60B6B8 01269000
-FREECOM  EQU   *              RETURN STORAGE FOR THE MSSCOM    @V60B6B8 01270000
-         LR    R1,R3          MSSCOM ADDRESS                   @VMI2009 01271000
-         LA    R0,MSSSIZE     NO. OF D-WORDS IN BLOCK          @V60B6B8 01272000
-         CALL  DMKFRET        AND RETURN THE STORAGE           @V60B6B8 01273000
-         DROP  R3                                              @VMI2009 01274000
-         GOTO  DMKDSPCH       AND EXIT                         @V60B6B8 01275000
 LOG49    LR    R2,R9          NOW LET R2 POINT TO THE REGULAR UDBFBLOK  01276000
          CALL  DMKUDRRV       "CLOSE" IT.                               01277000
          SPACE                                                          01278000
@@ -1338,7 +1210,8 @@ SETUVMA  EQU   *                                               @V4M0134 01329000
          ST    R15,MICVPSW    IN MICBLOK                       @VM08550 01338000
          LA    R15,TEMPSAVE   PUT ADDR OF WORKSPACE FOR ASSIST @VM08550 01339000
          ST    R15,MICWORK    IN MICBLOK                       @VM08550 01340000
-         OI    MICEVMA,X'FE'  TURN ON ECPS/EVMA CONTROL BITS   @VA07370 01341000
+         L     R15,PREFIXA    POINT TO ABSOLUTE PSA            @VA14280 01341100
+         MVC   MICEVMA,PSAEVMA-PSA(R15) COPY EVMA CONTROLS     @VA14280 01341600
          TM    VMPSTAT,VMV370R EC MODE?                        @VM08550 01342000
          BZ    MIC01          NO, BRANCH                       @VM08550 01343000
          L     R15,VMECEXT    PUT VIRT C-REG PTR OF EC MACH.   @VM08550 01344000
@@ -1366,8 +1239,8 @@ MIC03    OI    VMMCR6,VMMFE   TURN VM ASSIST ON FOR USER       @VM08550 01355000
          B     MICVR          AND SKIP NORMAL TIMER INIT.      @VA07315 01366000
 MICNOVR  EQU   *              HERE TO INIT. NON V=R TIMER      @VA07315 01367000
          ST    R15,MICVTMR    PUT IN MICBLOK                   @V386198 01368000
-         OI    VMMCR6,VMMVTMR SET VIRTUAL TIMER ASSIST ENABLED @V3M4026 01369000
-MICVR    EQU   *              TIMER INIT. COMMON REJOIN        @VA07315 01370000
+MICVR    EQU   *                                               @VA12708 01369100
+         OI    VMMCR6,VMMVTMR VIRT INTERVAL TMR FEAT EN        @VA12708 01369200
          TM    CPSTAT2,CPASTON   IS CP ASSIST IN USE ?         @V386198 01371000
          BZ    NOMIC          NO, DONE.                        @V386198 01372000
          OI    VMMCR6,VMMCPAST   SET CP ASSIST ENABLED         @V386198 01373000
@@ -1430,8 +1303,8 @@ LOGEXTF  L     R3,=A(DMKSYSJR) GET ADDRESS OF JPSCBLOK         @V60BBBB 01419000
          LA    R2,SAVEWRK6    POINT AT INVALID PASSWORD        @V60BBBB 01430000
          DROP  R3                                              @V60BBBB 01431000
 CALLJRL1 SLR   R4,R4          ASSUME LOGON COMMAND             @V60BBBB 01432000
-         TM    SAVEWRK1,AUTOLOG AUTOLOG?                       @V60BBBB 01433000
-         BZ    CALLJRL2       BR IF NOT                        @V60BBBB 01434000
+         TM    SAVEWRK1,AUTOLOG+PSWRDCK LOGGING ON OPERATOR    @VA10024 01433100
+         BNO   CALLJRL2       FROM DMKCPI....YES               @VA10024 01433200
          L     R4,SAVEWRK8    GET COMMAND ISSUERS VMBLOK       @V60BBBB 01435000
 CALLJRL2 CALL  DMKJRLLO       GO TO JOURNALING MODULE          @V60BBBB 01436000
 LOGEXITR EXIT                 REALLY EXIT.                              01437000
@@ -1584,6 +1457,7 @@ NOTJRLNG DS    0H                                              @V60BBBB 01581000
 FORCEUSR TM    SAVEWRK1,AUTOLOG+PSWRDCK OP BEING LOGGED ON     @V407466 01584000
          BM    USERGONE       YES, DON'T TURN ON VMKILL BIT    @V407466 01585000
          OI    VMOSTAT,VMKILL BYE BYE ..FOR NOW                @V407466 01586000
+         OI    VMSVSTAT,VMLGFORC INDICATE USER WAS FORCED OFF  @VA13026 01586500
          SPACE                                                          01587000
 USERGONE DS    0H                                              @V305535 01588000
          L     R1,SAVERETN    PICK UP RETURN ADDRESS           @V305535 01589000
@@ -1675,7 +1549,6 @@ SAVEPASS MVC   SAVEWRK8(*-*),0(R1)                                      01674000
 CLCMASK  CLC   CMASK(*-*),0(R1)                                         01675000
 CLCNOIPL CLC   CNOIPL(*-*),0(R1)                                        01676000
 *                                                                       01677000
-HALFTIME DC    X'3FFFFFFFFFFFF000'  TIME CONSTANT              @V4M0203 01678000
 CMASK    DC    C'MASK '       MEANS MASKING CHARACTERS WANTED           01679000
 CNOIPL   DC    C'NOIPL '      MEANS NO AUTOMATIC IPL WANTED             01680000
 *                                                              @V4075A0 01681000
@@ -1714,7 +1587,6 @@ BLANK    EQU   X'40'                                           @V60B6B8 01713000
 L48      EQU   48                                              @V60B6B8 01714000
 RC4      EQU   4                                               @V60B6B8 01715000
 L5       EQU   5                                               @V60B6B8 01716000
-MSGPROC  EQU   X'10'          MSC COMPLETE, PCI NOT RECEIVED   @VMI2018 01717000
 * PARAMETER BITS PASSED TO DMKUSOFF                                     01718000
 *                                                                       01719000
 NOOPMSG  EQU   X'01'          DONT SEND LOGOFF MSG TO SYS OP   @VM03066 01720000

@@ -154,6 +154,7 @@ DMKDAS   CSECT                                                          00145000
          EXTRN DMKCVTBH                                                 00152000
          EXTRN DMKIOEST                                        @VA03757 00153100
          EXTRN DMKTRKIN                                        @V56BDA8 00153200
+         EXTRN DMKSTKCP                                        @VA12941 00153400
          USING SAVEAREA,R13                                             00154000
          USING PSA,R0                                                   00155000
          USING IOERBLOK,R7    ADDRESSABILITY FOR IOERBLOK      @VA08187 00156000
@@ -302,7 +303,9 @@ CHANRTY  BAL   R5,CKIOB       TEST FOR 2'ND IOERBLOK                    00479000
 *                                                                       00483000
 *  ENTRY WILL BE MADED HERE WHEN A PENDING D.E. INT. OCCUR'S            00484000
 *                                                                       00485000
-PENDING  NI    IOERFLG1,X'FF'-IOERPEND TURN OFF PENDING DE BIT          00486000
+PENDING  TM    IOERFLG2,IOERMSW MESSAGE WRITER IN PROGRESS     @VA12941 00486000
+         BO    BLDCPEX        WAIT FOR MSW TO FINISH           @VA12941 00486100
+         NI    IOERFLG1,X'FF'-IOERPEND TURN OFF PEND DE BIT    @VA12941 00486200
          BAL   R5,FRETPTR     RELEASE ALLOCATED STORAGE        @VM08912 00487000
          BAL   R5,GETSTBUF    GET A BUFFER TO READ THE VOL1 LABEL       00488000
          STH   R0,IOERDW      SAVE THE SIZE OF THE STAT BUFFER (DW)     00489000
@@ -311,7 +314,33 @@ PENDING  NI    IOERFLG1,X'FF'-IOERPEND TURN OFF PENDING DE BIT          00486000
          OI    IOERFLG2,IOERVOL1   TURN ON THE READING VOLID FLAG       00492000
          XC    IOBRCNT,IOBRCNT INSURE 10 RETRIES FOR VOLREAD   @VA08413 00492100
          B     RETRYK00       READ THE VOLID.                  @V56BDA8 00493100
-         SPACE                                                          00494000
+         SPACE 1                                                        00493150
+BLDCPEX  LA    R0,CPEXSIZE    SIZE OF CPEXBLOK                 @VA12941 00493200
+         CALL  DMKFREE        GET STORAGE FOR CPEXBLOK         @VA12941 00493250
+         USING CPEXBLOK,R1    CPEXBLOK ADDRESSABILIY           @VA12941 00493300
+         XC    CPEXBLOK(CPEXSIZE*8),CPEXBLOK CLEAR BLOCK       @VA12941 00493350
+         MVC   CPEXR0(CPEXR12-CPEXR0),SAVER0 SETUP CPEXBLOK    @VA12941 00493400
+         STM   R12,R13,CPEXR12 ...                             @VA12941 00493450
+         L     R15,=A(DMKDASER) CPEXBLOK WILL RETURN TO DASER  @VA12941 00493500
+         ST    R15,CPEXADD    CPEXBLOK RETURN ADDRESS          @VA12941 00493550
+         DROP  R1             ...                              @VA12941 00493600
+         L     R5,IOERCPEX    ANCHOR FOR CPEXBLOKS             @VA12941 00493650
+         USING CPEXBLOK,R5    ADDRESSABILITY                   @VA12941 00493700
+         LTR   R5,R5          ANY CPEXBLOKS ON QUEUE           @VA12941 00493750
+         BNZ   NEXTCPEX       YES, FIND END OF CHAIN           @VA12941 00493800
+         ST    R1,IOERCPEX    ADD TO THE CHAIN                 @VA12941 00493850
+         B     GOTODSP        GOTO THE DISPATCHER              @VA12941 00493900
+         SPACE 1                                                        00493950
+NEXTCPEX L     R14,CPEXFPNT   GET POINTER TO NEXT ONE ON CHAIN @VA12941 00494000
+         LTR   R14,R14        END OF QUEUE                     @VA12941 00494050
+         BZ    QUEUE          END OF QUEUE - ADD CPEXBLOK      @VA12941 00494100
+         LR    R5,R14         CONTINUE TO LOOK FOR END         @VA12941 00494150
+         B     NEXTCPEX       ...                              @VA12941 00494200
+         SPACE 2              ...                              @VA12941 00494250
+QUEUE    ST    R1,CPEXFPNT    ADD CPEXBLOK TO QUEUE AT END     @VA12941 00494300
+GOTODSP  GOTO  DMKDSPCH       EXIT TO DISPATCHER FOR NOW       @VA12941 00494350
+         DROP  R5             DROP CPEXBLOK ADDRESSABILITY     @VA12941 00494400
+         SPACE 1                                                        00494450
 VOLREAD  L     R4,IOERLOC     POINT TO CHANNEL PGM             @VA07801 00495000
          ICM   R1,15,IOBIOER  DID OPERATION FINISH CORRECTLY   @VA07801 00495200
          BNP   READOK         YES - BRANCH                     @VA07801 00495400
@@ -350,6 +379,7 @@ LABRED   TM    IOERFLG2,IOERSTAT STATISTICAL DATA UNLOADED     @VA07801 00504600
          LA    R4,IOERPNT     POINT TO THE IOERBLOK POINTER             00515000
          BAL   R5,NXTPTR      CHAIN IN THE IOERBLOK                     00516000
          L     R4,IOERLOC     POINT TO THE STATDASD BUFFER     @VA04703 00516500
+         ST    R4,IOBRCAW     INITIALIZE THE RESTART CAW       @VA13424 00516700
          LM    R15,R0,PACKCHG * BUILD THE BUFFER UNLOAD CCW             00517000
          ALR   R15,R1         * TO READ THE ENVIRONMENTAL DATA          00518000
          STM   R15,R0,STATSNS * INTO THE IOERBLOK.                      00519000
@@ -496,6 +526,12 @@ REJECT   TM    IOERDATA,X'80' IS IT A COMMAND REJECT ?                  00660000
          BO    FILPROT        BRANCH ON PROTECT ERROR.                  00663000
 CHKREL   TM    IOBSPEC2,IOBREL IS THIS SPECIAL DMKDSB CH PGM   @VA07801 00663100
          BO    FINISH         YES, THEN LEAVE IT ALONE         @VA07801 00663200
+         L     R2,IOERCSW     FAILING CSW+8                    @VA14597 00663400
+         LA    R2,0(,R2)      CLEAR HIGH ORDER BYTE            @VA14597 00663500
+         S     R2,F8          FAILING CCW                      @VA14597 00663600
+         CLI   0(R2),X'FE'    WRITE WITH R/O DASD              @VA14597 00663700
+         BNE   COMREJ         INVALID CMND                     @VA14597 00663800
+         MVI   IOERDATA+1,X'02' TURN ON WRITE INHIBIT SW.      @VA14597 00663900
          B     COMREJ         MUST BE INVALID COMMAND                   00664000
 BDTRK    TM    IOERDATA,X'02'  IS THIS A TRACK CONDITION CHECK ?        00665000
          BZ    TRKOV          BRANCH NO.                                00666000
@@ -651,6 +687,8 @@ CALLWTR  EQU   *              CALL MSG WRITTER                          00802000
          ST    R9,SAVEWRK3    SAVE REG 9                       @VA05482 00807050
          TM    RDEVFLAG,RDEVOWN SYSTEM PACK?                   @VA05483 00807070
          BNO   CALLMSW        NO. CONSOLE SPOOLING OK          @VA05483 00807090
+         TM    RDEVFLAG,RDEVPREF IS IT PREFERRED FOR PAGING?   @VA11702 00807092
+         BO    CALLMSW        YES,CONSOLE SPOOLING OK          @VA11702 00807094
          L     R11,ASYSOP     GET VMBLOK OF SYSTEM OPERATOR    @VA04231 00807300
          LTR   R11,R11        SYSTEM OPERATOR LOGGED ON?       @VA04231 00807400
          BNP   CALLMSW        NO, NO PROBLEM                   @VA04231 00807500
@@ -676,7 +714,17 @@ CLEARMWR L     R9,SAVEWRK3    RESTORE R9                       @VA04231 00809400
          TM    IOERFLG1,IOERPEND   CHECK FOR INT. REQ.                  00811000
          BZ    NOTINT         IF SO EXIT BACK TO IOS WITH               00812000
          NI    IOBFLAG,X'FF'-IOBRSTRT   NO RESTART INDICATED            00813000
-         B     SDRCOUNT       GO UPDATE COUNTERS THEN EXIT     @VA03757 00814000
+         L     R1,IOERCPEX    SEE IF DEVICE END I/O TO REDRIVE @VA12941 00814000
+         LTR   R1,R1          ANY CPEXBLOKS ON QUEUE           @VA12941 00814050
+         BZ    DASSDR         NO DE I/O TO REDRIVE             @VA12941 00814100
+UNSTKNXT L     R5,CPEXFPNT-CPEXBLOK(R1) NEXT CPEX ON CHAIN     @VA12941 00814150
+         CALL  DMKSTKCP       STACK CPEXBLOK                   @VA12941 00814200
+         LTR   R5,R5          ANY MORE ON CHAIN                @VA12941 00814250
+         BZ    CLEARPNT       NO, ZERO ANCHOR AND EXIT         @VA12941 00814300
+         LR    R1,R5          CPEXBLOK ADDRESS TO R5           @VA12941 00814350
+         B     UNSTKNXT       STACK THEM ALL                   @VA12941 00814400
+CLEARPNT ST    R5,IOERCPEX    CLEAR ANCHOR                     @VA12941 00814450
+DASSDR   B     SDRCOUNT       GO UPDATE COUNTERS, THEN EXIT    @VA12941 00814500
 NOTINT   TM    IOERIND4,IOERSTRT   CHECK MESSAGE RESPONSE FOR RESTART   00815000
          BZ    IGNORE         BRANCH IF NO RESTART                      00816000
          MVC   IOBRCNT,F1+2   RESET ERROR COUNTER TO 1                  00817000
@@ -724,11 +772,26 @@ HISPEED  MVC   IOERVSER-IOERBLOK(6,R7),RDEVSER RESTORE VOLID   @VA02536 00834000
          B     RETRY                                                    00848000
 T2305    TM    IOERDATA+2,X'80'                                         00849000
          BZ    TESTPERM                                                 00850000
-         LA    R0,IOERSIZE+128/8                                        00851000
+*********************************************************************** 00851010
+* FOR CLARITY... SIZE OF THE EXTENSION HAS TO BE CALCULATED AS WHATS    00851020
+* LEFT OF THE BUFFERED DATA SIZE (E.G. 128 FOR THIS 2305) AFTER TAKING  00851030
+* OUT THAT PORTION PLACED FROM IOERDATA TO THE END OF THE IOERBLOK.     00851040
+* AS THIS IS VARIABLE IT SHOULD BE CALCULATED AS THE OVERALL SIZE LESS  00851050
+* THE AREA PRECEDING IOERDATA... ALL OF COURSE IN NUMBER OF DOUBLEWORDS 00851060
+*********************************************************************** 00851070
+         LA    R0,IOERSIZE+(128/8-(IOERSIZE-(IOERDATA-IOERBLOK)/8))     00851080
+*                     PUT IN THE SIZE PLUS EXTENSION RESIDUAL  @VA09736 00851090
          CALL  DMKFREE                                                  00852000
+         MVI   0(R1),X'00'       INIT TO ZERO                  @VA09736 00852010
+*********************************************************************** 00852020
+* NOW TO CLEAR THE IOERBLOK PLUS THE RESIDUAL EXTENSION OF THE 2305'S   00852030
+* 128 BYTES OF BUFFER DATA                                              00852040
+*********************************************************************** 00852050
+         MVC   1(((IOERSIZE*8)+(128-((IOERSIZE*8)-(IOERDATA-IOERBLOK)))*00852060
+               -1),R1),0(R1) CLEAR IT OUT                      @VA09736 00852070
          MVC   0(IOERSIZE*8,R1),IOERBLOK                                00853000
-         MVI   IOEREXT+1-IOERBLOK(R1),128/8 SAVE SIZE OF       @VA00705 00854000
-*                                    EXTENDED SENSE AREA                00855000
+         MVI   IOEREXT+1-IOERBLOK(R1),128/8-(IOERSIZE-(IOERDATA-IOERBLO*00854010
+               K)/8) PUT IN THE SIZE OF THE EXTENSION          @VA09736 00854020
          ST    R1,IOERPNT                                               00856000
          OI    IOERFLG2,IOERSTAT                                        00857000
          B     CLRUNIT                                                  00858000
@@ -745,10 +808,10 @@ TESTSTAT TM    RDEVTYPE,TYP2305                                         00860000
          MVC   IOERVSER-IOERBLOK(6,R1),RDEVSER    MOVE IN THE OLD VOLID 00869000
          DROP  R3                                                       00870000
          USING IOERBLOK,R7                                              00871000
-         L     R4,IOBCAW      LOAD KEY                         @VA07807 00871100
-         LTR   R4,R4          TEST FOR IT                      @VA07807 00871200
-         BNZ   BYMVCAW                                         @VA07807 00871300
-         MVC   IOBRCAW,IOBCAW                                           00872000
+         L     R4,IOBRCAW     LOOK FOR ZERO RESTART CAW        @VA13021 00871100
+         LTR   R4,R4          TEST FOR IT                      @VA13021 00871300
+         BNZ   BYMVCAW        NON-ZERO ... O.K.                @VA13021 00871500
+         MVC   IOBRCAW,IOBCAW ZERO ... USE THE ORIGINAL CAW    @VA13021 00871700
 BYMVCAW  DS    0H                                              @VA07807 00872100
          LA    R4,IOERPNT                                               00873000
          BAL   R5,NXTPTR                                                00874000
@@ -767,11 +830,26 @@ STAT2305 EQU   *                                                        00877000
          USING IOERBLOK,R3                                              00879000
          TM    IOERDATA+2,X'80'                                         00880000
          BZ    TESTPERM                                                 00881000
-         LA    R0,IOERSIZE+128/8                                        00882000
+*********************************************************************** 00882010
+* FOR CLARITY... SIZE OF THE EXTENSION HAS TO BE CALCULATED AS WHATS    00882020
+* LEFT OF THE BUFFERED DATA SIZE (E.G. 128 FOR THIS 2305) AFTER TAKING  00882030
+* OUT THAT PORTION PLACED FROM IOERDATA TO THE END OF THE IOERBLOK.     00882040
+* AS THIS IS VARIABLE IT SHOULD BE CALCULATED AS THE OVERALL SIZE LESS  00882050
+* THE AREA PRECEDING IOERDATA... ALL OF COURSE IN NUMBER OF DOUBLEWORDS 00882060
+*********************************************************************** 00882070
+         LA    R0,IOERSIZE+(128/8-(IOERSIZE-(IOERDATA-IOERBLOK)/8))     00882080
+*                     PUT IN THE SIZE PLUS EXTENSION RESIDUAL  @VA09736 00882090
          CALL  DMKFREE                                                  00883000
+         MVI   0(R1),X'00'       INIT TO ZERO                  @VA09736 00883010
+*********************************************************************** 00883020
+* NOW TO CLEAR THE IOERBLOK PLUS THE RESIDUAL EXTENSION OF THE 2305'S   00883030
+* 128 BYTES OF BUFFER DATA                                              00883040
+*********************************************************************** 00883050
+         MVC   1(((IOERSIZE*8)+(128-((IOERSIZE*8)-(IOERDATA-IOERBLOK)))*00883060
+               -1),R1),0(R1) CLEAR IT OUT                      @VA09736 00883070
          MVC   0(IOERSIZE*8,R1),IOERBLOK                                00884000
-         MVI   IOEREXT+1-IOERBLOK(R1),128/8 SAVE SIZE OF       @VA00705 00885000
-*                                   EXTENDED SENSE AREA                 00886000
+         MVI   IOEREXT+1-IOERBLOK(R1),128/8-(IOERSIZE-(IOERDATA-IOERBLO*00885010
+               K)/8) PUT IN THE SIZE OF THE EXTENSION          @VA09736 00885020
          DROP  R3                                                       00887000
          USING IOERBLOK,R7                                              00888000
          LA    R4,IOERPNT                                               00889000
@@ -786,7 +864,7 @@ CLRUNIT  LR    R4,R1                                                    00891000
          MVC   0(8,R1),UNLOAD                                           00898000
          MVC   8(8,R1),TICCW                                            00899000
          SPACE 1                                                        00900000
-         LA    R4,IOERSIZE*8(R4)   GET ADDR. FOR WHERE SNS DATA WILL GO 00901000
+         LA    R4,IOERDATA-IOERBLOK(R4) PUT IT WHERE IT GOES   @VA09736 00901010
          AL    R4,UNLOAD                                                00902000
          ST    R4,0(R1)                                                 00903000
          L     R4,IOBCAW      CHAIN A TIC COMD. TO USERS CCW STRING.    00904000
@@ -892,24 +970,32 @@ CORRERR  LA    R0,20          GET FREE STORAGE                 @V2A2029 00967000
 *                             CHECK                                     00984000
          L     R1,IOBCAW      POINT AT FIRST CCW               @VA04842 00984575
          LA    R1,0(,R1)      CLEAR KEY                        @VA04842 00985150
-         L     R0,FFS         FOR RCWHEAD COMPARE              @VA04842 00985725
          SLR   R15,R15        CLEAR RESTART REGISTER           @VA08187 00986300
 CHKZERO  CLI   0(CCWREG),X'00'     IS THIS A DATA CHAIN CCW?   @VA04842 00986875
-         BE    CHKFIRST       YES..FIND PREVIOUS CCW           @VA04842 00987450
-         LR    R2,CCWREG      ADDRESS INTO REG 2               @VA04842 00988025
-         S     R2,F8          LOOK AT PREVIOUS CCW             @VA04842 00988600
-         CH    R0,4(,R2)      CCWREG REALLY FIRST IN RCWTASK?  @VA04842 00989175
-         BE    CHKCD          YES...FIND VALID RESTART CCW     @VA04842 00989750
-         B     BYPASSW        NO...OK TO RESTART HERE          @VA04842 00990325
+         BNE   CHKCD          FIND VALID RESTART CCW           @VA12071 00988050
          SPACE ,                                               @VA04842 00990900
 CHKFIRST S     CCWREG,F8      BACK UP TO PREVIOUS CCW          @VA04842 00991475
          B     CHKZERO        KEEP LOOKING...                  @VA04842 00992050
          SPACE ,                                               @VA04842 00992625
 CHKCD    S     R1,F16         BEGINNING OF FIRST RCWTASK       @VA04842 00993200
+         L     R0,FFS         FOR RCWHEAD COMPARE              @VA12071 00993250
+         CH    R0,12(,R1)     CCWREG REALLY FIRST IN RCWTASK?  @VA12071 00993300
+         BNE   BYPASSW        NO... FIND VALID RESTART CCW     @VA12071 00993350
 CHKCD1   LH    R0,10(,R1)     GET COUNT OF CCWS                @VA04842 00993775
          LR    R2,R1          R2 = RCWTASK NOW UNDER SCRUTINY  @VA04842 00994350
          LA    R1,8(,R1)      POINT TO FIRST CCW-8             @VA04842 00994925
 NEXTCCW  LA    R1,8(,R1)      POINT AT NEXT CCW                @VA04842 00995500
+         CLI   0(R1),X'0B'    IS CMD A SEEK?                   @VA12071 00995550
+         BE    UPDTSEEK       YES, REMEMBER IT                 @VA12071 00995600
+         CLI   0(R1),X'07'    IS IT THIS SEEK?                 @VA12071 00995650
+         BNE   NOTSEEK        CARRY ON                         @VA12071 00995700
+UPDTSEEK EQU   *                                               @VA12071 00995750
+         ST    R3,SAVEWRK4    SAVE R3                          @VA12071 00995800
+         L     R3,0(R1)       PICK UP ADDR. OF                 @VA12071 00995850
+         LA    R3,0(R3)       SEEK DATA AND                    @VA12071 00995900
+         MVC   IOERADR(4),2(R3) SAVE THE LAST SEEK DONE        @VA12071 00995950
+         L     R3,SAVEWRK4    RESTORE R3                       @VA12071 00996000
+NOTSEEK  EQU   *                                               @VA12071 00996050
          CLR   R1,CCWREG      IS IT 'OUR' CCW?                 @VA04842 00996075
          BE    CHKCCW2        IF SO, LOOK NO FURTHER           @VA04842 00996650
          CLI   0(R1),CDTIC    CHAIN DATA TIC CCW?              @VA04842 00997225
@@ -997,7 +1083,8 @@ IDALIST  L     R2,0(,R15)     GET ENTRY WITHIN IDAL LIST       @VA08187 01058000
          B     IDALIST        KEEP LOOKING FOR CORRECT IDA WORD@VA00922 01069000
 FNDIDAW  L     R2,0(,R15)     LOAD ADDRESS FROM IDA WORD       @VA08187 01070000
          AL    R2,IDALCNT     ADD IN RECOMPUTED DISP.          @VA00922 01071000
-NXTBYTE  XC    0(1,R2),0(R11) OR' IN CORRECTION BYTE           @VA00922 01072000
+NXTBYTE  EQU   *                                               @VA09106 01072100
+         XC    0(1,R2),0(ERREG2) OR IN CORRECTION BYTE         @VA09106 01072200
          B     ECFINCR        GO INCREMENT FOR NEXT BYTE       @VA03061 01073000
 *                                                              @VA00922 01074000
 *  HERE TO EXCLUSIVE OR ECC BYTE INTO STORAGE FOR CHANNEL      @VA00922 01075000
@@ -1046,12 +1133,18 @@ LENCHK   TM    IOERDATA+23,X'01'   DID CONTROL UNIT INDICATE INCORRECT  01107000
          B     EQCK           CALL MESSAGE WRITTER                      01117000
          SPACE 1                                                        01118000
 MER210   EQU   *                                                        01119000
-         CLC   TOTALCNT(4),ECFCNT  IS COUNT EQUAL                       01120000
-         BE    ECFOVCK        IF YES BRANCH                             01121000
+         XC    IOBCSW+6(2),IOBCSW+6 CLEAR CSW RESIDUAL COUNT   @VA09516 01120100
+         NI    IOBCSW+5,255-IL TURN OFF INCORRECT LENGTH       @VA09516 01120300
+         CLC   TOTALCNT(4),ECFCNT WAS FULL BLOCK TRANSFERRED   @VA09516 01120500
+         BE    ECFOVCK        YES, LENGTH OK                   @VA09516 01120700
+         L     ERREG2,ECFCNT  GET ORIGINAL LENGTH              @VA09516 01120900
+         S     ERREG2,TOTALCNT SUBTRACT ACTUAL BYTES READ      @VA09516 01121100
+         BM    SETLEN         INCORRECT LENGTH IF NEGATIVE     @VA09516 01121300
+         STH   ERREG2,IOBCSW+6 UPDATE CSW                      @VA09516 01121500
 SETLEN   EQU   *                                               @VA02277 01122000
          TM    4(CCWREG),X'20'     SUPPRESS LEN. BIT ON ?               01123000
          BO    ECFOVCK        BRANCH IF YES                             01124000
-         OI    IOBCSW+5,X'40'     SET INCORRECT LENTH BIT IN CSW        01125000
+         OI    IOBCSW+5,IL    SET INCORRECT LENGTH BIT IN CSW  @VA09516 01125100
          B     NOERROR                                                  01126000
          SPACE 1                                                        01127000
 ECFOVCK  EQU   *                                                        01128000
@@ -1351,7 +1444,7 @@ CCW5     DS    D                                                        01299000
 CCW6     DS    D                                                        01300000
 ECFCSW   DS    D                                                        01301000
 ECFCCW   DS    D                                                        01302000
-ECFCNT   DS    F                                                        01303000
+ECFCNT   DS    F              CSW BYTE COUNT                   @VA09516 01303100
 ECFREG2  DS    F                                                        01304000
 ECFREG3  DS    F                                                        01305000
 ECFREG4  DS    F                                                        01306000
@@ -1360,7 +1453,7 @@ ECFREG15 DS    F                                               @VA08187 01308000
 ECFBWK   DS    F                                                        01309000
 ECFFWD   DS    F                                                        01310000
 ECFCCWRD DS    F                                                        01311000
-TOTALCNT DS    F                                                        01312000
+TOTALCNT DS    F              NUMBER OF BYTES PROCESSED        @VA09516 01312100
 IDALCNT  DS    F                                               @VA00922 01313000
 ECFREG11 DS    F                                                        01314000
 SECTVAL  DS    H                                                        01315000

@@ -53,7 +53,10 @@ MSG      TITLE 'DMKMSG     (CP)        VM/370 - RELEASE 6'              00001000
 *        DMKERMSG - SEND ERROR MESSAGES TO THE TERMINAL.                00051000
 *        DMKQCNRD - READ FROM TERMINAL.                                 00052000
 *        DMKCVTDB - CONVERT A NUMBER FROM DECIMAL TO BINARY             00053000
+*        DMKCVTBD CONVERT     BINARY TO DECIMAL                         00053050
 *        DMKLOKSW - SWITCH TO ANOTHER VMBLOK IF SYSTEM IS AP-MODE       00053100
+*        DMKLOCKQ - OBTAIN LOCKBLOK TO KEEP RECEIVER FOR ERROR MSG      00053200
+*        DMKLOCKD - RELEASE LOCKBLOK AFTER ERROR MSG WRITTEN            00053300
 *                                                                       00054000
 *                                                                       00055000
 * TABLES/WORKAREAS -                                                    00056000
@@ -113,12 +116,14 @@ MODID    DC   CL8'DMKMSG'                                               00101000
          USING SAVEAREA,R13                                             00106000
          SPACE                                                          00107000
          EXTRN DMKCVTDB                                                 00108000
+         EXTRN DMKCVTBD                                        @VA09994 00108500
          EXTRN DMKQCNRD                                                 00109000
          EXTRN DMKCVTDT                                        @V202420 00110000
          EXTRN DMKSCNAU                                                 00111000
          EXTRN DMKSCNFD                                                 00112000
          EXTRN DMKERMSG                                                 00113000
          EXTRN DMKVMCFC                                        @V60C2B8 00113500
+         EXTRN DMKLOCKQ,DMKLOCKD                               @VA12684 00113750
          EJECT                                                          00114000
 *.                                                                      00115000
 * SUBROUTINE NAME -                                                     00116000
@@ -212,12 +217,11 @@ DMKMSGNH RELOC ,              SEND MESSAGE WITHOUT HEADER      @V60C2BE 00151100
 *        DMKMSG057W (USERID) NOT RECEIVING; DISCONNECTED                00152720
 *        DMKMSG057W (USERID) NOT RECEIVING; SMSG OFF                    00152740
 *        DMKMSG057W (USERID) NOT RECEIVING; NOT AUTHORIZED              00152760
-*        DMKMSG810E VMCF SPECIAL MESSAGE LIMIT EXCEEDED                 00152780
 *.                                                                      00152800
          SPACE 2                                                        00152820
 DMKMSGSM RELOC ,              SEND MESSAGE WITHIN A BUFFER TO           00152840
 *                             ANY SPECIFIED USER                        00152860
-         MVI   SAVEWRK1,VMSMSGON REMEMBER THIS IS SPECIAL MSG  @V60C2B8 00152880
+         MVI   SAVEWRK1,HEXZERO REMEMBER THIS IS SPECIAL MSG   @VA09994 00152880
          B     MSGCOM         CONTINUE                         @V60C2B8 00152900
          EJECT                                                          00152920
 *.                                                                      00153000
@@ -281,6 +285,14 @@ DMKMSGMS RELOC ,         SEND A MESSAGE TO ONE OR ALL USERS    @V200820 00208000
 MSGCOM   CALL  DMKSCNFD        SCAN FOR USER TO RECEIVE THE MESSAGE     00211000
          BNZ   MSG020         GO SEND ERROR MESSAGE                     00212000
          STM   R0,R1,SAVEWRK8 SAVE LENGTH AND ADDRESS FOR LATER         00213000
+         LA    R0,MSGWASZE    SIZE OF WORK AREA IN DW'S        @VA12684 00213100
+         CALL  DMKFREE        OBTAIN STORAGE FOR WORK AREA     @VA12684 00213200
+         ST    R1,SAVEWRK6    HOLD ADDRESS OF WORK AREA        @VA12684 00213300
+         LR    R6,R1          ADDRESS OF WORK AREA             @VA12684 00213400
+         USING MSG1,R6        WORK AREA ADDRESSABILITY         @VA12684 00213500
+         XC    MSG1,MSG1      CLEAR WORK AREA                  @VA12684 00213600
+         DROP  R6                                              @VA12684 00213700
+         LM    R0,R1,SAVEWRK8  RESTORE REGS R0 - R1            @VA12684 00213800
          C     R0,F2          ARGUMENT TWO CHARACTERS OR MORE ???       00214000
          BL    MSGCKAST         CAN'T BE OPERATOR OR ALL IF BR.         00215000
          LR    R2,R0          LENGTH TO GPR2                            00216000
@@ -293,94 +305,66 @@ MSGCOM   CALL  DMKSCNFD        SCAN FOR USER TO RECEIVE THE MESSAGE     00211000
 MSGCKAST EQU   *              CHECK FOR MESSAGE TO USER HIMSELF@V200820 00223000
          SLR   R10,R10        SET END TRIGGER                  @VA07788 00223500
          CLI   0(R1),C'*'          DO WE HAVE AN ASTERISK ???           00224000
-         BNE   MSGUSEID       NO - FIND RECEIVER'S VMBLOK      @V60C2B8 00224400
-         TM    SAVEWRK1,VMSMSGON SPECIAL MESSAGE??             @V60C2B8 00224800
-         BO    PROCLOG        YES - SEND SPM TO HIMSELF        @V60C2B8 00225200
-         B     MSGFOR         SEND REGULAR MSG TO HIMSELF      @V60C2B8 00225600
+         BE    PROCLOG        YES - SEND MSG TO HIMSELF        @VA09994 00225000
 MSGUSEID CALL  DMKSCNAU       FIND USERID VMBLOK ADDRESS                00226000
          BC    4,MSG045       USERID NOT LOGGED ON             @VM08681 00227000
          BC    2,MSG020       USERID MISSING OR INVALID        @VM08681 00228000
+         TM    VMRSTAT-VMBLOK(R1),VMLOGOFF USER LOGGING OFF?   @VA09531 00228020
+         BO    MSG045         YES,LOGOFF                       @VA09531 00228040
+         TM    VMOSTAT-VMBLOK(R1),VMKILL USER KILLED?          @VA09531 00228060
+         BO    MSG045         YES,KILLED                       @VA09531 00228080
          SWTCHVM              LOCK THIS VMBLOK                 @V407508 00229100
          SLR   R10,R10        SET END TRIGGER                  @VA01513 00232000
 PROCLOG  TM    VMOSTAT,VMKILL HEADED FOR THE CLIFF?            @V60C2B8 00233000
          BO    OPROFF         SO INFORM THE SENDER             @VA01513 00234000
-         TM    SAVEWRK1,VMSMSGON WAS IT SPECIAL MESSAGE?       @V60C2B8 00234010
-         BNO   MSGFOR         NO - BRANCH AROUND SPM CODE      @V60C2B8 00234020
-         MVC   SAVEWRK4(8),VMUSER SAVE USERID TO RECV SPM      @V60C2B8 00234030
-         CLI   VMSPMFLG,VMSPMON IS USER RECEIVING SPM'S?       @V60C2B8 00234040
-         BE    PROCSM         YES - PROCESS SPM                @V60C2B8 00234050
-         MVI   SAVEWRK6,HEXZERO FIELD DELIMITER                @V60C2B8 00234060
-         LA    R1,=CL14'  SMSG OFF    ' NOT RECVING SPM'S      @V60C2B8 00234070
-         BAL   R7,MSGSNDE     USER NOT RECEIVING SPM MESSAGES  @V60C2B8 00234080
-         B     RETURN         RETURN TO CALLER                 @V60C2B8 00234090
-PROCSM   EQU   *              PROCESS SPECIAL MESSAGE          @V60C2B8 00234100
-         L     R1,ASYSVM      GET ADDRESS OF SYSTEM VMBLOK     @V60C2B8 00234110
-         SWTCHVM              LOCK SYSTEM VMBLOK               @V60C2B8 00234120
-         LM    R3,R4,BUFNXT   GET SPM TEXT POINTER AND COUNT   @V60C2B8 00234130
-         LTR   R4,R4          IS COUNT ZERO?                   @V60C2B8 00234140
-         BNP   RETURN         YES - RETURN TO CALLER           @V60C2B8 00234150
-         LR    R2,R4          SAVE MESSAGE LENGTH FOR LATER USE@V60C2B8 00234160
-         LA    R0,VMCMLEN+7(R4) GET SENDX EXT INT BUF LEN      @V60C2B8 00234170
-         SRL   R0,3           CONVERT TO DOUBLE WORDS          @V60C2B8 00234180
-         LR    R4,R0          SAVE FOR LATER FRET              @V60C2B8 00234190
-         CALL  DMKFREE        GO GET SPM BUFFER                @V60C2B8 00234200
-         USING VMCMHDR,R1                                               00234210
-         ST    R1,SAVEWRK3    SAVE SPM BUFFER ADDRESS          @V60C2B8 00234220
-         MVI   VMCMEFLG,HEXZERO ZERO OUT RETURN CODE FIELD     @V60C2B8 00234230
-         LA    R0,VMCPSENX    SENDX SUBFUNCTION CODE VALUE     @V60C2B8 00234240
-         STCM  R0,3,VMCMFUNC  FILL IN VMCF SUBFUNCTION CODE    @V60C2B8 00234250
-         LA    R0,VMCMLEN(R1) POINT TO START OF MSG TXT        @V60C2B8 00234260
-         ST    R0,VMCMVADA    STORE BUFFER PTR IN VMCF P-LIST  @V60C2B8 00234270
-         ST    R2,VMCMLENA    STORE TXT LEN IN P-LIST          @V60C2B8 00234280
-         STCK  VMCMUSE        CLOCK VALUE - UNIQUE MSGID       @V60C2B8 00234290
-         MVC   VMCMMID(4),VMCMUSE+3 UNIQUE SMGID FOR SPM       @V60C2B8 00234300
-         L     R15,SAVER11    GET SPM SENDER'S VMBLOK          @V60C2B8 00234310
-         DROP  R11                                                      00234320
-         USING VMBLOK,R15                                               00234330
-         MVC   VMCMUSE(8),VMUSER SAVE SENDER ID IN LIST        @V60C2B8 00234340
-         DROP  R15                                                      00234350
-         USING VMBLOK,R11                                               00234360
-         MVC   VMCMUSER(8),SAVEWRK4 USERID TO RECV SPM         @V60C2B8 00234370
-         LR    R5,R2          GET MSG TXT LEN                  @V60C2B8 00234380
-         BCTR  R5,0           SUBTRACT 1 FOR MOVE              @V60C2B8 00234390
-         EX    R5,SMSGMVC     MOVE SPM TO OUTPUT BUFFER        @V60C2B8 00234400
-         LA    R2,VMCMLEN     LENGTH OF P-LIST FOR VMCF CALL   @V60C2B8 00234410
-         DROP  R1                                                       00234420
-         L     R11,ASYSVM     GET ADDRESS OF SYSTEM VMBLOK     @V60C2B8 00234430
-         CALL  DMKVMCFC       SENDX THE VMCF SPM               @V60C2B8 00234440
-         ST    R2,SAVER2      SEND RETURN CODE TO CALLER       @V60C2B8 00234450
-         CH    R2,NOTAUTH    WAS RECEIVER AUTHORIZED?          @V60C2B8 00234460
-         BNE   RETURN         YES - RETURN TO CALLER           @V60C2B8 00234470
-         SPACE                                                          00234480
-*        OTHERWISE TELL SENDER - RECEIVER NOT VMCF AUTHORIZED           00234490
-         SPACE                                                          00234500
-         LA    R1,=CL14'NOT AUTHORIZED' SETUP MSG057 DATA      @V60C2B8 00234510
-         BAL   R7,MSGSNDE     USER NOT RECEIVING - NOT AUTHOR  @V60C2B8 00234520
-         B     RETURN         RETURN TO CALLER                 @V60C2B8 00234530
 MSGFOR   BAL   R7,MSGFMT      GET OUTPUT BUFFER AND FORMAT THE MESSAGE  00235000
 MSGNXT   BAL   R7,MSGSND      SEND THE MESSAGE IF THE USER IS RECEIVING 00236000
          CL    R10,SAVER11    MESSAGE FOR ALL USERS ?          @VA01513 00237000
          BNE   MSGRET         NOPE -- RETURN                   @VA01513 00238000
 NEXTVM   DS    0H             GET THE NEXT VMBLOK              @V407508 00239100
-         L     R1,VMPNT       GET THE NEXT VMBLOK ADDRESS      @V407508 00239200
+         LR    R1,R11                                          @VA09531 00239220
+         L     R1,VMPNT-VMBLOK(,R1) GET NEXT VMBLOK ADDRESS    @VA09531 00239240
+NEXTVM2  DS    0H                                              @VA09531 00239260
          CR    R10,R1         WAS THAT THE LAST MESSAGE?       @V407508 00239300
          BE    MSGRET         YES, RETURN TO THE CALLER        @V407508 00239400
+         TM    VMRSTAT-VMBLOK(R1),VMLOGOFF USER LOGGING OFF?   @VA09531 00239410
+         BO    NEXTVM3        YES,LOGOFF                       @VA09531 00239418
+         TM    VMOSTAT-VMBLOK(R1),VMKILL USER KILLED?          @VA09531 00239426
+         BO    NEXTVM3        YES,KILLED                       @VA09531 00239434
+         B     NEXTVM4        SWAP VMBLOK                      @VA09531 00239442
+NEXTVM3  DS    0H                                              @VA09531 00239450
+         L     R1,VMPNT-VMBLOK(,R1) GET NEXT VMBLOK            @VA09531 00239458
+         B     NEXTVM2        CONTINUE VALIDITY CHECK          @VA09531 00239466
+NEXTVM4  DS    0H                                              @VA09531 00239474
          SWTCHVM              LOCK THIS VMBLOK                 @V407508 00239500
          TM    VMRSTAT,VMLOGOFF HEADED FOR THE CLIFF?          @VA01513 00244000
          BO    NEXTVM         YES, GET NEXT                    @VA01513 00245000
          TM    VMOSTAT,VMKILL MAKE DOUBLE SURE                 @VA01513 00246000
          BZ    MSGNXT         NOPE, GO SEND MSG                @VA01513 00247000
          B     NEXTVM         YUP, TRY SOMEBODY ELSE           @VA01513 00248000
-MSGRET   LR    R0,R4          LOAD THE BUFFER SIZE                      00249000
+MSGRET   DS    0H                                              @VA09994 00248200
+         CLI   SAVEWRK1,HEXZERO SMSG?                          @VA09994 00248400
+         BE    RETURN         YES - NOTHING TO FRET THEN       @VA09994 00248600
+         LR    R0,R4          LOAD THE BUFFER SIZE             @VA09994 00248800
          L     R1,SAVEWRK3    LOAD THE MSG BUFFER ADDRESS      @V407508 00249100
          CALL  DMKFRET           RETURN THE OUTPUT BUFFER TO FREE STORA 00250000
 RETURN   DS    0H             RETURN TO CALLER                 @V407508 00251100
+         L     R1,SAVEWRK6    ADDRESS OF WORK AREA             @VA12684 00251110
+         LTR   R1,R1          WAS A WORK AREA OBTAINED ?       @VA12684 00251120
+         BZ    MSGEXIT        NO, JUST EXIT                    @VA12684 00251130
+         LA    R0,MSGWASZE    SIZE OF WORK AREA                @VA12684 00251140
+         CALL  DMKFRET        RELEASE WORK AREA STORAGE        @VA12684 00251150
+MSGEXIT  DS    0H                                              @VA12684 00251160
          L     R1,SAVER11     GET CALLERS VMBLOK ADDRESS       @V407508 00251200
          SWTCHVM              LOCK CALLERS VMBLOK              @V407508 00251300
          EXIT                                                           00254000
          SPACE 3                                                        00255000
 MSGCPO   DS    0H             MSG IS FOR OPERATOR              @V407508 00256100
          L     R1,ASYSOP      GET OPERATORS VMBLOK ADDRESS     @V407508 00256200
+         TM    VMRSTAT-VMBLOK(R1),VMLOGOFF USER LOGGING OFF?   @VA09531 00256220
+         BO    MSG045         YES,LOGOFF                       @VA09531 00256240
+         TM    VMOSTAT-VMBLOK(R1),VMKILL USER KILLED?          @VA09531 00256260
+         BO    MSG045         YES,KILLED                       @VA09531 00256280
          SWTCHVM              LOCK OPERATORS VMBLOK            @V407508 00256300
          L     R10,VMPNT      GET POINTER TO NEXT VMBLOK                00259000
          LTR   R10,R10        IS OPERATOR'S VMBLOK IN THE CHAIN ?       00260000
@@ -404,10 +388,6 @@ MSGFMT   LM    R3,R4,BUFNXT   LOAD INPUT BUFFER POINTER AND COUNT       00277000
          BNP   RETURN         YES - RETURN TO CALLER                    00279000
          LR    R2,R3          SAVE STARTING ADDRESS OF MESSAGE          00280000
 MSGFMTL  EQU   *              SCAN TO LOGICAL END OF MSG LINE  @V200820 00281000
-         CLI   0(R3),X'1D'    SCAN FOR UNDESIRABLE CHARACTER   @VA08728 00281200
-         BNE   MSGFMTL1       NO, DO NOT CHANGE                @VA08728 00281400
-         MVI   0(R3),X'40'    BLANK IT OUT                     @VA08728 00281600
-MSGFMTL1 EQU   *                                               @VA08728 00281800
          CLI   0(R3),X'15'    LOGICAL LINE END CHARACTER ?     @V200820 00282000
          BE    MSGFMTE        YES,COMPUTE THE MESSAGE LENGTH            00283000
          LA    R3,1(,R3)      NO, POINT TO THE NEXT BYTE IN THE BUFFER  00284000
@@ -417,7 +397,12 @@ MSGFMTE  STM   R3,R4,BUFNXT   SAVE UPDATED POINTER AND COUNT            00286000
          BZ    SETLEN              SO SKIP THE SUBTRACT                 00288000
          BCTR  R3,0           DECREMENT LENGTH BY 1 FOR MVC INSTRUCTION 00289000
 SETLEN   EQU   *                                                        00290000
-         LA    R0,L'MSGHDR+L'MSGTRL+8(,R3)   ADD HEADER + TRAILER + 8   00291000
+         CLI   SAVEWRK1,HEXZERO IS THIS AN SMSG CMD?           @VA09994 00290200
+         BNE   GETMSBUF       NO - GET MSG BUFFER              @VA09994 00290400
+         LA    R4,1(,R2)      START MSG TEXT (W/O BLANKS)      @VA09994 00290600
+         BR    R7             AND GO HOME                      @VA09994 00290800
+GETMSBUF EQU   *                                               @VA09994 00291000
+         LA    R0,L'MSGHDR+L'MSGTRL+8(,R3)                     @VA09994 00291200
          SRL   R0,3           CONVERT TO NUMBER OF DOUBLE WORDS         00292000
          LR    R4,R0          SAVE SIZE FOR LATER FRET                  00293000
          CALL  DMKFREE           GET A BUFFER FOR THE OUTPUT MESSAGE    00294000
@@ -428,6 +413,7 @@ SETLEN   EQU   *                                                        00290000
          BZ    MSGFMTM        NO,LEAVE 'MSG' IN THE HEADER              00299000
          MVC   MSGTYP-MSGHDR(3,R1),=C'WNG '  MOVE 'WNG' INTO THE HEADER 00300000
 MSGFMTM  EX    R3,MSGMVC      MOVE THE MESSAGE TO THE OUTPUT BUFFER     00301000
+         LA    R0,1(,R3)      GET BACK ACTUAL MSG LENGTH       @VA09994 00301100
          LR    R2,R1          START OF BUFFER FOR TIME-STAMP   @V202420 00302000
          SLR   R1,R1          NO DATE WANTED                   @V202420 00303000
          CALL  DMKCVTDT       TIME STAMP THE MESSAGE BUFFER    @V202420 00304000
@@ -437,9 +423,71 @@ MSGFMTM  EX    R3,MSGMVC      MOVE THE MESSAGE TO THE OUTPUT BUFFER     00301000
          LA    R0,L'MSGHDR+L'MSGTRL+1(,R3)   LOAD THE MESSAGE LENGTH    00308000
          STM   R0,R1,SAVEWRK2 SAVE MSG LENGTH AND ADDRESS      @V407508 00308100
          IC    R5,SAVEWRK1    LOAD THE MESSAGE / WARNING MASK           00309000
+         N     R5,=A(VMMSGON+VMWNGON) LEAVE ON MSG AND WNG     @VA13028 00309510
          BR    R7             RETURN                                    00310000
          EJECT                                                          00311000
-MSGSND   EX    R5,MSGREC      USER RECEIVING MESSAGES ??       @V200930 00312000
+MSGSND   DS    0H                                              @VA09994 00311030
+         L     R6,SAVEWRK6    ADDRESS OF WORK AREA             @VA12684 00311040
+         CLI   SAVEWRK1,X'00' IF = X'00', IT'S AN SMSG.        @VA09994 00311060
+         BNE   NOSMSG         NO! SEND IT AS A MSG.            @VA09994 00311090
+         MVC   MSGWA1(8,R6),VMUSER   SAVE USERID TO RECV SMSG. @VA12684 00311120
+         LA    R1,=CL14' SMSG OFF '                            @VA09994 00311150
+         TM    VMSPMFLG,VMSPMON USER RECEIVING SMSG?           @VA09994 00311180
+         BNO   MSGSNDE        NO! SEND MSG. INFORMING          @VA09994 00311210
+         L     R1,ASYSVM      GET SYS VMBLOK ADDR.             @VA09994 00311240
+         SWTCHVM LOCK         SYS VNBLOK                       @VA09994 00311270
+         LA    R0,VMCMLEN+7(R3) GET SENDX EXT INT BUF LEN      @VA09994 00311300
+         SRL   R0,3           CONVERT TO DOUBLE WORDS          @VA09994 00311330
+         CALL  DMKFREE        GO GET SPM BUFFER                @VA09994 00311360
+         USING VMCMHDR,R1                                      @VA09994 00311390
+         MVI   VMCMEFLG,HEXZERO ZERO OUT RETURN CODE FLD.      @VA09994 00311420
+         MVI   VMCMSTAT,HEXZERO (REALLY VMCPFLAG1)NOT PRTY MSG @VA09994 00311450
+         LA    R0,VMCPSENX    SENX SUBFUNCTION CODE VALUE      @VA09994 00311480
+         STCM  R0,3,VMCMFUNC  FILL IN VMCF SUBFUNCTION CODE    @VA09994 00311510
+         LA    R0,VMCMLEN(R1) START OF MSG TXT                 @VA09994 00311540
+         ST    R0,VMCMVADA    STORE BUF PTR IN VMCF P-LIST     @VA09994 00311570
+         ST    R3,VMCMLENA    STORE TXT LEN IN P-LIST          @VA09994 00311600
+         ST    R1,VMCMMID     USE MSG ADDRESS AS MSG ID        @VA09994 00311630
+         L     R15,SAVER11    GET SPM SENDER'S VMBLOK          @VA09994 00311660
+         MVC   VMCMUSE(8),VMUSER-VMBLOK(15) SENDERS ID.        @VA09994 00311690
+         MVC   VMCMUSER(8),MSGWA1(R6)   USERID TO RECV SPM     @VA12684 00311720
+         LTR   R5,R3          GET MSG TXT LEN                  @VA09994 00311750
+         BNP   SMSG0          NOTHING TO MOVE, SO DON'T        @VA09994 00311780
+         BCTR  R5,0           SUBTRACT 1 FOR MOVE              @VA09994 00311810
+         EX    R5,SMSGMVC     MOVE SPM TO OUTPUT BUFFER        @VA09994 00311840
+SMSG0    DS    0H                                              @VA09994 00311870
+         LA    R2,VMCMLEN     LENGTH OF P-LIST FOR VMCF CALL   @VA09994 00311900
+         DROP  R1                                              @VA09994 00311930
+         CALL  DMKVMCFC       SENDX THE VMCF SPM               @VA09994 00311960
+         LTR   R2,R2          HOW'D THE SENDX GO?              @VA09994 00311990
+         BZ    SMSGOK                                          @VA09994 00312020
+         LA    R0,VMCMLEN+7(R3) GET SENDX EXT INT BUF LEN      @VA09994 00312050
+         SRL   R0,3           CONVETR TO DOUBLE WORDS          @VA09994 00312080
+         CALL  DMKFRET        RELEASE SPM BUFFER               @VA09994 00312110
+SMSGOK   DS    0H                                              @VA09994 00312140
+         LA    R1,MSGWA1(,R1) POINT TO CURRENT USERID          @VA12684 00312170
+         LA    R0,8           LENGTH OF A USER ID              @VA09994 00312200
+         CALL  DMKSCNAU       FIND USERS VMBLOK                @VA09994 00312230
+         SWTCHVM                                               @VA09994 00312260
+         LTR   R2,R2          TEST COND CODE                   @VA09994 00312290
+         BZR   R7             OK- CONTINUE NORMALLY            @VA09994 00312320
+         LA    R1,=CL14'NOT AUTHORIZED' SET UP MSG057 DATA     @VA09994 00312350
+         CH    R2,NOTAUTH     WAS RECEIVER UNAUTH?             @VA09994 00312380
+         BE    MSGSNDE        YES! GEN MSG                     @VA09994 00312410
+         LA    R1,=CL14'QUIESCED' SET UP MSG057 DATA           @VA09994 00312440
+         CH    R2,QUIESCED    WAS RECEIVER QUIESCED?           @VA09994 00312470
+         BE    MSGSNDE        YES! GEN MSG                     @VA09994 00312500
+         LA    R1,=CL14'MSG TOO LARGE' SET UP MSG057 DATA      @VA09994 00312530
+         CH    R2,BIGMSG      WAS MSG TOO BIG?                 @VA09994 00312560
+         BE    MSGSNDE        YES! GEN MSG                     @VA09994 00312590
+* CHECK FOR ANY OTHER ERROR                                             00312620
+         LR    R1,R2          GET RETURN CODE                  @VA09994 00312650
+         CALL  DMKCVTBD       IN PRINTABLE DECIMAL             @VA09994 00312680
+         MVC   MSGWA2+1(11,R6),=CL11'VMCF ERROR'               @VA12684 00312710
+         STCM  R1,B'0111',MSGWA2+12(R6)  PUT INTO MSG          @VA12684 00312740
+         B     MSGSNDX                                         @VA09994 00312770
+NOSMSG   DS    0H                                              @VA09994 00312800
+         EX    R5,MSGREC      USER RECEIVING MESSAGES?         @VA09994 00312830
          BZ    MSGSNDN        NO, TELL ISSUING USER            @V200930 00313000
          TM    VMOSTAT,VMDISC USER DISCONNECTED ??             @V200930 00314000
          BO    MSGSNDN        YES - GO INFORM THE SENDER       @V202420 00315000
@@ -458,6 +506,7 @@ MSGSNDW  EQU   *              SEND THE USER MESSAGE/WARNING    @V202420 00322000
          LA    R15,L'MSGHDR+1 LENGTH OF HEADER TO BE SKIPPED   @V60C2BE 00322750
          AR    R1,R15         PAST HDR TEXT                    @V60C2BE 00322900
          SR    R0,R15         LESS LENGTH OF HDR TEXT          @V60C2BE 00323050
+         S     R0,F2          IGNORE TRAILING CR'S ALSO        @VA09896 00323100
 NOTNOH   EQU   *                                               @V60C2BE 00323200
          SPACE                                                          00323350
          O     R2,=A(NOTRESP) SET NON-COMMAND MSG              @V60C2B8 00323500
@@ -466,8 +515,7 @@ NOTNOH   EQU   *                                               @V60C2BE 00323200
          BR    R7             RETURN                                    00324000
          SPACE 2                                                        00325000
 MSGSNDN  EQU   *              SEND MSG= DMKMSG057W             @V200820 00326000
-         MVC   SAVEWRK4(8),VMUSER  MOVE USERID FOR DMKERMSG    @V200820 00328000
-         MVI   SAVEWRK6,X'00'      FIELD DELIMITER             @V200820 00329000
+         MVC   MSGWA1(8,R6),VMUSER MOVE USERID FOR DMKERMSG    @VA12684 00328000
          LA    R1,=CL14' DISCONNECTED'  MAYBE HE'S DISCONNECTED@V200820 00330000
          TM    VMOSTAT,VMDISC           ??                     @V200820 00331000
          BO    MSGSNDE      YES - GO FILL IN VARIABLE DATA     @V200820 00332000
@@ -476,25 +524,32 @@ MSGSNDN  EQU   *              SEND MSG= DMKMSG057W             @V200820 00326000
          BO    MSGSNDE        YES - GO FILL IN VARIABLE DATA   @V200820 00335000
          LA    R1,=CL14' WNG OFF '      MUST BE WARNING OFF    @V200820 00336000
 MSGSNDE  EQU   *                                               @V200820 00337000
-         MVC   SAVEWRK6+1(14),0(R1)     MOVE IN MESSAGE TRAILER@V200820 00338000
+         MVC   MSGWA2+1(14,R6),0(R1)   MOVE IN MESSAGE TRAILER @VA12684 00337500
+MSGSNDX  EQU   *                                               @VA09994 00338030
+         MVI   MSGWA2(R6),X'00'    FIELD DELIMITER             @VA12684 00338060
          L     R1,SAVER11     GET CALLERS VMBLOK ADDRESS       @V407508 00338100
          LR    R8,R11         REMEMBER CURRENT VMBLOK ADDRESS  @V407508 00338200
          SWTCHVM              LOCK CALLERS VMBLOK              @V407508 00338300
-         LA    R1,SAVEWRK4    START OF VARIABLE DATA FIELDS    @V200820 00339000
+         LA    R1,VMUSER-VMBLOK(,R8) LOCK DISCO USER           @VA09531 00338450
+         CALL  DMKLOCKQ       QUEUE ON OR OBTAIN USER LOCKBLOK @VA12684 00338600
+         LR    R1,R6          START OF VARIABLE DATA FIELDS    @VA12684 00339300
          LA    R0,23          MAXIMUM LENGTH                   @V60C2B8 00340000
          ICM   R0,B'1110',MODID+3  MODULE I.D. FOR DMKERM      @V200820 00341000
          L     R2,=X'80E60039'     RETURN HERE, MSG= DMKMSG057W@V200820 00342000
          CALL  DMKERMSG       SEND THE MESSAGE                          00347000
          N     R2,XRIGHT16         SAVE ERROR CODE ONLY                 00348000
          ST    R2,SAVER2           RETURN CODE TO CALLER                00349000
-         LR    R1,R8          RESTORE SAVED VMBLOK ADDRESS     @V407508 00350100
+         LA    R1,VMUSER-VMBLOK(,R8) UNLOCK DISCO USER         @VA09531 00350110
+         CALL  DMKLOCKD                                        @VA09531 00350120
+         LR    R1,R8                                           @VA09531 00350130
+         IC    R5,SAVEWRK1    RESTORE MASK                     @VA09531 00350140
          SWTCHVM              LOCK THIS VMBLOK                 @V407508 00350200
+         CLI   SAVEWRK1,HEXZERO WAS THIS AN SMSG ATTEMPT?      @VA09994 00351200
+         BER   R7             YES! DON'T RETRY                 @VA09994 00352200
          TM    VMOSTAT,VMDISC MSG DUE TO DISCONNECTED ?        @V200820 00354000
          BCR   8,R7                NO -- JUST RETURN           @V200820 00355000
          EX    R5,MSGREC      ALSO NOT RECEIVING ?             @V200820 00356000
          BCR   8,R7           YES - RETURN                     @V200820 00357000
-         CLI   VMSPMFLG,VMSPMON USER RECEIVING SP MSG?         @V60C2B8 00357300
-         BNER  R7             NO - RETURN TO SP MSG CODE       @V60C2B8 00357600
          B     SNDMSG         SEND MESSAGE ANYWAY              @V200930 00358000
          EJECT                                                          00359000
 *.                                                                      00360000
@@ -541,6 +596,7 @@ MSGSNDE  EQU   *                                               @V200820 00337000
 *.                                                                      00401000
          EJECT                                                          00402000
 DMKMSGEC RELOC                ECHO COMMAND PROCESSOR                    00403000
+         XC    SAVEWRK6,SAVEWRK6  NO WORK AREA OBTAINED        @VA12684 00403500
          MVC   SAVEWRK4(1),VMMLEVEL     SAVE LINEDIT BYTE               00404000
          NI    VMMLEVEL,255-VMMLINED    TURN OFF LINE EDIT BIT          00405000
          CALL  DMKSCNFD       LOCATE NN IF ANY                          00406000
@@ -583,6 +639,8 @@ CKEND    CL    R0,F3               IF THREE CHARACTERS - MIGHT BE 'END' 00437000
          CLC   SAVEWRK2(3),=C'END' WAS END SPECIFIED ?                  00441000
          BE    ECHOEXIT         YES - GO EXIT                           00442000
 NOTEND   EQU   *                                                        00443000
+         TM    VMOSTAT,VMKILL TEST IF USER TO BE FORCED OFF?   @VA11792 00443100
+         BO    ECHOEXIT       IF SO, EXIT                      @VA11792 00443200
          L     R4,SAVEWRK1    LOAD LINE COUNT                           00444000
 ECHOWRIT L     R2,=A(NOTRESP) INDICATE NON-COMMAND MSG         @V60C2B8 00444600
          CALL  DMKQCNWT                      ECHO LINE         @V60C2B8 00445200
@@ -612,7 +670,6 @@ MSG045   LA    R2,45          ERROR CODE                                00468000
          LM    R0,R1,SAVEWRK8 RELOAD LENGTH AND ADDRESS OF BAD ARG.     00469000
          B     CALLERM        ....                                      00470000
          SPACE                                                          00471000
-MSG810   LA    R2,810         ERROR CODE                       @V60C2B8 00471250
          B     NOVAR          ....                             @V60C2B8 00471500
          SPACE                                                          00471750
 NOVAR    SLR   R1,R1          ZERO PARM REG                             00472000
@@ -623,13 +680,15 @@ CALLERM  ICM   R0,14,MODID+3       INSERT MODULE ID                     00473000
 *                                                                       00477000
          SPACE 3                                                        00478000
 MSGMVC   MVC   L'MSGHDR(0,R1),0(R2)     MOVE MESSAGE TO OUTPUT BUFFER   00479000
-SMSGMVC  MVC   VMCMLEN(0,R1),0(R3)      SPM TO OUTPUT BUFFER   @V60C2B8 00479500
+SMSGMVC  MVC   VMCMLEN(0,R1),0(R4) SPM TO OUTPUT BUFF          @VA09994 00479500
 MSGREC   TM    VMMLEVEL,X'00' IS USER RECEIVING MESSAGES OR WARNINGS    00480000
 MSGCMPOP CLC   0(0,R1),=C'OPERATOR '    EXECUTED COMPARE                00481000
+MSGWASZE EQU   3              SIZE OF WORK AREA IN DW'S        @VA12684 00481500
          SPACE 2                                                        00482000
 HEXZERO  EQU   X'00'          CLEAR OUT VMCF PARM LIST FIELDS  @V60C2B8 00482200
-MSGLIMIT DC    H'10'          EXCEEDED VMCF MESSAGE LIMIT      @V60C2B8 00482400
-NOTAUTH  DC    H'5'           RECEIVER NOT VMCF AUTHORIZED     @V60C2B8 00482600
+NOTAUTH  DC    AL2(VMC05)     RECEIVER NOT VMCF AUTH           @VA09994 00482300
+BIGMSG   DC    AL2(VMC07)     RECEIVER BUFF TOO SMALL          @VA09994 00482400
+QUIESCED DC    AL2(VMC09)     RECEIVER IN VMCF QUIESCESAVE     @VA09994 00482500
          SPACE 3                                                        00482800
 MSGHDR   DS    CL30           LENGTH OF MESSAGE HEADER         @V202420 00483000
          ORG   MSGHDR                                                   00484000
@@ -637,6 +696,9 @@ MSGHDR   DS    CL30           LENGTH OF MESSAGE HEADER         @V202420 00483000
          DC    X'151515'      CR CR CR                                  00486000
 MSGTYP   DC    CL19'MSG FROM         : '                                00487000
 MSGTRL   DC    X'1515'        CR CR                                     00488000
+MSG1     DS    CL23           WORK AREA                        @VA12684 00488200
+MSGWA1   EQU   0              WORK AREA 1                      @VA12684 00488400
+MSGWA2   EQU   8              WORK AREA 2                      @VA12684 00488600
          EJECT                                                          00489000
          LTORG                                                          00490000
          EJECT                                                          00491000
@@ -646,4 +708,7 @@ MSGTRL   DC    X'1515'        CR CR                                     00488000
          COPY VMCBLOKS                                         @V60C2B8 00494500
          COPY  SAVE                                                     00495000
          COPY  VMBLOK                                                   00496000
+         COPY  NETWORK                                         @VA09684 00496010
+         COPY  RBLOKS                                          @VA09684 00496020
+         COPY  DEVTYPES                                        @VA09684 00496030
          END   DMKMSG                                          @V200820 00497000

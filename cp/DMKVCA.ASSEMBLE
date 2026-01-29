@@ -713,7 +713,6 @@ WRITIDL  EQU   *              X-SIDE WRITE, Y-SIDE IS IDLE              00705000
          B     VCANEXT        CONTINUE -- EFFECTIVE NO-OP               00713000
          EJECT                                                          00714000
 RDWRITE  EQU   *              READ OR WRITE FOR DATA TRANSFER           00715000
-         BAL   R14,USRWAIT    ZERO STATUS TO X-SIDE, DO TRACING         00716000
          L     R1,RCWADDR     GET CCW DATA OR IDAL ADDRESS              00717000
          LA    R1,0(0,R1)     ...WITHOUT THE CCW OP-CODE                00718000
          ST    R1,CHXIDAW     SET FOR DATA TRANSFER ROUTINE             00719000
@@ -722,6 +721,7 @@ RDWRITE  EQU   *              READ OR WRITE FOR DATA TRANSFER           00715000
          ST    R1,CHXCNCT     ...                                       00722000
          OI    CHXFLAG,CHBWAIT     INDICATE WAIT STATUS                 00723000
          BAL   R14,ATTNCHY    ATTENTION TO Y-SIDE                       00724000
+         BAL   R14,USRWAIT    ZERO STATUS TO X-SIDE,DO TRACING @VA10302 00724100
          B     VCAGOTO        EXIT, WAIT FOR SOMETHING TO HAPPEN        00725000
          SPACE 2                                                        00726000
 VCAREAD  EQU   *              READ, READ BACKWARD                       00727000
@@ -747,6 +747,18 @@ READEOF  EQU   *              READ, EOF LATCH IS SET                    00744000
          B     VCACEDE        ...AND TERMINATE CHANNEL PROGRAM          00747000
          EJECT                                                          00748000
 CHKSTAT  EQU   *              RETURN AFTER DATA TRANSFER IS COMPLETE    00749000
+         TM    SAVEWRK1+2,DEFCPX IS THERE A DEFERRED TASK      @VA13548 00749070
+         BZ    CPEXDONE       NO, NOTHING TO DO ON OTHER SIDE  @VA13548 00749140
+         NI    SAVEWRK1+2,255-DEFCPX YES, WE'LL DO IT NOW      @VA13548 00749210
+         L     R1,CHYCNCT     GET THE CPEXBLOK ON OTHER SIDE   @VA13548 00749280
+         LTR   R1,R1          IS IT THERE ... SHOULD BE        @VA13548 00749350
+         BZ    CPEXLOST       NO, CLEAN UP AND CONTINUE        @VA13548 00749420
+         CALL  DMKSTKCP       LET OTHER SIDE CONTINUE NOW      @VA13548 00749490
+         SR    R3,R3          ZERO POINTER TO CPEXBLOK         @VA13548 00749560
+         ST    R3,CHYCNCT     RIGHT HERE                       @VA13548 00749630
+CPEXLOST DS    0H                                              @VA13548 00749700
+         NI    CHYFLAG,255-CHBWAIT TAKE Y-SIDE OUT OF WAIT     @VA13548 00749770
+CPEXDONE DS    0H             CONTINUE WITH X-SIDE PROCESSING  @VA13548 00749840
          L     R10,SAVER10    ACCESS THE IOBLOK FOR A MOMENT            00750000
          USING IOBLOK,R10          ,,,                                  00751000
          TM    IOBFLAG,IOBRES HAS THIS IOTASK BEEN RESET ?              00752000
@@ -1056,21 +1068,36 @@ ILCHANY  EQU   *              SET INCORRECT LENGTH FOR Y-SIDE CHANNEL   01053000
          BO    RECONCT             YES - JUST FINISH UP                 01056000
          OI    CHYSTAT+1,IL   SET INCORRECT LENGTH                      01057000
          SPACE 2                                                        01058000
-RECONCT  EQU   *              RECONNECT BOTH X-SIDE AND Y-SIDE          01059000
-         L     R1,CHXCNCT                                               01060000
-         LTR   R1,R1          IS IT ZERO ??                    @VA06000 01061100
-         BZ    NOCPEX1        NO, DONE BY RESET DONT STACK     @VA06000 01061200
-         CALL  DMKSTKCP       STACK A CPEXBLOK                 @VA06000 01061300
-NOCPEX1  L     R1,CHYCNCT     GET Y-SIDE CPEX POINTER          @VA06000 01061400
-         LTR   R1,R1          IS IT ZERO ??                    @VA06000 01061500
-         BZ    NOCPEX2        NO, RESET, DONT STACK            @VA06000 01061600
-         CALL  DMKSTKCP       STACK A CPEXBLOK                 @VA06000 01061700
-NOCPEX2  EQU   *                                               @VA06000 01061800
-         ST    R3,CHXCNCT     CLEAR BOTH POINTERS                       01064000
-         ST    R3,CHYCNCT     ...                                       01065000
-         NI    CHXFLAG,255-CHBWAIT      NO LONGER WAITING               01066000
-         NI    CHYFLAG,255-CHBWAIT      ...    ...                      01067000
-         B     VCADSPCH       GET OUT OF HERE - WE'RE THROUGH           01068000
+RECONCT  EQU   *              RECONNECT THE Y-SIDE AND DEFER   @VA13548 01059000
+*                             THE X-SIDE UNTIL Y-SIDE COMPLETES         01059300
+         L     R1,CHYCNCT     GET THE Y-SIDE CPEXBLOK          @VA13548 01059600
+         LTR   R1,R1          IS THERE ONE ?                   @VA13548 01059900
+         BZ    NOCPEX1        NO, GO TAKE CARE OF X-SIDE       @VA13548 01060200
+         CALL  DMKSTKCP       STACK THE Y-SIDE CPEXBLOK        @VA13548 01060500
+         USING CPEXBLOK,R1    GET ADDRESSABILITY TO Y-SIDE     @VA13548 01060800
+         L     R3,CHXCNCT     SEE IF THERE IS AN X-SIDE BLOK   @VA13548 01061100
+         LTR   R3,R3          IS THERE ONE ?                   @VA13548 01061400
+         BZ    YEXIT1         NO, NO NEED TO DEFER IT THEN     @VA13548 01061700
+         LR    R3,R13         SAVE ADDR OF OUR SAVE AREA       @VA13548 01062000
+         L     R13,CPEXR13    GET Y-SIDE SAVEAREA ADDR         @VA13548 01062300
+         OI    SAVEWRK1+2,DEFCPX INDICATE WE'RE DEFERRING TASK @VA13548 01062600
+         LR    R13,R3         RE-ESTABLISH OUR SAVE AREA ADDR  @VA13548 01062900
+YEXIT    DS    0H                                              @VA13548 01063200
+         NI    CHYFLAG,255-CHBWAIT TAKE Y-SIDE OUT OF WAIT     @VA13548 01063500
+         SR    R3,R3          ZERO CONSTANT                    @VA13548 01063800
+         ST    R3,CHYCNCT     ZERO OUT THE Y-SIDE CPEX POINTER @VA13548 01064100
+         B     VCADSPCH       GO TO DISPATCHER                 @VA13548 01064400
+         DROP  R1             DROP CPEXBLOK ADDRESSABILITY     @VA13548 01064700
+         SPACE 2                                                        01065000
+NOCPEX1  DS    0H                                              @VA13548 01065300
+         L     R1,CHXCNCT     GET THE X-SIDE CPEXBLOK          @VA13548 01065600
+         LTR   R1,R1          IS THERE ONE ?                   @VA13548 01065900
+         BZ    YEXIT1         NO, GO RESET AND EXIT            @VA13548 01066200
+         CALL  DMKSTKCP       YES, STACK THE X-SIDE CPEXBLOK   @VA13548 01066500
+         SR    R3,R3          GET A ZERO CONSTANT              @VA13548 01066800
+         ST    R3,CHXCNCT     RESET THE X-SIDE CPEXBLOK POINTER@VA13548 01067100
+YEXIT1   NI    CHXFLAG,255-CHBWAIT TAKE X-SIDE OUT OF WAIT     @VA13548 01067400
+         B     YEXIT          GO TO RESET THE Y-SIDE           @VA13548 01067700
          EJECT                                                          01069000
 *     DATABLK - CALCULATE NEXT ADDRESS AND LENGTH FOR DATA TRANSFER     01070000
 *               GR8 = ADDRESS OF CHXBLOK OR CHYBLOK ON ENTRY            01071000
@@ -1406,7 +1433,22 @@ DMKVCARD RELOC ,              DEVICE RESET WITHOUT DE-COUPLE            01400000
          SPACE                                                          01401000
          TM    VDEVSTAT,VDEVNRDY   IS THE CTCA COUPLED ?                01402000
          BO    VCAEXIT             NO -- JUST EXIT QUIETLY              01403000
-         BAL   R5,GETCTCA     GET THE CHXBLOK AND CHYBLOK REGISTERS     01404000
+         L     R9,VDEVREAL    ADDRESS OF CHXBLOK               @VA09657 01403100
+         DROP  R7                                              @VA09657 01403200
+         USING CHXBLOK,R9                                      @VA09657 01403300
+         L     R11,CHXOTHR    Y-SIDE VMBLOK                    @VA09657 01403400
+         TM    VMRSTAT,VMLOGOFF IS Y-SIDE LOGGING OFF ?        @VA09657 01403500
+         BZ    FINDCTCA       NO,THEN  FIND THE CTCA FOR Y-SIDE@VA09657 01403600
+         L     R11,SAVER11    OTHERWISE LOAD CORRECT VMBLOK    @VA09657 01403700
+         B     VCAEXIT        AND EXIT                         @VA09657 01403800
+FINDCTCA EQU   *                                               @VA09657 01403900
+         LH    R1,CHXYADD     Y-SIDE VADDR                     @VA09657 01404000
+         CALL  DMKSCNVU       GET Y-SIDE VDEVBLOK              @VA09657 01404100
+         L     R6,VDEVREAL    ADDRESS OF CHYBLOK               @VA09657 01404200
+         L     R11,SAVER11    LOAD CORRECT VMBLOK ADDRESS      @VA09657 01404300
+         LR    R7,R9          ACCESS CHXBLOK VIA GR7           @VA09657 01404400
+         USING CHXBLOK,R7                                      @VA09657 01404500
+         DROP  R9                                              @VA09657 01404600
          TM    CHYFLAG,CHBMNOP     DID Y-SIDE INHIBIT COMPATIBILITY ?   01405000
          BO    RESMODE             YES - LEAVE IN EXTENDED MODE         01406000
          NI    CHYFLAG,255-CHBM370 DROP INTO COMPATIBILITY MODE         01407000
@@ -1486,7 +1528,7 @@ RESCTCB  EQU   *              CHECK X-SIDE END-OF-FILE LATCH            01430000
 *        FREE STORAGE IS RELEASED VIA A CALL TO DMKFRET.                01481000
 *.                                                                      01482000
          EJECT                                                          01483000
-         DROP  R6,R7,R9,R10     ABANDON STANDARD USAGES                 01484000
+         DROP  R6,R7,R10      ABANDON STANDARD USAGES          @VA09657 01484000
 DMKVCARS RELOC ,    INTERNAL RESET FOR CHAN-TO-CHAN ADAPTER             01485000
          USING VDEVBLOK,R8                                              01486000
          USING CHXBLOK,R9                                               01487000
@@ -1502,6 +1544,15 @@ DMKVCARS RELOC ,    INTERNAL RESET FOR CHAN-TO-CHAN ADAPTER             01485000
          L     R11,CHXOTHR    Y-SIDE VMBLOK                    @VA08419 01496000
          LH    R1,CHXYADD     Y-SIDE VADDR                     @VA08419 01496500
          CALL  DMKSCNVU                                        @VA08419 01497000
+         BZ    CONTINUE       NO, FRET BOTH CHBLOKS            @VA13002 01497050
+         USING VCUBLOK,R7     Y, RESTORE Y VDEVBLOK ADDR       @VA13002 01497100
+         LA    R8,X'00F'      BY ISOLATING DEVICE BIT          @VA13002 01497150
+         NR    R8,R1                                           @VA13002 01497200
+         AR    R8,R8                                           @VA13002 01497250
+         LH    R8,VCUDVTBL(R8) LOAD VDEVBLOK INDEX             @VA13002 01497300
+         A     R8,VMDVSTRT     LOAD VDEVBLOK POINTER           @VA13002 01497350
+         DROP  R7                                              @VA13002 01497400
+CONTINUE EQU   *                                               @VA13002 01497450
          L     R10,VDEVREAL   ADDRESS OF CHYBLOK               @VA08419 01497500
          ST    R0,VDEVREAL    UNPLUG                           @VA08419 01498000
          OI    VDEVSTAT,VDEVNRDY MARK NOT READY                @VA08419 01498500
@@ -1665,6 +1716,7 @@ GETCTCA  EQU   *              GET ADDRESSES FOR BOTH BLOCKS             01654000
          SPACE 2                                                        01665000
          LTORG                                                          01666000
          EJECT                                                          01667000
+DEFCPX   EQU   X'80'          FLAG INDICATING DEFERRED CPEXBLOK@VA13548 01667500
          COPY  VCTCA                                                    01668000
          COPY  IOBLOKS                                                  01669000
          COPY  IOER                                                     01670000

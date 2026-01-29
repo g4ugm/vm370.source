@@ -22,10 +22,12 @@ MODID    DC    CL8'DMKVDR'    PAGEABLE MODULE IDENTIFIER       @V200020 00018000
          USING SAVEAREA,R13                                    @V200020 00022000
          SPACE                                                          00023000
          EXTRN DMKVSPCO,DMKVSPCR                               @V200020 00024000
+         EXTRN DMKSTKCP                                        @VA12861 00024500
          EXTRN DMKCVTBH,DMKSCNRN,DMKSCNRD                      @V200020 00025000
          EXTRN DMKIOSQR,DMKCFPRD,DMKTDKRL,DMKACODV             @V200020 00026000
          EXTRN DMKIOSRW,DMKVCARS                               @V200020 00027000
          EXTRN DMKPTRPW                                        @VA08037 00027200
+         EXTRN DMKSSSRL                                        @VA11344 00027600
          EJECT                                                          00028000
 *.                                                                      00029000
 * SUBROUTINE NAME -                                                     00030000
@@ -157,6 +159,25 @@ DMKVDREL RELOC                RELEASE A VIRTUAL DEVICE         @V200020 00153000
          L     R1,=A(DMKCFPRD) AVOID LOSING CONTROL DURING     @VA04788 00153350
          TRANS 2,1,OPT=(BRING,DEFER,SYSTEM) SVC TO DMKCFPRD    @VA04788 00153700
          USING VDEVBLOK,R8                                     @V200020 00154000
+         TM    VDEVFLAG,VDEVDIAL IS IT A DIALED DEVICE?        @VA12861 00154020
+         BZ    COMMON         NO, CONTINUE                     @VA12861 00154040
+         CLC   VDEVREAL,F0    HAS DIAL PROCESS COMPLETED?      @VA12861 00154060
+         BE    COMMON         YES, CONTINUE                    @VA12861 00154080
+         CLI   VDEVTYPC,CLASGRAF IS IT GRAPHIC?                @VA12861 00154100
+         BNE   COMMON         NO, CONTINUE                     @VA12861 00154120
+** IF IT IS TO RELEASE/DROP A DIALED IN CONSOLE, PROCESS THE            00154140
+** PENDING I/O FIRST. THAT IS, GET A CPEXBLOK TO RETURN TO              00154160
+** PROCESS RESET/DROP DEVICE FOR A DIALED CONSOLE AFTER ITS             00154180
+** OUTSTANDING I/O IS PROCESSED CORRECTLY.                              00154200
+         LA    R0,CPEXSIZE    GET A CPEXBLOK                   @VA12861 00154220
+         CALL  DMKFREE                                         @VA12861 00154240
+         USING CPEXBLOK,R1    CPEXBLOK ADDRESSABILITY          @VA12861 00154260
+         LA    R15,COMMON     SAVE RETURN ADDRESS              @VA12861 00154280
+         STM   R15,R14,CPEXADD AND ALL THE REGISTERS.          @VA12861 00154300
+         CALL  DMKSTKCP       STACK THE CPEXBOK                @VA12861 00154320
+         GOTO  DMKDSPCH       AND EXIT.                        @VA12861 00154340
+         DROP  R1                                              @VA12861 00154360
+COMMON   EQU   *                                               @VA12861 00154380
          OI    VDEVFLAG,VDEVDET PREVENT VIR I/O TO DEV         @VA04343 00154500
          SR    R0,R0          ZERO WORK REGISTER                        00155000
          CALL  DMKCFPRD        RESET THE DEVICE                         00156000
@@ -185,12 +206,21 @@ RELDEDD  L     R2,VDEVREAL    LOAD ATTACHED RDEVBLOK ADDRESS            00169000
 RELDOFF  EQU   *              PUNCH AN ACCOUNTING CARD                  00178000
          CALL  DMKACODV,AFFINITY                               @V4075A0 00179100
 RELDRUM  EQU   *                                               @V200020 00180000
+         TM    RDEVTYPC,CLASDASD   DASD DEVICE?                @VA11344 00180100
+         BZ    NOTMSS         NO THEN IT'S NOT AN MSS DEVICE   @VA11344 00180200
+         TM    PSAMSS,MSSPRES IS THE MSS PRESENT?              @VA11344 00180300
+         BNO   NOTMSS         NO - THEN DON'T ISSUE ANY RLQSH  @VA11344 00180400
+         TM    RDEVFLAG,RDEVVMNT   WAS THIS VOL MOUNTED BY CP? @VA11344 00180500
+         BNO   NOTMSS         NO - THEN DON'T ISSUE RELINQUISH @VA11344 00180600
+         CALL  DMKSSSRL       ELSE ISSUE A RELINQUISH REQUEST  @VA11344 00180700
+NOTMSS   DS    0H                                              @VA11344 00180800
          ST    R0,VDEVREAL    ZERO RDEVBLOK ADDRESS            @V200020 00181000
          NI    VDEVSTAT,255-VDEVDED     TURN OFF DEDICATED FLAG         00182000
          NI    RDEVSTAT,255-RDEVDED     TURN OFF DEDICATED FLAG         00183000
          TM    RDEVTYPC,CLASDASD   IS THIS A DISK STORAGE DEV ?@V200020 00184000
-         BZ    *+8            NO- BRANCH DO NOT TURN ON THE MOUNTED BIT 00185000
+         BZ    NOTDASD        NO-DO NOT TURN ON THE MOUNTED BIT@VA11344 00185000
          OI    RDEVFLAG,RDEVMOUT   INDICATE VOLUME NOT ATTACHED         00186000
+NOTDASD  DS    0H                                              @VA11344 00186500
          L     R1,ASYSVM      SET VMBLOK POINTER...                     00187000
          ST    R1,RDEVUSER    ...TO POINT TO SYSTEM VMBLOK              00188000
          LH    R6,RDEVATT     REMEMBER VIRT. ADDR. FOR MESSAGE          00189000
@@ -264,8 +294,17 @@ RELDISK  L     R2,VDEVREAL    LOAD RDEVBLOK ADDRESS                     00232000
          S     R3,F1          DECREMENT AND TEST               @VA03163 00238000
          BP    RELPOS         STILL SOME LEFT, FIND NEXT ONE   @VA03163 00239000
          BNZ   ABEND3         NO LINKS TO BEGIN WITH: ERROR    @VA03163 00240000
-         NI    RDEVFLAG,X'FF'-RDEVSYS TURN OFF SYS VOL FLAG    @VA03163 00241000
+         TM    PSAMSS,MSSPRES IS THE MSS PRESENT?              @VA11344 00241000
+         BNO   RELPOS1        NO - THEN DON'T ISSUE RELINQUISH @VA11344 00241100
+         TM    RDEVFLAG,RDEVVMNT   THIS VOL MNTD BY CP?        @VA11344 00241200
+         BNO   RELPOS1        NO - THEN DON'T RELINQUISH IT!   @VA11344 00241300
+*                                                                       00241400
+*   ISSUE A RELINQUISH REQUEST FOR THIS VOLUME                          00241500
+*                                                                       00241600
+         CALL  DMKSSSRL       ISSUE RELINQUISH REQUEST         @VA11344 00241700
 *                                                                       00242000
+RELPOS1  DS    0H                                              @VA11344 00242300
+         NI    RDEVFLAG,X'FF'-RDEVSYS TURN OFF SYS VOL FLAG    @VA03163 00242600
 RELPOS   STH   R3,RDEVLNKS    RESET COUNT OF LINKS             @VA03163 00243000
          L     R4,VDEVLINK    GET NEXT VIRTUAL DEVICE BLOCK    @VA03163 00244000
          LTR   R4,R4          IS IT THERE?                     @VA03163 00245000

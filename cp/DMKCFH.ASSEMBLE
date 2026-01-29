@@ -295,9 +295,8 @@ DOSAVE   XC    SAVEWRK4(L'SAVEWRK4+L'SAVEWRK5),SAVEWRK4 CLEAR  @VM03100 00285000
          IC    R5,RDEVCODE+1  INSERT DEVICE CODE                        00294000
          ST    R5,SAVEWRK2    SAVE STARTING CCPD FOR FUTURE USE         00295000
          L     R10,F4096      LOAD CONSTANT FOR BUMPING PAGES           00296000
-         L     R7,F256        LOAD CONSTANT FOR BUMPING CCPD            00297000
          LH    R6,SYSPAGLN    LOAD NUMBER OF SAVEPAG ENTRIES            00298000
-         AR    R5,R7          POINT TO DASD ADDRESS OF FIRST VIRT PAGE  00299000
+         BAL   R14,NEXTCCPD   GET NEXT PAGE SLOT               @VA12886 00299100
          SR    R3,R3          ZERO GPR3                                 00300000
 ****************************************************************        00301000
 *        REGISTER USAGE DURING SAVE LOOP                                00302000
@@ -320,7 +319,7 @@ SAVELOOP L     R8,SYSPAGNM(R3)     LOAD ENTRY                           00313000
          BNL   CFH300         YES, WRITE ERROR MSG             @VA02004 00319000
          SPACE                                                          00320000
 TRANLOOP LR    R1,R8          ADDRESS OF PAGE TO R1                     00321000
-         TRANS 2,1,OPT=(BRING,DEFER)    BRING PAGE INTO STORAGE         00322000
+         TRANS 2,1,OPT=(BRING,DEFER),ADEX=CFH300,IOER=CFH435   @VA12197 00322500
          LR    R1,R8          LOAD ADDRESS                              00323000
          LR    R0,R5          LOAD CCPD                                 00324000
          ST    R2,SAVEWRK1    SAVE THE REAL ADDRESS FOR LATER           00325000
@@ -358,13 +357,7 @@ SEGVAL   DS    0H                                                       00343000
          A     R2,F2          BUMP COUNT OF KEYS(ALSO INDEXINTO BUFFER) 00357000
          ST    R2,SAVEWRK5    STORE IT                                  00358000
          SPACE                                                          00359000
-         AR    R5,R7          BUMP CCPD TO NEXT DASD PAGE               00360000
-         LR    R1,R5          CCPD TO R1                                00361000
-         N     R1,=X'0000FF00' SAVE PAGE NUMBER                         00362000
-         CL    R1,SAVEWRK7    CHECK IT AGAINST MAXIMUM PER CYL          00363000
-         BNH   PAGBUMP        BRANCH IF STILL ON SAME CYLINDER          00364000
-         A     R5,=X'00010000' ADD ONE TO 'CC'                          00365000
-         ICM   R5,B'0010',F1+3 RESET 'P' TO ONE                @VM03100 00366000
+         BAL   R14,NEXTCCPD   GET NEXT PAGE SLOT               @VA12886 00360100
          SPACE                                                          00367000
 PAGBUMP  EQU   *              . . .                                     00368000
          AR    R8,R10         BUMP PAGE                                 00369000
@@ -411,16 +404,19 @@ KEYSAVE  EQU   *                                                        00403000
          LH    R1,SYSPAGNM    STARTING PAGE NO.                @V408246 00410000
          SLL   R1,12          STARTING VIRTUAL ADDRESS         @V408246 00411000
          CALL  DMKRPAPT,PARM=0                                 @V408246 00412000
+         BNZ   CFH435         GET OUT ON ERROR FROM WRITE      @VA10709 00412100
          L     R0,SAVEWRK9    LOAD SIZE OF BUFFER                       00413000
          LR    R1,R7          ADDRESS OF BUFFER                         00414000
          CALL  DMKFRET        RELEASE BUFFER                            00415000
+         SR    R0,R0          CLEAR REGISTER                   @VA10709 00415100
+         ST    R0,SAVEWRK9    CLEAR SAVEWRK9 TO INDICATE       @VA10709 00415200
+*                             BUFFER HAS BEEN FRETTED                   00415300
          LH    R1,SYSPAGNM    FIRST PAGE SAVED                 @V408246 00416000
          SLL   R1,12          VIRT. ADDRESS OF FIRST PAGE SAVE @V408246 00417000
-         LR    R0,R5          CCPD OF FIRST SAVED              @V408246 00418000
-*                             PAGE (SAVETABLE)                 @V408246 00419000
-         A     R0,F256        BUMP TO WHAT SHOULD BE SAVED     @V408246 00420000
-*                             PAGE 0                           @V408246 00421000
+         BAL   R14,NEXTCCPD   GET NEXT PAGE SLOT               @VA12886 00418100
+         LR    R0,R5          SAVE ADDRESS                     @VA12886 00418300
          CALL  DMKRPAGT,PARM=0                                 @V408246 00422000
+         BNZ   CFH435         GET OUT ON ERROR FROM READ       @VA10709 00422100
          SPACE 1                                                        00423000
 SAVEFINI MSG   'SYSTEM SAVED' SEND CONFIRMATION MESSAGE                 00424000
          CALL  DMKQCNWT,PARM=NORET SEND THE MSG                         00425000
@@ -488,6 +484,13 @@ GETSNTBL L     R4,SAVEWRK6    IS SYSNAME TABLE ALLREADY IN     @V304635 00480000
          LR    R4,R2          ADDRESS OF SYSTABLE TO R4        @V304635 00486000
          ST    R2,SAVEWRK6    SAVE ADDRESS OF SYSNAME TABLE    @V304635 00487000
          BR    R5             RETURN TO CALLER                 @V304635 00488000
+NEXTCCPD EQU   *              HERE TO INCREMENT PAGE NUMBER    @VA12886 00488100
+         AL    R5,F256        INCREMENT PAGE NUMBER FIRST      @VA12886 00488110
+         CLM   R5,B'0010',SAVEWRK7+2 TEST PAGE # TO PAGE/CYL   @VA12886 00488120
+         BNHR  R14            NOT CYL BOUNDARY RETURN          @VA12886 00488130
+         AL    R5,=F'65536'   INCREMENT CYLINDER NUMBER        @VA12886 00488140
+         ICM   R5,B'0010',F256+2 RESET PAGE # TO ONE           @VA12886 00488150
+         BR    R14            RETURN                           @VA12886 00488160
          EJECT                                                          00489000
 SYSTUNLC ST    R2,SAVEWRK9    SAVE ERROR CODE REGISTER         @V304635 00490000
          L     R2,SAVEWRK6    TEST IF DMKSNT TABLE IN STORAGE  @V304635 00491000
@@ -502,6 +505,8 @@ PTRUL    CALL  DMKPTRUL       UNLOCK THE SYSNAME TABLE         @V304635 00496000
          BR    R10            RETURN TO CALLER                 @V304635 00500000
          SPACE 2                                                        00501000
 FREEKBUF L     R0,SAVEWRK9    BUFFER LENGTH                             00502000
+         LTR   R0,R0          IS THERE A BUFFER TO FRET?       @VA10709 00502100
+         BZ    NOVAR          NO,THEN CONTINUE WITHOUT FRET    @VA10709 00502200
          L     R1,SAVEWRK4    BUFFER ADDRESS                            00503000
          CALL  DMKFRET        FRET THE BUFFER                           00504000
          BR    R10            RETURN                                    00505000

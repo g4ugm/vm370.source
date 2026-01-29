@@ -123,6 +123,7 @@ DMKVIO   CSECT                                                          00113000
          EXTRN DMKCCHRF                                        @V508690 00119500
          EXTRN DMKSCNVU                                                 00120000
          EXTRN DMKTRKFP                                        @V56BDA8 00120100
+         EXTRN DMKSTKIO                                        @VA08629 00120200
          AIF   (NOT &TRACE(6)).TRA1                             **AIF** 00121000
          EXTRN DMKTRDSI,DMKTRCSW                               @V4M0240 00122100
          EXTRN DMKTRDWT                                        @VA07229 00123100
@@ -169,21 +170,82 @@ REFLECT  EQU   *                                                        00157000
          ICM   R15,B'0111',IOBCSW+1 REAL ADDR OF CURRENT CCW   @VA02985 00164000
          L     R14,IOBCAW     GET CAW                          @VA02137 00165000
          LA    R14,0(R14)     CLEAR HI BYTE                    @VA02137 00166000
-         SLR   R15,R14        DISPLACEMENT TO CURRENT CCW      @VA02985 00167000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *         00167025
+*              R0=VIRTUAL CCW ADDRESS                                   00167035
+*              R2=RCWTASK END                                           00167045
+*              R5=RCWTASK+X'10' TO POINT TO FIRST CCW IN THIS RCWTASK   00167055
+*              R14=IOBCAW/RCWTASK                                       00167065
+*              R15=IOBCSW                                               00167075
+*              THIS ROUTINE  WILL FIND OUT WHICH RCWTASK HAS THE        00167085
+*              INTERUPT IN IT. IT WILL THEN LOOK IN THE WRAP LIST       00167095
+*              TO FIND OUT WHICH CCW CAUSED THE INTERUPT BY CHECKING    00167105
+*              FOR THE DISPLACEMENT AND THE REAL VIRTUAL CCW ADDRESS.   00167115
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *         00167125
+         SPACE                                                          00167135
+         S     R14,F16        POINT TO BEGINNING OF FIRST      @VA08860 00167145
+*                             RCWTASK                                   00167155
+         USING RCWTASK,R14                                     @VA08860 00167165
+         CLC   RCWHEAD,FFS    IS THIS REALLY A RCWTASK         @VA08860 00167175
+         BNE   CKCC           NO, CONTINUE ON                  @VA08860 00167185
+REFLECT1 DS    0H                                              @VA08860 00167195
+         CLC   RCWRCNT,ZEROES TEST CCW COUNT                   @VA08860 00167205
+         BE    REFLECT2       NO, GET NEXT RCWTASK             @VA08860 00167215
+         LH    R2,RCWCCNT     GET RCWTASK LENGTH               @VA08860 00167225
+         SLL   R2,3           TIMES 8 TO GET NUMBER OF BYTES   @VA08860 00167235
+         LA    R2,0(R14,R2)   NOW GET END OF THE RCWTASK       @VA08860 00167245
+*              SO THAT WE CAN GET THE RIGHT RCWTASK FOR THIS INTERUPT   00167255
+*              SO WE CAN ALTER THE TIC.                                 00167265
+         CR    R15,R2         IS THE INTERUPT ABOVE OURS       @VA08860 00167275
+         BH    REFLECT2       YES,LOOK IN ANOTHER RCWTASK      @VA08860 00167285
+         CR    R15,R14        IS THE INTERUPT BELOW OURS       @VA08860 00167295
+         BL    REFLECT2       YES,LOOK IN ANOTHER RCWTASK      @VA08860 00167305
+         LA    R5,RCWCCW      NO,IT IS IN OUR RCWTASK,NOW POINT@VA08860 00167315
+*                             TO THE FIRST CCW IN THIS TASK             00167325
+         LR    R1,R5          WE WILL NEED THIS LATER AND USE  @VA08860 00167335
+*                             R1 NOW                                    00167345
+         SLR   R15,R1         GET DISPLACEMENT TO CURRENT CCW  @VA08860 00167355
+         LR    R0,R15         SAVE DISPLACEMENT ACROSS CALL    @VA10312 00167370
+         L     R1,RCWVCAW     ADDRESS TO TRANSLATE             @VA10312 00167380
+         TRANS R2,R1,OPT=(BRING+DEFER) CHECK OUT PAGE ADDRESS  @VA10312 00167390
+         LR    R15,R0         RESTORE DISPLACEMENT             @VA10312 00167400
+         BNZ   TSTPCIL        SOMETHING WRONG HERE             @VA10312 00167410
+         AR    R0,R2          POINT TO VIRTUAL CCW             @VA10312 00167420
+         B     FINDTIC        NOW LET'S SEE IF WE HAVE WRAPLIST@VA08860 00167455
+         SPACE                                                          00167465
+REFLECT2 DS    0H                                              @VA08860 00167475
+         ICM   R14,B'0111',RCWPNT+1 SEE IF THERE IS ANOTHER    @VA08860 00167485
+*                             RCWTASK                                   00167495
+         BNZ   REFLECT1       YES,GO BACK TO FIND IF INTERUPT  @VA08860 00167505
+*                             IS IN THIS RCWTASK                        00167515
+         B     TSTPCIL        SOMETHING WRONG WE SHOULD HAVE   @VA10312 00167526
+*                             FOUND THE INTERUPT......                  00167535
+         DROP  R14                                             @VA08860 00167545
 FINDTIC  EQU   *              TRY TO FIND TIC TO AUTOPOLL CCW  @VA02985 00168000
          ICM   R14,B'1111',IOBMISC GET ADDRESS OF POLL LIST    @VA01384 00169000
-         BZ    CKCC           BRANCH IF NONE                   @VA01384 00170000
+         BZ    TSTPCIL        BRANCH IF NONE                   @VA10312 00170100
          ICM   R1,B'1111',IOBMISC2 GET NUMBER OF LIST ENTIES   @VA01384 00171000
-         BZ    CKCC           BRANCH IF NONE OR END OF LIST    @VA01384 00172000
+         BZ    TSTPCIL        BRANCH IF NONE OR END OF LIST    @VA10312 00172100
 WRAPLP   C     R15,4(R14)     LIST FOR THIS TIC ?              @VA01384 00173000
-         BE    CKTIC          YES - NOW CHECK FOR TIC          @VA01384 00174000
+         BNE   WRAPLP1        NO, CONTINUE FIND IT SOMEWHERE   @VA08860 00174200
+*                             ELSE                                      00174300
+         CL    R0,0(R14)      YES,IT COULD BE OURS CHECK FOR   @VA08860 00174400
+*                             SAME VIRT CCW ADDRESS                     00174500
+         BE    CKTIC          YES,GO CHECK TO SEE IF TIC IS    @VA08860 00174600
+*                             CHANGED                                   00174700
+WRAPLP1  DS    0H                                              @VA08860 00174800
          LA    R14,8(,R14)    UPDATE TO NEXT ENTRY             @VA01384 00175000
          BCT   R1,WRAPLP      BRANCH IF MORE ENTRIES           @VA01384 00176000
+         S     R0,F8          BACKUP TO PREVIOUS CCW           @VA08860 00176500
+*            THE PURPOSE FOR BACKING UP THE CCW'S IS THAT THE           00176550
+*            PCI INTERUPT CAN OCCUR AT ANYTIME AFTER THE                00176600
+*           PCI BIT IS DETECTED BY THE CHANNEL. THEREFORE               00176650
+*             THE ACTUAL INTERUPT CAN COME IN ANYWHERE.                 00176700
          S     R15,F8         BACK UP ONE CCW                  @VA02985 00177000
          BNM   FINDTIC        BRANCH IF MORE CCW'S TO CHECK    @VA02985 00178000
-         B     CKCC           NOT THIS TIME                    @VA01384 00179000
+         B     TSTPCIL        NOT THIS TIME                    @VA10312 00179100
 CKTIC    LM    R1,R2,0(R14)   VIRTUAL TIC ADD,REAL TIC DISP    @VA01384 00180000
-         AL    R2,IOBCAW      ADDRESS OF REAL TIC              @VA01384 00181000
+         AR    R2,R5          NOW ADD THIS RCWTASK FIRST  CCW  @VA08860 00181050
+*                             TO DISPLACEMENT                           00181100
          TM    0(R1),X'07'    VIRTUAL TIC STILL A TIC ?        @VA03585 00182000
          BNZ   NEWCCW         NO -- GO GET NEW CCW             @VA03585 00183000
          TM    0(R1),X'08'    MAKE SURE IT'S STILL A TIC       @VA03585 00184000
@@ -291,6 +353,7 @@ VIOCC1   EQU   *                                                        00266000
          STH   R4,4(,R2)           STORE STATUS IN USER'S CSW           00279000
          TM    5(R2),CDC+CCC+IFCC WAS THIS A CHANNEL ERROR ?   @V508690 00279050
          BZ    NOCHAN         NO, CONTINUE PROCESSING          @V508690 00279100
+         BAL   R2,CHKIOERB    CLEAN UP RESIDUAL IOER           @VA09068 00279110
          ICM   R1,15,VDEVIOER GET IOERBLOK FOR REFLECT         @V508690 00279150
          BZ    NOCHAN         NO IOERBLOK, FORGET CALL         @V508690 00279200
          CALL  DMKCCHRF       GO SET UP USERS CHANNEL CHECK    @V508690 00279250
@@ -380,7 +443,7 @@ SIOFCC1  EQU   *              GIVE DEFERRED CC = 1             @VA01382 00330000
          SPACE                                                          00353000
 VIOINT   DS    0H             HANDLE VIRTUAL I/O INTERRUPT:             00354000
          CL    R10,IOBLINK    IS THIS THE FINAL INTERRUPT ?             00355000
-         BNE   VIOINT1             NOPE - NOT YET              @VM08571 00356000
+         BNE   VIOINT1        NOPE - NOT YET                   @VA08629 00356000
          SLR   R15,R15        YES - CLEAR VDEVIOB RIGHT NOW             00357000
          ST    R15,VDEVIOB    TO AVOID POSSIBLE ''RESET'' PROBLEMS ETC  00358000
 VIOINT1  EQU   *              PERHAPS TRACING SYNCHRONIZATION  @VM08571 00359000
@@ -459,9 +522,44 @@ DEVICEND EQU   *  HERE TO HANDLE DEVICE END TYPE INTERRUPTS             00419000
 DEVSTAT  LH    R3,IOBCSW+4         GET CSW STATUS                       00430000
          TM    IOBCSW+4,ATTN  ATTENTION INTERRUPT              @VA01653 00431000
          BZ    SAVESTAT       NO - OR IN OTHER STATUS          @VA01653 00432000
-         TM    IOBCSW+4,X'FF'-(ATTN+UC) ANYTHING ELSE ?        @VA01653 00433000
-         BZ    SAVESTAT       NO - ADD TO OLD STATUS           @VA01653 00434000
-         OI    VDEVFLAG,VDEVPOST FLAG AS SINGLE INTERRUPT      @VA01653 00435000
+         TM    IOBSPEC,IOBUNSL UNSOLICITED INTERRUPT?          @VA08629 00432100
+         BZ    ATTNPLUS       NO SPECIAL CHECKING              @VA08629 00432150
+         CLI   VDEVTYPC,CLASGRAF LOOKING FOR 2250/3350         @VA08629 00432200
+         BNE   ATTNPLUS       GRAPHICS DEVICE                  @VA08629 00432250
+         TM    VDEVTYPE,TYP2250 ...                            @VA08629 00432300
+         BZ    ATTNPLUS       NO SPECIAL CHECKING              @VA08629 00432350
+         TM    VDEVFLAG,VDEVUC WAITING FOR SENSE TO BE         @VA08629 00432400
+         BZ    ATTNPLUS       OFFLOADED? NO, HANDLE NORMALLY   @VA08629 00432450
+* MUST WAIT FOR SENSE TO BE OFFLOADED BEFORE HANDLING ATTENTION         00432500
+* I/O FOR KEYBOARD OR LIGHT PEN FUNCTIONS.                              00432550
+         SLR   R2,R2          CLEAR R2                         @VA08629 00432600
+         ICM   R2,7,VDEVIO    QUEUE OF PENDING INTERRUPTS      @VA08629 00432650
+         BNZ   NEXTIOB        FIND END OF CHAIN AND QUEUE I/O  @VA08629 00432700
+         STCM  R10,7,VDEVIO   STORE POINTER TO IOBLOK          @VA08629 00432750
+         B     GOTODSP        OFF TO THE DISPATCHER            @VA08629 00432800
+         DROP  R10                                             @VA08629 00432850
+         USING IOBLOK,R2      R2 IOBLOK ADDRESSABILITY         @VA08629 00432900
+NEXTIOB  L     R14,IOBFPNT    POINTER TO NEXT IOB ON CHAIN     @VA08629 00432950
+         LTR   R14,R14        LOOKING FOR END OF CHAIN         @VA08629 00433000
+         BZ    QUEUE          FOUND END - QUEUE THIS IOB       @VA08629 00433050
+         LR    R2,R14         SAVE THIS IOBLOK POINTER         @VA08629 00433100
+         B     NEXTIOB        CONTINUE LOOKING FOR END         @VA08629 00433150
+QUEUE    ST    R10,IOBFPNT    CHAIN IN CURRENT IOBLOK          @VA08629 00433200
+GOTODSP  SLR   R14,R14        CLEAR R14 TO ZERO POINTER        @VA08629 00433250
+         ST    R14,IOBFPNT-IOBLOK(R10) CLEAR FORWARD POINTER   @VA08629 00433300
+         GOTO  DMKDSPCH       OFF TO THE DISPATCHER            @VA08629 00433350
+         SPACE                                                          00433400
+         USING IOBLOK,R10     RE-ESTABLISH R10 ADDRESSABILITY  @VA08629 00433450
+ATTNPLUS TM    IOBCSW+4,X'FF'-(ATTN+UC) ANYTHING ELSE?         @VA08629 00433500
+         BZ    SAVESTAT       NO-ADD TO OLD STATUS             @VA12082 00434200
+         CLI   VDEVTYPC,CLASGRAF IS THIS GRAPHICS TYPE         @VA12082 00434400
+         BNE   VIOBY1         NO-POST AS SINGLE INTERRUPT      @VA12082 00434600
+         CLI   IOBCSW+4,ATTN+CUE DO WE HAVE ATTN AND CUE       @VA12082 00434800
+         BNE   VIOBY1         NO-POST AS SINGLE INTERRUPT      @VA12082 00435000
+         TM    VDEVINTS,X'04' DO WE HAVE DE END                @VA12082 00435200
+         BO    SAVESTAT       YES-ADD TO OLD STATUS            @VA12082 00435400
+VIOBY1   EQU   *                                               @VA12082 00435600
+         OI    VDEVFLAG,VDEVPOST FLAG AS SINGLE INTERRUPT      @VA12082 00435800
 SAVESTAT O     R3,VDEVINTS-2  ADD TO EXISTING STATUS, IF ANY   @VA01653 00436000
          STH   R3,VDEVINTS         AND STORE IN DEVICE BLOCK            00437000
          OI    VDEVSTAT,VDEVPEND   INDICATE DEVICE CLASS INTERRUPT PEND 00438000
@@ -487,6 +585,10 @@ CHKIOERB EQU   *   CHECK FOR POSSIBLE IO ERROR BLOCK (R2 = RETURN REG): 00454000
          TM    IOERCSW+5,CDC+CCC+IFCC WAS THIS A CHANNEL       @V508690 00458050
 *                             ERROR ?                                   00458100
          BZ    NOCHAN01       NO, CONTINUE PROCESSING          @V508690 00458150
+         TM    IOERCSW+5,IFCC WAS IT IFCC ONLY?                @VA10829 00458160
+         BZ    NOTIFCC        NO, CONTINUE                     @VA10829 00458170
+         NI    VDEVSTAT,255-VDEVCHBS IF ON, TURN IT OFF        @VA10829 00458180
+NOTIFCC  EQU   *                                               @VA10829 00458190
          L     R15,VDEVIOER   GET OLD(SENSE) IOERBLOK POINTER  @V508690 00458200
          ST    R1,VDEVIOER    SAVE (CHANNEL CHECK) IOERBLOK    @V508690 00458250
 *                             FOR REFLECTION                            00458300
@@ -546,6 +648,8 @@ CKVR     EQU   *                                               @VA03443 00494000
          BZ    NOUNTFR4       NO, CONTINUE                              00499000
 UNTFR4   DS    0H             CONNECTOR                                 00500000
 .NOVR11  ANOP                                                           00501000
+         CL    R10,IOBLINK    IS IT COPY IOB ?                 @VA09216 00501100
+         BNE   NOUNTFR4       NO, DON'T UNTRANSLATE IT         @VA09216 00501150
          CALL  DMKUNTFR            FREE  THE CCW LIST                   00502000
 NOUNTFR4 DS    0H             CONNECTOR                                 00503000
          TM    IOBSTAT,IOBFATAL DID SENSE FAIL?                @VA03443 00504000
@@ -579,6 +683,10 @@ NIINTREQ NI    IOERDATA,255-INTREQ  RESET INT. REQ.                     00532000
          DROP  R1                                                       00533000
          SPACE                                                          00534000
 STAKPEND EQU   *  HERE TO STACK ALL PENDING INTERRUPTS                  00535000
+         TM    IOBSPEC3,IOBPST POST THIS INTERRUPT?            @VA09137 00535200
+         BNO   NOPOST         NO                               @VA09137 00535400
+         OI    VDEVFLG2,VDEVPST TELL DSP TO POST               @VA09137 00535600
+NOPOST   EQU   *                                               @VA09137 00535800
          LH    R3,VDEVADD          GET DEVICE ADDRESS (0-F)             00536000
          AR    R3,R3               AND MULTIPLY BY 2                    00537000
          LH    R3,DMKVIOMK(R3)     CORRECT INTERRUPT MASK BIT           00538000
@@ -624,7 +732,7 @@ CHKUNSL  EQU   *                                               @VA01255 00568000
 VIOFREDV EQU   *              FREE UP DEVICE, EXIT CC = 0               00578000
          NI    VDEVSTAT,255-VDEVBUSY    REMOVE TEMPORARY BUSY BIT       00579000
          NI    VMRSTAT,255-VMIOWAIT     TAKE USER OUT OF IOWAIT@VM01157 00580000
-         B     VIOFRET                  FRET IOBLOK, EXIT               00581000
+         B     CKTERM2                                         @VA10261 00581010
          SPACE                                                          00582000
 SETCC1   EQU   *                                                        00583000
          LA    R2,X'10'            SET CONDITION CODE ONE               00584000
@@ -660,9 +768,14 @@ CKTIO    EQU   *                                                        00609000
          NI    VMRSTAT,X'FF'-VMIDLE     YES- LET THE USER ENTER Q       00614000
          NI    VMRSTAT,X'FF'-VMEXWAIT   TAKE OUT OF WAIT --             00615000
 CKTERM   EQU   *                                               @V200820 00616000
-         CL    R10,IOBLINK    IS THIS THE FINAL INTERRUPT ??            00620000
-         BNE   VIOBFRET       NO -- DO NOT CLEAR THE VDEVBLOK           00621000
-VIOFRET  EQU   *              FRET THE IOBLOK AND EXIT                  00622000
+         TM    VDEVTYPC,CLASTERM+CLASGRAF TERMINAL DEVICE ?    @VA10261 00616200
+         BZ    CKTERM1        NO                               @VA10261 00616210
+         OI    VMQSTAT,VMPRIDSP SET Q1 SWITCH                  @VA10261 00616220
+CKTERM1  DS    0H                                              @VA10261 00616230
+         CL    R10,IOBLINK    FINAL INTERRUPT ?                @VA10261 00616240
+         BNE   VIOBFRET       NO.  TAKE BRANCH                 @VA10261 00616250
+         B     QTWO           GO CHECK FOR INTERRUPT           @VA10261 00616260
+CKTERM2  DS    0H                                              @VA10261 00616270
          TM    VDEVTYPC,CLASTERM+CLASGRAF TERMINAL DEVICE?     @V408246 00622100
          BNZ   QONE           YES, ELGIBLE FOR Q1              @VA07264 00622350
          TM    VDEVTYPC,CLASSPEC IS IT SPECIAL CLASS ?         @VA07264 00622400
@@ -687,9 +800,25 @@ WRAPLIST L     R2,0(R1)       GET ADDRESS OF VIRTUAL TIC       @VA01384 00630000
          L     R0,IOBMISC2    GET SIZE OF POLL LIST            @VA01384 00636000
          CALL  DMKFRET        RELEASE IT                       @VA01384 00637000
          SPACE                                                          00638000
-VIOBFRET LR    R1,R10         GET IOBLOK ADDRESS IN R1         @VA07464 00639051
-         LA    R0,IOBSIZE     AND ITS SIZE                              00640000
-         CALL  DMKFRET        RELEASE IT                                00641000
+VIOBFRET EQU   *                                               @VA08629 00639060
+VIORLSE  LR    R2,R10         SAVE IOBLOK ADDR TEMPORARILY     @VA08629 00639110
+         TM    IOBSPEC3,IOBSENSE SPECIAL 2250/3250 UC CASE?    @VA08629 00639160
+         BZ    VIONOSTK       NO, KEEP GOING                   @VA08629 00639210
+         NI    IOBSPEC3,X'FF'-IOBSENSE RESET 2250/3250 IND.    @VA08629 00639260
+         SLR   R10,R10        ...                              @VA08629 00639310
+         ICM   R10,7,VDEVIO   ANY PENDING I/O                  @VA08629 00639360
+         BZ    VIONOSTK       NO, BYPASS UNSTACK OF PEND I/O   @VA08629 00639410
+UNSTKNXT L     R1,IOBFPNT-IOBLOK(R10) ADDR OF NEXT ON CHAIN    @VA08629 00639460
+         CALL  DMKSTKIO       UNSTACK PENDING I/O              @VA08629 00639510
+         LTR   R1,R1          ANY MORE PENDING                 @VA08629 00639560
+         BZ    VIOCLR         NO, KEEP GOING                   @VA08629 00639610
+         LR    R10,R1         PREPARE TO UNSTACK NEXT I/O      @VA08629 00639660
+         B     UNSTKNXT       UNSTACK NEXT REQUEST             @VA08629 00639710
+VIOCLR   STCM  R1,7,VDEVIO    CLEAR VDEVBLOK PEND CHAIN        @VA08629 00639760
+VIONOSTK EQU   *                                               @VA08629 00639810
+         LR    R1,R2          NOW RELEASE IOBLOK               @VA08629 00639860
+         LA    R0,IOBSIZE     SIZE IN DOUBLEWORDS              @VA08629 00639910
+         CALL  DMKFRET        RELEASE STORAGE                  @VA08629 00639960
          EJECT                                                          00642000
 VIOEXIT2 EQU   *                                               @VA03443 00643000
          GOTO  DMKDSPCH       AND GO DISPATCH                  @VA03443 00644000
@@ -703,7 +832,18 @@ FRET01   LA    R0,IOERSIZE    GET SIZE OF IOERBLOK             @V508690 00646600
          AH    R0,IOEREXT     AND THE EXTRA (IF ANY)           @VA03443 00647000
          CALL  DMKFRET        AND RELEASE IT                   @VA03443 00648000
          NI    VDEVFLAG,255-VDEVUC RESET UNIT CHECK FLAG       @VA03443 00651000
-         BR    R2             AND RETURN                       @VA03443 00652000
+         SLR   R3,R3          CLEAR                            @VA08629 00651100
+         ICM   R3,7,VDEVIO    ANY I/O PENDING?                 @VA08629 00651200
+         BZR   R2             NO, NOTHING TO RELEASE           @VA08629 00651300
+         LR    R1,R3          GET IOBLOK INTO R10 FOR STACK    @VA08629 00651400
+VIORUNQ  L     R3,IOBFPNT-IOBLOK(R1) GET POINTER TO NEXT       @VA08629 00651500
+*                             PRIOR                                     00651600
+         LA    R0,IOBSIZE     SIZE OF STORAGE TO RELEASE       @VA08629 00651700
+         CALL  DMKFRET        TO RELEASE PENDING I/O           @VA08629 00651800
+         LTR   R3,R3          ANYMORE ON CHAIN?                @VA08629 00651900
+         BZR   R2             NO, RETURN                       @VA08629 00652000
+         LR    R1,R3          CONTINUE TO RELEASE PEND I/O     @VA08629 00652100
+         B     VIORUNQ        ...                              @VA08629 00652200
          SPACE                                                          00653000
 SCANALL  STM   R7,R8,TEMPSAVE SAVE THESE REGS                  @VA03150 00654000
          NI    VCUSTAT,255-VCUACTV RESET CU ACTIVE FLAG        @VA03150 00655000

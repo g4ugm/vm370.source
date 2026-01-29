@@ -160,6 +160,8 @@ DMKDRD   START                                                          00018000
 *        THERE HAVE BEEN INTERVENING CALLS FOR FILE READING, THE        00159000
 *        SPOOL INPUT CHAIN IS SEARCHED FROM THE BEGINNING, AND CC = 2   00160000
 *        IS SET IF NO FILES ARE FOUND.                                  00161000
+*        IF A SPOOL FILE IS ALREADY ATTACHED TO THE SPECIFIED  @VA12474 00161200
+*        VIRTUAL READER, CC = 3, RC = 12 IS SET.               @VA12474 00161250
 *   NOTE: THE VIRTUAL BUFFER SPECIFIED VIA 'R1' MUST NOT CROSS A        00162000
 *        PAGE BOUNDARY OR A SPECIFICATION EXCEPTION WILL RESULT.        00163000
 *                                                                       00164000
@@ -239,6 +241,14 @@ DMKDRD   START                                                          00018000
 *        IS SET.  OTHERWISE, THE SFBLOK AND THE FIRST RECORD OF THE     00224000
 *        FILE (GENERALLY, THE 'TAG') ARE COPIED TO THE CALLER'S         00225000
 *        VIRTUAL STORAGE BUFFER.                                        00226000
+         SPACE                                                          00226010
+*      WARNING:  SINCE THIS SUBCODE DOES NOT CONSIDER THE STATE@VA14052 00226020
+*                OF THE "INUSE" FLAG, IT IS POSSIBLE FOR THE   @VA14052 00226030
+*        FILE FOUND TO BE CHANGED, PURGED, ETC BEFORE DMKDRD   @VA14052 00226040
+*        FINISHES PROCESSING AND RETURNS THE ABOVE DATA IN A   @VA14052 00226050
+*        BUFFER.  AS A RESULT, THE CONTENTS OF THE BUFFER MAY  @VA14052 00226060
+*        NOT BE VALID DATA;  THE FILE MAY HAVE BEEN CHANGED OR @VA14052 00226070
+*        DELETED.                                                       00226080
 *.                                                                      00227000
          EJECT                                                          00228000
          DC    CL8'DMKDRD'    PAGEABLE MODULE IDENTIFIER                00229000
@@ -327,6 +337,7 @@ SETCOD2  LA    R2,X'20'       ESTABLISH CONDITION CODE = 2     @VA04236 00292500
          SPACE 1                                                        00293500
 SETCOD3  L     R2,SAVER6      GPR6 AT ENTRY HAS CODE-REG NUMBER@VA04236 00294000
          ST    R1,4(,R2)      PASS ERROR IN SUBCODE-REG        @VA04236 00294500
+SETCC3   DS    0H                                              @VA08925 00294750
          LA    R2,X'30'       ESTABLISH CONDITION CODE = 3     @VA04236 00295000
 CCSET    LA    R1,VMPSW+4     CC POSITION FOR BC-MODE PSW      @VA04236 00295500
          TM    VMESTAT,VMEXTCM IS THIS VM IN EC-MODE?          @VA04236 00296000
@@ -441,7 +452,10 @@ READCHK  DS    0H                                              @V200930 00399000
          CLI   SAVEWRK6,X'00'      SHOULD WE CHECK FOR DUMP FILES ?     00400000
          BCR   7,R14          NO - GIVE THIS ONE TO USER                00401000
          TM    SFBFLAG,SFBDUMP     CANNOT USE DUMP FILES                00402000
-         BO    BEGINB      SURE ENOUGH                         @VA02787 00403000
+         BNO   CHKMON              IF NOT DUMP CONTINUE        @V67CAH7 00403000
+         CLI   SFBMISC1+1,C'V'     'VMDUMP' IS ACCEPTABLE      @V67CAH7 00403010
+         BNE   BEGINB              NOPE, IT'S CP DUMP. GETNEXT @V67CAH7 00403020
+CHKMON   DS    0H                                              @V67CAH7 00403030
          TM    SFBFLAG2,SFBMON  IS THIS A MONITOR FILE?        @V50A2B5 00403050
          BNO   SEEOK                NO                         @V50A2B5 00403100
          CLI   SAVEWRK6+1,X'00'     DO WE HAVE CORRECT DIAG?   @V50A2B5 00403150
@@ -460,6 +474,9 @@ GETVSPL  EQU   *                                                        00409000
          BNP   GETVSP1        NO - GET ONE                              00412000
          TM    VDEVSFLG,VDEVDIAG   IN USE BY DIAGNOSE ??                00413000
          BCR   1,R6           YES - VSPLCTL ALREADY EXISTS              00414000
+         L     R0,VSPSFBLK    IS THERE A SFBLOK ATTACHED       @VA12474 00414200
+         LTR   R0,R0          TO THE VSPLCTL?                  @VA12474 00414300
+         BNZ   DRDBUSY        YES - RETURN BUSY CONDITION      @VA12474 00414400
 GETVSP1  EQU   *              GET VSPLCTL BLOCK                         00415000
          LA    R0,VSPSIZE     GET VSPLCTL BLOCK                         00416000
          CALL  DMKFREE        ...                                       00417000
@@ -492,8 +509,8 @@ SELECTF  EQU   *                                                        00428000
 *---------------------------------------------------------------------* 00444000
 CONNECT  EQU   *                                                        00445000
          ST    R14,SAVEWRK2   SAVE RETURN REGISTER                      00446000
-         OI    SFBFLAG,SFBINUSE+SFBOPEN+SFBRECER                        00447000
-         BAL   R6,GETVSPL     GET VSPLCTL BLOCK IF NEEDED               00448000
+         BAL   R6,GETVSPL     GET VSPLCTL BLOCK IF NEEDED      @VA12474 00447000
+         OI    SFBFLAG,SFBINUSE+SFBOPEN INDICATE INUSE AND OPEN@VA12474 00448000
          ST    R10,VSPSFBLK   CONNECT SFBLOK                            00449000
          L     R1,SFBSTART    FIRST DASD LOCATION                       00450000
          ST    R1,VSPDPAGE    ...INTO VSPLCTL                           00451000
@@ -526,6 +543,20 @@ NEXTPAG  EQU   *              USER WANTS A DATA PAGE                    00474000
          BAL   R14,ADDCHEK    VALIDATE ADDRESS                          00478000
          LA    R15,GETSFCB    IF INACTIVE, CONNECT A BLOCK              00479000
          BAL   R14,CHKBUSY     SEE IF THE DEVICE IS ACTIVE              00480000
+CKACTIVE DS    0H     SEE IF THE ACTIVE FILE IS THE RIGHT TYPE @VA14190 00480010
+         TM    SFBFLAG,SFBDUMP IS IT A DUMP?                   @VA14190 00480030
+         BNO   MONCK          NO - CHECK FOR MONITOR FILE      @VA14190 00480050
+         CLI   SFBMISC1+1,C'V' YES - IS IT A VMDUMP?           @VA14190 00480070
+         BNE   DRDBUSY        CP DUMP - WE CAN'T HANDLE IT     @VA14190 00480090
+MONCK    TM    SFBFLAG2,SFBMON IS THIS A MONITOR FILE?         @VA14190 00480110
+         BNO   NOTMON         NO - CHECK FOR SUBCODE '000'     @VA14190 00480130
+         CLI   SAVEWRK6+1,X'00' YES - IS IT SUBCODE '020'?     @VA14190 00480150
+         BE    DRDBUSY        WRONG SUBCODE FOR MONITOR FILE   @VA14190 00480170
+         B     FILEOK         MON. FILE, SUBCODE '020 IS OK    @VA14190 00480190
+NOTMON   CLI   SAVEWRK6+1,X'00' IS IT SUBCODE '000'?           @VA14190 00480210
+         BNE   DRDBUSY        NO - MUST HAVE MONITOR FILE      @VA14190 00480230
+FILEOK   EQU   *              ACTIVE FILE MATCHES THE SUBCODE           00480250
+*                             ISSUED                           @VA14190 00480270
          TM    SFBFLAG,SFBEOF ALREADY AT END OF FILE?                   00481000
          BO    EXAMINE        YES - CHECK COPY COUNT, ETC.              00482000
 CHEKNXT  EQU   *                                                        00483000
@@ -542,12 +573,15 @@ GIVEPAG  EQU   *              GIVE PAGE TO THE USER                     00490000
          BC    1,DRDIOER      FATAL I/O ERROR WHILE READING             00494000
          BC    4,DRDLOCK      PAGE ALREADY IN USE FOR I/O      @VA07519 00494050
          USING SPLINK,R2      REAL ADDRESS BACK VIA GPR 2               00495000
+         ICM   R4,B'1111',SPRECNUM GET THE RECORD COUNT        @VA12226 00495300
+         BZ    EXAMA          IF ZERO GIVE EOF                 @VA12226 00495600
          L     R0,SPPREPAG    GET BACK LINKAGE                          00496000
          ST    R0,VSPCAW      USE 'CAW' FOR BACK LINKAGE IN FILE        00497000
          L     R4,SPNXTPAG    NEXT LINK IN SPOOL FILE                   00498000
          ST    R4,VSPDPAGE    ...UPDATE 'NEXT PAGE' DATA                00499000
          B     DRDEXIT        ALL DONE -- RETURN TO USER                00500000
          DROP  R2                                                       00501000
+EXAMA    OI    SFBFLAG,SFBEOF SET EOF INDICATOR                @VA12226 00501500
 EXAMINE  EQU   *              CHECKING EOF CONDITIONS                   00502000
          LH    R1,SFBCOPY     PICK UP COPY COUNT NOW                    00503000
          TM    VDEVSFLG,VDEVCONT   SPOOL CONTINUOUS ??                  00504000
@@ -580,7 +614,7 @@ SFBFOUND EQU   *                                                        00527000
          L     R2,0(,R1)      FIRST SFBLOK IN CHAIN                     00531000
          ST    R10,0(,R1)     PUT THIS ONE FIRST                        00532000
          ST    R2,SFBPNT      ...SO IT WILL COME UP NEXT                00533000
-         NI    SFBFLAG,X'FF'-(SFBEOF+SFBINUSE+SFBRECER)                 00534000
+         NI    SFBFLAG,X'FF'-(SFBEOF+SFBINUSE) RESET FLAGS     @VA11232 00534000
          SLR   R1,R1          DISCONNECT VSPLCTL BLOCK                  00535000
          ST    R1,VSPSFBLK    ...                                       00536000
          ST    R1,VSPDPAGE    ...                                       00537000
@@ -695,7 +729,7 @@ SUCFIND  EQU   *              SPECIFIED FILE FOUND             @V293598 00630000
          L     R0,SFBSTART    DASD ADDRESS OF FIRST FILE BUFFER@V293598 00642000
          L     R1,SAVEWRK1    RESTORE SYS VIRT PAGE ADDRESS    @V293598 00643000
          CALL  DMKRPAGT,PARM=(BRING+SYSTEM)  READ IT IN        @V293598 00644000
-         BNZ   SUCIOER        QUIT IF I/O ERROR                @V293598 00645000
+         BNZ   SUCIOER        QUIT IF I/O ERROR                @V293598 00645110
          EJECT                                                          00646000
          AL    R8,VMDVSTRT    GET VDEVBLOK ADDR                @VM01086 00647000
          L     R3,0(,R5)      CALLER'S VIRTUAL BUFFER ADDRESS  @V293598 00648000
@@ -893,6 +927,9 @@ DMKDRDMP RELOC ,              READ SYSTEM-DUMP SPOOL FILE               00834000
          LR    R5,R1          ...AND GPR 5                              00839000
          L     R2,F4096       FULL-PAGE FIELD LENGTH                    00840000
          BAL   R14,ADDCHEK    CHECK VALIDITY OF ADDRESS                 00841000
+         LA    R1,VMGPRS+(4*15) GET ADDRESS OF R15             @VA09560 00841100
+         CR    R1,R6          IS RY = R15                      @VA09560 00841200
+         BE    DRDSPEC        SORRY NOT ALLOWED                @VA09560 00841300
          L     R1,0(,R6)      VIRTUAL READER ADDRESS                    00842000
          MAXDV R15            GET HIGHEST VIRTUAL DEVICE                00843000
          CLR   R1,R15         CHECK ITS VALIDITY                        00844000
@@ -912,8 +949,16 @@ DMKDRDMP RELOC ,              READ SYSTEM-DUMP SPOOL FILE               00834000
          BAL   R14,SEARCHB    FIND ANY SFBLOK FOR THIS USER             00858000
          TM    SFBFLAG,SFBDUMP     THIS A DUMP FILE ?                   00859000
          BZ    BEGINB         NO - KEEP LOOKING                @VA06358 00860000
+         CLI   SFBMISC1+1,C'V'  * IS THIS A VMDUMP?            @V67CAH7 00860300
+         BE    BEGINB           * YES...DON'T ALLOW DIAG X34   @V67CAH7 00860600
          BAL   R14,CONNECT    CONNECT SFBLOK TO VDEVBLOK                00861000
-DMPAGET  EQU   *              GIVE ONE PAGE OF DATA TO USER             00862000
+         B     DMPAGET1       NO NEED TO CHECK FILE AGAIN      @VA14190 00861010
+DMPAGET  DS    0H             SEE IF ACTIVE FILE IS CP DUMP    @VA14190 00862010
+         TM    SFBFLAG,SFBDUMP IS IT A DUMP?                   @VA14190 00862030
+         BZ    DRDBUSY        NO - DIAG34 CAN'T READ IT        @VA14190 00862050
+         CLI   SFBMISC1+1,C'V' IS IT A VMDUMP?                 @VA14190 00862070
+         BE    DRDBUSY        YES - NOT RIGHT FOR DIAG34       @VA14190 00862090
+DMPAGET1 EQU   *              GIVE ONE PAGE OF DATA TO USER    @VA14190 00862110
          TM    SFBFLAG,SFBEOF AT END OF FILE NOW ?                      00863000
          BO    SETCOD1        YES - RETURN CC = 1                       00864000
          L     R0,VSPDPAGE    NEXT PAGE FROM VSPLCTL BLOCK              00865000
@@ -925,6 +970,7 @@ DMPAGEX  EQU   *                                                        00869000
          CALL  DMKRPAGT,PARM=0     HE'LL GET THE PAGE LATER             00871000
          BC    2,DRDPROT      OOPS .. TRIED TO OVERLAY A SHARED PAGE    00872000
          BC    1,DRDIOER      FATAL I/O ERROR WHILE READING             00873000
+         BC    4,DRDLOCK      PAGE LOCKED FOR I/O              @VA08925 00873100
          LA    R4,VSPDPAGE    POINT TO THE 'CCPD'                       00874000
          BAL   R7,CMPNEXT     GO COMPUTE NEXT ADDRESS                   00875000
          B     DRDEXIT        ALL THROUGH FOR NOW                       00876000
@@ -1123,12 +1169,13 @@ DMPDELT  EQU   *              LOOP THROUGH THE FILE                     01003000
 *        SINGLE REGISTER VALUE, AS FOLLOWS:                             01069000
 *              'R1' = START ADDRESS OF FULL-PAGE BUFFER                 01070000
 *        THE ADDRESS IS EXMAINED FOR VALIDITY, AND AN ADDRESSING OR     01071000
-*        SPECIFICATION EXCEPTION SI GENERATED IF THE ADDRESS IS         01072000
+*        SPECIFICATION EXCEPTION IS GENERATED IF THE ADDRESS IS         01072500
 *        INVALID OR NOT PAGE-BOUNDARY ALIGNED. NEXT, THE SYSTEM         01073000
 *        VMBLOK SWAP-TABLE IS REFERENCED TO FIND THE COMPRESSED         01074000
 *        DASD ADDRESS (CCPD) OF THE SYMBOL TABLE CSECT (DMKDYM).        01075000
 *        IF THE CSECT IS NOT DEFINED, CC = 1 IS SET, INDICATING         01076000
-*        THAT NO SYMBOL TABLE IS AVAILABLE. OTHERWISE, THE FULL         01077000
+*        THAT NO SYMBOL TABLE IS AVAILABLE. IF THE PAGE BUFFER IS       01077300
+*        LOCKED FOR AN I/O OPERATION, CC=3 IS SET. OTHERWISE, THE FULL  01077600
 *        PAGE OF DATA IS MADE AVAILABLE TO THE VIRTUAL MACHINE VIA      01078000
 *        A CALL TO DMKRPAGT, AND VIRTUAL CC = 0 IS SET.                 01079000
 *.                                                                      01080000
@@ -1164,6 +1211,7 @@ DMKDRDSY RELOC ,              READ SYSTEM SYMBOL TABLE PAGE             01082000
          CALL  DMKRPAGT,PARM=0     USER WILL GET THE PAGE LATER         01109000
          BC    2,DRDPROT      OOPS .. TRIED TO OVERLAY A SHARED PAGE    01110000
          BC    1,DRDIOER      FATAL I/O ERROR WHILE READING             01111000
+         BC    4,SETCC3       PAGE LOCKED FOR I/O              @VA08925 01111500
          B     DRDEXIT        EXIT WITH CC = 0                          01112000
          SPACE 2                                                        01113000
          LTORG                                                          01114000

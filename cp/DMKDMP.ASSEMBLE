@@ -115,6 +115,8 @@ DMP      TITLE 'DMKDMP     (CP)        VM/370 - RELEASE 6'              00001000
 *        DMKDMP906W SYSTEM DUMP FAILURE; MACHINE CHECK, RUN SEREP       00115000
 *        DMKDMP907W SYSTEM DUMP FAILURE; FATAL I/O ERROR                00116000
 *        DMKDMP909W SYSTEM DUMP DEVICE; NOT-READY                       00117000
+*        DMKDMP918I SYSTEM DUMP FAILURE; STATUS NOT STORED FOR NON-     00117500
+*                   ABENDING PROCESSOR.                                 00117600
 *                                                                       00118000
 *.                                                                      00119000
          EJECT                                                          00120000
@@ -453,6 +455,10 @@ SKIPPAG  DS    0H                                              @V407510 00439000
          L     R7,=A(DMKSYSRV)     GET GENERATED STORAGE SIZE           00456000
          L     R7,0(R7)       ..                                        00457000
          ST    R7,DMPSYSRV    SAVE FOR VDUMP                            00458000
+         L     R7,=A(DMKSYSRM)     POINT TO REAL STORAGE SIZE  @V67CAH7 00458200
+         L     R7,0(R7)            GET REAL STOR VALUE         @V67CAH7 00458400
+         ST    R7,DMPSYSRM         SAVE IT IN DMPINREC         @V67CAH7 00458600
+         MVC   DMPCPUID,CPUID      SAVE CPU'S ID IN DMPINREC   @V67CAH7 00458800
          MVC   DMPPROCA,PROCA MOVE PROCESSOR ADDRESS TO        @V407510 00459000
 *                                       DMPINREC               @V407510 00460000
          MVC   DMPPRFRG,PREFRG    MOVE PREFIX REG              @V4M0115 00461000
@@ -537,6 +543,8 @@ NXTPAG4  BAL   R14,DSKWTRC2   WRITE OUT REC                             00525000
          MVI   SFBTYPE,TYP1403 PRINTER FILE TYPE               @V200930 00540000
          MVC   SFBDATE,DMKDMPDT   SET DATE OF CRASH            @V407510 00541000
          MVC   SFBTIME,DMPTIME     SET TIME                             00542000
+         MVC   SFBDIST(6),DMPSCOD  MOVE CP ABEND CODE TO       @VA14457 00542300
+*                                  SFBLOK DISTRIBUTION FIELD            00542600
          LA    R2,1(,R2)      BUMP (IGNORE OVERFLOW)                    00543000
          STH   R2,0(,R3)      REPLACE FOR DMKCKP                        00544000
          LA    R2,RDEVRECS    GET PTR TO SPOOL RECBLOK CHAIN            00545000
@@ -565,7 +573,7 @@ CKSBEGIN DS    0H                                              @V304298 00565000
          LA    R14,57         ASSUME A 3330                    @V304298 00568000
          TM    RDEVTYPE,TYP3330 IS IT?                         @V304298 00569000
          BO    CKPA1          XFER IF SO                       @V304298 00570000
-         L     R14,120        ASSUME A 3350                    @V304498 00571000
+         LA    R14,120        ASSUME A 3350                    @VA09846 00571100
          CLI   RDEVTYPE,TYP3350 IS IT ?                        @V304498 00572000
          BE    CKPA1          XFER IF SO                       @V304498 00573000
          LA    R14,32         ASSUME IT IS A 2314              @V304298 00574000
@@ -754,16 +762,17 @@ SIOIPL   SIO   0(R15)                                                   00769000
          BAL   R14,LOADWAIT   CC=3, NOT OPERATIONAL                     00774000
 TIOIPL   TIO   0(R15)         TEST                                      00775000
          BNZ   *-4            WAIT                                      00776000
+         CLC   CSW+4(2),=AL1(CE+DE,0) IS IT CE DE CLEAN?       @VA08883 00776500
+         BNE   IPLUC          NO, SEE WHAT WENT WRONG          @VA08883 00776600
          STH   R15,INTTIO     SAVE IPL DEVICE ADDRESS                   00777000
          OI    IPLREAD+4,SKIP+CC   CHANGE IPL SEQUENCE                  00778000
          SIO   0(R15)         START                                     00779000
          BNZ   *-4            WAIT                                      00780000
          TIO   0(R15)         TEST                                      00781000
          BNZ   *-4            WAIT                                      00782000
-         CLC   CSW+4(2),=XL2'0C00' IS IT CE DE CLEAN ??                 00783000
+         CLC   CSW+4(2),=AL1(CE+DE,0) IS IT CE DE CLEAN?       @VA08883 00783500
          BE    B1             OK                               @V408246 00784000
-         BCT   R14,RESTART+4  RETRY                            @V408246 00785000
-         BAL   R14,LOADWAIT   NO, SOMETHING WENT WRONG                  00786000
+         B     IPLUC          SEE WHAT WENT WRONG              @VA08883 00785100
 B1       EQU   *                                               @V408246 00787000
          LPSW  IPLPSW         GO                                        00788000
          SPACE                                                          00789000
@@ -785,6 +794,10 @@ B2       EQU   *                                               @V408246 00800000
          BNZ   *-4            WAIT                                      00805000
          TIO   0(R15)         TEST                                      00806000
          BNZ   *-4            WAIT                                      00807000
+         CLC   CSW+4(2),=AL1(CE+DE,0) IS IT CE DE CLEAN?       @VA08883 00807100
+         BE    B2A            OK                               @VA08883 00807200
+         BAL   R14,LOADWAIT   UNEXPLAINED ERROR FROM SENSE     @VA08883 00807300
+B2A      EQU   *                                               @VA08883 00807400
          TM    SENSDATA,INTREQ     INTERVENTION REQUIRED ?              00808000
          BO    B3             OK                               @V408246 00809000
          BCT   R14,RESTART+4  RETRY                            @V408246 00810000
@@ -1149,16 +1162,29 @@ PRSIO    SIO   0(R15)         START                                     01161000
          BAL   R14,LOADWAIT   TRACER ADDRESS ON FATAL I/O CONDITION     01163000
          BC    2,CLRCHAN      CC=2, CHANNEL STILL BUSY                  01164000
          BC    8,GOTIO        CC=0, GOOD SIO STATUS                     01165000
+         TM    CSW+4,BUSY     DOES THE CSW CONTAIN BUSY?       @VA09426 01165300
+         BO    PRSIO          YES, OK REDO THE SIO.            @VA09426 01165600
          CLI   CSW+4,UC       IS DEVICE IN A NOT-READY CONDITION        01166000
          BE    CHKSTAT        YES - GO TELL THE OPERATOR                01167000
+         TM    CSW+5,CDC+CCC+IFCC CHECK CSW FOR CHANNEL ERRORS @VA09171 01167200
+         BZ    GOTIO          NONE - CONTINUE                  @VA09171 01167400
+         BAL   R14,LOADWAIT   ERROR - SET TRACE ADDRESS AND    @VA09171 01167600
+*                             WAIT                                      01167800
          SPACE                                                          01168000
 GOTIO    TIO   0(R15)         ISSUE TIO TO 'DUMP' DEVICE                01169000
          BC    2,*-4          CC=2, CHANNEL STILL BUSY; LOOP UNTIL FREE 01170000
-         BC    8,*+16         CC=0, STATUS HAS BEEN CLEARED             01171000
-         CLI   CSW+4,UC       IS DEVICE IN A NOT-READY STATE            01172000
-         BE    CHKSTAT        YES - TELL THE OPERATOR                   01173000
+         BC    8,CONTIO       CC=0, STATUS HAS BEEN CLEARED    @VA09171 01171200
+         TM    CSW+5,CDC+CCC+IFCC CHECK CSW FOR CHANNEL ERRORS @VA09171 01171400
+         BZ    *+8            NONE KEEP GOING                  @VA09171 01171600
+         BAL   R14,LOADWAIT   CHAN ERROR - SET TRACE AND WAIT  @VA09171 01171800
+         CLI   CSW+4,UC       IS DEVICE IN A NOT-READY STATE ? @VA10548 01172000
+         BE    CHKSTAT        YES--TELL THE OPERATOR           @VA10548 01172150
+         CLI   RDEVTYPC,CLASTAPE IS THIS A TAPE ?              @VA10548 01172300
+         BE    GOTIO          YES-REISSUE THE TIO              @VA10548 01172450
+         TM    CSW+4,UC       IS THE PRINTER NOT-READY ?       @VA10548 01172600
+         BNZ   CHKSTAT        YES - TELL THE OPERATOR          @VA09426 01173000
          B     GOTIO          RE-ISSUE THE TIO                          01174000
-         NC    CSW+4(2),=AL1(X'FF'-CE-DE-UE,X'FF')     ANY ERRORS ?     01175000
+CONTIO   NC    CSW+4(2),=AL1(X'FF'-CE-DE-UE,X'FF') ANY ERRORS? @VA09171 01175100
          BCR   8,R10          NO -- RETURN                              01176000
          CLI   RDEVTYPC,CLASTAPE   TAPE ?                               01177000
          BCR   7,R10          NO -- RETURN                              01178000
@@ -1229,6 +1255,29 @@ TYPMSGE  EQU   *                                               @VM08555 01241000
          BR    R9             RETURN TO IN LINE CODE           @VM08555 01243000
          EJECT                                                          01244000
 *        CONSTANTS AND LITERAL POOL                                     01245000
+         SPACE 1                                                        01245030
+***************************************************************         01245060
+*              THE FOLLOWING FIELDS ARE INITIALIZED BY DMKCPI           01245090
+*              DMKDMPMA, DMKDMPAA AND DMKDMPSA ARE ALSO INITIALIZED     01245120
+*              BY DMKCPU                                                01245150
+         SPACE 1                                                        01245180
+DMKDMPDV DC    A(0)           PTR TO DUMP DEVICE RDEVBLOK               01245210
+DMKDMPAU DC    A(0)           PTR TO AUTOMATIC DUMP DEVICE RDEVBLOK     01245240
+DMKDMPRC DC    A(0)           PTR TO RECBLOK CHAIN FOR AUTOMATIC DUMP  *01245270
+                              DEVICE                                    01245300
+DMKDMPTD DC    D'0'           TOD CLOCK AT 00.00.00 TODAY      @V407510 01245330
+TODATE2W EQU   DMKDMPTD+4     SECOND WORD OF TODATE            @V407510 01245360
+DMKDMPDT DC    D'0'           DATE - MM/DD/YY - EDITED EBCDIC  @V407510 01245390
+DMKDMPSD DC    H'0'           SYSTEM IPL DEVICE                @V407510 01245420
+*        DMKDMPMA & DMKDMPAA ARE EQUAL IN UNIPROCESSOR MODE             01245450
+DMKDMPMA DC    H'0'           MAIN PROCESSOR ADDRESS           @V407510 01245480
+DMKDMPAA DC    H'0'           ATTACHED PROCESSOR ADDRESS       @V407510 01245510
+*              DMKDMPSA IS EQUAL ZERO IN UNIPROCESSOR MODE              01245540
+DMKDMPSA DC    D'0'           SAVE AREA FOR THE PSA ADDRESSES  @V5BC0AB 01245570
+         ORG   DMKDMPSA                                                 01245600
+MAINPSA  DS    F              ADDRESS OF THE MAIN PSA          @V5BC0AB 01245630
+ATTPSA   DS    F              ADDRESS OF THE APU PSA           @V5BC0AB 01245660
+***************************************************************         01245690
          SPACE 1                                                        01246000
 PAGESIZE DC    F'4096'        SIZE OF 1 PAGE                   @V407510 01247000
 *                             THIS CONSTANT MUST REMAIN IN 1ST @V407510 01248000
@@ -1357,28 +1406,6 @@ MONCAD   DC    F'0'           SAVED ADDRESS OF MONCOM          @V2B2638 01354000
 DISABLMC DC    AL1(HARDSTOP+DAMAGRPT),AL3(0) MASK TO DISABLE   @VA01130 01357000
          DC    A(512)         SOFT M.C. RECORDING AND RESET LOGOUT      01358000
          SPACE                                                          01359000
-***************************************************************@V407510 01360000
-*              THE FOLLOWING FIELDS ARE INITIALIZED BY DMKCPI  @V407510 01361000
-*              DMKDMPMA, DMKDMPAA AND DMKDMPSA ARE ALSO INITIALIZED     01361010
-*              BY DMKCPU                                                01361020
-         SPACE                                                          01362000
-DMKDMPDV DC    A(0)           PTR TO DUMP DEVICE RDEVBLOK               01363000
-DMKDMPAU DC    A(0)           PTR TO AUTOMATIC DUMP DEVICE RDEVBLOK     01364000
-DMKDMPRC DC    A(0)           PTR TO RECBLOK CHAIN FOR AUTOMATIC DUMP  *01365000
-                              DEVICE                                    01366000
-DMKDMPTD DC    D'0'           TOD CLOCK AT 00.00.00 TODAY      @V407510 01367000
-TODATE2W EQU   DMKDMPTD+4     SECOND WORD OF TODATE            @V407510 01368000
-DMKDMPDT DC    D'0'           DATE - MM/DD/YY - EDITED EBCDIC  @V407510 01369000
-DMKDMPSD DC    H'0'           SYSTEM IPL DEVICE                @V407510 01370000
-*        DMKDMPMA & DMKDMPAA ARE EQUAL IN UNIPROCESSOR MODE    @V4M0124 01371000
-DMKDMPMA DC    H'0'           MAIN PROCESSOR ADDRESS           @V407510 01372000
-DMKDMPAA DC    H'0'           ATTACHED PROCESSOR ADDRESS       @V407510 01373000
-*              DMKDMPSA IS EQUAL ZERO IN UNIPROCESSOR MODE              01373100
-DMKDMPSA DC    D'0'           SAVE AREA FOR THE PSA ADDRESSES  @V5BC0AB 01373110
-         ORG   DMKDMPSA                                                 01373120
-MAINPSA  DS    F              ADDRESS OF THE MAIN PSA          @V5BC0AB 01373130
-ATTPSA   DS    F              ADDRESS OF THE APU PSA           @V5BC0AB 01373140
-***************************************************************@V407510 01374000
 DMPSTAT  DC    X'0'           STATUS OF SYSTEM..UP OR AP       @V4M0124 01375000
          SPACE                                                          01376000
 DMPSYSVM DC    V(DMKSYSVM)    ADDR SYSTEM VMBLOK               @V407510 01377000
@@ -1473,7 +1500,7 @@ DMPABMC  DC    C' '                                                     01464000
 DMPABMT  DC    CL24' '                                                  01466000
 DMPAMSGL EQU   *-DMPAMSG      LENGTH OF DUMP ABEND MESSAGE              01467000
          SPACE 1                                                        01468000
-DMPERRM  DC    C'DMKDMP913I SYSTEM DUMP FAILURE; '             @V407510 01469000
+DMPERRM  DC    C'DMKDMP918I SYSTEM DUMP FAILURE; '             @VA13645 01469100
          DC    C'STATUS NOT STORED FOR NON-ABENDING PROCESSOR' @V407510 01470000
 DMPERRML EQU   *-DMPERRM      LENGTH OF ERROR MESSAGE          @V407510 01471000
 INTQAMSG DC    C'DMKDMP909W SYSTEM DUMP DEVICE; NOT-READY'     @V200735 01472000

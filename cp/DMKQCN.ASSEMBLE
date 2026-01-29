@@ -34,6 +34,7 @@ DMKQCN   START ,                                                        00021000
          EXTRN DMKCNSIC,DMKGRFIC,DMKRNHIC,DMKSYSNM             @V200820 00034000
          EXTRN DMKCVTAB                                        @VA04301 00034100
          EXTRN DMKGRTDS                                        @V60A6B6 00034550
+         EXTRN DMKTBLSF                                        @VA13491 00034800
          EJECT                                                          00035000
 *.                                                                      00036000
 * SUBROUTINE NAME -                                                     00037000
@@ -522,8 +523,11 @@ WRGLENT  EQU   *              ALLOW AT LEAST 9 EXTRA BYTES FOR @VA06176 00428100
 WRMDATA  EQU   *              SET DATA COUNT, MOVE IN USER DATA@V200820 00453000
          LM    R3,R4,SAVEWRK2      PICK UP USER DATA POINTERS  @VM08816 00454000
          LTR   R5,R3          COUNT TO GR5 ALSO                @V200820 00455000
-         BNP   *+6            SKIP MOVE IF ZERO-LENGTH DATA    @V200820 00456000
+         BNP    WRMSKIP   SKIP MOVE IF ZERO-LENGTH DATA                 00456005
+         LH    R3,CONCNT      DATA COUNT FROM CONTASK          @VA13038 00456010
+         ICM   R5,8,BLANK     SET PAD CHARACTER TO X'40' FOR   @VA13038 00456020
          MVCL  R2,R4          MOVE THE DATA INTO THE CONTASK   @V60A6B6 00457000
+WRMSKIP  DS     0H                                                      00457500
          OI    CONSTAT,CONOUTPT    THIS IS AN OUTPUT MESSAGE   @V200820 00458000
          TM    SAVER2+2,DFRET/256  RELEASE THE CALLER'S BUFFER @V200820 00459000
          BZ    WRMCHEK             NO -- CHECK RETURN OPTION   @V200820 00460000
@@ -546,6 +550,8 @@ QCNMC1   MC    MNCOWRIT,MNCLRESP RESPONSE CLASS, WRITE         @VM01017 00466000
 WRSPCHK  EQU   *              CHECK FOR CONSOLE SPOOLING       @V200820 00474000
          TM    VMOSTAT,VMDISC+VMKILL   DISCONNECTED OR DYING ? @V200820 00475000
          BNZ   WRTINHB                  YES - INHIBIT MSG      @V200820 00476000
+         TM    VMMLVL2,VMMDIAL USER ISSUED DIAL COMMAND?       @VA11241 00476100
+         BO    WRTINHB        YEP, INHIBIT MSG NOW Y'HEAR      @VA11241 00476200
          L     R8,VMTERM      CHECK EXISTENCE OF HIS TERMINAL  @V200820 00477000
          LTR   R8,R8                                           @V200820 00478000
          BP    WRSPOOL        LOOKS O.K. FROM HERE             @V200820 00479000
@@ -607,6 +613,37 @@ CHKGRAF  EQU   *              DEVICE IS NOT A REMOTE GRAPHIC   @V60A6B6 00530500
          IC    R10,RDEVGRTY   GET LOCAL DISPLAY'S SCREEN INDEX @V60A6B6 00531250
 CHKSIZE  L     R1,=A(DMKGRTDS)  ADDRESS TABLE OF DISPLAY SIZES @V60A6B6 00531500
          L     R10,0(R1,R10)  AND GET THE RIGHT ONE FOR DEVICE @V60A6B6 00531750
+         SPACE 1                                               @VA13491 00531757
+*        SCAN THE LINE FOR ANY START FIELD ORDERS,             @VA13491 00531764
+*        IF A X'1D' IS FOUND, CHANGE IT TO A BLANK             @VA13491 00531771
+         SPACE 1                                               @VA13491 00531778
+         LH    R15,CONCNT     LOAD DATA LENGTH                 @VA13491 00531785
+         N     R15,XRIGHT16   ZERO LEFTMOST HALFWORD           @VA13491 00531792
+         LA    R1,CONDATA     LOAD DATA START ADDRESS          @VA13491 00531799
+         AR    R15,R1         SET DATA END ADDRESS             @VA13491 00531806
+         L     R14,=A(DMKTBLSF)   LOAD TRANSLATE TABLE ADDRES  @VA13491 00531813
+CONTSCAN DS    0H                                              @VA13491 00531820
+         LR    R3,R15         LOAD DATA END ADDR               @VA13491 00531827
+         SR    R3,R1          COMPUTE DATA BALANCE             @VA13491 00531834
+         BZ    APLSPLT        IF NO DATA GO CONTINUE           @VA13491 00531841
+         C     R3,F256        LAST SEGMENT?                    @VA13491 00531848
+         BL    DOTRT          YES, USE CURRENT LENGTH          @VA13491 00531855
+         LA    R3,256         LOAD MAX SEGMENT LENGTH          @VA13491 00531862
+DOTRT    DS    0H                                              @VA13491 00531869
+         BCTR  R3,0           DECREMENT FOR EXECUTE            @VA13491 00531876
+         EX    R3,EXTRTSCN    ANY SF ORDERS?                   @VA13491 00531883
+         BZ    NEXTSCAN       NO, GO CONTINUE WITH NEXT SEG    @VA13491 00531890
+         MVI   0(R1),C' '     BLANK THE SF ORDER               @VA13491 00531897
+         LA    R1,1(R1)       SET NEW SCAN START               @VA13491 00531904
+         B     CONTSCAN       GO CHECK THE REST OF THE DATA    @VA13491 00531911
+NEXTSCAN DS    0H                                              @VA13491 00531918
+         LA    R1,1(R1,R3)    SET NEW SCAN START               @VA13491 00531925
+         B     CONTSCAN       GO SCAN THIS SEGMENT             @VA13491 00531932
+         SPACE 1                                               @VA13491 00531939
+EXTRTSCN TRT   0(*-*,R1),0(R14)   LOCATE SF ORDER              @VA13491 00531946
+         SPACE 2                                               @VA13491 00531953
+*        SPLIT INTO MULTIPLE CONTASKS IF NEEDED                @VA13491 00531960
+APLSPLT  DS    0H                                              @VA13491 00531967
          CH    R10,CONCNT      GREATER THAN ONE SCREEN FULL ?  @VA01645 00532000
          BNL   ENQUEUE        NO -- JUST SEND IT AS IS         @VA01645 00533000
          LR    R8,R6          SAVE CURRENT CONTASK POINTER     @VA01645 00534000
@@ -673,23 +710,33 @@ CRSCAN2  EQU   *                                               @VA01645 00573000
          CLI   0(R5),X'16'    IS IT A BACKSPACE ?              @VA07248 00575400
          BNE   *+6            NO, LEAVE AS IS                  @VA07248 00575600
          SR    R1,R0          MOVE BALL LEFT UNLESS GRAF       @VA07248 00575800
+         CLI   0(R5),X'1D'    IS THIS A START FIELD?           @VA13491 00575820
+         BNE   NOIMSF         NO - GO COUNT IT                 @VA13491 00575840
+         LTR   R0,R0          YES - NON-GRAPHICS DEVICE?       @VA13491 00575860
+         BNZ   NOIMSF         YES - PASS IT AS A CHARACTER     @VA13491 00575880
+         MVI   0(R5),C' '     BLANK THE SF ORDER               @VA13491 00575900
+NOIMSF   DS    0H                                              @VA13491 00575920
          LA    R5,1(0,R5)     NEXT BYTE OF DATA                @VA01645 00576000
          LA    R7,1(0,R7)     COUNT THE BYTES                  @VA01645 00577000
          CR    R7,R3          ANY MORE DATA TO BE SCANNED ?    @VA01645 00578000
          BNL   CRSCAN4        NO -- FINISH UP                  @VA01645 00579000
          CR    R1,R10         HAVE WE HIT LINESIZE LIMIT       @VA07248 00580500
-          BL    CRSCAN2            NO -- KEEP SCANNING         @VA03565 00581000
+         BL    CRSCAN2        NO, KEEP SCANNING                @VA09338 00581100
+         CLI   0(R5),X'16'    IS THIS A BACKSPACE?             @VA09338 00581200
+         BE    CRSCAN2        YES, KEEP SCANNING               @VA09338 00581300
+         LR    R10,R7         DATA LENGTH TO R10               @VA09338 00581400
          BAL   R5,SPLTASK     SPLIT OFF A CONTASK              @VA01645 00582000
          B     CRSCAN1        SCAN THE NEXT PIECE              @VA01645 00583000
          EJECT                                                          00584000
 CRSCAN3  EQU   *              EMBEDDED CARRIAGE RETURN FOUND   @VA01645 00585000
          LA    R10,1(0,R7)    EXTRA BYTE (IN CASE OF ZERO)     @VA01645 00586000
          C     R3,F1              LENGTH = 1 ?                 @VA03434 00587000
-         BE    CRSCAN3B           YES -- MAKE IT A BLANK       @VA03434 00588000
+         BE    CRSCAN3C                                        @VA14333 00588100
          CR    R10,R3             THIS 'CR' AT END OF MSG?     @VA03434 00589000
          BNE   CRSCAN3B           NO -- GO MAKE IT A BLANK     @VA03434 00590000
          TM    CONPARM-CONTASK(R8),NOAUTO 'NOAUTO' ON ?        @VA07505 00591000
          BNO   CRSCAN3A           NO -- SPLIT                  @VA03434 00592000
+CRSCAN3C DS    0H                                              @VA14333 00592100
          NI    CONPARM-CONTASK(R8),X'FB' YES, TURN OFF 'NOAUTO'@VA03434 00593000
          B     CRSCAN3B           GO MAKE 'CR' A BLANK         @VA03434 00594000
 CRSCAN3A BCTR  R10,0              BACK UP LENGTH               @VA03434 00595000
@@ -943,6 +990,8 @@ DMKQCNTO DS    0D             ENTRY FOR DISCONNECT WITH TIMEOUT@V200820 00824000
          ST    R0,VMTERM      CLEAR VMBLOK POINTER TO RDEVBLOK @VA04273 00830800
          TM    VMRSTAT,VMLOGOFF    ALREADY IN LOGOFF PROCESS ? @V200820 00831000
          BO    DSCEXIT        YES...JUST EXIT                  @VA04635 00834500
+         TM    VMOSTAT,VMKILL ALREADY BEING FORCED?            @VA08501 00835000
+         BO    DSCEXIT        YES...JUST EXIT                  @VA08501 00835100
          TM    VMRSTAT,VMLOGON     STILL IN LOGON PROCESS ?    @V200820 00837000
          BZ    TSTMORE        NO--BYPASS FOLLOWING TEST        @VA02743 00838000
          NI    VMOSTAT,255-VMCF YES - STOP MACHINE             @VA02849 00839000
@@ -950,7 +999,10 @@ DMKQCNTO DS    0D             ENTRY FOR DISCONNECT WITH TIMEOUT@V200820 00824000
          BO    DSCLLOG        YES--LOG HIM OFF                 @VA02743 00841000
          CLI   VMCOMND,X'00'  FIRST COMMAND ENTERED YET?       @VA04635 00842100
          BNH   DSCLLOG        NO...LOG HIM OFF                 @VA04635 00842200
-         OI    VMOSTAT,VMCF+VMKILL COMPLETE CF THEN LOGOFF     @VA04635 00842300
+         TM    VMOSTAT,VMSLEEP USER SLEEPING?                  @VA11535 00842210
+         BO    DSCLLOG        YES, LOG HIM OFF                 @VA11535 00842220
+         OI    VMSVSTAT,VMLGFORC INDICATE USER WAS FORCED      @VA13026 00842300
+         OI    VMOSTAT,VMCF+VMKILL COMPLETE CF THEN LOGOFF     @VA13026 00842350
          B     DSCEXIT        EXIT FOR NOW                     @VA04635 00842400
          SPACE 1                                                        00844000
 TSTMORE  EQU   *                                               @VA02743 00845000
@@ -1037,10 +1089,16 @@ DSCTLOG  EQU   *              RETURN ADDRESS TO LOGOFF THE USER@V200820 00925000
          CALL  DMKFRET        RELEASE THE TRQBLOK STORAGE      @V200820 00928000
          SLR   R1,R1                                           @V200820 00929000
          ST    R1,VMDELAY     CLEAR THE VMBLOK HOLD FIELD      @V200820 00930000
+         B     QCNKIL         DONOT ADJUST R12                 @VA10061 00930200
 QCNLOG   EQU   *              WHEN CPEXBLOK IS UNSTACKED       @VA04688 00930500
+         USING QCNLOG,R12                                      @VA10061 00930600
+         SL    R12,=A(QCNLOG-DSCTLOG) SET R12 TO DSCTLOG       @VA10061 00930700
+QCNKIL   DS    0H                                              @VA10061 00930800
          OI    VMOSTAT,VMKILL      LOG THIS GUY OFF            @V200820 00931000
+         OI    VMSVSTAT,VMLGFORC FORCE                         @VA13026 00931500
          OI    VMRSTAT,VMCFWAIT    DO NOT RUN VIRTUAL MACHINE  @V200820 00932000
-         GOTO  DMKDSPCH       ...                              @V200820 00933000
+         USING DSCTLOG,R12                                     @VA10061 00933100
+         GOTO  DMKDSPCH       GO TO DSPCH TO INITIATE FORCE    @VA13026 00933200
          SPACE                                                          00934000
 DSCTIME  EQU   X'0359'        15 MINUTES IN T.O.D. CLOCK UNITS @V200820 00935000
          EJECT                                                          00936000
@@ -1056,7 +1114,7 @@ DSCTIME  EQU   X'0359'        15 MINUTES IN T.O.D. CLOCK UNITS @V200820 00935000
 *                                                                       00946000
 * ATTRIBUTES -                                                          00947000
 *                                                                       00948000
-*        SERIALLY REUSABLE, RESIDENT, CALLED VIA SVC                    00949000
+*        SERIALLY REUSABLE, RESIDENT, CALLED VIA BALR                   00949500
 *                                                                       00950000
 * ENTRY CONDITIONS -                                                    00951000
 *                                                                       00952000
@@ -1278,18 +1336,24 @@ STKCPEX  EQU   *              BUILD AND STACK A CPEXBLOK       @V200820 01157000
          STM   R0,R15,CPEXREGS     SET REGISTERS               @V200820 01162000
          ST    R4,CPEXADD          ...AND EXECUTION ADDRESS    @V200820 01163000
          ST    R4,CPEXR12     USE EXADD AS BASE FOR 'GOTO' USE @V200820 01164000
-         LA    R2,FORCE       INDICATE FORCE                   @VA08667 01164300
-         ST    R2,CPEXR2      TO DMKUSOFF                      @VA08667 01164600
          CALL  DMKSTKCP            ...STACK IT                 @V200820 01165000
          BR    R10            RETURN INTERNALLY                @V200820 01166000
          DROP  R1                                              @V200820 01167000
-NOMC     EQU   X'08'          DON'T ALLOW MONITOR CALL         @VA04810 01167500
+BLANK    EQU    X'40'                BLANK                     @VA13038 01167050
+NOMC     EQU   X'10'          DON'T ALLOW MONITOR CALL         @VA09459 01167500
 FORCE    EQU   X'02'          FORCED LOGOFF BY SYSTEM          @VA08667 01167580
 RESPMASK DS    0F             BITS THAT INDICATE MESSAGE IS    @V60C2B8 01167660
          DC    XL2'00'        NOT TO BE MOVED TO A RESPONSE BUF@V60C2B8 01167740
          DC    AL1((OPERATOR+NOTRESP)/256)                     @V60C2B8 01167820
          DC    AL1(LOGDROP+LOGHOLD+VMGENIO)                    @V60C2B8 01167900
          SPACE 2                                                        01168000
+         DS    0F             FORCE ALIGNMENT FOR MASK WORK    @VA13491 01168100
+ATTRMSK1 DC    X'0000001C'    MASK FOR VALID SF ORDER BITS     @VA13491 01168200
+         SPACE 1                                               @VA13491 01168300
+*              TABLE OF ACCEPTABLE SF ATTRIBUTES               @VA13491 01168400
+ATTRTBL  DC    XL1'60',XL1'E4',XL1'E8',XL1'6C'                 @VA13491 01168500
+         DC    XL1'F0',XL1'F4',XL1'F8',XL1'7C'                 @VA13491 01168600
+         EJECT .                                               @VA13491 01168700
          LTORG                                                 @V200820 01169000
          EJECT                                                          01170000
          COPY  IOBLOKS                                         @V200820 01171000

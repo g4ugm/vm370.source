@@ -76,7 +76,7 @@ CST      TITLE 'DMKCST     (CP)        VM/370 - RELEASE 6'              00001000
 *        SAVEWRK5   - SAVE AREA FOR R0 IN EXIT ROUTINE                  00076100
 *        SAVEWRK6,7 - SAVE AREA FOR R0,R1 SCAN VALUES                   00077000
 *        SAVEWRK8   - SAVE AREA FOR R5                                  00077700
-*        SAVEWRK9   - UNUSED                                            00078400
+*        SAVEWRK9  -   SAVEAREA TO SAVE SFBFLAG                         00078400
 *                                                                       00079000
 * REGISTER USAGE -                                                      00080000
 *                                                                       00081000
@@ -285,11 +285,15 @@ AG02     CALL  DMKSCNFD            LOCATE NEXT OPTION PARAMATER@V293598 00266000
 *            IF PRESENT, CALCULATE AND VALIDATE THE TAG DATA BYTE       00284000
 *            COUNT, AND STORE THE TAG BYTE COUNT AND DATA ADDRESS IN    00285000
 *            SAVEWRK6 AND SAVEWRK7, RESPECTIVELY.                       00286000
-*        3.  IF NEW TAG DATA HAS BEEN SPECIFIED, GO TO STEP 6.          00287000
-*        4.  MOVE A ZERO LENGTH INTO THE VSPXTGLN FIELD.                00288000
-*        5.  GO TO STEP 7.                                              00289000
-*        6.  MOVE THE NEW TAG DATA AND TAG LENGTH INTO THE VSPXBLOK.    00290000
-*        7.  CALL GETDEVIC; IF LAST DEVICE, EXIT; OTHERWISE GO TO       00291000
+*        3.  IF NEW TAG DATA HAS BEEN SPECIFIED, GO TO STEP 6.          00287300
+*        4.  IF OLD VSPXBLOK IS LONGER THAN MINIMUM, GET A SHORT        00287600
+*            ONE, MOVE IN THE OLD HEADER INFO AND FRET THE OLD ONE.     00287900
+*        5.  GO TO STEP 8.                                              00288200
+*        6.  GET A NEW VSPXBLOK WHICH IS LONG ENOUGH FOR THE NEW        00288500
+*            TAG INFORMATION, MOVE IN THE OLD HEADER INFO               00288800
+*            AND FRET THE OLD ONE.                                      00289100
+*        7.  MOVE THE NEW TAG DATA AND TAG LENGTH INTO THE VSPXBLOK.    00289400
+*        8.  CALL GETDEVIC; IF LAST DEVICE, EXIT; OTHERWISE GO TO       00289700
 *            STEP 3.                                                    00302000
 *.                                                                      00303000
          SPACE 3                                                        00304000
@@ -338,10 +342,33 @@ TD06     L     R6,VDEVEXTN         BASE FOR OLD XBLOK          @V293598 00327000
          SPACE                                                          00332000
          USING VSPXBLOK,R6         DEFINE OLD XBLOK ADDRESSING @V293598 00333000
          SPACE                                                          00334000
-         MVI   VSPXTGLN,X'00'      RESET THE TAG LENGTH        @V60B9BA 00335000
-         B     TD11                GO LOOK AT NEXT DEVICE      @V60B9BA 00336000
-         SPACE                                                          00337000
-TD08     MVC   VSPXTGLN,SAVEWRK6+3 MOVE IN NEW TAG LENGTH      @V60B9BA 00349000
+         CLI   VSPXLEN,VSPXSIZ1    ALREADY AT MINIMUM?         @VA09273 00335000
+         BE    TD11                XFER IF SO                  @VA09273 00335500
+         LA    R0,VSPXSIZ1         GET A MINIMUM LENGTH BLOCK  @VA09273 00336000
+         CALL  DMKFREE             GET THE STORAGE             @VA09273 00336500
+         MVC   0(VSPXSIZ1*8,R1),VSPXBLOK  MOVE IN OLD HDR      @VA09273 00337000
+         MVI   VSPXTGLN-VSPXBLOK(R1),X'00'  ZERO TAG LENGTH    @VA09273 00337500
+         STC   R0,VSPXLEN-VSPXBLOK(R1)  LENGTH OF THE BLOCK    @VA09273 00338000
+         ST    R1,VDEVEXTN         THE NEW VSPXBLOK            @VA09273 00338500
+         SR    R0,R0               GET THE LENGTH              @VA09273 00339000
+         IC    R0,VSPXLEN               OF THE OLD ONE         @VA09273 00339500
+         LR    R1,R6               ADDRESS OF THE OLD ONE      @VA09273 00340000
+         CALL  DMKFRET             FRET THE STORAGE            @VA09273 00340500
+         B     TD11                GO LOOK AT NEXT DEVICE      @VA09273 00341000
+         SPACE                                                          00341500
+TD08     LA    R0,VSPXSIZ1*8+7     HEADER LENGTH               @VA09273 00342000
+         AL    R0,SAVEWRK6         TAG LENGTH                  @VA09273 00342500
+         SRL   R0,3                CONVERT TO DOUBLEWORDS      @VA09273 00343000
+         CALL  DMKFREE             STORAGE FOR NEW VSPXBLOK    @VA09273 00343500
+         MVC   0(VSPXSIZ1*8,R1),VSPXBLOK  MOVE IN OLD HDR      @VA09273 00344000
+         STC   R0,VSPXLEN-VSPXBLOK(R1)  LGTH OF NEW VSPXBLOK   @VA09273 00344500
+         MVC   VSPXTGLN-VSPXBLOK(1,R1),SAVEWRK6+3 NEW TAG LGTH @VA09273 00345000
+         ST    R1,VDEVEXTN         SAVE ADDRESS IN VDEVBLOK    @VA09273 00345500
+         SR    R0,R0               PREPARE TO FRET OLD ONE     @VA09273 00346000
+         IC    R0,VSPXLEN          OLD LENGTH IN DBLWDS        @VA09273 00346500
+         LR    R1,R6               ADDRESS OF OLD ONE          @VA09273 00347000
+         CALL  DMKFRET             FRET THE STORAGE            @VA09273 00347500
+         L     R6,VDEVEXTN         RESTORE ADDRESSIBILITY      @VA09273 00348000
          L     R2,SAVEWRK6         NEW TAG DATA COUNT          @V293598 00358000
          LTR   R2,R2               ANY ??                      @V293598 00359000
          BZ    TD11                NEXT DEVICE IF NOT          @V60B9BA 00360000
@@ -392,13 +419,18 @@ TF01     BAL   R4,GETFILE          LOCATE REQUESTED FILE'S SFB @V293598 00416000
          CALL  DMKPGTVG            GOT IT, RESERVE SY VIRT PAGE@V293598 00418000
          ST    R1,SAVEWRK1         SAVE ADDRESS OF SY VIRT PAGE@V293598 00419000
          L     R0,SFBSTART         DASD ADDR OF FILE'S 1ST BUFR@V293598 00420000
+         MVC   SAVEWRK9(1),SFBFLAG SAVE FLAGS                  @VA09978 00420100
+         OI    SFBFLAG,SFBINUSE MARK SPOOL FILE BLOCK IN USE   @VA09978 00420200
          CALL  DMKRPAGT,PARM=(BRING+SYSTEM)  READ IN 1ST BUFFER@V293598 00421000
          BNZ   MSG424E        PAGING ERROR - QUIT              @V305435 00422000
+         MVC   SFBFLAG,SAVEWRK9 RESTORE FLAG IF IT WAS ORIG.ON @VA09978 00422100
          AL    R8,VMDVSTRT    GET VDEVBLOK ADDR                @VM01086 00423000
          CLI   16(R2),X'03'   IS THERE A TAG RECORD?           @VA08508 00423300
-         BNE   TF04           NONE--SHOULD NOT HAPPEN          @VA08508 00423600
+         BNE   MSG027E        INVALID FILE MESSAGE             @VA12943 00423610
+         CLI   24(R2),X'08'   IS THIS REALLY A TAG RECORD?     @VA09783 00423750
+         BNE   MSG027E        INVALID FILE TYPE                @VA12943 00423860
          TM    20(R2),SKIP         IS THERE A TAG RECORD HERE ?@V293598 00424000
-         BO    TF04                NONE - (SHOULDN'T HAPPEN)   @V293598 00425000
+         BO    MSG027E        INVALID FILE                     @VA12943 00425010
          LH    R6,22(R2)           TAG RECORD DATA LENGTH      @V293598 00426000
          LR    R1,R6               SAVE IT FOR LATER           @V293598 00427000
          BCTR  R1,0                -1 CHAR COUNT FOR CHAR OP   @V293598 00428000
@@ -434,6 +466,7 @@ TFSCANE  STM   R3,R4,BUFNXT       RESTORE BUFFER POINTERS      @VA04461 00443200
 TF04     L     R0,SFBSTART         DASD ADDR OF 1ST SPOOL BUFR @V293598 00445000
          L     R1,SAVEWRK1         ADDR OF SYSTEM VIRTUAL PAGE @V293598 00446000
          CALL  DMKRPAPT,PARM=SYSTEM  WRITE NEW BUFFER TO DASD  @V293598 00447000
+         BNZ   MSG424E        PAGING ERROR ON WRITE - QUIT     @VA09978 00447100
          SPACE                                                          00448000
 TF05     L     R1,SAVEWRK1         ADDR OF SYSTEM VIRTUAL PAGE @V293598 00449000
          CALL  DMKPGTVR            RETURN SYSTEM VIRTUAL PAGE  @V293598 00450000
@@ -557,11 +590,16 @@ QF01     BAL   R4,GETFILE          LOCATE THE SPOOL FILE BLOCK @V293598 00566000
          CALL  DMKPGTVG            RESERVE A SYS VIRTUAL PAGE  @V293598 00568000
          ST    R1,SAVEWRK1         AND SAVE ITS ADDRESS        @V293598 00569000
          L     R0,SFBSTART         DASD @ OF 1ST SPOOL DATA BUF@V293598 00570000
+         MVC   SAVEWRK9(1),SFBFLAG SAVE FLAG                   @VA09978 00570100
+         OI    SFBFLAG,SFBINUSE MARK SPOOL FILE BLOCK IN USE   @VA09978 00570200
          CALL  DMKRPAGT,PARM=(BRING+SYSTEM)  READ IT IN        @V293598 00571000
          BNZ   MSG424E        PAGING ERROR - QUIT              @V305435 00572000
+         MVC   SFBFLAG,SAVEWRK9 RESTORE FLAG IF IT WAS ORIG.ON @VA09978 00572100
          AL    R8,VMDVSTRT    GET VDEVBLOK ADDR                @VM01086 00573000
          CLI   16(R2),X'03'   IS THERE A TAG RECORD?           @VA08508 00573300
          BNE   QF07           NONE--TAG MISSING                @VA08508 00573600
+         CLI   24(R2),X'08'   IS THIS REALLY A TAG RECORD?     @VA09783 00573750
+         BNE   QF07           NONE--TAG MISSING.               @VA09783 00573850
          TM    20(R2),SKIP         IS THERE A TAG RECORD HERE ?@V293598 00574000
          BO    QF07                NOPE - TAG MISSING          @V293598 00575000
 QF02     LA    R1,28(R2)           ADDR OF START OF TAG DATA   @V293598 00576000
@@ -901,6 +939,7 @@ MSG042E  EQU   *  HERE IF SPOOL FILE DOES NOT EXIST            @V293598 00907000
          B     EXIT8                                           @V293598 00910000
          SPACE 2                                                        00911000
 MSG424E  EQU   *              HERE ON PAGING ERROR             @V305435 00912000
+         MVC   SFBFLAG,SAVEWRK9 RESTORE FLAG IF IT WAS ORIG.ON @VA09978 00912100
          L     R1,SAVEWRK1    ADDR OF SYS VIRT PAGE            @VM01086 00913000
          CALL  DMKPGTVR       RETURN THE PAGE                  @VM01086 00914000
          LA    R2,424         MESSAGE NUMBER                   @V305435 00915000

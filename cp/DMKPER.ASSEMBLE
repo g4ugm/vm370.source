@@ -1,19 +1,1661 @@
-PER      TITLE 'DMKPER     (CP)        VM/370 - RELEASE 6'              00001000
-DMKPER   START                                                          00002000
-         USING VMBLOK,11                                                00003000
-         DC    CL8'DMKDUMMY'                                            00004000
-         SPACE                                                          00005000
-         ENTRY DMKPERCH,DMKPERT,DMKPERIL                                00006000
-         SPACE                                                          00007000
-DMKPERCH EQU   *              COMMAND ENTRY                             00008000
-         SLR   2,2            RETURN CODE ZERO                          00009000
-         SVC   12             EXIT                                      00010000
-         SPACE                                                          00011000
-DMKPERIL EQU   *              INTERRUPT ENTRY                           00012000
-         NI    VMPEND,X'FF'-VMPERPND                                    00013000
-DMKPERT  EQU   *              RESET ENTRY                               00014000
-         NI    VMTRCTL,X'FF'-VMTRPER                                    00015000
-         SVC   12             EXIT                                      00016000
-         EJECT                                                          00017000
-         COPY  VMBLOK                                                   00018000
-         END   DMKPER                                                   00019000
+PER      TITLE 'DMKPER        VM/370               VERSION 6, LEVEL 0'  00001000
+*.                                                                      00002000
+* MODULE NAME -                                                         00003000
+*                                                                       00004000
+*        DMKPER                                                         00005000
+*                                                                       00006000
+* FUNCTION -                                                            00007000
+*                                                                       00008000
+*        CONTAINS SEVERAL ROUTINES USED BY THE "PER" TRACE FACILITY     00009000
+*                                                                       00010000
+* ATTRIBUTES -                                                          00011000
+*                                                                       00012000
+*        RE-ENTRANT, PAGEABLE, CALLED BY SVC                            00013000
+*                                                                       00014000
+* ENTRY POINTS -                                                        00015000
+*                                                                       00016000
+*        DMKPERIL - HANDLE A "PER" INTERUPT                             00017000
+*        DMKPERCH - UPDATE THE CONTROL REGS IN THE PERBLOK              00018000
+*        DMKPERT  - TERMINATE "PER" TRACING                             00019000
+*                                                                       00020000
+* ENTRY CONDITIONS -                                                    00021000
+*                                                                       00022000
+*        DETAILED AT EACH ENTRY POINT                                   00023000
+*                                                                       00024000
+* EXIT CONDITIONS -                                                     00025000
+*                                                                       00026000
+*        DETAILED AT EACH ENTRY POINT                                   00027000
+*                                                                       00028000
+* CALLS TO OTHER ROUTINES                                               00029000
+*                                                                       00030000
+*        DMKPEDAL - TO PRODUCE "PER" TRACE OUTPUT                       00031000
+*        DMKVATRN - TO RESOLVE THIRD LEVEL STORAGE                      00032000
+*                                                                       00033000
+* TABLES / WORK AREAS -                                                 00034000
+*                                                                       00035000
+*        PERBLOK, PEXBLOK, SAVEAREA, PSA, VMBLOK                        00036000
+*                                                                       00037000
+* OPERATION -                                                           00038000
+*                                                                       00039000
+*        DETAILED AT EACH ENTRY POINT                                   00040000
+*                                                                       00041000
+*.                                                                      00042000
+         EJECT ,                                                        00043000
+         COPY  OPTIONS                                                  00044000
+         COPY  LOCAL                                                    00045000
+         EJECT ,                                                        00046000
+DMKPER   CSECT ,                                                        00047000
+         SPACE                                                          00048000
+         USING SAVEAREA,R13                                             00049000
+         USING VMBLOK,R11                                               00050000
+         USING PERBLOK,R8                                               00051000
+         USING PEXBLOK,R7                                               00052000
+         USING PSA,R0                                                   00053000
+         SPACE 1                                                        00054000
+         DC    CL8'DMKPER'                                              00055000
+         SPACE 1                                                        00056000
+         EXTRN DMKPEDAL,DMKVATRN                                        00057000
+         EJECT ,                                                        00058000
+*.                                                                      00059000
+* ENTRY POINT NAME -                                                    00060000
+*                                                                       00061000
+*        DMKPERIL                                                       00062000
+*                                                                       00063000
+* PURPOSE -                                                             00064000
+*                                                                       00065000
+*        TO HANDLE A "PER" INTERUPT                                     00066000
+*                                                                       00067000
+* ENTRY CONDITIONS -                                                    00068000
+*                                                                       00069000
+*        GPR 11 = ADDRESS OF VMBLOK                                     00070000
+*        GPR 12 = ADDRESS OF DMKPERIL                                   00071000
+*        GPR 13 = ADDRESS OF STANDARD SAVE AREA                         00072000
+*        PERBLOK FILLED IN WITH "PER" INTERUPT INFO                     00073000
+*                                                                       00074000
+* EXIT CONDITIONS -                                                     00075000
+*                                                                       00076000
+*        SVC 12, GPRS UNCHANGED                                         00077000
+*                                                                       00078000
+* OPERATION -                                                           00079000
+*                                                                       00080000
+*     1. IF PERBLOK DOES NOT EXIST, ABEND 3                             00081000
+*     2. HANDLE PER "BLIP" FOR EACH TYPE OF TRAP                        00082000
+*     3. IF WAS A GREG EVENT DETERMINE WHICH REGISTERS CHANGED          00083000
+*     4. FETCH THE INSTRUCTION CAUSING THE INTERUPT FROM USER STORAGE   00084000
+*     5. IF NOT A STORE EVENT GO TO STEP 8                              00085000
+*     6. DETERMINE WHAT REGISTERS IF ANY THAT THE INSTRUCTION ALTERED.  00086000
+*     7. IF INSTRUCTION WAS AN EXECUTE, CHECK FOR QUESTIONABLE          00087000
+*        ADDRESS OR MODIFIER                                            00088000
+*     8. CALCULATE OPERAND ADDRESS OR ADDRESSES                         00089000
+*     9. IF THE INSTRUCTION WAS AN EXECUTE, MAKE A SECOND PASS TO GET   00090000
+*        THE EXECUTED INSTRUCTION, GOTO STEP 4                          00091000
+*    10. IF STORE EVENT, CALCULATE STORE LENGTH                         00092000
+*    11. IF ADDRESS OR LENGTH IS QUESTIONABLE, SET LENGTH TO            00093000
+*        16 MEGABYTES TO AVOID MISSING INTERUPTS                        00094000
+*    12. IF SUCCESSFUL BRANCH INSTRUCTION, GET BRANCH ADDR FROM PSW     00095000
+*    13. IF BRANCH EVENT, UPDATE TRACEBACK TABLE                        00096000
+*    14. SCAN PEXBLOKS TO SEE IF ANY MATCH.                             00097000
+*    15. IF NECESSARY CALL DMKPERCH TO RECALCULATE CREGS.               00098000
+*    16. IF ANY PEXBLOKS MATCHED, CALL DMKPEDAL TO DISPLAY              00099000
+*        OUTPUT                                                         00100000
+*    17. EXIT                                                           00101000
+*                                                                       00102000
+* USAGE OF SAVEWORK AREA -                                              00103000
+*                                                                       00104000
+*   SAVEWRK1 BYTE 0 FLAG                                                00105000
+*            X'80' FIRST HALFWORD OF ISN MISSING                        00106000
+*            X'40' SECOND HALFWORD OF ISN MISSING                       00107000
+*            X'20' THIRD HALFWORD OF ISN MISSING                        00108000
+*            X'08' QUESTIONABLE EX ADDRESS                              00109000
+*            X'04' QUESTIONABLE EX MODIFIER                             00110000
+*            BYTE 1 USED TO SAVE ORIGINAL SECOND BYTE OF ISN            00111000
+*                  IF WAS EXECUTED                                      00112000
+*            BYTES 2 AND 3 ARE UNUSED                                   00113000
+*                                                                       00114000
+*   SAVEWRK2 BYTE 0 FLAGS                                               00115000
+*            X'80' NEED TO CALL DMKPERCH                                00116000
+*            X'40' NEED TO CALL DMKPEDAL                                00117000
+*            X'20' INSTRUCTION WAS IN AN IFETCH RANGE                   00118000
+*            BYTES 1-3 UNUSED                                           00119000
+*                                                                       00120000
+*   SAVEWRK3-SAVEWRK6 USED AS REG SAVEAREA BY GETPAGE                   00121000
+*                                                                       00122000
+*   SAVEWRK7-SAVEWRK9 UNUSED                                            00123000
+*.                                                                      00124000
+DMKPERIL RELOC ,                                                        00125000
+         ICM   R8,B'1111',VMPERCTL LOAD ADDR OF PER EXT BLOCK           00126000
+         BZ    PER3           NONE, ABEND                               00127000
+         XC    PEREX(4+6+2+4+4+1+3+4),PEREX  CLEAR OUT WORK AREAS       00128000
+         MVI   SAVEWRK2,0     ZAP FLAGS                                 00129000
+         SPACE 1                                                        00130000
+*---------------------------------------------------------------------* 00131000
+*        HANDLE PER "BLIP"                                            * 00132000
+*---------------------------------------------------------------------* 00133000
+         LA    R3,=C'BISG'    POINT TO LIST OF BLIP IDS                 00134000
+         LA    R4,PERBBLIP    POINT TO LIST OF BLIP COUNTERS            00135000
+         SLR   R5,R5          CLEAR FLAG REG FOR IC                     00136000
+         ICM   R5,B'1000',PERCDE   LOAD PER CODE                        00137000
+BLIPLOOP ALR   R5,R5          CHECK FLAG                                00138000
+         BZ    UPGREG         GO SEE IF NEED TO UPDATE GREG STUFF       00139000
+         BC    B'0100',BLIPNEXT    NO BIT, SKIP OUTPUT                  00140000
+         LH    R7,0(,R4)      LOAD COUNTER                              00141000
+         BCT   R7,NOBLIP      DECREMENT AND BRANCH IF NOT ZERO          00142000
+         LH    R7,=H'10000'   LOAD NEW BLIP COUNT                       00143000
+         MVI   PERBUF,C'*'    MOVE IN BLIP CHAR                         00144000
+         MVC   PERBUF+1(1),0(R3)        MOVE IN BLIP ID                 00145000
+         LA    R0,2           LOAD LENGTH OF WRITE                      00146000
+         LA    R1,PERBUF      POINT TO CHARS TO TYPE                    00147000
+         LA    R2,NORET+NOAUTO          DON'T WAIT AND NO CR            00148000
+         CALL  DMKQCNWT       GO TYPE BLIP                              00149000
+NOBLIP   STH   R7,0(,R4)      SAVE NEW COUNT                            00150000
+BLIPNEXT LA    R3,1(,R3)      POINT TO NEXT BLIP ID                     00151000
+         LA    R4,2(,R4)      POINT TO NEXT BLIP COUNTER                00152000
+         B     BLIPLOOP       AND LOOP                                  00153000
+         EJECT ,                                                        00154000
+*---------------------------------------------------------------------* 00155000
+*        IF GREG EVENT, UPDATE TABLE AND FIND WHICH REGS CHANGED      * 00156000
+*---------------------------------------------------------------------* 00157000
+UPGREG   TM    PERCDE,PEXGPR  GREG ALTERATION?                          00158000
+         BNO   GETISN         NO, GO RETRIEVE ISN                       00159000
+         SLR   R1,R1          CLEAR FLAG REG                            00160000
+         LA    R2,VMGPRS      POINT TO REGISTERS                        00161000
+         ICM   R3,B'1111',PERGPRP  LOAD POINTER                         00162000
+         BZ    PER2           NONE, ERROR                               00163000
+         LA    R4,16          LOAD COUNT                                00164000
+GSETL    ALR   R1,R1          SHIFT LEFT 1 BIT                          00165000
+         CLC   0(4,R2),0(R3)  REGISTER ALTERED?                         00166000
+         BE    *+8            NO, SKIP SETTING FLAG                     00167000
+         LA    R1,1(,R1)      SET REGISTER ALTER FLAG                   00168000
+         LA    R2,4(,R2)      POINT TO NEXT REGISTER                    00169000
+         LA    R3,4(,R3)      ...                                       00170000
+         BCT   R4,GSETL       LOOP THROUGH ALL REGISTERS                00171000
+         N     R1,PERCR9      LEAVE ONLY REGISTERS OF INTREST           00172000
+         STH   R1,PERGALT     SET FLAGS                                 00173000
+         L     R2,PERGPRP     LOAD POINTER AGAIN                        00174000
+         MVC   0(4*16,R2),VMGPRS   SAVE VALUES FOR NEXT TIME            00175000
+         EJECT ,                                                        00176000
+*---------------------------------------------------------------------* 00177000
+*        FETCH INSTRUCTION FROM USER STORAGE                          * 00178000
+*---------------------------------------------------------------------* 00179000
+GETISN   L     R1,PERADDR     LOAD ADDRESS TO FETCH FROM                00180000
+         MVI   SAVEWRK1,0     SET FLAG                                  00181000
+UFETCHIT OI    SAVEWRK1,X'80'+X'40'+X'20'    SET FLAGS                  00182000
+         BAL   R0,GETPAGE     TRY TO GET FIRST HALFWORD                 00183000
+         BNZ   NOH1           NOT THERE, SKIP NI                        00184000
+         NI    SAVEWRK1,255-X'80'  GOT FIRST HALFWORD                   00185000
+         MVC   PERINST(2),0(R2)    MOVE IN INSTRUCTION                  00186000
+         CLI   PERINST,X'40'  DOES IT HAVE ANOTHER HALFWORD?            00187000
+         BL    NOH1           NO, GOT IT ALL                            00188000
+         LA    R1,2(,R1)      POINT TO NEXT HALFWORD                    00189000
+         BAL   R0,GETPAGE     TRY FOR SECOND HALFWORD                   00190000
+         BNZ   NOH1           NOT AVAIL, SKIP IT                        00191000
+         NI    SAVEWRK1,255-X'40'  INDICATE HAVE SECOND HALFWORD        00192000
+         MVC   PERINST+2(2),0(R2)  MOVE IT IN                           00193000
+         CLI   PERINST,X'C0'  DOES IT HAVE A THIRD HALFWORD?            00194000
+         BL    NOH1           NO, SKIP IT                               00195000
+         LA    R1,2(,R1)      POINT TO LAST HALFWORD                    00196000
+         BAL   R0,GETPAGE     GO GET IT                                 00197000
+         BNZ   NOH1           NOT AVAIL, SKIP IT                        00198000
+         NI    SAVEWRK1,255-X'20'  WE HAVE THIRD HALFWORD               00199000
+         MVC   PERINST+4(2),0(R2)  MOVE IN THIRD HALFWORD               00200000
+NOH1     CLI   PEREX,X'44'    DO WE HAVE AN EXECUTE?                    00201000
+         BNE   CHKREGA        NO, SKIP OR                               00202000
+         MVC   SAVEWRK1+1(1),PERINST+1  SAVE OLD VALUE                  00203000
+         OC    PERINST+1(1),PEREXMOD    OR IN MODIFIER                  00204000
+         EJECT ,                                                        00205000
+*---------------------------------------------------------------------* 00206000
+*        FIND TABLE ENTRY FOR THIS OP CODE                            * 00207000
+*---------------------------------------------------------------------* 00208000
+CHKREGA  SLR   R6,R6          CLEAR R6 FOR IC                           00209000
+         CLI   PERINST,X'B2'  IS IT A B2 TYPE ISN?                      00210000
+         BE    GETB2          YES, HANDLE IT                            00211000
+         IC    R6,PERINST     INSERT OP CODE                            00212000
+         ALR   R6,R6          DOUBLE FOR INDEX                          00213000
+         LA    R6,FUNCTAB(R6) POINT TO INFO BYTES                       00214000
+         B     CKGALT         AND GO CHECK GREG ALT                     00215000
+GETB2    IC    R6,PERINST+1   INSERT CODE BYTE                          00216000
+         CLI   PERINST+1,X'13'     TOO BIG?                             00217000
+         BNH   *+6            NO, SKIP SLR                              00218000
+         SLR   R6,R6          INVALID ISN, SET TO ZERO                  00219000
+         ALR   R6,R6          DOUBLE FOR INDEX                          00220000
+         LA    R6,B2TAB(R6)   POINT TO INFO                             00221000
+         EJECT ,                                                        00222000
+*---------------------------------------------------------------------* 00223000
+*        CHECK FOR REGISTER ALTERATIONS                               * 00224000
+*---------------------------------------------------------------------* 00225000
+CKGALT   TM    PERCDE,PEXST   STORE EVENT?                              00226000
+         BZ    DECOP1         NO, NO NEED TO CHECK REG AND STORE        00227000
+         SLR   R1,R1          CLEAR R1 FOR IC                           00228000
+         IC    R1,0(,R6)      LOAD CODE BYTE                            00229000
+         SRL   R1,4           SHIFT OUT UNWANTED GARBAGE                00230000
+         ALR   R1,R1          DOUBLE FOR INDEX                          00231000
+         LH    R1,GALTTAB(R1) LOAD OFFSET                               00232000
+         B     DMKPER(R1)     AND GO THERE                              00233000
+         SPACE 1                                                        00234000
+* CODE 1: REGISTER INDICATED BY THIRD NYBBLE ALTERED                    00235000
+RCODE1   SLR   R1,R1          CLEAR R1 FOR IC                           00236000
+         IC    R1,PERINST+1   INSERT IT                                 00237000
+         SRL   R1,4           SHIFT OUT UNWANTED NYBBLE                 00238000
+         L     R0,=X'00008000'     LOAD FLAG                            00239000
+         SRL   R0,0(R1)       GET PROPER FLAG                           00240000
+         B     RALTCOM        AND JOIN COMMON                           00241000
+         SPACE 1                                                        00242000
+* CODE 2: REGISTER PAIR INDICATED BY THIRD NYBBLE ALTERED               00243000
+RCODE2   SLR   R1,R1          CLEAR R1 FOR IC                           00244000
+         IC    R1,PERINST+1   INSERT IT                                 00245000
+         SRL   R1,4           SHIFT OUT GARBAGE                         00246000
+         L     R0,=X'0000C000'     LOAD FLAG                            00247000
+         SRL   R0,0(R1)       AND SHIFT TO POSITION                     00248000
+         B     RALTCOM        AND JOIN COMMON                           00249000
+         SPACE 1                                                        00250000
+* CODE 3: REGISTER RANGE IN SECOND BYTE ALTERED                         00251000
+RCODE3   SLR   R2,R2          CLEAR R2                                  00252000
+         IC    R2,PERINST+1   LOAD RANGE                                00253000
+         LR    R3,R2          PUT IN R3 ALSO                            00254000
+         SRL   R2,4           NOW HAVE FIRST REG IN R2                  00255000
+         N     R3,F15         AND LAST IN R3                            00256000
+         L     R0,XRIGHT16         LOAD FLAGS TO R0                     00257000
+         L     R1,=X'FFFF0000'     AND R1                               00258000
+         SRL   R0,0(R2)       SHIFT FOR R1                              00259000
+         SRL   R0,1(R3)       AND FOR R2                                00260000
+         CLR   R2,R3          WRAP ARAUND?                              00261000
+         BH    RAPIT          YES, USE OR                               00262000
+         NR    R0,R1          GET IT                                    00263000
+         B     *+6            SKIP OVER OR                              00264000
+RAPIT    OR    R0,R1          GET IT                                    00265000
+         B     RALTCOM        GO TO COMMON                              00266000
+         SPACE 1                                                        00267000
+* CODE 4: ALTER TWO REGISTER PAIRS INDICATED BY SECOND BYTE             00268000
+RCODE4   SLR   R1,R1          CLEAR R1                                  00269000
+         IC    R1,PERINST+1   INSERT REG INDICATORS                     00270000
+         LR    R2,R1          MOVE TO R2 ALSO                           00271000
+         SRL   R1,4           NOW HAVE FIRST REG PAIR IN R1             00272000
+         N     R2,F15         AND SECOND IN R2                          00273000
+         L     R0,=X'0000C000'     LOAD FLAG                            00274000
+         LR    R3,R0          AND R3 ALSO                               00275000
+         SRL   R0,0(R1)       SHIFT FLAG TO POSITION                    00276000
+         SRL   R3,0(R2)       AND SECOND PAIR                           00277000
+         OR    R0,R3          OR TOGETHER                               00278000
+         B     RALTCOM        AND GO JOIN COMMON                        00279000
+         SPACE 1                                                        00280000
+* CODE 5: COMPARE AND SWAP                                              00281000
+RCODE5   LA    R3,RCODE1      IF HAPPENED SAME AS RCODE1                00282000
+         B     CSCOMM         JOIN COMPARE AND SWAP COMMON              00283000
+         SPACE 1                                                        00284000
+* CODE 6: COMPARE DOUBLE AND SWAP                                       00285000
+RCODE6   LA    R3,RCODE2      SAME AS CODE 2 IF HAPPENED                00286000
+CSCOMM   LA    R1,VMPSW+4     ASSUME BC MODE                            00287000
+         TM    VMPSW+1,EXTMODE     ECMODE PSW?                          00288000
+         BZ    *+8            NO, SKIP LA                               00289000
+         LA    R1,VMPSW+2                                               00290000
+         TM    0(R1),X'03'    WAS CC ZERO?                              00291000
+         BZ    DECOP1         YES, NO REGISTER ALTERATION               00292000
+         BR    R3             GO HANDLE ALTERATION                      00293000
+         SPACE 1                                                        00294000
+* CODE 7: INSERT CHARACTERS UNDER MASK                                  00295000
+RCODE7   TM    PERINST+1,X'0F'     IS THE MASK ZERO?                    00296000
+         BZ    DECOP1         YES, NO ALTERATION                        00297000
+         B     RCODE1         OTHERWISE SAME AS CODE 1                  00298000
+         SPACE 1                                                        00299000
+* CODE 8: TRANSLATE AND TEST                                            00300000
+RCODE8   LA    R1,VMPSW+4     POINT TO BC MODE CC                       00301000
+         TM    VMPSW+1,EXTMODE     ECMODE PSW?                          00302000
+         BZ    *+8            NO, SKIP LA                               00303000
+         LA    R1,VMPSW+2     POINT TO EC MODE CC                       00304000
+         TM    0(R1),X'03'    IS CC=0                                   00305000
+         BZ    DECOP1         YES, NO REGISTER ALTERATION               00306000
+         L     R0,=X'00006000'     LOAD FLAGS                           00307000
+         B     RALTCOM        AND JOIN COMMON                           00308000
+         SPACE 1                                                        00309000
+* CODE 9: EDIT AND MARK                                                 00310000
+RCODE9   L     R0,=X'00004000'     ASSUME R1 ALTERED                    00311000
+         B     RALTCOM        AND JOIN COMMON                           00312000
+         SPACE 1                                                        00313000
+* CODE 10: INSERT PSW KEY                                               00314000
+RCODE10  L     R0,=X'00002000'     REGISTER 2 ALTERED                   00315000
+         SPACE 1                                                        00316000
+RALTCOM  N     R0,PERCR9      IF GREG ON, COMBINE INFO                  00317000
+         O     R0,PERGALT-2   OR THEM IN                                00318000
+         STH   R0,PERGALT     AND STORE BACK                            00319000
+         EJECT ,                                                        00320000
+*---------------------------------------------------------------------* 00321000
+*        CHECK FOR QUESTIONABLE EX ADDR OR MOD                        * 00322000
+*---------------------------------------------------------------------* 00323000
+         CLI   PEREX,X'44'    IS IT AN EXECUTE?                         00324000
+         BNE   DECOP1         NO, GO CALC OPERAND ADDRESS               00325000
+         SLR   R1,R1          CLEAR R1                                  00326000
+         IC    R1,PEREX+1     INSERT SECOND BYTE                        00327000
+         SRL   R1,4           GET MODIFIER REG                          00328000
+         LTR   R1,R1          REG ZERO?                                 00329000
+         BZ    EXCKA1         YES, CHECK ADDRESS                        00330000
+         BAL   R15,CHKGALT    CHECK ALTERATION                          00331000
+         OI    SAVEWRK1,X'04' INDICATE MODIFIER QUESTIONABLE            00332000
+EXCKA1   IC    R1,PEREX+1     INSERT IT AGAIN                           00333000
+         N     R1,F15         GET ONLY BASE REG                         00334000
+         BZ    EXCKA2         IF ZERO TRY INDEX                         00335000
+         BAL   R15,CHKGALT    CHECK FOR CHANGE                          00336000
+         OI    SAVEWRK1,X'08' INDICATE QUESTIONABLE ADDRESS             00337000
+EXCKA2   IC    R1,PEREX+2     INSERT THIRD BYTE                         00338000
+         SRL   R1,4           ISOLATE INDEX REG                         00339000
+         LTR   R1,R1          REG ZERO?                                 00340000
+         BZ    DECOP1         YES, KEEP GOING                           00341000
+         BAL   R15,CHKGALT    CHECK FOR ALTERATION                      00342000
+         OI    SAVEWRK1,X'08' INDICATE QUAETIONABLE ADDRESS             00343000
+         EJECT ,                                                        00344000
+*---------------------------------------------------------------------* 00345000
+*        CALCULATE OPERAND ADDRESS OR ADDRESSES                       * 00346000
+*---------------------------------------------------------------------* 00347000
+DECOP1   MVI   PEROP1,PEROPNOT   INDICATE NO OP1                        00348000
+         MVI   PEROP2,PEROPNOT     INDICATE NO OP2                      00349000
+         IC    R1,0(,R6)      INSERT BYTE                               00350000
+         N     R1,F15         CLEAR UNWANTED NYBBLE                     00351000
+         ALR   R1,R1          GET INDEX                                 00352000
+         LH    R1,OPTAB(R1)   LOAD OFFSET                               00353000
+         B     DMKPER(R1)     AND GO TO HANDLER                         00354000
+         SPACE 1                                                        00355000
+* CODE 1: FOURTH NYBBLE IS REGISTER CONTAINING OPERAND ADDRESS          00356000
+OCODE1   MVI   PEROP1,0       CLEAR FLAG                                00357000
+         SLR   R1,R1          CLEAR R1                                  00358000
+         IC    R1,PERINST+1   INSERT BYTE                               00359000
+         N     R1,F15         ISOLATE WANTED NYBBLE                     00360000
+         BZ    OCODE1A        IF REG ZERO, NO OPERAND                   00361000
+         BAL   R15,CHKGALT    CHECK REG ALTERED                         00362000
+         OI    PEROP1,PEROPQU INDICATE POSSIBLY BAD                     00363000
+         ALR   R1,R1          DOUBLE                                    00364000
+         ALR   R1,R1          AND AGAIN                                 00365000
+         L     R1,VMGPRS(R1)  LOAD REGISTER                             00366000
+OCODE1A  STCM  R1,B'0111',PEROP1+1 SAVE ADDRESS                         00367000
+         B     CHKSTO         GO CHECK FOR STORE                        00368000
+         SPACE 1                                                        00369000
+* CODE 2: RX TYPE ADDRESS                                               00370000
+OCODE2   MVI   PEROP1,0       INDICATE HAVE OP1                         00371000
+         LA    R1,PERINST+2   POINT TO HALFWORD                         00372000
+         BAL   R15,RSADDR     GO GET RS TYPE ADDRESS                    00373000
+         OI    PEROP1,PEROPQU INDICATE BAD                              00374000
+         LR    R2,R1          SAVE ADDRESS                              00375000
+         SLR   R1,R1          CLEAR R1                                  00376000
+         IC    R1,PERINST+1   LOAD SECOND BYTE                          00377000
+         N     R1,F15         ISOLATE REGISTER                          00378000
+         BZ    OCODE2A        IF REG ZERO, DON'T USE IT                 00379000
+         BAL   R15,CHKGALT    GO CHECK ALTERATION                       00380000
+         OI    PEROP1,PEROPQU INDICATE MIGHT BE BAD                     00381000
+         ALR   R1,R1          ADD                                       00382000
+         ALR   R1,R1          AND AGAIN                                 00383000
+         AL    R2,VMGPRS(R1)  ADD                                       00384000
+OCODE2A  STCM  R2,B'0111',PEROP1+1 SAVE ADDRESS                         00385000
+         TM    SAVEWRK1,X'40' WAS SECOND HALFWORD THERE?                00386000
+         BZ    CHKEXE         YES, CHECK FOR EXECUTE                    00387000
+         OI    PEROP1,PEROPQU INDICATE MIGHT BE BAD                     00388000
+         B     CHKEXE         GO CHECK FOR EXECUTE                      00389000
+         SPACE 1                                                        00390000
+* CODE 3: RS TYPE ADDRESS                                               00391000
+OCODE3   MVI   PEROP1,0       INDICATE HAVE OP1                         00392000
+         LA    R1,PERINST+2   POINT TO IT                               00393000
+         BAL   R15,RSADDR     CALCULATE RS ADDRESS                      00394000
+         OI    PEROP1,PEROPQU INDICATE BAD                              00395000
+         STCM  R1,B'0111',PEROP1+1 SAVE ADDRESS                         00396000
+         TM    SAVEWRK1,X'40' OK?                                       00397000
+         BZ    CHKSTO         YES, LEAVE                                00398000
+         OI    PEROP1,PEROPQU SET AS NOT OK                             00399000
+         B     CHKSTO         GO CHECK FOR EXECUTE                      00400000
+         SPACE 1                                                        00401000
+* CODE 4: TWO RS TYPE ADDRESSES                                         00402000
+OCODE4   MVI   PEROP1,0       INDICATE HAVE OP1                         00403000
+         MVI   PEROP2,0       AND OP 2                                  00404000
+         LA    R1,PERINST+2   POINT TO FIRST                            00405000
+         BAL   R15,RSADDR     GO GET ADDRESS                            00406000
+         OI    PEROP1,PEROPQU SET AS POSSIBLY BAD                       00407000
+         STCM  R1,B'0111',PEROP1+1 SAVE IT                              00408000
+         LA    R1,PERINST+4   POINT TO SECOND OPERAND                   00409000
+         BAL   R15,RSADDR     GO GET ADDRESS                            00410000
+         OI    PEROP2,PEROPQU INDICATE IS BAD                           00411000
+         STCM  R1,B'0111',PEROP2+1 SAVE IT                              00412000
+         TM    SAVEWRK1,X'40' WAS SECOND HALFWORD THERE?                00413000
+         BZ    *+8            YES, SKIP OI                              00414000
+         OI    PEROP1,PEROPQU INDICATE IS QUESTIONABLE                  00415000
+         TM    SAVEWRK1,X'20' WAS THIRD HALFWORD THERE?                 00416000
+         BZ    CHKSTO         YES, OK THEN                              00417000
+         OI    PEROP2,PEROPQU INDICATE IS QUESTIONABLE                  00418000
+         B     CHKSTO         GO CHECK EXECUTE                          00419000
+         SPACE 1                                                        00420000
+* CODE 5: LOAD ADDRESS                                                  00421000
+OCODE5   MVI   PEROP1,0       INDICATE HAVE OP1                         00422000
+         SLR   R1,R1          CLEAR FOR IC                              00423000
+         IC    R1,PERINST+1   INSERT BYTE                               00424000
+         SRL   R1,4           ISOLATE NYBBLE                            00425000
+         ALR   R1,R1          DOUBLE                                    00426000
+         ALR   R1,R1          AND AGAIN                                 00427000
+         L     R1,VMGPRS(R1)  LOAD REG VALUE                            00428000
+         ST    R1,PEROP1      SAVE IT                                   00429000
+         TM    SAVEWRK1,X'40' WAS HALFWORD THERE?                       00430000
+         BZ    CHKSTO         YES, CHECK FOR STORE                      00431000
+         OI    PEROP1,PEROPQU INDICATE QUESTIONABLE                     00432000
+         B     CHKSTO         GO CHECK FOR STORE                        00433000
+         EJECT ,                                                        00434000
+*---------------------------------------------------------------------* 00435000
+*        CHECK FOR AN EXECUTE INSTRUCTION                             * 00436000
+*---------------------------------------------------------------------* 00437000
+CHKEXE   CLI   PERINST,X'44'  EXECUTE INSTRUCTION?                      00438000
+         BNE   CHKSTO         NO, GO CHECK FOR STORAGE ALTERATION       00439000
+         CLI   PEREX,0        IS THIS A SECOND PASS?                    00440000
+         BNE   SCANPEX        YES, CAN'T EXECUTE AN EXECUTE             00441000
+         MVC   PEREX(4),PERINST    MOVE INSTRUCTION                     00442000
+         MVC   PEREXADD(3),PEROP1+1     MOVE ADDRESS                    00443000
+         SLR   R1,R1          CLEAR R1                                  00444000
+         IC    R1,PERINST+1   INSERT BYTE                               00445000
+         SRL   R1,4           ISOLATE REG                               00446000
+         ALR   R1,R1          DOUBLE                                    00447000
+         ALR   R1,R1          AND AGAIN                                 00448000
+         IC    R1,VMGPRS+3(R1)     GET BYTE                             00449000
+         STC   R1,PEREXMOD    SAVE MODIFIER BYTE                        00450000
+         TM    PEROP1,PEROPQU IS OPERAND QUESTIONABLE?                  00451000
+         BZ    *+8            NO, SKIP OI                               00452000
+         OI    SAVEWRK1,X'08' INDICATE EX ADDRESS QUESTIONABLE          00453000
+         L     R1,PEROP1      LOAD ADDRESS                              00454000
+         XC    PEROP1(4),PEROP1    CLEAR OPERAND ADDRESS                00455000
+         B     UFETCHIT            GO GET EXECUTED ISN                  00456000
+         EJECT ,                                                        00457000
+*---------------------------------------------------------------------* 00458000
+*        CALCULATE STORAGE LENGTH                                     * 00459000
+*---------------------------------------------------------------------* 00460000
+CHKSTO   TM    PERCDE,PEXST   STORE EVENT?                              00461000
+         BZ    CHKBRA         NO, SKIP STORE CHECK                      00462000
+         SLR   R1,R1          CLEAR R1 FOR IC                           00463000
+         IC    R1,1(,R6)      GET CODE                                  00464000
+         SRL   R1,4           ISOLATE IT                                00465000
+         ALR   R1,R1          DOUBLE IT                                 00466000
+         LH    R1,STOTAB(R1)  LOAD OFFSET                               00467000
+         B     DMKPER(R1)     AND GO TO IT                              00468000
+         SPACE 1                                                        00469000
+* CODE 1: LENGTH OF 1 BYTE                                              00470000
+SCODE1   LA    R1,1           SET LENGTH TO 1                           00471000
+         B     STOCOM         JOIN COMMON CODE                          00472000
+         SPACE 1                                                        00473000
+* CODE 2: LENGTH OF 2 BYTES                                             00474000
+SCODE2   LA    R1,2           SET LENGTH TO 2                           00475000
+         B     STOCOM         JOIN COMMON CODE                          00476000
+         SPACE 1                                                        00477000
+* CODE 3: LENGTH OF 4 BYTES                                             00478000
+SCODE3   LA    R1,4           SET LENGTH TO 4                           00479000
+         B     STOCOM         JOIN COMMON CODE                          00480000
+         SPACE 1                                                        00481000
+* CODE 4: LENGTH OF 8 BYTES                                             00482000
+SCODE4   LA    R1,8           SET LENGTH TO 8                           00483000
+         B     STOCOM         JOIN COMMON CODE                          00484000
+         SPACE 1                                                        00485000
+* CODE 5: REGISTER RANGE IN SECOND BYTE                                 00486000
+SCODE5   SLR   R1,R1          CLEAR R1 FOR IC                           00487000
+         IC    R1,PERINST+1   INSERT RANGE                              00488000
+         LR    R2,R1          IN R2 AS WELL                             00489000
+         SRL   R1,4           ISOLATE FIRST REG                         00490000
+         N     R2,F15         AND LAS REG                               00491000
+         SR    R2,R1          GET DIFFERENCE                            00492000
+         BNL   *+8            IF NOT LOW SKIP LA                        00493000
+         LA    R2,16(,R2)     ADD 16 IF LOW                             00494000
+         LA    R1,1(,R2)      GET NUMBER OF REGISTERS STORED            00495000
+         ALR   R1,R1          DOUBLE                                    00496000
+         ALR   R1,R1          AND AGAIN, NOW HAVE STORE LENGTH          00497000
+         LA    R2,4*16        SET MAX LENGTH IN CASE PROBLEMS           00498000
+         B     STOCOM         JOIN COMMON CODE                          00499000
+         SPACE 1                                                        00500000
+* CODE 6: COMPARE AND SWAP                                              00501000
+SCODE6   LA    R3,SCODE3      IF HAPPENED, LENGTH OF 4                  00502000
+         B     STOCSCOM       JOIN CDS                                  00503000
+         SPACE 1                                                        00504000
+* CODE 7: COMPARE DOUBLE AND SWAP                                       00505000
+SCODE7   LA    R3,SCODE4      DOUBLEWORD STORE                          00506000
+STOCSCOM LA    R1,VMPSW+4     ASSUME BC MODE                            00507000
+         TM    VMPSW+1,EXTMODE     ECMODE PSW?                          00508000
+         BZ    *+8            NO, SKIP LA                               00509000
+         LA    R1,VMPSW+2     POINT TO EC MODE CC                       00510000
+         TM    0(R1),X'03'    IS CC=0                                   00511000
+         BZR   R3             YES, STORE HAPPENED                       00512000
+         B     CHKBRA         NO STORE                                  00513000
+         SPACE 1                                                        00514000
+* CODE 8: STORE CHARACTERS UNDER MASK                                   00515000
+SCODE8   SLR   R1,R1          CLEAR LENGTH                              00516000
+         IC    R1,PERINST+1   LOAD MASK                                 00517000
+         N     R1,F15         ISOLATE IT                                00518000
+         IC    R1,MASKTAB(R1) GET LENGTH FOR GIVEN MASK                 00519000
+         LA    R2,4           MAX LENGTH IN CASE QUESTIONS              00520000
+         B     STOCOM         JOIN COMMON                               00521000
+*                  0 1 2 3 4 5 6 7 8 9 A B C D E F                      00522000
+MASKTAB  DC    AL1(0,1,1,2,1,2,2,3,1,2,2,3,2,3,3,4)                     00523000
+         SPACE 1                                                        00524000
+* CODE 9: SS TYPE 1, LENGTH IN SECOND BYTE                              00525000
+SCODE9   SLR   R1,R1          CLEAR R1 FOR IC                           00526000
+         IC    R1,PERINST+1   INSERT LENGTH -1                          00527000
+         LA    R1,1(,R1)      ADD 1                                     00528000
+         LA    R2,256         MAX LENGTH IN CASE TROUBLE                00529000
+         B     STOCOM         AND JOIN COMMON                           00530000
+         SPACE 1                                                        00531000
+* CODE 10: SS TYPE 2, LENGTH IN FIRST NYBBLE OF SECOND BYTE             00532000
+SCODE10  SLR   R1,R1          CLEAR R1 FOR IC                           00533000
+         IC    R1,PERINST+1   INSERT SECOND BYTE                        00534000
+         SRL   R1,4           ISOLATE FIRST NYBBLE                      00535000
+         LA    R1,1(,R1)      GET LENGTH                                00536000
+         LA    R2,16          MAX LENGTH IN CASE TROUBLE                00537000
+         SPACE 1                                                        00538000
+STOCOM   TM    SAVEWRK1,X'04'+X'08' QUESTIONABLE EX MOD OR ADDR         00539000
+         BNO   *+6            USE THIS LENGTH                           00540000
+         LR    R1,R2          MOVE IN ALTERNATE LENGTH                  00541000
+         TM    PEROP1,PEROPQU IS OPERAND ADDRESS QUESTIONABLE?          00542000
+         BNO   *+8            NO, SKIP SETTING BIG LENGTH               00543000
+SCODE11  L     R1,=X'01000000'     LOAD LARGE LENGTH                    00544000
+         ST    R1,PERSTLEN    SAVE LENGTH                               00545000
+         B     SCANPEX        GO SCAN PEX BLOCKS                        00546000
+         EJECT ,                                                        00547000
+*---------------------------------------------------------------------* 00548000
+*        CHECK FOR POSSIBLE BETTER ADDRESS ON BRANCH INSTRUCTIONS     * 00549000
+*---------------------------------------------------------------------* 00550000
+CHKBRA   TM    PERCDE,PEXBR   SUCCESSFUL BRANCH?                        00551000
+         BO    BRACOM         YES, USE VMPSW                            00552000
+         IC    R1,1(,R6)      INSERT CODE                               00553000
+         N     R1,F15         ISOLATE IT                                00554000
+         ALR   R1,R1          DOUBLE IT                                 00555000
+         LH    R1,BRATAB(R1)  LOAD OFFSET FROM TABLE                    00556000
+         B     DMKPER(R1)     AND HANDLE IT                             00557000
+         SPACE 1                                                        00558000
+* CODE 1: BRANCH AND LINK REGISTER                                      00559000
+BCODE1   TM    PERINST+1,X'0F'     REGISTER ZERO?                       00560000
+         BZ    SCANPEX        YES, NO BRANCH                            00561000
+         B     BRACOM         GO TO COMMON                              00562000
+         SPACE 1                                                        00563000
+* CODE 2: BRANCH AND COUNT REGISTER                                     00564000
+BCODE2   TM    PERINST+1,X'0F'     REGISTER ZERO?                       00565000
+         BZ    SCANPEX        YES, NO BRANCH                            00566000
+BCODE5   SLR   R1,R1          CLEAR R1                                  00567000
+         IC    R1,PERINST+1   INSERT BYTE                               00568000
+         SRL   R1,4           ISOLATE IT                                00569000
+         ALR   R1,R1          DOUBLE IT                                 00570000
+         ALR   R1,R1          AND AGAIN                                 00571000
+         L     R1,VMGPRS(R1)  LOAD IT                                   00572000
+         LTR   R1,R1          AND TEST IT                               00573000
+         BZ    SCANPEX        IF ZERO NO BRANCH                         00574000
+         B     BRACOM                                                   00575000
+         SPACE 1                                                        00576000
+* CODE 3: BRANCH ON CONDITION REGISTER                                  00577000
+BCODE3   TM    PERINST+1,X'0F'     CHECK REG                            00578000
+         BZ    SCANPEX        REG 0 SCAN PEX                            00579000
+BCODE6   TM    PERINST+1,X'F0'     CHECK CODE                           00580000
+         BZ    SCANPEX        NOP, BRANCH                               00581000
+         BO    BRACOM         UNCONDITIONAL, JOIN COMMON                00582000
+         IC    R3,VMPSW+4     INSERT BC CC                              00583000
+         TM    VMPSW+1,EXTMODE     EC MODE?                             00584000
+         BZ    *+8            NO, SKIP IC                               00585000
+         IC    R3,VMPSW+2     INSERT EC CC                              00586000
+         SRL   R3,4           SHIFT TO POSITION                         00587000
+         N     R3,F3          AND ISOLATE                               00588000
+         LA    R2,X'80'       LOAD MASK                                 00589000
+         SRL   R2,0(R3)       SHIFT                                     00590000
+         IC    R3,PERINST+1   INSERT MASK                               00591000
+         NR    R2,R3          CHECK IT                                  00592000
+         BZ    SCANPEX        NOPE, SCAN PEXBLOKS                       00593000
+         B     BRACOM         SUCCESS                                   00594000
+         SPACE 1                                                        00595000
+* CODE 7: BRANCH ON INDEX HIGH                                          00596000
+BCODE7   LA    R3,BXHBRA      POINT TO BRANCH ISN                       00597000
+         B     BXCOM                                                    00598000
+         SPACE 1                                                        00599000
+* CODE 8: BRANCH ON INDEX LOW OR EQUAL                                  00600000
+BCODE8   LA    R3,BXLEBRA     POINT TO BRANCH                           00601000
+BXCOM    SLR   R1,R1          CLEAR R1 FOR IC                           00602000
+         IC    R1,PERINST+1   INSERT BYTE                               00603000
+         LR    R2,R1          MOVE TO R2 ALSO                           00604000
+         SRL   R1,4           ISOLATE R1                                00605000
+         LA    R2,1(,R2)      GET R3+1                                  00606000
+         N     R2,F15         AND ISOLATE IT                            00607000
+         ALR   R1,R1          DOUBLE                                    00608000
+         ALR   R1,R1          AND AGAIN                                 00609000
+         L     R1,VMGPRS(R1)  LOAD R1                                   00610000
+         ALR   R2,R2          DOUBLE                                    00611000
+         ALR   R2,R2          AND AGAIN                                 00612000
+         L     R2,VMGPRS(R2)  LOAD R3+1                                 00613000
+         CR    R1,R2          COMPARE                                   00614000
+         EX    R0,0(,R3)      EXECUTE BRANCH ISN                        00615000
+         SPACE 1                                                        00616000
+BRACOM   MVC   PEROP1+1(3),VMPSW+5 MOVE IN ADDR                         00617000
+         MVI   PEROP1,0       AND RESET FLAGS                           00618000
+         EJECT                                                          00619000
+*---------------------------------------------------------------------* 00620000
+*        IF BRANCH EVENT, UPDATE TRACEBACK TABLE                      * 00621000
+*---------------------------------------------------------------------* 00622000
+         TM    PERCDE,PEXBR   BRANCH EVENT?                             00623000
+         BNO   SCANPEX        NO, SKIP UPDATE                           00624000
+         L     R1,PERADDR     LOAD EVENT ADDRESS                        00625000
+         CLI   PEREX,X'44'    EXECUTE?                                  00626000
+         BNE   *+8            NO, SKIP SETTING PROPER ADDRESS           00627000
+         ICM   R1,B'0111',PEREXADD LOAD PROPER ADDRESS                  00628000
+         L     R2,PERTBAK     POINT TO TRACEBACK TABLE                  00629000
+         LTR   R2,R2          DOES IT EXIST?                            00630000
+         BZ    PER5           NO, ABEND                                 00631000
+         CLM   R1,B'0111',PERTBLEN-16(R2)    SAME ADDRESS?              00632000
+         BNE   ADDTAB         NO, ADD TO TABLE                          00633000
+         CLC   PERINST(6),PERTBLEN-16+3(R2)  SAME INST?                 00634000
+         BNE   ADDTAB         NO, ADD TO TABLE                          00635000
+         CLC   PEROP1+1(3),PERTBLEN-16+9(R2)  SAME OP ADDR?             00636000
+         BNE   ADDTAB         NO, ADD TO TABLE                          00637000
+         L     R1,PERTBLEN-16+12(R2)    LOAD COUNTER                    00638000
+         AL    R1,F1          ADD 1                                     00639000
+         ST    R1,PERTBLEN-16+12(R2)    STORE BACK                      00640000
+         B     SCANPEX        AND GO SCAN BLOCKS                        00641000
+ADDTAB   MVC   0(PERTBLEN-16,R2),16(R2) PUSH STACK UP                   00642000
+         STCM  R1,B'0111',PERTBLEN-16(R2)    SET ADDR                   00643000
+         MVC   PERTBLEN-16+3(6,R2),PERINST   MOVE IN ISN                00644000
+         MVC   PERTBLEN-16+9(3,R2),PEROP1+1  MOVE IN ADDR               00645000
+         MVC   PERTBLEN-16+12(4,R2),F1  SET COUNTER                     00646000
+         EJECT ,                                                        00647000
+*---------------------------------------------------------------------* 00648000
+*        SCAN THROUGH PEX BLOCKS LOOKING FOR MATCHES                  * 00649000
+*---------------------------------------------------------------------* 00650000
+SCANPEX  CLI   PEREX,X'44'    EXECUTE ISN?                              00651000
+         BNE   *+10           NO, SKIP RESTOREING SECOND ISN BYTE       00652000
+         MVC   PERINST+1(1),SAVEWRK1+1                                  00653000
+         L     R7,PERCHAIN    LOAD POINTER                              00654000
+         LTR   R7,R7          ANY PEXBLOCKS?                            00655000
+         BZ    PER4           NO, ABEND: SOMEBODY GOOFED                00656000
+HNDLOOP  IC    R1,PEXFLAGT    INSERT CODE                               00657000
+         EX    R1,CDETM       PROPER EVENT TYPE?                        00658000
+         BZ    HNDLNXT        NO, TRY NEXT ONE                          00659000
+         LA    R1,HNDLIST     POINT TO LIST                             00660000
+         LA    R2,3           LOAD LENGTH OF LIST ENTRY                 00661000
+         LA    R3,HNDLEND     POINT TO LAST ENTRY                       00662000
+FINDL    LH    R4,0(,R1)      LOAD PTR (JUST IN CASE)                   00663000
+         CLC   2(1,R1),PEXFLAGT    THIS IT?                             00664000
+         BE    DMKPER(R4)     GO TO IT                                  00665000
+         BXLE  R1,R2,FINDL    LOOP UNTIL FOUND                          00666000
+         B     PER1           ABEND, JUNK IN PEXBLOK                    00667000
+HNDLNXT  L     R7,PEXNEXT     POINT TO NEXT PEXBLOK                     00668000
+         LTR   R7,R7          ANY MORE?                                 00669000
+         BNZ   HNDLOOP        YES, KEEP LOOPING                         00670000
+         TM    SAVEWRK2,X'80' NEED TO CALL DMKPERCH?                    00671000
+         BO    CALPERCH       YES, CALL IT                              00672000
+         TM    PERCDE,PEXIFET IFETCH OCCUR?                             00673000
+         BNO   TRYDISP        NO, SEE IF NEED TO DISPLAY                00674000
+         TM    SAVEWRK2,X'20' WAS IT IN AN IFETCH RANGE?                00675000
+         BO    TRYDISP        NO, TRY DISPLAY                           00676000
+         TM    PERCDE,PEXST   ANY STORE RANGES IN EFFECT?               00677000
+         BNO   CALPERCH       NO, CALL DMKPERCH                         00678000
+         L     R0,PERADDR     LOAD EVENT ADDRESS                        00679000
+         LA    R7,PERCHAIN    POINT TO CHAIN                            00680000
+RECLOOP  ICM   R7,B'1111',PEXNEXT  LOAD FWD PTR                         00681000
+         BZ    CALPERCH       NONE, CALL PERCH                          00682000
+         TM    PEXFLAGT,PEXST STORE TYPE BLOCK?                         00683000
+         BZ    RECLOOP        NOPE, TRY NEXT                            00684000
+         LM    R1,R2,PEXADDR3 LOAD RANGE                                00685000
+         BAL   R15,RANGECHK   CHECK IT                                  00686000
+         BNZ   RECLOOP        KEEP GOING                                00687000
+         B     TRYDISP        TRY DISPLAY                               00688000
+CALPERCH CALL  DMKPERCH       GO UPDATE CONTROL REGS                    00689000
+TRYDISP  TM    SAVEWRK2,X'40' NEED TO CALL DISPLAY MODULE?              00690000
+         BNO   EXITIL         NO, EXIT                                  00691000
+         CALL  DMKPEDAL       CALL DISPLAY MODULE                       00692000
+         B     EXITIL         AND GO EXIT                               00693000
+         EJECT ,                                                        00694000
+*---------------------------------------------------------------------* 00695000
+*         HANDLE BRANCH TRACE BACK BLOCK                              * 00696000
+*---------------------------------------------------------------------* 00697000
+EDBRTB   DS    0H             HERE ON BRANCH EVENT FOR BRTB PEXBLOK     00698000
+         L     R0,VMPSW+4     LOAD ADDRESS OF BRANCH                    00699000
+         N     R0,XRIGHT24    CLEAR FIRST BYTE                          00700000
+         LM    R1,R2,PEXADDR3 LOAD ADDRESS RANGE                        00701000
+         BAL   R15,RANGECHK   IN RANGE?                                 00702000
+         BNZ   HNDLNXT        NO, TRY NEXT PEXBLOK                      00703000
+         BAL   R4,CHKFRM      GO CHECK FROM ADDRESS                     00704000
+         B     COMPEX         GO CHECK SKIP                             00705000
+         EJECT ,                                                        00706000
+*---------------------------------------------------------------------* 00707000
+*        HANDLE GPR ALTERATION EVENT                                  * 00708000
+*---------------------------------------------------------------------* 00709000
+EDGPR    BAL   R4,CHKFRM      CHECK FROM ADDRESS                        00710000
+         LH    R3,PEXGREG     LOAD REGISTER FLAGS                       00711000
+         N     R3,XRIGHT16    CLEAR TOP 2 BYTES                         00712000
+         N     R3,PERGALT-2   AND SEE IF ANY CHANGED                    00713000
+         BZ    HNDLNXT        NOPE, TRY NEXT PEXBLOK                    00714000
+         CLI   PEXDLEN,0      IS IT A DATA STOP?                        00715000
+         BE    GSKP1          NO, THEN FLAG FOR OUTPUT                  00716000
+         LR    R0,R3          MOVE TO R0                                00717000
+         SLL   R0,16          SHIFT TO TOP OF REG                       00718000
+         SLR   R3,R3          CLEAR PLACE TO BUILD FLAGS                00719000
+         LA    R1,VMGPRS      POINT TO REGISTERS                        00720000
+         LA    R2,1           LOAD FLAG                                 00721000
+         SLL   R2,16          SHIFT TO POSITION                         00722000
+GSTPL    SRL   R2,1           SHIFT FLAG BIT OVER TO NEXT REG           00723000
+         ALR   R0,R0          CHECK BIT AND SHIFT                       00724000
+         BZ    GSKP1          DONE CHECK                                00725000
+         BC    B'1100',GSTPL1 NO CARRY, SO NOT CHANGED                  00726000
+         CLC   0(4,R1),PEXDATA     IS THIS EQUAL?                       00727000
+         BNE   GSTPL1         NO, SKIP OR                               00728000
+         OR    R3,R2          OR IN REGISTER FLAG                       00729000
+GSTPL1   LA    R1,4(,R1)      POINT TO NEXT REGISTER                    00730000
+         B     GSTPL          LOOP BACK                                 00731000
+GSKP1    STH   R3,PEXGSUC     SAVE FLAGS FOR DISPLAY                    00732000
+         LTR   R3,R3          ANY?                                      00733000
+         BZ    HNDLNXT        NOPE, TRY NEXT PEXBLOK                    00734000
+         B     COMPEX         JOIN COMMON CODE                          00735000
+         EJECT ,                                                        00736000
+*---------------------------------------------------------------------* 00737000
+*        HANDLE IFETCH OR BRANCH BLOCK                                * 00738000
+*---------------------------------------------------------------------* 00739000
+EDIFET   DS    0H             HERE FOR IFETCH OR BRANCH                 00740000
+         BAL   R4,CHKFRM      GO CHECK FROM ADDRESS                     00741000
+         OI    SAVEWRK2,X'20' INDICATE WAS IN A RANGE                   00742000
+         CLI   PEXDLEN,0      DATA STOP?                                00743000
+         BE    COMPEX         NOPE, GO CHECK SKIP                       00744000
+         L     R3,PERADDR     LOAD PER ADDR                             00745000
+         BAL   R4,DATACMP     DO COMPARE                                00746000
+         BE    COMPEX         EQUAL, IS OK                              00747000
+         CLI   PEREX,X'44'    EXECUTE ISN?                              00748000
+         BNE   HNDLNXT        NOPE, NO MATCH                            00749000
+         L     R3,PEREXADD-1  LOAD EXECUTE ADDRESS                      00750000
+         BAL   R4,DATACMP     DO COMPARE                                00751000
+         BNE   HNDLNXT        NO MATCH, TRY NEXT                        00752000
+         B     COMPEX         JOIN COMMON                               00753000
+         EJECT ,                                                        00754000
+*---------------------------------------------------------------------* 00755000
+*        HANDLE MASK BLOCK                                            * 00756000
+*---------------------------------------------------------------------* 00757000
+EDMASK   DS    0H             HERE TO HANDLE MASK                       00758000
+         L     R3,PEXADDR3    LOAD ADDRESS                              00759000
+         SLR   R1,R1          CLEAR R1 FOR IC                           00760000
+         IC    R1,PEXDLEN     INSERT DATA LENGTH                        00761000
+         BCTR  R1,0           MINUS 1                                   00762000
+         LR    R5,R1          SAVE IN R5                                00763000
+         ALR   R1,R3          POINT TO LAST BYTE                        00764000
+         N     R1,X2048BND    ROUND DOWN TO 2K PAGE BNDRY               00765000
+         CLR   R1,R3          IS IT WITHIN ONE 2K PAGE?                 00766000
+         BH    TWOMOV         NO, WILL HAVE TO DO IN TWO PARTS          00767000
+         LR    R1,R3          MOVE ADDRESS TO R3                        00768000
+         BAL   R0,GETPAGE     GET REAL ADDRESS                          00769000
+         BNZ   HNDLNXT        UNABLE TO GET PAGE, ASSUME NOT ALTERED    00770000
+         LA    R4,PEXDATA+1(R5)         POINT TO OLD DATA               00771000
+         EX    R5,MASKXC1     FIND CHANGED BITS                         00772000
+         EX    R5,MASKNC1     CHECK AGAINST MASK                        00773000
+         EX    R5,MASKMVC1    AND MOVE IN NEW DATA WHILE WE'RE AT IT    00774000
+         BNZ   EDMASK1        AND GO CHECK OTHER STUFF                  00775000
+         TM    PEXFLAGO,PEXDATAI        DATA INVALID?                   00776000
+         BO    EDMASK1        NOT ANY MORE                              00777000
+         B     HNDLNXT        NO, GO TO NEXT PEXBLOK                    00778000
+TWOMOV   SLR   R6,R6          CLEAR FLAG REG                            00779000
+         LR    R1,R3          MOVE ADDRESS                              00780000
+         BAL   R0,GETPAGE     TRY TO GET REAL ADDRESS                   00781000
+         BNZ   TWOMOV1        NOT AVAIL, ASSUME UNCHANGED               00782000
+         TM    PEXFLAGO,PEXDATAI        IS THE DATA INVALID?            00783000
+         BNO   *+6            NO, SKIP SETTING FLAG REG                 00784000
+         BCTR  R6,0           YES, THEN FORCE DISPLAY                   00785000
+         LA    R1,0(R3,R5)    POINT TO LAST BYTE                        00786000
+         N     R1,X2048BND    TRUNCATE DOWN                             00787000
+         BCTR  R1,0           MINUS 1                                   00788000
+         SLR   R1,R3          GET LENGTH                                00789000
+         LA    R4,PEXDATA+1(R5)         POINT TO DATA                   00790000
+         EX    R1,MASKXC1     FIND CHANGED BITS                         00791000
+         EX    R1,MASKNC1     CHECK AGAINST MASK                        00792000
+         EX    R1,MASKMVC1    AND MOVE IN NEW DATA                      00793000
+         BZ    TWOMOV1        UNCHANGED, TRY SECOND PART                00794000
+         BCTR  R6,0           SET FLAG REG                              00795000
+TWOMOV1  LA    R1,0(R3,R5)    POINT TO LAST BYTE                        00796000
+         N     R1,X2048BND    ROUND DOWN TO 2K BNDRY                    00797000
+         SLR   R3,R1          GET LENGTH OF FIRST PART                  00798000
+         LPR   R3,R3          ...                                       00799000
+         BAL   R0,GETPAGE     TRRY TO GET REAL ADDRESS                  00800000
+         BNZ   CHK6           NOT AVAIL, GO CHECK FLAG REG              00801000
+         TM    PEXFLAGO,PEXDATAI        IS DATA INVALID?                00802000
+         BNO   *+6            NO, SKIP SETTING FLAG                     00803000
+         BCTR  R6,0           YES, THEN FORCE DISPLAY                   00804000
+         LA    R4,PEXDATA+1(R5)         POINT TO DATA AREA              00805000
+         LA    R4,0(R4,R3)    POINT TO SECOND PART                      00806000
+         LA    R1,PEXDATA(R3) POINT TO SECOND PART OF MASK              00807000
+         SLR   R5,R3          AND GET LENGTH OF SECOND PART             00808000
+         EX    R5,MASKXC1     FIND CHANGED BITS                         00809000
+         EX    R5,MASKNC2     CHECK AGAINST MASK                        00810000
+         EX    R5,MASKMVC1    AND MOVE IN NEW DATA                      00811000
+         BNZ   EDMASK1        GO FORCE OUTPUT                           00812000
+CHK6     LTR   R6,R6          CHECK FLAG REG                            00813000
+         BZ    HNDLNXT        GO CHECK NEXT PEXBLOK                     00814000
+EDMASK1  NI    PEXFLAGO,255-PEXDATAI    DATA NO LONGER INVALID          00815000
+         BAL   R4,CHKFRM      SEE IF WE WANT THIS ONE                   00816000
+         B     COMPEX         AND GO JOIN COMMON CODE                   00817000
+         EJECT ,                                                        00818000
+*---------------------------------------------------------------------* 00819000
+*        HANDLE PAGE TRACE BLOCK                                      * 00820000
+*---------------------------------------------------------------------* 00821000
+EDPGT    DS    0H             HERE TO CHECK PAGE TRACE BLOCK            00822000
+         L     R0,PERADDR     LOAD EVENT ADDRESS                        00823000
+         LM    R1,R2,PEXADDR3 LOAD ADDR3-ADDR4                          00824000
+         BAL   R15,RANGECHK   CHECK OUT RANGE                           00825000
+         BNZ   CHKEXPG        GO SEE IF MIGHT BE EX                     00826000
+         LM    R1,R2,PEXADDR1 LOAD ADDRESS RANGE                        00827000
+         BAL   R15,RANGECHK   IN RANGE?                                 00828000
+         BNZ   PGTSTR         NO, SET NEW RANGE                         00829000
+         LR    R1,R2          REVERSE RANGE                             00830000
+         L     R2,PEXADDR1    ...                                       00831000
+         LA    R1,1(,R1)      ADD 1 TO ADDR                             00832000
+         BCTR  R2,0           MINUS 1                                   00833000
+         L     R3,PEXINCR     LOAD INCREMENT                            00834000
+         LTR   R3,R3          ANY?                                      00835000
+         BZ    PGTSTR         NO, GO SET NEW RANGE                      00836000
+         LR    R1,R0          MOVE ADDR TO R1                           00837000
+         SLR   R0,R0          ZERO R0                                   00838000
+         DR    R0,R3          DIVIDE                                    00839000
+         MR    R0,R3          AND THEN MULTIPLY                         00840000
+         LR    R2,R1          MOVE TO R2                                00841000
+         ALR   R1,R3          AND SET ADDR1                             00842000
+         BCTR  R2,0           MINUS 1                                   00843000
+PGTSTR   STCM  R1,B'0111',PEXADDR3+1    SAVE LOW ADDR                   00844000
+         STCM  R2,B'0111',PEXADDR4+1    SAVE HIGH ADDR                  00845000
+         OI    SAVEWRK2,X'80' SET TO RE-COMPUTE CONTROL REG VALUES      00846000
+         B     COMPEX         GO JOIN COMMON CODE                       00847000
+CHKEXPG  CLI   PEREX,X'44'    EXECUTE ISN?                              00848000
+         BNE   HNDLNXT        NOPE, NOT GOOD                            00849000
+         ICM   R0,B'0111',PEREXADD LOAD PER ADDRESS                     00850000
+         BAL   R15,RANGECHK   IN RANGE?                                 00851000
+         BNZ   HNDLNXT        TOO BAD, WILL PROB HAVE TO CALL DMKPERCH  00852000
+         OI    SAVEWRK2,X'20' INDICATE IS IN A RANGE                    00853000
+         B     HNDLNXT        AND GO CHECK NEXT PEXBLOK                 00854000
+         EJECT ,                                                        00855000
+*---------------------------------------------------------------------* 00856000
+*        HANDLE STORE BLOCK                                           * 00857000
+*---------------------------------------------------------------------* 00858000
+         SPACE                                                          00859000
+EDSTORE  DS    0H             HERE ON STORE EVENT                       00860000
+         BAL   R4,CHKFRM      GO CHECK FROM ADDR                        00861000
+         L     R0,PEROP1      LOAD STORE ADDR                           00862000
+         N     R0,XRIGHT24    CLEAR TOP BYTE                            00863000
+         LM    R1,R2,PEXADDR3 LOAD SECOND RANGE                         00864000
+         BAL   R15,RANGECHK   GO CHECK IT                               00865000
+         BZ    DOSTCHK        YES, SEE IF DATA STOP                     00866000
+         LR    R1,R0          MOVE START TO R1                          00867000
+         L     R2,PERSTLEN    LOAD LENGTH                               00868000
+         BCTR  R2,0           MINUS 1                                   00869000
+         LA    R2,0(R2,R1)    POINT TO END OF RANGE                     00870000
+         L     R0,PEXADDR3    LOAD START OF STORE RANGE                 00871000
+         BAL   R15,RANGECHK   AND CHECK IT OUT                          00872000
+         BNZ   HNDLNXT        NO, TRY NEXT                              00873000
+DOSTCHK  CLI   PEXDLEN,0      DATA STOP?                                00874000
+         BE    COMPEX         YES, JOIN COMMON                          00875000
+         L     R3,PEXADDR3    LOAD ADDRESS                              00876000
+         BAL   R4,DATACMP     GO DO COMPARE                             00877000
+         BE    EDST2          EQUAL, GO HANDLE                          00878000
+         NI    PEXFLAGO,255-PEXDATAE    TURN OFF EQUAL FLAG             00879000
+         B     HNDLNXT        GO HANDLE NEXT ONE                        00880000
+EDST2    TM    PEXFLAGO,PEXDATAE   WAS DATA EQUAL BEFORE?               00881000
+         BO    HNDLNXT        THEN NOT YET.                             00882000
+         OI    PEXFLAGO,PEXDATAE   INDICATE THAT IS EQUAL THIS TIME     00883000
+         EJECT ,                                                        00884000
+*---------------------------------------------------------------------* 00885000
+*        CHECK SKIP AND SET SUCCESS BIT                               * 00886000
+*---------------------------------------------------------------------* 00887000
+COMPEX   L     R1,PEXSKIPN    LOAD SKIP CNTR                            00888000
+         BCT   R1,SVSKP       GO SAVE NEW SKIP                          00889000
+         MVC   PEXSKIPN(4),PEXSKIP SET NEW SKIP COUNT                   00890000
+         OI    PEXFLAGO,PEXSUCC    INDICATE SUCCESS                     00891000
+         OI    SAVEWRK2,X'40' INDICATE CALL TO DISPLAY NEEDED           00892000
+         B     HNDLNXT        AND GO HANDLE NEXT                        00893000
+SVSKP    ST    R1,PEXSKIPN    SAVE NEW SKIP COUNT                       00894000
+         B     HNDLNXT        AND GO HANDLE NEXT PEXBLOK                00895000
+         EJECT ,                                                        00896000
+*.                                                                      00897000
+* ENTRY POINT NAME -                                                    00898000
+*                                                                       00899000
+*        DMKPERCH                                                       00900000
+*                                                                       00901000
+* PURPOSE -                                                             00902000
+*                                                                       00903000
+*        TO SET UP CONTROL REGISTERS 9 THROUGH 11 ACORDING TO           00904000
+*        INFORMATION IN THE PEXBLOK CHAIN.                              00905000
+*                                                                       00906000
+* ENTRY CONDITIONS -                                                    00907000
+*                                                                       00908000
+*        GPR 11 = ADDRESS OF VMBLOK                                     00909000
+*        GPR 12 = ADDRESS OF DMKPERCH                                   00910000
+*        GPR 13 = ADDRESS OF STANDARD SAVEAREA                          00911000
+*                                                                       00912000
+* EXIT CONDITIONS -                                                     00913000
+*                                                                       00914000
+*        SVC 12, REGISTERS UNCHANGED, CREGS SET                         00915000
+*                                                                       00916000
+* OPERATION -                                                           00917000
+*                                                                       00918000
+*     1. SCAN PEXBLOK CHAIN TO GET TYPES OF TRACES TO ENABLE            00919000
+*     2. IF NETHER IFETCH OR STORE TRACES IN EFFECT, EXIT               00920000
+*     3. SCAN PEXBLOKS TO FIND A GAP INCLUDING THE NEXT                 00921000
+*        INSTRUCTION TO BE EXECUTED, IF NONE, USE LARGEST GAP.          00922000
+*     5. USE GAP TO SET CR10 AND CR11 VALUES                            00923000
+*     6. EXIT                                                           00924000
+*.                                                                      00925000
+         SPACE 1                                                        00926000
+DMKPERCH RELOC ,                                                        00927000
+         L     R8,VMPERCTL    LOAD POINTER                              00928000
+         LTR   R8,R8          IS IT THERE?                              00929000
+         BZ    EXIT           NONE, EXIT                                00930000
+         XC    PERCR9(12),PERCR9   CLEAR CREGS 9, 10 AND 11             00931000
+         LA    R7,PERCHAIN-(PEXNEXT-PEXBLOK) SET INITIAL PTR            00932000
+LOOP     L     R7,PEXNEXT     POINT TO NEXT PEXBLOK                     00933000
+         LTR   R7,R7          ANY?                                      00934000
+         BZ    RANGEIT        NO, GO CHECK FOR RANGES                   00935000
+         OC    PERCR9(1),PEXFLAGT  OR IN FLAGS                          00936000
+         CLI   PEXFLAGT,PEXGPR     GREG TRAP?                           00937000
+         BNE   LOOP           NO, CHECK NEXT ONE                        00938000
+         OC    PERCR9+2(2),PEXGREG OR IN REGISTER FLAGS                 00939000
+         B     LOOP           AND GO CHECK NEXT BLOK                    00940000
+RANGEIT  NI    PERCR9,X'F0'   KILL UNWANTED BITS                        00941000
+         TM    PERCR9,PEXIFET+PEXST     NEED ANY RANGES?                00942000
+         BZ    EXIT           NOPE, EXIT                                00943000
+         XC    SAVEWRK4(8),SAVEWRK4     CLEAR GAP ADDR AND LENGTH       00944000
+         MVC   PERCR11(4),XRIGHT24 SET TO ALL INCLUSIVE (JUST IN CASE)  00945000
+         LA    R7,PERCHAIN-(PEXNEXT-PEXBLOK) SET INITIAL PTR            00946000
+LOOP1    L     R7,PEXNEXT     POINT TO FIRST/NEXT PEXBLOK               00947000
+         LTR   R7,R7          ANY?                                      00948000
+         BZ    USEIT          NOPE, USE OUR BIGGEST GAP                 00949000
+         TM    PEXFLAGT,PEXST+PEXIFET   ANY RANGE IN THIS BLOK?         00950000
+         BZ    LOOP1          NO, TRY NEXT                              00951000
+         LM    R3,R4,PEXADDR1 LOAD RANGE                                00952000
+         CLI   PEXFLAGT,PEXIFET    WAS IT IFETCH?                       00953000
+         BE    *+8            YES, KEEP THIS RANGE                      00954000
+         LM    R3,R4,PEXADDR3 FOR IFETCH USE THIS RANGE                 00955000
+         LR    R5,R3          MOVE TO R5 FOR GAP CALCULATION            00956000
+         LR    R3,R4          MOVE TO R3 FOR SUBTRACT                   00957000
+         SLR   R3,R5          GET RANGE SIZE -1                         00958000
+         LA    R3,0(,R3)      CLEAR TOP BYTE                            00959000
+         CL    R3,XRIGHT24    ALL INCLUSIVE RANGE?                      00960000
+         BE    EXIT           YES, NO NEED TO GO FURTHER                00961000
+         LA    R4,1(,R4)      POINT TO START OF GAP                     00962000
+         BCTR  R5,0           AND TO END OF GAP                         00963000
+         LA    R5,0(,R5)      CLEAR FIRST BYTE                          00964000
+         LA    R6,PERCHAIN-(PEXNEXT-PEXBLOK) SET INITIAL PTR            00965000
+LOOP2    L     R6,PEXNEXT-PEXBLOK(,R6)  POINT TO NEXT                   00966000
+         LTR   R6,R6          ANY?                                      00967000
+         BZ    CHKGAP         NO, GO CHECK GAP                          00968000
+         CLR   R6,R7          SAME ONE?                                 00969000
+         BE    LOOP2          YES, NO NEED TO CHECK                     00970000
+         TM    PEXFLAGT-PEXBLOK(R6),PEXST+PEXIFET ANY RANGE?            00971000
+         BZ    LOOP2          NO, DON'T SCREW UP CR10/CR11              00972000
+         LM    R1,R2,PEXADDR1-PEXBLOK(R6)    LOAD RANGE                 00973000
+         CLI   PEXFLAGT-PEXBLOK(R6),PEXIFET  IFETCH?                    00974000
+         BE    *+8            YES, KEEP THIS RANGE                      00975000
+         LM    R1,R2,PEXADDR3-PEXBLOK(R6)    LOAD PROPER RANGE          00976000
+         LR    R0,R4          MOVE GAP LOW TO R1 FOR CHECK              00977000
+         BAL   R15,RANGECHK   IS IT IN RANGE?                           00978000
+         BZ    LOOP1          YES, CAN'T BE START OF REAL GAP           00979000
+         LR    R0,R1          SEE IF START OF RANGE IS IN GAP           00980000
+         LR    R1,R4          MOVE START                                00981000
+         LR    R2,R5          AND END                                   00982000
+         BAL   R15,RANGECHK   SEE IF RANGE IN GAP                       00983000
+         BNZ   LOOP2          NO, SKIP RESETING END                     00984000
+         LR    R5,R0          MOVE START OF RANGE TO R5                 00985000
+         BCTR  R5,0           DECREMENT                                 00986000
+         LA    R5,0(,R5)      AND KILL TOP BYTE                         00987000
+         B     LOOP2          GO CHECK NEXT BLOK                        00988000
+CHKGAP   LR    R1,R4          MOVE TO R1 FOR RANGE CHECK                00989000
+         LR    R2,R5          MOVE TO R2 FOR RANGE CHECK                00990000
+         SLR   R5,R4          GET LENGTH -1                             00991000
+         LA    R5,1(,R5)      ADD 1 AND CLEAR TOP BYTE                  00992000
+         TM    PERCR9,PEXIFET IFETCH ON?                                00993000
+         BZ    CHKGAPL        NO, NEXT ISN IRRELEVANT                   00994000
+         L     R0,VMPSW+4     POINT TO NEXT ISN                         00995000
+         N     R0,XRIGHT24    CLEAR TOP BYTE                            00996000
+         BAL   R15,RANGECHK   AND CHECK IT                              00997000
+         BZ    USEIT1         GO USE THIS GAP                           00998000
+CHKGAPL  CL    R5,SAVEWRK5    COMPARE SIZE OF GAP                       00999000
+         BL    LOOP1          LOW, TRY NEXT ONE                         01000000
+         STM   R4,R5,SAVEWRK4 SAVE THIS GAP                             01001000
+         B     LOOP1          AND TRY NEXT                              01002000
+USEIT    LM    R4,R5,SAVEWRK4 LOAD GAP                                  01003000
+USEIT1   LR    R6,R4          MOVE FOR SUBTRACT                         01004000
+         BCTR  R6,0           MINUS 1                                   01005000
+         LA    R6,0(,R6)      AND CLEAR TOP BYTE                        01006000
+         LA    R5,0(R4,R5)    GET START ADDR                            01007000
+         STM   R5,R6,PERCR10  AND SAVE RANGE                            01008000
+         B     EXIT           AND EXIT                                  01009000
+         EJECT ,                                                        01010000
+*.                                                                      01011000
+* ENTRY POINT NAME -                                                    01012000
+*                                                                       01013000
+*        DMKPERT                                                        01014000
+*                                                                       01015000
+* PURPOSE -                                                             01016000
+*                                                                       01017000
+*        TO CLEAR ALL PER TRACING                                       01018000
+*                                                                       01019000
+* OPERATION -                                                           01020000
+*                                                                       01021000
+*     1. IF PER TRACE IS NOT IN EFFECT EXIT                             01022000
+*                                                                       01023000
+*     2. IF NOT LOGGING OFF, PUT OUT "*PER TRAPS CLEARED*"              01024000
+*        MESSAGE TO CONSOLE.                                            01025000
+*                                                                       01026000
+*     3. FRET ALL PER TRACE CONTROL BLOCKS.                             01027000
+*                                                                       01028000
+*     4. RESET VMPERFLG AND EXIT                                        01029000
+*.                                                                      01030000
+         SPACE 1                                                        01031000
+DMKPERT  RELOC ,                                                        01032000
+         NI    VMPERFLG,255-VMPERUSE                                    01033000
+         L     R8,VMPERCTL    LOAD POINTER TO PER BLOCK                 01034000
+         LTR   R8,R8          ANY?                                      01035000
+         BZ    EXIT           NO, JUST EXIT                             01036000
+         NI    VMPEND,255-VMPERPND TURN OFF PENDING BIT                 01037000
+         SLR   R5,R5          GET A ZERO FOR USE IN CLEARING POINTERS   01038000
+         TM    VMRSTAT,VMLOGOFF    IS A LOGOFF PENDING?                 01039000
+         BO    PERTNMSG       YES, SKIP MSG                             01040000
+         MSG   '*PER TRAPS CLEARED*'                                    01041000
+         CALL  DMKQCNWT,PARM=NORET                                      01042000
+PERTNMSG L     R1,PERTBAK     POINT TO TRACEBACK TABLE                  01043000
+         LTR   R1,R1          DID IT EXIST?                             01044000
+         BZ    PERTG          NO, SEE IF GPR SAVE AREA                  01045000
+         ST    R5,PERTBAK     CLEAR TABLE POINTER                       01046000
+         LA    R0,(PERTBLEN+7)/8   LOAD LENGTH                          01047000
+         CALL  DMKFRET                                                  01048000
+PERTG    L     R1,PERGPRP     LOAD POINTER                              01049000
+         LTR   R1,R1          ANY?                                      01050000
+         BZ    PERTC          NO, GO FRET PEX BLOKS                     01051000
+         ST    R5,PERGPRP     ZERO POINTER TO SAVEAREA                  01052000
+         LA    R0,(16*4)/8    LOAD SIZE                                 01053000
+         CALL  DMKFRET        FRET IT                                   01054000
+PERTC    LA    R2,PERTSA      POINT TO WHERE TO GO WHEN DONE FRET OF CH 01055000
+         L     R3,PERSAVED    LOAD SAVED CHAIN POINTER FOR LATER        01056000
+         L     R7,PERCHAIN    LOAD CHAIN POINTER                        01057000
+         ST    R5,PERSAVED    ZERO SAVED POINTER                        01058000
+         ST    R5,PERCHAIN    AND CURRENT POINTER                       01059000
+PERTCL   LTR   R7,R7          ANY MORE?                                 01060000
+         BZR   R2             NO, EXIT                                  01061000
+         L     R1,PEXCMND     LOAD POINTER TO CF BLOK                   01062000
+         LTR   R1,R1          ANY?                                      01063000
+         BZ    PERTNOCF       NO, SKIP FRET                             01064000
+         SLR   R0,R0          CLEAR R0 FOR IC                           01065000
+         IC    R0,0(,R1)      INSERT LENGTH                             01066000
+         AL    R0,F8          ROUND UP                                  01067000
+         SRL   R0,3           GET DWORDS                                01068000
+         CALL  DMKFRET        AND FRET IT                               01069000
+PERTNOCF SLR   R0,R0          CLEAR FOR IC                              01070000
+         IC    R0,PEXLEN      LOAD LENGTH OF BLOCK                      01071000
+         LR    R1,R7          LOAD ADDR                                 01072000
+         L     R7,PEXNEXT     AND POINT TO NEXT                         01073000
+         CALL  DMKFRET        FRET PEXBLOK                              01074000
+         B     PERTCL         CONTINUE CLEAR                            01075000
+PERTSA   LA    R2,PERTSA1     POINT TO WHERE TO GO AFTER EACH CHAIN     01076000
+         USING PESBLOK,R3                                               01077000
+         B     PERTSA2        GO START FRET OF ANY SAVED CHAINS         01078000
+PERTSA1  LR    R1,R3          LOAD POINTER FOR DMKFRET                  01079000
+         L     R3,PESNEXT     POINT TO NEXT PESBLOK                     01080000
+         LA    R0,PESSIZE     LOAD SIZE OF BLOK                         01081000
+         CALL  DMKFRET        FRET BLOCK                                01082000
+PERTSA2  LTR   R3,R3          ANY MORE SAVED CHAINS?                    01083000
+         BZ    PERTPER        NO, GO FRET PERBLOK                       01084000
+         L     R7,PESCHAIN    LOAD CHAIN POINTER                        01085000
+         B     PERTCL         AND GO FRET IT                            01086000
+PERTPER  ST    R5,VMPERCTL    ZERO PERBLOK POINTER                      01087000
+         LR    R1,R8          MOVE POINTER                              01088000
+         LA    R0,PERSIZE     LOAD SIZE OF BLOK                         01089000
+         CALL  DMKFRET        AND FRET IT                               01090000
+         B     EXIT           AND GO EXIT                               01091000
+         EJECT ,                                                        01092000
+*---------------------------------------------------------------------* 01093000
+*       COMMON EXIT ROUTINE FOR PERIL, PERCH AND PERT                 * 01094000
+*---------------------------------------------------------------------* 01095000
+EXITIL   NI    VMPEND,255-VMPERPND TURN OFF PENDING BIT                 01096000
+EXIT     NI    VMESTAT,255-VMPERCM TURN OFF FLAG                        01097000
+         NI    VMTRCTL,255-VMTRPER ...                                  01098000
+         TM    VMPSW+1,EXTMODE     IN EXT MODE?                         01099000
+         BZ    OUROWN         NO, TRY OURS                              01100000
+         TM    VMPSW,PERMODE  PER IN EFFECT?                            01101000
+         BZ    OUROWN         NO, TRY OURS                              01102000
+         OI    VMESTAT,VMPERCM     TURN ON FLAG                         01103000
+         B     DOEXIT         AND GO DO EXIT                            01104000
+OUROWN   TM    VMPERFLG,VMPERUSE   IS CP PER ON?                        01105000
+         BNO   DOEXIT         NO, JUST EXIT                             01106000
+         L     R8,VMPERCTL    LOAD POINTER                              01107000
+         CLI   PERCR9,0       ANY TRAPS IN EFFECT?                      01108000
+         BE    DOEXIT         NO, EXIT                                  01109000
+         OI    VMESTAT,VMPERCM     TURN ON FLAG                         01110000
+         OI    VMTRCTL,VMTRPER     ...                                  01111000
+DOEXIT   EXIT  ,                                                        01112000
+         EJECT ,                                                        01113000
+*---------------------------------------------------------------------* 01114000
+*        BRING A PAGE INTO REAL MEMORY                                * 01115000
+*---------------------------------------------------------------------* 01116000
+GETPAGE  TM    VMPSW+1,EXTMODE     EXTENDED PSW?                        01117000
+         BZ    NOVAT          NO, CAN'T HAVE TRANSLATE                  01118000
+         TM    VMPSW,TRANMODE TRANSLATE ON?                             01119000
+         BO    TRANVAT        HANDLE THIRD LEVEL ADDRESS                01120000
+NOVAT    TRANS 2,1,OPT=(BRING+DEFER)    FIND USER PAGE                  01121000
+RETPAGE  LR    R15,R0         LOAD RETURN ADDRESS                       01122000
+         BR    R15            RETURN TO CALLER                          01123000
+         SPACE 1                                                        01124000
+TRANVAT  STM   R0,R3,SAVEWRK3 SAVE REGISTERS                            01125000
+         LR    R3,R1          MOVE ADDRESS TO R3 FOR CALL               01126000
+         CALL  DMKVATRN       AND TRY TO RESOLVE IT                     01127000
+         LTR   R0,R0          SET RETURN CODE                           01128000
+         LM    R0,R1,SAVEWRK3 RESTORE R0 AND R1                         01129000
+         L     R3,SAVEWRK6    AND R3                                    01130000
+         LR    R15,R0         LOAD RETURN ADDRESS                       01131000
+         BR    R15            AND RETURN TO CALLER                      01132000
+         EJECT                                                          01133000
+*---------------------------------------------------------------------* 01134000
+*        CALCULATE AN RS TYPE ADDRESS                                 * 01135000
+*---------------------------------------------------------------------* 01136000
+RSADDR   LH    R1,0(,R1)      LOAD HALFWORD ADDRESS                     01137000
+         LR    R2,R1          AND INTO R2                               01138000
+         N     R2,F4095       ISOLATE INDEX                             01139000
+         SRL   R1,12          AND REGISTER                              01140000
+         LA    R10,4(,R15)    POINT TO RETURN ADDR                      01141000
+         N     R1,F15         ISOLATE REG NO                            01142000
+         BZ    RSADDR1        IF ZERO, DON'T USE REGISTER               01143000
+         BAL   R15,CHKGALT    CHECK FOR REG ALTERATION                  01144000
+         SL    R10,F4         BACK UP                                   01145000
+         ALR   R1,R1          DOUBLE REG                                01146000
+         ALR   R1,R1          AND AGAIN                                 01147000
+         L     R1,VMGPRS(R1)  LOAD VALUE                                01148000
+RSADDR1  LA    R1,0(R1,R2)    ADD DISPLACEMENT                          01149000
+         BR    R10            AND RETURN TO CALLER                      01150000
+         EJECT ,                                                        01151000
+*---------------------------------------------------------------------* 01152000
+*        CHECK A REGISTER FOR ALTERATION                              * 01153000
+*---------------------------------------------------------------------* 01154000
+CHKGALT  L     R14,=X'00008000'    LOAD MASK                            01155000
+         SRL   R14,0(R1)      SHIFT TO GET PROPER MASK                  01156000
+         N     R14,PERGALT-2  AND AGAINST ALTERED MASK                  01157000
+         BZ    4(,R15)        IF NOT ALTERED, SKIP NEXT ISN             01158000
+         BR    R15            RETURN TO CALLER                          01159000
+         EJECT ,                                                        01160000
+*---------------------------------------------------------------------* 01161000
+*        CHECK AN ADDRESS FOR BEING WITHIN A RANGE                    * 01162000
+*---------------------------------------------------------------------* 01163000
+RANGECHK EQU   *              HERE TO SEE IF ADDR IN RANGE              01164000
+         CLR   R1,R2          R1=LOW, R2=HIGH                           01165000
+         BH    RNGWRAP        WRAPAROUND ADDR, DIFFERENT CHECK          01166000
+         CLR   R0,R1          COMPARE ADDR WITH LOW                     01167000
+         BLR   R15            NOT IN RANGE, ERROR RETURN                01168000
+         CLR   R0,R2          COMPARE ADDR WITH HIGH                    01169000
+         BHR   R15            NOT IN RANGE, ERROR RETURN                01170000
+RNGZRET  CLR   R0,R0          SET CC=0                                  01171000
+         BR    R15            AND RETURN                                01172000
+RNGWRAP  CLR   R0,R1          COMPARE TO FIRST                          01173000
+         BNL   RNGZRET        NOT LOW, IS OK                            01174000
+         CLR   R0,R2          COMPARE TO SECOND                         01175000
+         BNH   RNGZRET        LOW, IS OK                                01176000
+         BR    R15            NOT IN RANGE, ERROR RETURN                01177000
+         EJECT ,                                                        01178000
+*---------------------------------------------------------------------* 01179000
+*        CHECK TO SEE IF INSTRUCTION FETCHED IS WITHIN RANGE          * 01180000
+*---------------------------------------------------------------------* 01181000
+CHKFRM   L     R0,PERADDR     LOAD EVENT ADDR                           01182000
+         LM    R1,R2,PEXADDR1 LOAD ADDRESS RANGE                        01183000
+         BAL   R15,RANGECHK   AND SEE IF ISN WAS IN RANGE               01184000
+         BZR   R4             YES, RETURN TO CALLER                     01185000
+         CLI   PEREX,X'44'    WAS IT AN EXECUTE ISN                     01186000
+         BNE   HNDLNXT        NO, DON'T BOTHER TO RETURN TO CALLER      01187000
+         ICM   R0,B'0111',PEREXADD INSERT ADDR OF EX'D ISN              01188000
+         BAL   R15,RANGECHK   AND SEE IF IT IS IN RANGE                 01189000
+         BZR   R4             YES, RETURN TO CALLER                     01190000
+         B     HNDLNXT        NO, GO TO NEXT PEXBLOK                    01191000
+         EJECT ,                                                        01192000
+*---------------------------------------------------------------------* 01193000
+*        DO COMPARE FOR DATA STOPS                                    * 01194000
+*---------------------------------------------------------------------* 01195000
+DATACMP  EQU   *              HERE TO COMPARE FOR DATA STOP R3->DATA    01196000
+         SLR   R1,R1          CLEAR R1 FOR IC                           01197000
+         IC    R1,PEXDLEN     LOAD DATA LENGTH                          01198000
+         BCTR  R1,0           MINUS 1                                   01199000
+         LR    R5,R1          SAVE IN R5                                01200000
+         ALR   R1,R3          POINT TO LAST BYTE                        01201000
+         N     R1,X2048BND    ROUND TO HALF PAGE BNDRY                  01202000
+         CLR   R1,R3          DOES IT CROSS BOUNDRY?                    01203000
+         BH    TWOCMP         YES, GO DO DOUBLE COMPARE                 01204000
+         LR    R1,R3          MOVE ADDR TO R1                           01205000
+         BAL   R0,GETPAGE     GET REAL ADDRESS                          01206000
+         BNZR  R4             NOT AVAIL, NO COMPARE                     01207000
+         EX    R5,SALTCLC1    DO COMPARE                                01208000
+         BR    R4             AND RETURN                                01209000
+TWOCMP   LR    R1,R3          MOVE ADDR                                 01210000
+         BAL   R0,GETPAGE     TRY TO GET PAGE                           01211000
+         BNZR  R4             NOT AVAILIBLE, ERROR RETURN               01212000
+         LA    R1,0(R3,R5)    POINT TO LAST BYTE                        01213000
+         N     R1,X2048BND    TRUNCATE DOWN                             01214000
+         BCTR  R1,0           MINUS 1                                   01215000
+         SLR   R1,R3          GET LENGTH                                01216000
+         EX    R1,SALTCLC1    DO COMPARE                                01217000
+         BNER  R4             NOT EQUAL, RETURN                         01218000
+         SLR   R5,R1          GET LENGTH                                01219000
+         BCTR  R5,0           MINUS 1 FOR EX                            01220000
+         LA    R2,1(R1,R3)    POINT TO FIRST BYTE                       01221000
+         LA    R3,PEXDATA+1(R1)    POINT TO PLACE IN DATA               01222000
+         LR    R1,R2          MOVE ADDR TO R1 FOR CALL                  01223000
+         BAL   R0,GETPAGE     TRY TO GET PAGE                           01224000
+         BNZR  R4             RETURN                                    01225000
+         EX    R5,SALTCLC2    DO COMPARE                                01226000
+         BR    R4             RETURN                                    01227000
+         EJECT ,                                                        01228000
+*---------------------------------------------------------------------* 01229000
+*        ABENDS                                                       * 01230000
+*---------------------------------------------------------------------* 01231000
+         SPACE 1                                                        01232000
+         ABEND 1              INVALID PEX BLOCK                         01233000
+         ABEND 2              MISSING GREG SAVE AREA                    01234000
+         ABEND 3              INTERUPT WITH NO PERBLOCK                 01235000
+         ABEND 4              INTERUPT WITH NO PEXBLOCKS                01236000
+         ABEND 5              TRACEBACK TABLE MISSING                   01237000
+         EJECT ,                                                        01238000
+*---------------------------------------------------------------------* 01239000
+*        EXECUTED INSTRUCTIONS                                        * 01240000
+*---------------------------------------------------------------------* 01241000
+         SPACE 1                                                        01242000
+BXHBRA   BNH   SCANPEX        IF NOT HIGH, NO BRANCH                    01243000
+BXLEBRA  BH    SCANPEX        IF HIGH, NO BRANCH                        01244000
+CDETM    TM    PERCDE,X'00'   TEST FOR GIVEN PER INTERUPT CODE          01245000
+MASKXC1  XC    0(*-*,R4),0(R2)     EXECUTED EXCLUSIVE OR                01246000
+MASKNC1  NC    0(*-*,R4),PEXDATA   EXECUTED AND 1                       01247000
+MASKNC2  NC    0(*-*,R4),0(R1)     EXECUTED AND 2                       01248000
+MASKMVC1 MVC   0(*-*,R4),0(R2)     EXECUTED MOVE                        01249000
+SALTCLC1 CLC   0(*-*,R2),PEXDATA   FIRST EXECUTED COMPARE               01250000
+SALTCLC2 CLC   0(*-*,R2),0(R3)     EXECUTED COMPARE 2                   01251000
+         EJECT ,                                                        01252000
+*---------------------------------------------------------------------* 01253000
+*        BRANCH TABLES                                                * 01254000
+*---------------------------------------------------------------------* 01255000
+         SPACE 1                                                        01256000
+* REGISTER ALTERATION BRANCH TABLE                                      01257000
+GALTTAB  DC    AL2(DECOP1-DMKPER)  CODE 0                               01258000
+         DC    AL2(RCODE1-DMKPER)  CODE 1                               01259000
+         DC    AL2(RCODE2-DMKPER)  CODE 2                               01260000
+         DC    AL2(RCODE3-DMKPER)  CODE 3                               01261000
+         DC    AL2(RCODE4-DMKPER)  CODE 4                               01262000
+         DC    AL2(RCODE5-DMKPER)  CODE 5                               01263000
+         DC    AL2(RCODE6-DMKPER)  CODE 6                               01264000
+         DC    AL2(RCODE7-DMKPER)  CODE 7                               01265000
+         DC    AL2(RCODE8-DMKPER)  CODE 8                               01266000
+         DC    AL2(RCODE9-DMKPER)  CODE 9                               01267000
+         DC    AL2(RCODE10-DMKPER) CODE 10                              01268000
+         SPACE 1                                                        01269000
+* OPERAND ADDRESS BRANCH TABLE                                          01270000
+OPTAB    DC    AL2(CHKEXE-DMKPER)  CODE 0                               01271000
+         DC    AL2(OCODE1-DMKPER)  CODE 1                               01272000
+         DC    AL2(OCODE2-DMKPER)  CODE 2                               01273000
+         DC    AL2(OCODE3-DMKPER)  CODE 3                               01274000
+         DC    AL2(OCODE4-DMKPER)  CODE 4                               01275000
+         DC    AL2(OCODE5-DMKPER)  CODE 5                               01276000
+         SPACE 1                                                        01277000
+* STORAGE ALTERATION BRANCH TABLE                                       01278000
+STOTAB   DC    AL2(CHKBRA-DMKPER)  CODE 0                               01279000
+         DC    AL2(SCODE1-DMKPER)  CODE 1                               01280000
+         DC    AL2(SCODE2-DMKPER)  CODE 2                               01281000
+         DC    AL2(SCODE3-DMKPER)  CODE 3                               01282000
+         DC    AL2(SCODE4-DMKPER)  CODE 4                               01283000
+         DC    AL2(SCODE5-DMKPER)  CODE 5                               01284000
+         DC    AL2(SCODE6-DMKPER)  CODE 6                               01285000
+         DC    AL2(SCODE7-DMKPER)  CODE 7                               01286000
+         DC    AL2(SCODE8-DMKPER)  CODE 8                               01287000
+         DC    AL2(SCODE9-DMKPER)  CODE 9                               01288000
+         DC    AL2(SCODE10-DMKPER) CODE 10                              01289000
+         DC    AL2(SCODE11-DMKPER) CODE 11                              01290000
+         SPACE 1                                                        01291000
+* BRANCH TYPE BRANCH TABLE                                              01292000
+BRATAB   DC    AL2(SCANPEX-DMKPER) CODE 0                               01293000
+         DC    AL2(BCODE1-DMKPER)  CODE 1                               01294000
+         DC    AL2(BCODE2-DMKPER)  CODE 2                               01295000
+         DC    AL2(BCODE3-DMKPER)  CODE 3                               01296000
+         DC    AL2(BRACOM-DMKPER)  CODE 4                               01297000
+         DC    AL2(BCODE5-DMKPER)  CODE 5                               01298000
+         DC    AL2(BCODE6-DMKPER)  CODE 6                               01299000
+         DC    AL2(BCODE7-DMKPER)  CODE 7                               01300000
+         DC    AL2(BCODE8-DMKPER)  CODE 8                               01301000
+         SPACE 1                                                        01302000
+* PEX BLOCK HANDLER BRANCH TABLE                                        01303000
+HNDLIST  DC    AL2(EDPGT-DMKPER),AL1(PEXPGT)      PAGE TRACE            01304000
+         DC    AL2(EDBRTB-DMKPER),AL1(PEXBRTB)    BRANCH TRACEBACK      01305000
+         DC    AL2(EDGPR-DMKPER),AL1(PEXGPR)      GREG                  01306000
+         DC    AL2(EDSTORE-DMKPER),AL1(PEXST)     STORE                 01307000
+         DC    AL2(EDIFET-DMKPER),AL1(PEXIFET)    IFETCH                01308000
+         DC    AL2(EDIFET-DMKPER),AL1(PEXBR)      BRANCH                01309000
+HNDLEND  DC    AL2(EDMASK-DMKPER),AL1(PEXMASK)    MASK                  01310000
+         EJECT ,                                                        01311000
+*=====================================================================* 01312000
+*         THE FOLLOWING IS A TABLE  OF THE CHARACTERISTICS OF THE     * 01313000
+*    370 INSTRUCTION SET.  IT IS USED BY PER TO DETERMINE WHAT TO     * 01314000
+*    PRINT AND WHAT  HAS BEEN MODIFIED.                               * 01315000
+*                                                                     * 01316000
+*    FIRST NYBBLE: REGISTER ALTERATION                                * 01317000
+*                                                                     * 01318000
+*        0 NO REGISTERS ALTERED                                       * 01319000
+*        1 REGISTER INDICATED BY THIRD NYBBLE ALTERED                 * 01320000
+*        2 REGISTER PAIR INDICATED BY THIRD NYBBLE ALTERED            * 01321000
+*        3 REGISTER RANGE IN SECOND BYTE ALTERED                      * 01322000
+*        4 ALTER TWO REGISTER PAIRS INDICATED BY SECOND BYTE          * 01323000
+*        5 COMPARE AND SWAP INSTRUCTION (CS)                          * 01324000
+*        6 COMPARE DOUBLE AND SWAP INSTRUCTION (CDS)                  * 01325000
+*        7 INSERT CHARACTERS UNDER MASK (ICM)                         * 01326000
+*        8 TRANSLATE AND TEST (TRT)                                   * 01327000
+*        9 EDIT AND MARK (EDMK)                                       * 01328000
+*       10 INSERT PSW KEY (IPK)                                       * 01329000
+*                                                                     * 01330000
+*    THE SECOND NYBBLE IS USED TO DECODE THE OPERAND ADDRESSES:       * 01331000
+*                                                                     * 01332000
+*        0 NO OPERANDS                                                * 01333000
+*        1 SECOND NYBBLE INDICATES REGISTER POINTING TO OPERAND       * 01334000
+*        2 RX TYPE ADDRESS                                            * 01335000
+*        3 RS TYPE ADDRESS                                            * 01336000
+*        4 TWO ADDRESSES (SS TYPES 1 AND 2)                           * 01337000
+*        5 LOAD ADDRESS (LA)                                          * 01338000
+*                                                                     * 01339000
+*    THE THIRD NYBBLE INDICATES THE LENGTH OF STORAGE ALTERED:        * 01340000
+*                                                                     * 01341000
+*        0 ZERO LENGTH (NO STORAGE ALTERED)                           * 01342000
+*        1 LENGTH OF 1 BYTE                                           * 01343000
+*        2 LENGTH OF 2 BYTES                                          * 01344000
+*        3 LENGTH OF 4 BYTES                                          * 01345000
+*        4 LENGTH OF 8 BYTES                                          * 01346000
+*        5 REGISTER RANGE IN SECOND BYTE                              * 01347000
+*        6 COMPARE AND SWAP (CS)                                      * 01348000
+*        7 COMPARE DOUBLE AND SWAP (CDS)                              * 01349000
+*        8 STORE CHARACTERS UNDER MASK (STCM)                         * 01350000
+*        9 SS TYPE ONE, LENGTH IN SECOND BYTE                         * 01351000
+*       10 SS TYPE TWO, LENGTH IN FIRST NYBBLE OF SECOND BYTE         * 01352000
+*       11 UNKNOWN AMOUNT OF STORAGE ALTERED (MVCL)                   * 01353000
+*                                                                     * 01354000
+*    THE FOURTH NYBBLE INDICATES BRANCHING CHARACTERISTICS            * 01355000
+*                                                                     * 01356000
+*        0 NOT A BRANCH INSTRUCTION                                   * 01357000
+*        1 BRANCH AND LINK REGISTER (BALR)                            * 01358000
+*        2 BRANCH AND COUNT REGISTER (BCTR)                           * 01359000
+*        3 BRANCH ON CONDITION REGISTER (BCR)                         * 01360000
+*        4 BRANCH AND LINK (BAL)                                      * 01361000
+*        5 BRANCH AND COUNT (BCT)                                     * 01362000
+*        6 BRANCH ON CONDITION (BC)                                   * 01363000
+*        7 BRANCH ON INDEX HIGH (BXH)                                 * 01364000
+*        8 BRANCH ON INDEX LOW OR EQUAL (BXLE)                        * 01365000
+*=====================================================================* 01366000
+         SPACE 1                                                        01367000
+FUNCTAB  EQU   *              TABLE OF ISN INFO                         01368000
+         DC    AL.4(0,0,0,0)  00 INVALID ISN                            01369000
+         DC    AL.4(0,0,0,0)  01 INVALID ISN                            01370000
+         DC    AL.4(0,0,0,0)  02 INVALID ISN                            01371000
+         DC    AL.4(0,0,0,0)  03 INVAILD ISN                            01372000
+         DC    AL.4(0,0,0,0)  04 SPM                                    01373000
+         DC    AL.4(1,1,0,1)  05 BALR                                   01374000
+         DC    AL.4(1,1,0,2)  06 BCTR                                   01375000
+         DC    AL.4(0,1,0,3)  07 BCR                                    01376000
+         DC    AL.4(0,1,0,0)  08 SSK                                    01377000
+         DC    AL.4(1,1,0,0)  09 ISK                                    01378000
+         DC    AL.4(0,0,0,0)  0A SVC                                    01379000
+         DC    AL.4(0,0,0,0)  0B INVALID ISN                            01380000
+         DC    AL.4(0,0,0,0)  0C INVALID ISN                            01381000
+         DC    AL.4(0,0,0,0)  0D INVALID ISN                            01382000
+         DC    AL.4(4,0,11,0) 0E MVCL                                   01383000
+         DC    AL.4(4,0,0,0)  0F CLCL                                   01384000
+         DC    AL.4(1,0,0,0)  10 LPR                                    01385000
+         DC    AL.4(1,0,0,0)  11 LNR                                    01386000
+         DC    AL.4(1,0,0,0)  12 LTR                                    01387000
+         DC    AL.4(1,0,0,0)  13 LCR                                    01388000
+         DC    AL.4(1,0,0,0)  14 NR                                     01389000
+         DC    AL.4(0,0,0,0)  15 CLR                                    01390000
+         DC    AL.4(1,0,0,0)  16 OR                                     01391000
+         DC    AL.4(1,0,0,0)  17 XR                                     01392000
+         DC    AL.4(1,0,0,0)  18 LR                                     01393000
+         DC    AL.4(0,0,0,0)  19 CR                                     01394000
+         DC    AL.4(1,0,0,0)  1A AR                                     01395000
+         DC    AL.4(1,0,0,0)  1B SR                                     01396000
+         DC    AL.4(2,0,0,0)  1C MR                                     01397000
+         DC    AL.4(2,0,0,0)  1D DR                                     01398000
+         DC    AL.4(1,0,0,0)  1E ALR                                    01399000
+         DC    AL.4(1,0,0,0)  1F SLR                                    01400000
+         DC    AL.4(0,0,0,0)  20 LPDR                                   01401000
+         DC    AL.4(0,0,0,0)  21 LNDR                                   01402000
+         DC    AL.4(0,0,0,0)  22 LTDR                                   01403000
+         DC    AL.4(0,0,0,0)  23 LCDR                                   01404000
+         DC    AL.4(0,0,0,0)  24 HDR                                    01405000
+         DC    AL.4(0,0,0,0)  25 LRDR                                   01406000
+         DC    AL.4(0,0,0,0)  26 MXR                                    01407000
+         DC    AL.4(0,0,0,0)  27 MXDR                                   01408000
+         DC    AL.4(0,0,0,0)  28 LDR                                    01409000
+         DC    AL.4(0,0,0,0)  29 CDR                                    01410000
+         DC    AL.4(0,0,0,0)  2A ADR                                    01411000
+         DC    AL.4(0,0,0,0)  2B SDR                                    01412000
+         DC    AL.4(0,0,0,0)  2C MDR                                    01413000
+         DC    AL.4(0,0,0,0)  2D DDR                                    01414000
+         DC    AL.4(0,0,0,0)  2E AWR                                    01415000
+         DC    AL.4(0,0,0,0)  2F SWR                                    01416000
+         DC    AL.4(0,0,0,0)  30 LPER                                   01417000
+         DC    AL.4(0,0,0,0)  31 LNER                                   01418000
+         DC    AL.4(0,0,0,0)  32 LTER                                   01419000
+         DC    AL.4(0,0,0,0)  33 LCER                                   01420000
+         DC    AL.4(0,0,0,0)  34 HER                                    01421000
+         DC    AL.4(0,0,0,0)  35 LRER                                   01422000
+         DC    AL.4(0,0,0,0)  36 AXR                                    01423000
+         DC    AL.4(0,0,0,0)  37 SXR                                    01424000
+         DC    AL.4(0,0,0,0)  38 LER                                    01425000
+         DC    AL.4(0,0,0,0)  39 CER                                    01426000
+         DC    AL.4(0,0,0,0)  3A AER                                    01427000
+         DC    AL.4(0,0,0,0)  3B SER                                    01428000
+         DC    AL.4(0,0,0,0)  3C MER                                    01429000
+         DC    AL.4(0,0,0,0)  3D DER                                    01430000
+         DC    AL.4(0,0,0,0)  3E AUR                                    01431000
+         DC    AL.4(0,0,0,0)  3F SUR                                    01432000
+         DC    AL.4(0,2,2,0)  40 STH                                    01433000
+         DC    AL.4(1,5,0,0)  41 LA                                     01434000
+         DC    AL.4(0,2,1,0)  42 STC                                    01435000
+         DC    AL.4(1,2,0,0)  43 IC                                     01436000
+         DC    AL.4(0,2,0,0)  44 EX                                     01437000
+         DC    AL.4(1,2,0,4)  45 BAL                                    01438000
+         DC    AL.4(1,2,0,5)  46 BCT                                    01439000
+         DC    AL.4(0,2,0,6)  47 BC                                     01440000
+         DC    AL.4(1,2,0,0)  48 LH                                     01441000
+         DC    AL.4(0,2,0,0)  49 CH                                     01442000
+         DC    AL.4(1,2,0,0)  4A AH                                     01443000
+         DC    AL.4(1,2,0,0)  4B SH                                     01444000
+         DC    AL.4(1,2,0,0)  4C MH                                     01445000
+         DC    AL.4(0,0,0,0)  4D INVALID ISN                            01446000
+         DC    AL.4(0,2,4,0)  4E CVD                                    01447000
+         DC    AL.4(2,2,0,0)  4F CVB                                    01448000
+         DC    AL.4(0,2,3,0)  50 ST                                     01449000
+         DC    AL.4(0,0,0,0)  51 INVAILD ISN                            01450000
+         DC    AL.4(0,0,0,0)  52 INVAILD ISN                            01451000
+         DC    AL.4(0,0,0,0)  53 INVAILD ISN                            01452000
+         DC    AL.4(1,2,0,0)  54 N                                      01453000
+         DC    AL.4(0,2,0,0)  55 CL                                     01454000
+         DC    AL.4(1,2,0,0)  56 O                                      01455000
+         DC    AL.4(1,2,0,0)  57 X                                      01456000
+         DC    AL.4(1,2,0,0)  58 L                                      01457000
+         DC    AL.4(0,2,0,0)  59 C                                      01458000
+         DC    AL.4(1,2,0,0)  5A A                                      01459000
+         DC    AL.4(1,2,0,0)  5B S                                      01460000
+         DC    AL.4(2,2,0,0)  5C M                                      01461000
+         DC    AL.4(2,2,0,0)  5D D                                      01462000
+         DC    AL.4(1,2,0,0)  5E AL                                     01463000
+         DC    AL.4(1,2,0,0)  5F SL                                     01464000
+         DC    AL.4(0,2,4,0)  60 STD                                    01465000
+         DC    AL.4(0,0,0,0)  61 INVALID ISN                            01466000
+         DC    AL.4(0,0,0,0)  62 INVALID ISN                            01467000
+         DC    AL.4(0,0,0,0)  63 INVALID ISN                            01468000
+         DC    AL.4(0,0,0,0)  64 INVALID ISN                            01469000
+         DC    AL.4(0,0,0,0)  65 INVALID ISN                            01470000
+         DC    AL.4(0,0,0,0)  66 INVALID ISN                            01471000
+         DC    AL.4(0,2,0,0)  67 MXD                                    01472000
+         DC    AL.4(0,2,0,0)  68 LD                                     01473000
+         DC    AL.4(0,2,0,0)  69 CD                                     01474000
+         DC    AL.4(0,2,0,0)  6A AD                                     01475000
+         DC    AL.4(0,2,0,0)  6B SD                                     01476000
+         DC    AL.4(0,2,0,0)  6C MD                                     01477000
+         DC    AL.4(0,2,0,0)  6D DD                                     01478000
+         DC    AL.4(0,2,0,0)  6E AW                                     01479000
+         DC    AL.4(0,2,0,0)  6F SW                                     01480000
+         DC    AL.4(0,2,3,0)  70 STE                                    01481000
+         DC    AL.4(0,0,0,0)  71 INVALID ISN                            01482000
+         DC    AL.4(0,0,0,0)  72 INVALID ISN                            01483000
+         DC    AL.4(0,0,0,0)  73 INVALID ISN                            01484000
+         DC    AL.4(0,0,0,0)  74 INVALID ISN                            01485000
+         DC    AL.4(0,0,0,0)  75 INVALID ISN                            01486000
+         DC    AL.4(0,0,0,0)  76 INVALID ISN                            01487000
+         DC    AL.4(0,0,0,0)  77 INVALID ISN                            01488000
+         DC    AL.4(0,2,0,0)  78 LE                                     01489000
+         DC    AL.4(0,2,0,0)  79 CE                                     01490000
+         DC    AL.4(0,2,0,0)  7A AE                                     01491000
+         DC    AL.4(0,2,0,0)  7B SE                                     01492000
+         DC    AL.4(0,2,0,0)  7C ME                                     01493000
+         DC    AL.4(0,2,0,0)  7D DE                                     01494000
+         DC    AL.4(0,2,0,0)  7E AU                                     01495000
+         DC    AL.4(0,2,0,0)  7F SU                                     01496000
+         DC    AL.4(0,3,0,0)  80 SSM                                    01497000
+         DC    AL.4(0,0,0,0)  81 INVALID ISN                            01498000
+         DC    AL.4(0,3,0,0)  82 LPSW                                   01499000
+         DC    AL.4(0,0,0,0)  83 DIAGNOSE                               01500000
+         DC    AL.4(0,3,0,0)  84 WRD                                    01501000
+         DC    AL.4(0,3,1,0)  85 RDD                                    01502000
+         DC    AL.4(1,3,0,7)  86 BXH                                    01503000
+         DC    AL.4(1,3,0,8)  87 BXLE                                   01504000
+         DC    AL.4(1,3,0,0)  88 SRL                                    01505000
+         DC    AL.4(1,3,0,0)  89 SLL                                    01506000
+         DC    AL.4(1,3,0,0)  8A SRA                                    01507000
+         DC    AL.4(1,3,0,0)  8B SLA                                    01508000
+         DC    AL.4(2,3,0,0)  8C SRDL                                   01509000
+         DC    AL.4(2,3,0,0)  8D SLDL                                   01510000
+         DC    AL.4(2,3,0,0)  8E SRDA                                   01511000
+         DC    AL.4(2,3,0,0)  8F SLDA                                   01512000
+         DC    AL.4(0,3,5,0)  90 STM                                    01513000
+         DC    AL.4(0,3,0,0)  91 TM                                     01514000
+         DC    AL.4(0,3,1,0)  92 MVI                                    01515000
+         DC    AL.4(0,3,1,0)  93 TS                                     01516000
+         DC    AL.4(0,3,1,0)  94 NI                                     01517000
+         DC    AL.4(0,3,0,0)  95 CLI                                    01518000
+         DC    AL.4(0,3,1,0)  96 OI                                     01519000
+         DC    AL.4(0,3,1,0)  97 XI                                     01520000
+         DC    AL.4(3,3,0,0)  98 LM                                     01521000
+         DC    AL.4(0,0,0,0)  99 INVALID ISN                            01522000
+         DC    AL.4(0,0,0,0)  9A INVALID ISN                            01523000
+         DC    AL.4(0,0,0,0)  9B INVALID ISN                            01524000
+         DC    AL.4(0,3,0,0)  9C SIO                                    01525000
+         DC    AL.4(0,3,0,0)  9D TIO                                    01526000
+         DC    AL.4(0,3,0,0)  9E HIO                                    01527000
+         DC    AL.4(0,3,0,0)  9F TCH                                    01528000
+         DC    AL.4(0,0,0,0)  A0 INVALID ISN                            01529000
+         DC    AL.4(0,0,0,0)  A1 INVALID ISN                            01530000
+         DC    AL.4(0,0,0,0)  A2 INVALID ISN                            01531000
+         DC    AL.4(0,0,0,0)  A3 INVALID ISN                            01532000
+         DC    AL.4(0,0,0,0)  A4 INVALID ISN                            01533000
+         DC    AL.4(0,0,0,0)  A5 INVALID ISN                            01534000
+         DC    AL.4(0,0,0,0)  A6 INVALID ISN                            01535000
+         DC    AL.4(0,0,0,0)  A7 INVALID ISN                            01536000
+         DC    AL.4(0,0,0,0)  A8 INVALID ISN                            01537000
+         DC    AL.4(0,0,0,0)  A9 INVALID ISN                            01538000
+         DC    AL.4(0,0,0,0)  AA INVALID ISN                            01539000
+         DC    AL.4(0,0,0,0)  AB INVALID ISN                            01540000
+         DC    AL.4(0,3,1,0)  AC STNSM                                  01541000
+         DC    AL.4(0,3,1,0)  AD STOSM                                  01542000
+         DC    AL.4(1,0,0,0)  AE SIGP                                   01543000
+         DC    AL.4(0,3,0,0)  AF MC                                     01544000
+         DC    AL.4(0,0,0,0)  B0 INVALID ISN                            01545000
+         DC    AL.4(1,2,0,0)  B1 LRA                                    01546000
+         DC    AL.4(0,0,0,0)  B2 WILL NEVER GET HERE                    01547000
+         DC    AL.4(0,0,0,0)  B3 INVALID ISN                            01548000
+         DC    AL.4(0,0,0,0)  B4 INVALID ISN                            01549000
+         DC    AL.4(0,0,0,0)  B5 INVALID ISN                            01550000
+         DC    AL.4(0,3,5,0)  B6 STCTL                                  01551000
+         DC    AL.4(3,3,0,0)  B7 LCTL                                   01552000
+         DC    AL.4(0,0,0,0)  B8 INVALID ISN                            01553000
+         DC    AL.4(0,0,0,0)  B9 INVALID ISN                            01554000
+         DC    AL.4(5,3,6,0)  BA CS                                     01555000
+         DC    AL.4(6,3,7,0)  BB CDS                                    01556000
+         DC    AL.4(0,0,0,0)  BC INVALID ISN                            01557000
+         DC    AL.4(0,3,0,0)  BD CLM                                    01558000
+         DC    AL.4(0,3,8,0)  BE STCM                                   01559000
+         DC    AL.4(7,3,0,0)  BF ICM                                    01560000
+         DC    AL.4(0,0,0,0)  C0 INVALID ISN                            01561000
+         DC    AL.4(0,0,0,0)  C1 INVALID ISN                            01562000
+         DC    AL.4(0,0,0,0)  C2 INVALID ISN                            01563000
+         DC    AL.4(0,0,0,0)  C3 INVALID ISN                            01564000
+         DC    AL.4(0,0,0,0)  C4 INVALID ISN                            01565000
+         DC    AL.4(0,0,0,0)  C5 INVALID ISN                            01566000
+         DC    AL.4(0,0,0,0)  C6 INVALID ISN                            01567000
+         DC    AL.4(0,0,0,0)  C7 INVALID ISN                            01568000
+         DC    AL.4(0,0,0,0)  C8 INVALID ISN                            01569000
+         DC    AL.4(0,0,0,0)  C9 INVALID ISN                            01570000
+         DC    AL.4(0,0,0,0)  CA INVALID ISN                            01571000
+         DC    AL.4(0,0,0,0)  CB INVALID ISN                            01572000
+         DC    AL.4(0,0,0,0)  CC INVALID ISN                            01573000
+         DC    AL.4(0,0,0,0)  CD INVALID ISN                            01574000
+         DC    AL.4(0,0,0,0)  CE INVALID ISN                            01575000
+         DC    AL.4(0,0,0,0)  CF INVALID ISN                            01576000
+         DC    AL.4(0,0,0,0)  D0 INVALID ISN                            01577000
+         DC    AL.4(0,4,9,0)  D1 MVN                                    01578000
+         DC    AL.4(0,4,9,0)  D2 MVC                                    01579000
+         DC    AL.4(0,4,9,0)  D3 MVZ                                    01580000
+         DC    AL.4(0,4,9,0)  D4 NC                                     01581000
+         DC    AL.4(0,4,0,0)  D5 CLC                                    01582000
+         DC    AL.4(0,4,9,0)  D6 OC                                     01583000
+         DC    AL.4(0,4,9,0)  D7 XC                                     01584000
+         DC    AL.4(0,0,0,0)  D8 INVALID ISN                            01585000
+         DC    AL.4(0,0,0,0)  D9 INVALID ISN                            01586000
+         DC    AL.4(0,0,0,0)  DA INVALID ISN                            01587000
+         DC    AL.4(0,0,0,0)  DB INVALID ISN                            01588000
+         DC    AL.4(0,4,9,0)  DC TR                                     01589000
+         DC    AL.4(8,4,0,0)  DD TRT                                    01590000
+         DC    AL.4(0,4,9,0)  DE ED                                     01591000
+         DC    AL.4(9,4,9,0)  DF EDMK                                   01592000
+         DC    AL.4(0,0,0,0)  E0 INVALID ISN                            01593000
+         DC    AL.4(0,0,0,0)  E1 INVALID ISN                            01594000
+         DC    AL.4(0,0,0,0)  E2 INVALID ISN                            01595000
+         DC    AL.4(0,0,0,0)  E3 INVALID ISN                            01596000
+         DC    AL.4(0,0,0,0)  E4 INVALID ISN                            01597000
+         DC    AL.4(0,0,0,0)  E5 INVALID ISN                            01598000
+         DC    AL.4(0,0,0,0)  E6 INVALID ISN                            01599000
+         DC    AL.4(0,0,0,0)  E7 INVALID ISN                            01600000
+         DC    AL.4(0,0,0,0)  E8 INVALID ISN                            01601000
+         DC    AL.4(0,0,0,0)  E9 INVALID ISN                            01602000
+         DC    AL.4(0,0,0,0)  EA INVALID ISN                            01603000
+         DC    AL.4(0,0,0,0)  EB INVALID ISN                            01604000
+         DC    AL.4(0,0,0,0)  EC INVALID ISN                            01605000
+         DC    AL.4(0,0,0,0)  ED INVALID ISN                            01606000
+         DC    AL.4(0,0,0,0)  EE INVALID ISN                            01607000
+         DC    AL.4(0,0,0,0)  EF INVALID ISN                            01608000
+         DC    AL.4(0,3,10,0) F0 SRP                                    01609000
+         DC    AL.4(0,4,10,0) F1 MVO                                    01610000
+         DC    AL.4(0,4,10,0) F2 PACK                                   01611000
+         DC    AL.4(0,4,10,0) F3 UNPK                                   01612000
+         DC    AL.4(0,0,0,0)  F4 INVALID ISN                            01613000
+         DC    AL.4(0,0,0,0)  F5 INVALID ISN                            01614000
+         DC    AL.4(0,0,0,0)  F6 INVALID ISN                            01615000
+         DC    AL.4(0,0,0,0)  F7 INVALID ISN                            01616000
+         DC    AL.4(0,4,10,0) F8 ZAP                                    01617000
+         DC    AL.4(0,4,10,0) F9 CP                                     01618000
+         DC    AL.4(0,4,10,0) FA AP                                     01619000
+         DC    AL.4(0,4,10,0) FB SP                                     01620000
+         DC    AL.4(0,4,10,0) FC MP                                     01621000
+         DC    AL.4(0,4,10,0) FD DP                                     01622000
+         DC    AL.4(0,0,0,0)  FE INVALID ISN                            01623000
+         DC    AL.4(0,0,0,0)  FF INVALID ISN                            01624000
+         EJECT ,                                                        01625000
+B2TAB    EQU   *              B2 OP CODE TABLE                          01626000
+         DC    AL.4(0,0,0,0)  00 INVALID ISN                            01627000
+         DC    AL.4(0,0,0,0)  01 INVALID ISN                            01628000
+         DC    AL.4(0,3,4,0)  02 STIDP                                  01629000
+         DC    AL.4(0,3,0,0)  03 STIDC                                  01630000
+         DC    AL.4(0,3,0,0)  04 SCK                                    01631000
+         DC    AL.4(0,3,4,0)  05 STCK                                   01632000
+         DC    AL.4(0,3,0,0)  06 SCKC                                   01633000
+         DC    AL.4(0,3,4,0)  07 STCKC                                  01634000
+         DC    AL.4(0,3,0,0)  08 SPT                                    01635000
+         DC    AL.4(0,3,4,0)  09 STPT                                   01636000
+         DC    AL.4(0,3,0,0)  0A SPKA                                   01637000
+         DC    AL.4(10,0,0,0) 0B IPK                                    01638000
+         DC    AL.4(0,0,0,0)  0C INVALID ISN                            01639000
+         DC    AL.4(0,0,0,0)  0D PTLB                                   01640000
+         DC    AL.4(0,0,0,0)  0E INVALID ISN                            01641000
+         DC    AL.4(0,0,0,0)  0F INVALID ISN                            01642000
+         DC    AL.4(0,3,0,0)  10 SPX                                    01643000
+         DC    AL.4(0,3,3,0)  11 STPX                                   01644000
+         DC    AL.4(0,3,2,0)  12 STAP                                   01645000
+         DC    AL.4(0,3,0,0)  13 RRB                                    01646000
+         EJECT ,                                                        01647000
+*---------------------------------------------------------------------* 01648000
+*        LITERALS                                                     * 01649000
+*---------------------------------------------------------------------* 01650000
+         LTORG ,                                                        01651000
+         EJECT ,                                                        01652000
+*---------------------------------------------------------------------* 01653000
+*        DSECTS AND EQUATES                                           * 01654000
+*---------------------------------------------------------------------* 01655000
+         COPY  EQU                                                      01656000
+         COPY  PERBLOKS                                                 01657000
+         PSA   ,                                                        01658000
+         COPY  SAVE                                                     01659000
+         COPY  VMBLOK                                                   01660000
+         END   DMKPER                                                   01661000

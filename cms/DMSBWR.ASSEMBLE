@@ -88,6 +88,9 @@ BWR      TITLE 'DMSBWR     (CMS)       VM/370 - RELEASE 6'              00001000
 *                                                                       00088000
 * 25.  INSUFFICIENT FREE STORAGE AVAILABLE FOR FILE                     00089000
 *      MANAGEMENT CONTROL AREAS.                                        00090000
+*                                                                       00090100
+* 27. ATTEMPT TO UPDATE VARIABLE LENGTH ITEM WITH ONE OF DIFFERENT      00090200
+*     LENGTH                                                            00090300
 * CALLS TO OTHER ROUTINES:                                              00091000
 *                                                                       00092000
 *        ACTFREE, ACTFRET, ACTLKP, ADTLKP, DISKDIE, FREE, FRET,         00093000
@@ -393,7 +396,10 @@ WRBUF    EQU   DMSBWR                                                   00366000
          BNP   ERR            NOT > 0.                                  00393000
          LA    R15,0(R2,R3)   COMPUTE END OF DATA              @VM03232 00394000
          C     R15,VMSIZE     COMPARE WITH VMSIZE              @VM03232 00395000
-         BH    ERROR22        ERROR IF BEYOND END OF MEMORY    @VM03232 00396000
+         BNH   BUFOK          GO TO IT                         @VA10561 00396000
+         CLC   VMSIZE+1(3),SVCOPSW+5  DCSS USER..??            @VA10561 00396200
+         BH    ERROR22        NO KILL HIM (RC=2)               @VA10561 00396400
+BUFOK    EQU   *                                               @VA10561 00396600
          LA    R7,1           1 INTO R7 FOR GENERAL USE (FOR A WHILE)   00397000
          SR    R0,R0            0 INTO R0,                              00398000
          ST    R0,FALIGN         CLEAR 'FALIGN',                        00399000
@@ -608,6 +614,7 @@ LR34     LR    R3,R4          CALCULATE BLOCK                           00594000
 SETWR    L     R12,AFTADT     REFERENCE ACTIVE DISK TABLE               00608000
          ST    R12,PLIST+12   STORE IN RDTK/WRTK P-LIST                 00609000
          STH   R4,AFTWP       STORE WRITE-POINTER                       00610000
+         NI    AFTFLG2,255-SAMELEN INITIALIZE SAME LENGTH      @VA09491 00610500
          TM    AFTFLG,AFTWRT  IS IT ALREADY AN ACTIVE-WRITE ?           00611000
          BO    INSERT         BO IF YES, GET ON WITH IT.                00612000
          OI    AFTFLG,AFTWRT  IT'S AN ACTIVE WRITE NOW, CONTINUE...     00613000
@@ -834,11 +841,51 @@ ALLDONE  LTR   R15,R3         RESTORE RETURN-CODE AND SET C.C. @VA01100 00825000
 *                                                                       00834000
 VARINT   SR    R4,R4          ZERO OUT A REGISTER.                V0510 00835000
          ICM   R4,B'0011',AFTIC    GET THE NUMBER OF ITEMS.       V0510 00836000
-         LA    R4,1(,R4)          INCREASE BY ONE              @VA06436 00837000
+         CLM   R4,B'0011',AFTWP  REPLACING LAST RECORD ?       @VA09491 00836040
+         BE    LASTREC             YES, OK                     @VA09491 00836080
+         BL    MAYADD             CHECK FOR ADDING NEXT RECORD @VA09491 00836120
+         TM    AFTFLG2,AFTNEW      CHECK NEW FILE              @VA09491 00836160
+         BO    LASTREC             YES, ALLOW DIFFERENT LENGTH @VA09491 00836200
+         TM    DOSFLAGS,DOSMODE    IN DOS MOD ?                @VA09491 00836240
+         BO    LASTREC             YES, SKIP LENGTH CHECK      @VA09491 00836280
+         OI    AFTFLG2,SAMELEN     CHECK SAME LENGTH           @VA09491 00836320
+         LH    R6,FCBNUM           COUNT OF FCB ENTRIES        @VA09491 00836360
+         LTR   R6,R6               ARE THERE ANY ?             @VA09491 00836400
+         BZ    LASTREC             NO , SKIP THE CHECK         @VA09491 00836440
+         LA    R3,0(,R11)          POINT TO WRBUF PLIST        @VA09491 00836480
+         S     R3,SIXTEEN          BACK UP 4 WORDS             @VA09491 00836520
+         L     R7,FCBFIRST         FCB ANCHOR                  @VA09491 00836560
+         USING FCBSECT,R7          FCB ADDRESSABILITY          @VA09491 00836600
+LOOPFCB  EQU   *                                               @VA09491 00836640
+         CLC   FCBDD,EIGHT(R3)     FCB DDNAME IN PLIST         @VA09491 00836680
+         BE    FOUNDFCB            YES, CHECK IT               @VA09491 00836720
+         L     R7,0(,R7)           BUMP TO NEXT FCB            @VA09491 00836760
+         BCT   R6,LOOPFCB          LOOP THRU ENTRIES           @VA09491 00836800
+         B     LASTREC             NOT FOUND                   @VA09491 00836840
+FOUNDFCB EQU   *                   CHECK RECORD FORMAT         @VA09491 00836880
+         NI    AFTFLG2,255-SAMELEN NO LENGTH CHECK             @VA09491 00836920
+         LA    R7,0(,R7)           CLEAR HIGH BYTE             @VA09491 00836960
+         CR    R7,R3               THE SAME FCB ?              @VA09491 00837000
+         BNE   LASTREC             NO, FORGET IT               @VA09491 00837040
+         ICM   R3,M7,DEBDCBAD+1    DCB POINTER IN FCB          @VA09491 00837080
+         BZ    LASTREC             NO , SKIP DCB CHECK         @VA09491 00837120
+         C     R3,VMSIZE           BEYOND ADDRESSABILITY       @VA09491 00837160
+         BNL   LASTREC             YES , SKIP IT               @VA09491 00837200
+         USING IHADCB,R3           DCB ADDRESSABILITY          @VA09491 00837240
+         TM    DCBRECFM,UND        RECFM = UNDEFINED           @VA09491 00837280
+         BO    LASTREC             YES , SKIP LENGTH CHECK     @VA09491 00837320
+         OI    AFTFLG2,SAMELEN ALL REPLACES MUST BE            @VA09491 00837360
+*                                  THE SAME LENGTH AS BEFORE   @VA09491 00837400
+         B     LASTREC             BYPASS NEXT CHECK           @VA09491 00837440
+         DROP  R3                  DROP DCB ADDRESSABILITY     @VA09491 00837480
+         DROP  R7                  DROP FCB ADDRESSABILITY     @VA09491 00837520
+MAYADD   DS    0H                                              @VA09491 00837560
+         LA    R4,1(,R4)           CHECK FOR ADDING ONE RECORD @VA09491 00837600
          SR    R15,R15        EMPTY ANOTHER REGISTER.             V0510 00838000
          ICM   R15,B'0011',AFTWP   AND GET THE WRITE-POINTER.     V0510 00839000
          CR    R4,R15         WRITE PTR. MUST NOT EXCEED NO. OF ITEMS   00840000
          BL    ERROR7         ERROR 7 IF TROUBLE                        00841000
+LASTREC  DS    0H                                              @VA09491 00841500
          SR    3,3            SET TO READ BLOCK NO. 0                   00842000
          MVC   AFTIN(2),ONEH  SET THE ITEM NO. TO 1.              V0510 00843000
          STH   R3,AFTID       SET DISPLACEMENT = 0                      00844000
@@ -929,6 +976,11 @@ ALS4     LTR   R5,R2          GET DISPLACEMENT FOR ITEM LENGTH @VM03232 00926000
          BNE   ALS4A          NOPE (WHEW) - WE'RE OK.          @VM03232 00929000
          BAL   R14,DISKRD     YES - INITIALIZE DATA BLOCK      @VM03232 00930000
 ALS4A    A     R5,AFTDBA      FORM ADDRESS FOR ITEM LENGTH     @VM03232 00931000
+         TM    AFTFLG2,SAMELEN     MUST CHECK LENGTH ?         @VA09491 00931100
+         BZ    LAB1                NO,CONTINUE                 @VA09491 00931200
+         CLC   0(2,R5),PNOBY+2(R11) IS LENGTH OK               @VA09491 00931300
+         BNE   ERROR27             NO , WRONG LENGTH           @VA09491 00931400
+LAB1     DS    0H                                              @VA09491 00931500
          MVC   0(2,5),PNOBY+2(11)   INSERT ITEM LENGTH                  00932000
          LA    2,2(,2)        ADJUST DISPLACEMENT                       00933000
          L     5,PNOBY(,11)   SET NUMBER OF BYTES TO WRITE              00934000
@@ -937,10 +989,20 @@ ALS2     C     R2,EIGHTHD     IS IT IN THIS BLOCK?                V0510 00936000
          BE    ALS3         NO, GET NEXT ONE                            00937000
          LR    5,2            GET LOC. TO PUT FIRST BYTE                00938000
          A     5,AFTDBA     ...                                         00939000
+         TM    AFTFLG2,SAMELEN     MUST CHECK LENGTH ?         @VA09491 00939100
+         BZ    LAB2                NO, CONTINUE                @VA09491 00939200
+         CLC   0(1,R5),PNOBY+2(R11) IS FIRST HALF OK ?         @VA09491 00939300
+         BNE   ERROR27             NOPE                        @VA09491 00939400
+LAB2     DS    0H                                              @VA09491 00939500
          MVC   0(1,5),PNOBY+2(11)   INSERT FIRST BYTE TO ITEM LENGTH    00940000
          LA    3,1(,3)        GET NEXT BLOCK                            00941000
          BAL   R14,DISKRW     ...                              @VM03232 00942000
          L     5,AFTDBA     GET LOC. TO PUT SECOND BYTE                 00943000
+         TM    AFTFLG2,SAMELEN     MUST CHECK LENGTH           @VA09491 00943100
+         BZ    LAB3                NO, CONTINUE                @VA09491 00943200
+         CLC   0(1,R5),PNOBY+3(R11) IS SECOND HALF OK ?        @VA09491 00943300
+         BNE   ERROR27             NO, DIFFERENT LENGTH        @VA09491 00943400
+LAB3     DS    0H                                              @VA09491 00943500
          MVC   0(1,5),PNOBY+3(11)   INSERT SECOND BYTE                  00944000
          LA    2,1            SET DISPLACEMENT=1                        00945000
          L     5,PNOBY(,11)   SET NUMBER OF BYTES TO WRITE              00946000
@@ -951,12 +1013,20 @@ ALS3     LA    3,1(,3)        GET NEXT BLOXK                            00948000
          B     ALS4        SET ITEM LENGTH                              00951000
 ALS5     LR    5,2            GET LOC. TO PUT ITEM LENGTH               00952000
          A     5,AFTDBA     ...                                         00953000
+         TM    AFTFLG2,SAMELEN     MUST CHECK LENGTH           @VA09491 00953100
+         BZ    LAB4                NO, CONTINUE                @VA09491 00953200
+         CLC   0(2,R5),PNOBY+2(R11) IS LENGTH OK               @VA09491 00953300
+         BNE   ERROR27             NO, DIFFERENT LENGTH        @VA09491 00953400
+LAB4     DS    0H                                              @VA09491 00953500
          MVC   0(2,5),PNOBY+2(11)   INSERT ITEM LENGTH                  00954000
          LA    3,1(0,3)       GET NEXT BLOCK                            00955000
          BAL   R14,DISKRW     ...                              @VM03232 00956000
          SR    2,2            SET DISPLACEMENT                          00957000
          L     5,PNOBY(0,11)  AND NO. OF BYTES                          00958000
          B     INSRT       INSERT DATA                                  00959000
+ERROR27  EQU   *                                               @VA09491 00959200
+         LA    R15,27              ERROR CODE 26               @VA09491 00959400
+         B     ERR                 RETURN WITH AN ERROR        @VA09491 00959600
          EJECT                                                          00960000
 **********************************************************************  00961000
 *                                                                       00962000
@@ -1196,6 +1266,7 @@ SIXTY    DC    H'60'                                                    01194000
 MAXFILES DC    H'3400'        MAX. NO. OF FILES CMS CAN HANDLE @VA03764 01196000
 MAXBLKS  DC    H'16060'       MAXIMUM NO. OF DATA BLOCKS FOR ONE FILE   01197000
 MAXCHAIN DC    H'41'          HIGHEST CHAIN-LINK WE CAN NOW HANDLE      01198000
+SIXTEEN  DC    F'16'               FULLWORD SIXTEEN            @VA09491 01198500
 *                                                                       01199000
 *        FULLWORD CONSTANTS                                             01200000
 *                                                                       01201000
@@ -1214,6 +1285,8 @@ SIGNBIT  DC    X'80000000'   TO SIGNAL THAT CHAIN-LINK HAS BEEN WRITTEN 01212000
 *  EQUATES                                                              01214000
 *                                                                       01215000
 M3       EQU   3                                               @VA07151 01216000
+M7       EQU   7                   MASK SEVEN                  @VA09491 01216200
+EIGHT    EQU   8                   MISCELLANEOUS 8             @VA09491 01216400
          EJECT                                                          01217000
 *                                                                       01218000
 *        SPECIAL ERROR-HANDLING PURPOSELY AT THE END ...                01219000
@@ -1425,6 +1498,8 @@ END$TEMP EQU   WRBFLAG2+1     END OF TEMPORARY STORAGE.                 01423000
 REGSAV4  EQU   RWFSTRG+12   SAFE SAVE-AREA NOT USED BY TFINIS OR UPDISK 01425000
          EJECT                                                          01426000
          NUCON                                                          01427000
+         DCBD  DSORG=(PS)                                               01427200
+         CMSCB                                                          01427400
          AFT                                                            01428000
          FSTB                                                           01429000
          ADT                                                            01430000

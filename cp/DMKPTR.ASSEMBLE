@@ -24,6 +24,7 @@ PTR      TITLE 'DMKPTR     (CP)        VM/370 - RELEASE 6'              00001000
 *        DMKPTRFT - RETURN A PAGE OF REAL MEMORY TO THE SYSTEM          00024000
 *        DMKPTRLK - LOCK A PAGE OF REAL MEMORY                          00025000
 *        DMKPTRRS    RESET PAGES BELONGING TO USER                      00026000
+*        DMKPTRPW - WAIT FOR USER PAGING TO COMPLETE                    00026100
 *                                                                       00027000
 *        THE FOLLOWING VALUES MAY BE REFERENCED OR MODIFIED BY EXTERNAL 00028000
 *        ROUTINES                                                       00029000
@@ -97,6 +98,11 @@ PTR      TITLE 'DMKPTR     (CP)        VM/370 - RELEASE 6'              00001000
 *        GPR12 = DMKPTRFT BASE                                          00097000
 *        GPR13 = SAVEAREA BASE                                          00098000
 *                                                                       00099000
+*        FOR DMKPTRPW                                                   00099100
+*        GPR11 = ADDRESS OF VMBLOK OF VIRTUAL MEMORY'S OWNER            00099200
+*        GPR12 = ADDRESS OF ENTRY POINT                                 00099300
+*        GPR13 = ADDRESS OF SAVEAREA                                    00099400
+*                                                                       00099500
 * EXIT CONDITIONS -                                                     00100000
 *                                                                       00101000
 *        FROM DMKPTRAN - NORMAL -                                       00102000
@@ -250,6 +256,7 @@ DMKPTR   CSECT                                                          00212000
          ENTRY DMKPTRRF       NO. PAGES EXAMINED DURING STEALS @V2B2638 00251000
          ENTRY DMKPTRCS       NO. COMP SCANS OF ULIST FOR STEAL@V2B2638 00252000
          ENTRY DMKPTRPL,DMKPTRRM - FOR CP ASSIST               @V386198 00253000
+         ENTRY DMKPTRSN                                        @VA08341 00253100
          ENTRY DMKPTRFQ                                        @V408246 00254000
          ENTRY DMKPTRP2       PAGES RECLAIMED FROM FLUSH LIST  @VA07717 00254100
          ENTRY DMKPTRUC       FLUSHED PAGE COUNT               @VA07810 00254200
@@ -330,13 +337,13 @@ GETENTRY EQU   *                                                        00319000
          S     R7,=F'16'      BACK TO HEADER                   @V407594 00328000
          ICM   R3,B'0111',PAGSHR-PAGTABLE+1(R7)  NAMED SYSTEM  @V407594 00329000
          BZ    GETENTR1       NO                               @V407594 00330000
+         TM    SHRFLAG-SHRTABLE(R3),SHRNOPRT UNPROTECTED       @VA09281 00330100
+*                             SHARED SYSTEM?                            00330200
+         BO    GETENTR1       YES, NO NEED TO SET UP PROCESSOR @VA09281 00330300
+*                             AFFINITY SINCE THERE IS ONLY ONE          00330400
+*                             SET OF PAGE/SWAP TABLES                   00330500
          ICM   R3,B'1111',SHRSEGCT-SHRTABLE(R3)  SHARED SYSTEM @V407594 00331000
          BZ    GETENTR1       NO                               @V407594 00332000
-         TM    SHRFLAG-SHRTABLE(R3),SHRNOPRT UNPROTECTED       @VMI0033 00332100
-*                             SHARED SYSTEM?                            00332200
-         BO    GETENTR1       YES, NO NEED TO SET UP PROCESSOR @VMI0033 00332300
-*                             AFFINITY SINCE THERE IS ONLY ONE          00332400
-*                             SET OF PAGE/SWAP TABLES                   00332500
          IC    R3,LPUADDR+1   LOGICAL PROCESSOR ID             @V407594 00333000
          STC   R3,SAVEPROC    TO SAVE AREA                     @V407594 00334000
 GETENTR1 LA    R7,16(R7)      R7 POINTS TO FIRST PTE           @V407594 00335000
@@ -578,10 +585,11 @@ DOIO     EQU   *  HERE TO SET UP FOR REAL PAGE READ                     00500000
 *                             SHARED SEGMENT? IF SO, ONLY ONE           00521500
 *                             SET OF PG/SWP TABLES EXIST.               00521600
          BO    GETCPEX        GO DO PAGE READ                  @VMI0019 00521700
-         TM    SWPFLAG2-SWPTABLE(R15),SWPAPP  OWNED BY AP      @V407594 00522000
-         LA    R15,PAGBMP(,R9)  ASSUME CPU- PT TO AP PTE       @V407594 00523000
-         BZ    COPYSHR        PG OWNED BY CPU                  @V407594 00524000
-         S     R15,=A(2*PAGBMP)  AP PG- PT TO CPU'S PTE        @V407594 00525000
+         TM    SWPFLAG2-SWPTABLE(R15),SWPAPP 2ND SET OF TABLES?@V60B7AA 00522100
+         LA    R15,PAGBMP(,R9) ASSUME IPL PROC'S PAGE--POINT TO@V60B7AA 00522600
+*                             AP PTE                                    00523100
+         BZ    COPYSHR        PAGE OWNED BY IPL PROCESSOR      @V60B7AA 00523600
+         S     R15,=A(2*PAGBMP) AP PAGE;POINT TO IPL PROC'S PTE@V60B7AA 00524100
 COPYSHR  LH    R14,0(R15)     LOAD PTE OF DUPLICATE PAGE       @V407594 00526000
          N     R14,=A(X'FFF0')  PAGE FRAME ONLY                @V407594 00527000
          BZ    GETCPEX        PAGE NOT RESIDENT OR RECLAIMABLE @V407594 00528000
@@ -885,14 +893,27 @@ PAGERROR EQU   *  HERE IF AN IOERROR OCCURED DURING PAGEING             00820000
          SRL   R7,8           PAGE NUMBER X 16                 @VA07310 00825100
          AL    R7,ACORETBL    BASE CORE TABLE ENTRY            @VA07310 00825200
          L     R5,CORSWPNT    PICK-UP SWAPTABLE ENTRY          @V408246 00826000
-         OI    SWPFLAG,SWPRECMP BACKING STORE UNUSABLE         @V408246 00827000
+         TM    SWPFLAG,SWPSHR SHARED PAGE                      @VA12685 00827050
+         BZ    BADBKST        NO, SKIP UNSHARE OF USER         @VA12685 00827100
+         MVC   PAGCORE,INVLPTE INVALIDATE PTE                  @VA12685 00827150
+         XC    CORPGPNT(4),CORPGPNT CLEAR CORETBL PTE PTR      @VA12685 00827200
+         SLR   R0,R0          ...                              @VA12685 00827250
+         STCM  R0,B'0111',CORSWPNT+1 CLR SWPTBL PTR IN CORETBL @VA12685 00827300
+         NI    CORFLAG,255-CORSHARE CLEAR FLAGS                @VA12685 00827350
+         CALL  DMKPTRFT       PLACE FRAME ON FREE LIST         @VA12685 00827400
+         B     HNDLERR        ISSUE CP MSG OR RETURN TO USER   @VA12685 00827450
+         SPACE 1                                                        00827500
+INVLPTE  DC    X'0008'        INVALID PTE CONSTANT             @VA12685 00827550
+         SPACE 1                                                        00827600
+BADBKST  OI    SWPFLAG,SWPRECMP BACKING STORE UNUSABLE         @VA12685 00827650
          XC    SWPCYL(4),SWPCYL ZEROS PAGE                     @V408246 00828000
-         TM    SAVER2+3,IOERETN    USER WANT TO HANDLE ERROR ??         00829000
+HNDLERR  TM    SAVER2+3,IOERETN USER WANT TO HANDLE ERROR ?    @VA12685 00829500
          ST    R1,SAVER2      RETURN REAL ADDRESS IN GPR2      @V408246 00830000
          BO    SETCC3         YES -- JUST RETURN CC                     00831000
          SPACE 2                                                        00832000
           MSG  'DMKPTR410W CP ENTERED; PAGING ERROR'                    00833000
          CALL  DMKQCNWT,PARM=NORET                                      00834000
+         CALL  DMKCFMBK       PUT USER IN CONSOLE FUNTION MODE @VA09005 00834500
 SETCC3   TM    FFS,X'FF'      SET CC = 3                                00835000
          B     EXIT           AND EXIT TO CALLER                        00836000
          SPACE 2                                                        00837000
@@ -1022,6 +1043,9 @@ EXTPAGE  EQU   *  HERE TO MERGE PAGE INTO FREE STORAGE CHAIN            00931000
          IC    R0,0(R4)       LOAD SIZE OF DMKFREAP (DBL WDS)  @V407594 00953000
          CALL  DMKFREE        GET STORAGE                      @V407594 00954000
          STCM  R1,B'0111',1(R4)  SAVE ITS ADDRESS              @V407594 00955000
+         LA    R0,CPEXSIZE    MUST GET CPEXBLOK TOO            @VA12596 00955100
+         CALL  DMKFREE                                         @VA12596 00955300
+         ST    R1,4(,R4)      PUT CPEX POINTER IN DMKFREAP     @VA12596 00955500
 SKIPAP   DS    0H                                              @V407594 00956000
          LA    R0,CPEXSIZE    GET CPEXBLOK                     @V408246 00957000
          CALL  DMKFREE                                         @V408246 00958000
@@ -1058,14 +1082,22 @@ TSTUSR   DS    0H                                              @V408246 00980000
 *        PART TWO OF SCAN IF NO UNCHANGED PAGES                         00989000
 *                                                                       00990000
 FLLSCN   DS    0H                                              @V408246 00991000
-         LA    R3,CONTST      BRANCH ADDRESS                   @V408246 00992000
-         LM    R6,R9,FULLSCAN  LOAD TBL VALUES FOR BXH SEARCH  @V407594 00993000
+         LA    R2,FULLSCAN    ADDRESS OF FIRST SCAN BLOCK      @VA08341 00991100
+FLLSCN1  LA    R3,CONTST      BRANCH ADDRESS                   @VA08341 00992100
+         LM    R6,R9,0(R2)    LOAD TABLE VALUES FOR BXH SEARCH @VA08341 00993100
+         LTR   R6,R6          TEST IF TABLES HAVE BEEN EXCEEDED@VA11926 00993400
+         BM    SCNEND         YES--BRANCH OUT                  @VA11926 00993700
          L     R1,F4096       CONSTANT TO DECREMENT PAGE ADDR  @V407594 00994000
 TSTFLAG  TM    CORFLAG,255-CORSHARE-CORRSV PICK ANY UNLOCKED   @V408246 00995000
 *                             PAGE                                      00996000
          BZ    TESTCHG        YES, TEST CHANGED                @V408246 00997000
 CONTST   SLR   R6,R1          GET NEXT REAL PAGE ADDRESS       @V407594 00998000
          BXH   R7,R8,TSTFLAG  LET BXH GET NEXT CORETABLE ENTRY @V408246 00999000
+         LA    R2,20(R2)      INCREMENT TO NEXT BLOCK TO SCAN  @VA08341 00999100
+         TM    SCANFLAG,VEQRUNLK HAVE V=R PAGES BEEN UNLOCKED? @VA08341 00999200
+         BO    FLLSCN1        YES, BRANCH TO TRY THOSE PAGES   @VA08341 00999300
+SCNEND   DS    0H                                              @VA11926 00999350
+         L     R2,SAVER2      RESTORE CALLER'S REGISTER 2      @VA08341 00999400
          SR    R13,R13        GO DIRECTLY TO PAGIO AFTER SELECT@V408246 01000000
          CL    R2,F2          CONDITIONAL CALL FROM FREE       @V407594 01001000
          BNE   USERPAGE       NO, NORMAL EXTEND CALL           @V407594 01002000
@@ -1214,8 +1246,10 @@ FREEXIT  MVI   CORFLAG,CORCP  PAGE NOW BELONGS TO CP           @VA05378 01138000
 *     F. OPERATION OF THE PAGE SELECTION ROUTINE -                      01145000
 *        1. IF THERE IS AN ENTRY ON THE FLUSHED PAGE LIST, UNCHAIN IT   01146000
 *           AND GO TO STEP F.8; OTHERWISE, CONTINUE                     01147000
-*        2. SEARCH ALL OF AVAIALABLE PAGEABLE STORAGE FOR A PAGE WITH   01148000
-*           THE HARDWARE 'REFERENCED' BITS = 0                          01149000
+*        2. SEARCH ALL OF AVAILABLE PAGEABLE STORAGE ( IF V=R           01148100
+*           AREA IS UNLOCKED THEN IT WILL BECOME PAGEABLE               01148600
+*           STORAGE ) FOR A PAGE WITH THE HARDWARE 'REFERENCED'         01149100
+*           BITS = 0                                                    01149600
 *        3. IF ONE OR BOTH OF THE 'REFERENCED' BITS ARE SET TO ONE,     01150000
 *           RESET THEM AND CONTINUE SEARCHING PAGEABLE STORAGE          01151000
 *        4. IF STORAGE IS EXHAUSTED BEFORE AN UNREFERENCED PAGE IS      01152000
@@ -1317,9 +1351,12 @@ SELPAG   DS    0H             SELECT NON-REFERENCED PAGE       @V408246 01228000
          XI    TESTFLG+1,CORRSV YES, SEARCH FOR ANY            @V408246 01236000
          B     TSTQSCE        QUIESCE OPP PROC'R IF REQUIRED   @V407594 01237000
 SELPAGA  DS    0H                                              @V408246 01238000
+         NI    SCANFLAG,255-PASSTWO INITIALIZE FLAG TO 1ST PASS@VA08341 01238100
+         MVC   SCANSTRT(2),SCANBLOK STARTING SCAN AT THIS      @VA08341 01238150
+*                             BLOCK OF FRAMES                           01238200
+         LA    R1,CURPNT      LOAD ADDR OF INDEX TO CORETABLE  @VA08341 01238250
          LM    R6,R9,CURPNT   LOAD ALL NEEDED REGISTERS        @V407594 01239000
          L     R2,F4096       VALUE TO DECREMENT PAGE ADDRESS  @V407594 01240000
-         LA    R1,FULLSCAN    SET INDEX REG. FOR 2'ND PASS     @V408246 01241000
          CNOP  0,8            ALIGN FOR PERFORMANCE            @V408246 01242000
 TESTFLG1 L     R15,DMKPTRRF   LOAD COUNT OF STEAL REFS         @VA07751 01243000
          LA    R15,1(R15)     BUMP 1                           @VA07751 01243500
@@ -1328,11 +1365,42 @@ TESTFLG  TM    CORFLAG,255-CORSHARE PAGE AVAILABLE ?           @VA07751 01244500
          BZ    TESTRRB        YES                              @V408246 01245000
 NONZERO  SLR   R6,R2          GET NEXT REAL PAGE ADDRESS       @V407594 01246000
          BXH   R7,R8,TESTFLG1 LET BXLE CALC. NEXT ENTRY        @VA07751 01247100
-         LA    R6,1           INCREMENT                        @V408246 01248000
-         AL    R6,DMKPTRCS    COUNT OF CORE TABLE WRAPS        @V408246 01249000
-         ST    R6,DMKPTRCS                                     @V408246 01250000
-         LM    R6,R9,0(R1)    LOAD NEXT SET OF POINTERS        @V407594 01251000
-         LA    R1,20(,R1)     BUMP INDEX POINTER.              @V408246 01252000
+         LA    R6,TOPPNT      LOAD ADDRESS FOR LAST PART OF    @VA08341 01251100
+*                             COMPLETE SCAN                             01251150
+         CR    R6,R1          DID WE JUST SCAN THIS TOP PART?  @VA08341 01251200
+         BNE   NEXTBLOK       NO--WE ARE NOT DONE YET          @VA08341 01251250
+         LA    R1,20(R1)      ADDRESS OF 'FENCE'               @VA08341 01251300
+         B     PASSONE        GO LOAD NEXT SET OF POINTERS     @VA08341 01251350
+NEXTBLOK LH    R6,SCANBLOK    BLOCK OF FRAMES WE ARE SCANNING  @VA08341 01251400
+         BCTR  R6,0           MOVE ON TO NEXT LOWER BLOCK      @VA08341 01251450
+         C     R6,F1          ARE WE NOW POINTING TO BLOCK 1?  @VA08341 01251500
+         BH    TSTSTART       NO--TEST TO SEE IF WE ARE BACK   @VA08341 01251550
+*                             WHERE WE BEGAN THE SCAN                   01251600
+         BL    SETBLKNO       AT BLOCK '0'--SET TO HIGH BLOCK  @VA08341 01251650
+         TM    SCANFLAG,VEQRUNLK AT BLOCK 1--HAS V=R AREA BEEN @VA08341 01251700
+*                             UNLOCKED?                                 01251750
+         BO    TSTSTART       YES. OK TO SCAN THIS BLOCK.      @VA08341 01251800
+SETBLKNO LA    R6,1           VALUE TO INCREMENT               @VA08341 01251850
+         AL    R6,DMKPTRCS    COUNT OF CORE TABLE WRAPS        @VA08341 01251900
+         ST    R6,DMKPTRCS    UPDATE COUNTER                   @VA08341 01251950
+         LH    R6,SCANNUM     UPDATE BLOCK POINTER TO TOP BLOCK@VA08341 01252000
+TSTSTART STH   R6,SCANBLOK    UPDATE CURRENT BLOCK POINTER     @VA08341 01252050
+         CH    R6,SCANNUM     ARE WE SCANNING TOP BLOCK?       @VA08341 01252100
+         BNE   CALCSTRT       IF NOT, CALCULATE FULLSCAN PTR.  @VA08341 01252150
+         LA    R1,FULLSCAN    START AT FULLSCAN OF TOP BLOCK   @VA08341 01252200
+         B     TST2           TEST FOR END OF FIRST PASS       @VA08341 01252250
+CALCSTRT LH    R15,SCANNUM    NUMBER OF FRAME BLOCKS TO SCAN   @VA08341 01252300
+         SR    R15,R6         SUBTRACT CURRENT BLOCK NUMBER    @VA08341 01252350
+         SR    R14,R14        GET READY FOR MULTIPLY           @VA08341 01252400
+         M     R14,F20        20 BYTES FOR EACH FULLSCAN ENTRY @VA08341 01252450
+         LA    R1,FULLSCAN(R15) POINT TO CURRENT FULLSCAN ENTRY@VA08341 01252500
+TST2     CH    R6,SCANSTRT    IS THIS THE BLOCK WE STARTED THE @VA08341 01252550
+*                             SCAN ON?                                  01252600
+         BNE   PASSONE        NO--STILL ON THE FIRST PASS      @VA08341 01252650
+         TM    SCANFLAG,PASSTWO HAVE WE COMPLETED TWO PASSES?  @VA08341 01252700
+         BO    DOTOP          YES--DO TOP SCAN                 @VA08341 01252750
+         OI    SCANFLAG,PASSTWO INDICATE NOW ON 2ND FULL PASS  @VA08341 01252800
+PASSONE  LM    R6,R9,0(R1)    LOAD NEXT SET OF POINTERS        @VA08341 01252850
          LTR   R6,R6          TEST IF TABLES HAVE BEEN EXCEEDED@V408246 01253000
          BP    TESTFLG1       LOOK AGAIN THRU THE LIST         @VA07751 01254100
          XI    TESTFLG+1,CORRSV ALLOW SELECTION OF RESERVED    @V408246 01255000
@@ -1348,6 +1416,11 @@ TSTQSCE  TM    APSTAT1,APUOPER  RUNNING IN AP MODE             @V407594 01258000
          MVI   TEMPR0+1,OPPRSTRT  MUST RESTART OTHER PROC'R    @V407594 01264000
 .NOAP9   ANOP                                                  **ANOP** 01264100
          B     SELPAGA        MAY NOW SELECT ANY AVAILABLE PG  @V407594 01265000
+         SPACE                                                          01265100
+DOTOP    LA    R1,TOPPNT      LOAD ADDRESS FOR LAST PART OF    @VA08341 01265150
+*                             COMPLETE SCAN                             01265200
+         B     PASSONE        GO LOAD NEXT SET OF POINTERS     @VA08341 01265250
+         SPACE                                                          01265300
          ABEND 7              SO- VERY-SORRY (NO PAGES)        @V408246 01266000
          CNOP  0,8            ALIGN FOR PERF.                  @V408246 01267000
 TESTRRB  DS    0H                                              @V408246 01268000
@@ -1410,6 +1483,7 @@ TSTRRB2  DS    0D             1ST KEY 0, CHECK 2ND KEY         @V408246 01317000
          BALR  R15,R0         CHANGE C.C.                      @V408246 01321000
          TM    SWPFLAG,SWPREF1+SWPREF2 CHECK BACK-UP BITS      @V408246 01322000
          BNZ   STKEY2+4       PAGE REF'ED DON'T SELECT         @V408246 01323000
+         OR    R14,R15        SAVE FOR CHANGED PAGE TEST       @VA09279 01323100
          AIF   (NOT &AP).NOAP12                                **AIF*** 01323900
          TM    TEMPR0,NOSTEAL  CAN WE SELECT PAGE              @V407594 01324000
          BO    NONZERO        NO, ACCESS NEXT PAGE FRAME       @V407594 01325000
@@ -1421,29 +1495,99 @@ TSTRRB2  DS    0D             1ST KEY 0, CHECK 2ND KEY         @V408246 01317000
          SLL   R0,3           TIMES 8 FOR ENTRY LENGTH         @V407594 01331000
          LR    R3,R5          PT TO SWAP TBL ENTRY             @V407594 01332000
          SLR   R3,R0          PT TO SWAP TBL HDR               @V407594 01333000
-         TM    SWPFLAG2-SWPTABLE(R3),SWPAPP  PAGE OWNED BY AP  @V407594 01334000
+         LR    R15,R3         SWAP TABLE HEADER                @VA09279 01333100
+         S     R15,=A(PAGTSWP) BACK UP TO PAGE TABLE HEADER    @VA09279 01333150
+         L     R15,PAGSHR-PAGTABLE(R15) ADDRESS OF SHARETABLE  @VA09279 01333200
+         TM    SHRFLAG-SHRTABLE(R15),SHRNOPRT IS SHARED PAGE   @VA09279 01333250
+*                             UNPROTECTED?                              01333300
+         BO    STEALSHR       YES--OK TO STEAL IT              @VA09279 01333350
+*        IF PROTECTED SHARED PAGE, DETERMINE IF FRAME IS                01333400
+*        OWNED BY THIS PROCESSOR                                        01333450
+         TM    SWPFLAG2-SWPTABLE(R3),SWPAPP 2ND SET OF TABLES? @V60B7AA 01334100
          BO    SHPGAP         YES                              @V407594 01335000
-         TM    APSTAT1,PROCIO  IS THIS MAIN PROC'R             @V407594 01336000
+         TM    APSTAT1,PROCIPL IS THIS THE MAIN (IPL) PROC?    @V60B7AA 01336100
          BO    STEALSHR       YES, STEAL PAGE                  @V407594 01337000
          B     NONZERO        ON AP, PG OWNED BY MAIN PROC'R   @V407594 01338000
-SHPGAP   TM    APSTAT1,PROCIO  IS THIS AP                      @V407594 01339000
+SHPGAP   TM    APSTAT1,PROCIPL IS THIS NON-IPL PROCESSOR?      @V60B7AA 01339100
          BO    NONZERO        NO- ON MAIN PROC'R, AP PAGE      @V407594 01340000
 STEALSHR DS    0H                                              @V407594 01341000
 .NOAP12  ANOP                                                  **ANOP** 01341100
-         OR    R14,R15        SAVE FOR CHANGED PAGE TEST       @V408246 01342000
-         TM    CORFLAG,CORSHARE  IS THIS A SHARED FRAME        @V60BC11 01342100
-         BZ    STEALSH1       NO, CONTINUE PROCESSING          @V60BC11 01342200
-         SPM   R14            IS THIS A CHANGED SHARED PAGE?   @V60BC11 01342300
-         BNZ   NONZERO        YES, CHECK NEXT CORTABLE ENTRY   @V60BC11 01342400
-STEALSH1 DS    0H                                              @V60BC11 01342500
+         TM    CORFLAG,CORSHARE SHARED PAGE?                   @VA09279 01342150
+         BZ    STEALSH1       NO, STEAL IT                     @VA09279 01342175
+         SPM   R14            CHECK FOR CHANGED SHARED PAGE    @VA09279 01342200
+         BC    8+2,STEALSH1   IF UNCHANGED, STEAL IT           @VA09279 01342225
+*        CHECK TO SEE IF CHANGED SHARED PAGE IS UNPROTECTED             01342250
+         SLR   R0,R0          ZERO REG FOR INSERT              @VA09279 01342275
+         IC    R0,SWPVPAGE    VIRTUAL PAGE NUMBER              @VA09279 01342300
+         ALR   R0,R4          ADD ONE FOR SWAP TABLE HEADER    @VA09279 01342325
+         SLL   R0,3           MULTIPLY BY 8 FOR ENTRY LENGTH   @VA09279 01342350
+         LR    R15,R5         SWAP TABLE ENTRY ADDRESS         @VA09279 01342375
+         SLR   R15,R0         POINT TO SWAP TABLE HEADER       @VA09279 01342400
+         S     R15,=A(PAGTSWP) ADDRESS OF PAGE TABLE HEADER    @VA09279 01342425
+         L     R15,PAGSHR-PAGTABLE(R15) SHARETABLE ADDRESS     @VA09279 01342450
+         TM    SHRFLAG-SHRTABLE(R15),SHRNOPRT IS SHARED PAGE   @VA09279 01342475
+*                             UNPROTECTED?                              01342500
+         BZ    NONZERO        DON'T STEAL PROTECTED SHARED PAGE@VA09279 01342525
+*                             IF UNPROTECTED, STEAL EVEN IF    @VA09279 01342550
+*                             CHANGED                                   01342575
+STEALSH1 DS    0H                                              @VA09279 01342600
          LR    R0,R6          SAVE REAL STORAGE ADDRESS        @V408246 01343000
          LR    R1,R7          SAVE CURRENT CORETABLE ENTRY     @V408246 01344000
          SLR   R0,R2          DECREMENT REAL ADDR BY ONE PAGE  @V407594 01345000
          AR    R1,R8          DECREMENT CURRENT CORETABLE      @V408246 01346000
          STM   R0,R1,CURPNT   SAVE THE 'NEW' CURRENT POINTER   @V408246 01347000
          ST    R1,TOPPNT+12   ALSO SAVE IT HERE.               @V408246 01348000
+         CLC   SCANBLOK(2),SCANSTRT IS FRAME IN THE CURRENT    @VA08341 01348100
+*                             BLOCK?                                    01348150
+         BE    EXTSRCH        YES--OTHER POINTERS ARE OK       @VA08341 01348200
+         LH    R0,SCANBLOK    POINTER TO CURRENT BLOK OF FRAMES@VA08341 01348250
+         LH    R1,SCANNUM     NO. OF BLOCKS AVAILABLE TO SCAN  @VA08341 01348300
+         SR    R1,R0          START TO CALCULATE CURRENT       @VA08341 01348350
+*                             BLOCK'S FULLSCAN ENTRY                    01348400
+         SR    R0,R0          GET READY FOR MULTIPLY           @VA08341 01348450
+         M     R0,F20         20 BYTES PER FULLSCAN ENTRY      @VA08341 01348500
+         LA    R1,FULLSCAN(R1) CURRENT BLOCK'S FULLSCAN ENTRY  @VA08341 01348550
+         MVC   CURPNT+12(4),12(R1) UPDATE CURPNT ADDRESSES     @VA08341 01348600
+         MVC   TOPPNT(8),0(R1) UPDATE TOPPNT ADDRESSES         @VA08341 01348650
 EXTSRCH  DS    0H                                              @V408246 01349000
          DROP  R11                                             @V408246 01350000
+         AIF   (NOT &AP).NOAP12A                               **AIF*** 01350025
+         TM    APSTAT1,APUOPER IN AP MODE?                     @VA09279 01350040
+         BZ    STEALSH2       NO, BYPASS UNPROTECTED CHECK     @VA09279 01350055
+         TM    CORFLAG,CORSHARE SHARED PAGE?                   @VA09279 01350070
+         BZ    STEALSH2       NO -- NO NEED FOR QUIESCE        @VA09279 01350085
+         SLR   R0,R0                                           @VA09279 01350100
+         IC    R0,SWPVPAGE    GET PAGE NUMBER                  @VA09279 01350115
+         SLL   R0,1           MULTIPLY BY 2 FOR PTE SIZE       @VA09279 01350130
+         L     R1,CORPGPNT    PAGE TABLE ENTRY ADDRESS         @VA09279 01350145
+         SLR   R1,R0          BACK UP TO START OF PAGE TABLE   @VA09279 01350160
+         SL    R1,F16         BACK UP TO PAGE TABLE HEADER     @VA09279 01350175
+         L     R1,PAGSHR-PAGTABLE(,R1) GET SHRTABLE ADDRESS    @VA09279 01350190
+         TM    SHRFLAG-SHRTABLE(R1),SHRNOPRT UNPROTECTED?      @VA09279 01350205
+         BZ    STEALSH2       NO -- NO QUIESCE NECESSARY       @VA09279 01350220
+         L     R1,PREFIXA     ACCESS ABSOLUTE PSA              @VA09279 01350235
+         CLI   XTNDLOCK-PSA(R1),0  SYSTEM EXTENDING?           @VA09279 01350250
+         BNE   STEALSH2       YES--BYPASS QUIESCE              @VA09279 01350265
+         TM    TEMPR0+1,OPPRSTRT HAS OTHER PROCESSOR ALREADY   @VA09279 01350280
+*                             BEEN QUIESCED?                            01350295
+         BO    SETPTLB        YES -- CONTINUE                  @VA09279 01350310
+         LR    R9,R14         SAVE R14 CONTENTS                @VA09279 01350325
+         SIGNAL QUIESCE,CONTROL=SERIAL                         @VA09279 01350340
+         LR    R14,R9         SAVE FOR CHANGED PAGE TEST       @VA09279 01350355
+         MVI   TEMPR0+1,OPPRSTRT REMEMBER TO RESUME OTHER PROC.@VA09279 01350370
+SETPTLB  TM    TESTFLG+1,CORRSV PHASE ONE?                     @VA09279 01350385
+         BO    OTHRPTLB       IF PHASE ONE, TELL OTHER PROC    @VA09279 01350400
+*                             TO DO PTLB. THIS PROC. WILL BE            01350415
+*                             MARKED FOR PTLB AT OWNSHR.                01350430
+*        HERE IF NOT PHASE 1                                            01350445
+         TM    APSTAT1,PROCIPL IS THIS THE MAIN (IPL) PROC?    @V60B7AA 01350465
+         BO    OTHRPTLB       YES -- TELL OTHER PROC TO PTLB   @VA09279 01350475
+         OI    APSTAT2,CPPTLBR THIS PROC MUST PURGE TLB        @VA09279 01350490
+         B     STEALSH2       CONTINUE WITH STEAL              @VA09279 01350505
+OTHRPTLB L     R1,PREFIXB     ADDRESS OF OTHER PSA             @VA09279 01350520
+         OI    APSTAT2-PSA(R1),CPPTLBR TELL OTHER PROC TO PTLB @V60B7AA 01350540
+STEALSH2 DS    0H                                              @VA09279 01350550
+.NOAP12A ANOP                                                  **ANOP** 01350565
          L     R15,CORFPNT    PAGES OWNER                      @V408246 01351000
          USING VMBLOK,R15                                      @V408246 01352000
          L     R9,CORPGPNT    PICK-UP PTE POINTER              @V408246 01353000
@@ -1476,18 +1620,34 @@ PNTSTL   DS    0H                                              @V408246 01363000
          SLL   R0,3           TIMES 8                          @V407594 01379000
          LR    R2,R5          SWAP TBL ENTRY                   @V407594 01380000
          SR    R2,R0          PT TO SWPTBL HEADER              @V407594 01381000
-         TM    SWPFLAG2-SWPTABLE(R2),SWPAPP  AP PAGE           @V407594 01382000
+         TM    SWPFLAG2-SWPTABLE(R2),SWPAPP 2ND SET OF TABLES? @V60B7AA 01382100
          BO    PURAP          YES                              @V407594 01383000
-         TM    APSTAT1,PROCIO IS THIS MAIN PROCESSOR           @V407594 01384000
+         TM    APSTAT1,PROCIPL IS THIS THE MAIN (IPL) PROC?    @V60B7AA 01384100
          BO    OWNSHR         ON CPU- CPU PAGE                 @V407594 01385000
 OTHSHR   L     R2,PREFIXB     PURGE OTHER LOOKASIDE BUFFER     @V407594 01386000
          OI    APSTAT2-PSA(R2),CPPTLBR  SET PTLB REQUIRED      @V407594 01387000
+         L     R2,RUNUSER-PSA(R2) ACCESS RUNUSER FOR OTHER     @VA08621 01387100
+*                             PROCESSOR                                 01387200
+         NI    VMDSTAT-VMBLOK(R2),X'FF'-VMDSP NO FAST DISPATCH @VA08621 01387300
+*              NOW THE OTHER PROCESSOR SHOULD BE QUIESCED AT THIS TIME  01387400
          B     CKRSV          CHECK FOR RESERVED PG            @V407594 01388000
 PURAP    DS    0H             PAGE OWNED BY AP                 @V407594 01389000
-         TM    APSTAT1,PROCIO MAIN PROCESSOR                   @V407594 01390000
+         TM    APSTAT1,PROCIPL MAIN (IPL) PROCESSOR?           @V60B7AA 01390100
          BO    OTHSHR         ON CPU- AP PAGE                  @V407594 01391000
 .NOAP13  ANOP                                                  **ANOP** 01391100
 OWNSHR   OI    APSTAT2,CPPTLBR  SET PTLB REQUIRED              @V407594 01392000
+         CLC   RUNUSER,ASYSVM IS RUNUSER SYSTEM                @VA08621 01392100
+         BE    CKRSV          YES, BRANCH                      @VA08621 01392150
+         TM    APSTAT1,APUOPER RUNNING AS AP                   @VA08621 01392200
+         BZ    RESETDSP       NO                               @VA08621 01392250
+         CLC   RUNUSER,LASTUSER RUNUSER STILL LOCKED           @VA08621 01392300
+         BE    RESETDSP       YES, OK TO RESET VMDSP           @VA08621 01392350
+         NI    APSTAT2,X'FF'-CPPTLBR RESET PTLB REQUIRED       @VA08621 01392400
+         PTLB                 DO IT NOW                        @VA08621 01392450
+         B     CKRSV                                           @VA08621 01392500
+RESETDSP DS    0H                                              @VA08621 01392550
+         L     R2,RUNUSER     NO FAST REDISPATCH FOR HIM       @VA08621 01392600
+         NI    VMDSTAT-VMBLOK(R2),X'FF'-VMDSP                  @VA08621 01392650
          B     CKRSV          CHECK FOR RESERVED PAGE          @V408246 01393000
 CKPG0    DS    0H                                              @V408246 01394000
          CL    R15,ASYSVM     IS THIS SYSTEM PAGE (NON-SHARED) @V407594 01395000
@@ -1543,6 +1703,20 @@ CKCHGE   DS    0H                                              @V408246 01433000
 CKCHGE2  DS    0H                                              @V407594 01440000
 .NOAP15  ANOP                                                  **ANOP** 01440100
          OI    CORFLAG,CORFLUSH FLAG PAGE SELECTED             @V408246 01441000
+         AIF   (NOT &AP).NOAP15A                               **AIF*** 01441050
+         TM    TEMPR0+1,OPPRSTRT WAS OTHER PROCESSOR QUIESCED? @VA09279 01441100
+         BZ    CKCHGE3        NO--WE DON'T HAVE TO WORRY ABOUT @VA09279 01441150
+*                             CHANGE BITS HAVING BEEN CHANGED           01441200
+         RRB   0(R6)          TEST FIRST HALF OF PAGE--PAGE    @VA09279 01441250
+*                             MAY HAVE BEEN CHANGED BY OTHER            01441300
+*                             PROCESSOR IF STEALING UNPROTECTED         01441350
+*                             SHARED PAGE                               01441400
+         BC    4+1,BCHNGE     REAL KEY WAS CHANGED             @VA09279 01441450
+         RRB   2048(R6)       TEST SECOND HALF OF PAGE         @VA09279 01441500
+         BC    4+1,BCHNGE     REAL KEY WAS CHANGED             @VA09279 01441550
+         B     CKBKUP         TEST BACK-UP BITS                @VA09279 01441600
+CKCHGE3  DS    0H                                              @VA09279 01441650
+.NOAP15A ANOP                                                  **ANOP** 01441700
          SPM   R14            CHECK FOR CHANGED PAGE C.C.      @V408246 01442000
          BC    4+1,BCHNGE     REAL KEYS WERE CHANGED           @V408246 01443000
 CKBKUP   DS    0H                                              @V408246 01444000
@@ -1645,17 +1819,18 @@ CHKDSD   DS    0H                                              @V408246 01566000
          AR    R3,R4          PLUS ONE                         @VA07810 01574055
          ST    R3,DMKPTRUC    STORE NEW COUNT                  @VA07810 01574060
          TM    CORFLAG,CORSHARE    SHARED PAGE                 @VA07717 01574100
-         BO    SELEXIT        YES                              @VA07717 01574150
+         BO    SELEXIT1       YES                              @VA09179 01574151
          LH    R3,VMFLPAG-VMBLOK(R11)  FLUSHED PAGE COUNT      @VA07922 01574210
          AR    R3,R4          PLUS ONE                         @VA07717 01574250
          STH   R3,VMFLPAG-VMBLOK(R11)                          @VA07922 01574310
-         CL    R13,F2       ENTERED BY CPEXBLOK                @VA07922 01574360
+SELEXIT1 CL    R13,F2         ENTERED BY CPEXBLOK              @VA09179 01574361
          BNH   SELDISP        YES, EXIT TO DMKPAG              @VA07922 01574410
          CHARGE SWITCH,SAVER11     BACK TO CALLER              @VA07922 01574460
          B     SELEXIT        AND LEAVE                        @V408246 01575000
 *                                                                       01576000
 SETADDR  DS    0H                                              @V408246 01577000
          ST    R1,SWPCYL      SAVE BACKING STORE ADDRESS       @V408246 01578000
+         NI    SWPFLAG,X'FF'-SWPRECMP  TURN OFF SWAPRECMP      @VA09460 01578500
          EJECT                                                          01579000
 QWRITE   EQU   *  HERE TO SWAP THE PAGE                                 01580000
 * GET CPEXBLOK BEFORE UPPING COUNTS SO THAT AN EXTEND ON THIS FREE CALL 01581000
@@ -2085,8 +2260,20 @@ RSPGVL   DS    0H                                              @V408246 01974000
          TM    CORFLAG,CORSHARE  SHARED PAGE FRAME?            @V4M0167 01999000
          BZ    RSSCHG         NO, CHECK CHANGED                @V4M0167 02000000
          SPM   R14            CHECK FOR SHARED AND CHANGED     @V4M0167 02001000
-         BC    4+1,RSCHGSHR   YES, LEAVE FOR DMKVMA            @V4M0172 02002000
-         L     R2,DMKPTRSC    YES, DECREMENT                   @V4M0167 02003000
+         BC    8+2,RSNOCHG    PAGE NOT CHANGED                 @VA09279 02002100
+         SLR   R15,R15        CLEAR REG FOR INSERT             @VA09279 02002200
+         IC    R15,SWPVPAGE   VIRTUAL PAGE NUMBER              @VA09279 02002300
+         SLL   R15,1          MULTIPLY BY 2 FOR PTE SIZE       @VA09279 02002400
+         L     R2,CORPGPNT    PAGE TABLE ENTRY ADDRESS         @VA09279 02002500
+         SLR   R2,R15         BACK UP TO START OF PAGE TABLE   @VA09279 02002600
+         SL    R2,F16         BACK UP TO PAGE TABLE HEADER     @VA09279 02002700
+         L     R2,PAGSHR-PAGTABLE(,R2) SHARETABLE POINTER      @VA09279 02002800
+         TM    SHRFLAG-SHRTABLE(R2),SHRNOPRT  IS SHARED PAGE   @VA09279 02002900
+*                             UNPROTECTED?                              02003000
+         BZ    RSCHGSHR       PAGE IS SHARED, CHANGED,         @VA09279 02003100
+*                             PROTECTED--LEAVE FOR DMKVMA               02003200
+RSNOCHG  L     R2,DMKPTRSC    FRAME IS UNCHANGED, OR FRAME IS  @VA09279 02003300
+*                             CHANGED AND UNPROTECTED                   02003400
          SR    R2,R4          RESIDENT SHARED PAGE COUNT       @V4M0167 02004000
          ST    R2,DMKPTRSC    STORE UPDATED COUNT              @V4M0167 02005000
 RSSCHG   DS    0H                                              @V4M0167 02006000
@@ -2216,6 +2403,8 @@ DMKPTRPW RELOC                                                 @V408246 02071420
          LR    R10,R12        SET SECOND BASE                  @VA08037 02071440
          A     R10,F4096      .........                        @VA08037 02071460
          USING DMKPTR,R12,R10                                  @VA08037 02071480
+         CL    R11,ASYSVM     ENTERED FOR SYSTEM VMBLOK?       @VA08341 02071485
+         BE    EXITA          YES, ALL DONE                    @VA08341 02071490
 PTRPWEP  DS    0H                                              @V408246 02071500
          TM    VMRSTAT,VMPGWAIT ALL QUIET?                     @V408246 02071520
          BNZ   CHKSTK         NO                               @V408246 02071540
@@ -2338,13 +2527,18 @@ DMKPTRRC DC    F'0'           NUMBER OF RESIDENT, RESERVED PAGES        02121000
 DMKPTRCP EQU   *              TABLE IS SET UP BY DMKCPI        @V408246 02124000
 *        THE FOLLOWING DC CONTAINS POINTERS TO INDEX INTO THE CORETBL   02125000
 *CURPNT  DC    A(REAL STORAGE ADDR),A(CUR CORETBL ENTRY),A(INDEX CONT)  02126000
-*        DC    A(LOWEST PAGEABLE CORETBL ENTRY),A(INCREMENT)            02127000
+*        DC    A(LOWEST PAGEABLE CORETBL ENTRY THIS BLOK),A(INCREMENT)  02127100
 CURPNT   DC    A(0),A(0),A(-16),A(0),A(4096)                   @V408246 02128000
          SPACE 1                                                        02129000
-*FULLSCAN DC   A(ADDR. OF HIGHEST PAGEABLE PAGE),A(HIGH CORETBL ENTRY)  02130000
+FULLSCAN EQU   *              START OF FULLSCAN TABLE          @VA08341 02130100
+*FULSCAN2 DC   A(ADDR. OF HIGHEST PAGEABLE PAGE),A(HIGH CORETBL ENTRY)  02130150
 *        DC    A(INDEX CONST.),A(FIRST PAGEABLE CORETBL ENTRY),A(INCRE) 02131000
-FULLSCAN DC    A(0),A(0),A(-16),A(0),A(4096)                   @V408246 02132000
-*TOPPNT  DC    A(ADDR. HIGHEST PAGEABLE PAGE),A(HIGHEST CORETBL ENTRY)  02133000
+FULSCAN2 DC    A(0),A(0),A(-16),A(0),A(4096)                   @VA08341 02131100
+*FULSCAN1 DC   A(ADDR. OF HIGHEST V=R PAGE),A(HIGH V=R CORETBL ENTRY)   02131200
+*        DC    A(INDEX CONST.),A(1ST V=R CORETBL ENTRY),A(INCRE)        02131300
+FULSCAN1 DC    A(0),A(0),A(-16),A(0),A(4096)                   @VA08341 02131400
+*TOPPNT  DC    A(ADDRESS HIGHEST PAGEABLE PAGE THIS BLOK),              02133100
+*        DC    A(HIGHEST CORETBL ENTRY THIS BLOK),                      02133200
 *        DC    A(INDEX CONST),A(CURRENT CORETBL ENTRY),A(INCREMENT)     02134000
          SPACE 1                                                        02135000
 TOPPNT   DC    A(0),A(0),A(-16),A(0),A(4096)                   @V408246 02136000
@@ -2354,6 +2548,19 @@ DMKPTRCT DC    F'0'           TOTAL CALLS TO DMKPTR                     02139000
 DMKPTRSC DC    F'0'           TOTAL RESIDENT SHARED PAGES               02140000
 *                                                                       02141000
 DMKPGSHR DC    2A(DMKPGSHR)   ANCHOR FOR SCHRTABLES            @V408246 02142000
+DMKPTRSN EQU   *                                               @VA08341 02142100
+SCANNUM  DC    H'0'           NUMBER OF FRAME BLOCKS AVAILABLE @VA08341 02142150
+*                             FOR SCAN                                  02142200
+SCANBLOK DC    H'0'           NUMBER OF BLOCK CURRENTLY BEING  @VA08341 02142250
+*                             SCANNED                                   02142300
+SCANSTRT DC    H'0'           NUMBER OF BLOCK WHERE CURRENT    @VA08341 02142350
+*                             SCAN STARTED                              02142400
+SCANFLAG DC    X'0'           FLAGS FOR SCAN PROCESS           @VA08341 02142450
+PASSTWO  EQU   X'80'          SCAN IS NOW ON 2ND FULL PASS     @VA08341 02142500
+*                             THROUGH THE BLOCKS OF FRAMES              02142550
+VEQRUNLK EQU   X'40'          V=R AREA HAS BEEN UNLOCKED BY THE@VA08341 02142600
+*                             OPERATOR AND IS AVAILABLE TO THE          02142650
+*                             SCAN PROCESS                              02142700
          EJECT                                                          02143000
          LTORG                                                          02144000
          SPACE 2                                                        02145000
