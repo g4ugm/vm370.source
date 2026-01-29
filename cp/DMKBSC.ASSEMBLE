@@ -1,0 +1,583 @@
+BSC      TITLE 'DMKBSC     (CP)        VM/370 - RELEASE 6'              00001000
+         ISEQ  73,80          VALIDATE INPUT SERIALIZATION     @V2D3931 00002000
+         COPY  OPTIONS                                         @V2D3931 00003000
+         EJECT                                                          00004000
+**************************************************************          00005000
+*.                                                                      00006000
+* MODULE NAME -                                                         00007000
+*                                                                       00008000
+*        DMKBSC                                                         00009000
+*                                                                       00010000
+* FUNCTION -                                                            00011000
+*                                                                       00012000
+*        TO EXAMINE THE ERROR CONDITION RESULTING FROM A UNIT CHECK     00013000
+*        OR CHANNEL ERROR WHILE EXECUTING A CP GENERATED BISYNC         00014000
+*        LINE CHANNEL PROGRAM. IF THE ERROR CONDITION IS                00015000
+*        UNCORRECTABLE A CALL WILL BE ISSUED TO THE MESSAGE WRITER      00016000
+*        (DMKMSW) FOR OPERATOR AWARENESS. ON REGAINING CONTROL FROM     00017000
+*        DMKMSW THE ORIGINAL CHANNEL PROGRAM IS TERMINATED AND THE      00018000
+*        FATAL FLAG IS SET IN THE IOBLOK. OTHERWISE, THE CHANNEL        00019000
+*        PROGRAM IS RE-EXECUTED AGAIN, UP TO A MAXIMUN OF 7 RETRYS.     00020000
+*        ALSO STATISTICAL DATA COUNTERS WILL BE UPDATED.                00020100
+*                                                                       00021000
+* ATTRIBUTES -                                                          00022000
+*                                                                       00023000
+*        SERIALLY REUSEABLE, RESIDENT, ENTERED VIA SVC                  00024000
+*                                                                       00025000
+* ENTRY CONDITIONS -                                                    00026000
+*                                                                       00027000
+*        GR 13 = ADDRESS OF SAVE AREA                                   00028000
+*        GR 12 = ADDRESS OF DMKBSCER                                    00029000
+*        GR 11 = ADDRESS OF A VALID VMBLOK                              00030000
+*        GR 10 = ADDRESS OF IOBLOK                                      00031000
+*        GR  8 = ADDRESS OF THE LINE RDEVBLOK                           00032000
+*                                                                       00033000
+* EXIT CONDITIONS -                                                     00034000
+*                                                                       00035000
+*        1. WHEN RETRY IS POSSIBLE:                                     00036000
+*            IOBFLAG=IOBRSTRT                                           00037000
+*            IOBRCAW=ADDRESS OF RESTART CCW STRING                      00038000
+*        2. WHEN RETRY IS NOT POSSIBLE:                                 00039000
+*            IOBFLAG=IOBFATAL                                           00040000
+*                                                                       00041000
+* CALLS TO OTHER ROUTINES -                                             00042000
+*                                                                       00043000
+*        DMKMSWR  - TO PROVIDE OPERATOR COMMUNICATION                   00044000
+*        DMKFREE  - TO ALLOCATE FREE STORAGE FOR WORK AREA              00045000
+*        DMKFRET  - TO RELEASE STORAGE USED FOR WORK AREA               00046000
+*        DMKIOEST  - TO UPDATE STATISTICAL DATA COUNTERS                00046100
+*                                                                       00047000
+* EXTERNAL REFERENCES -                                                 00048000
+*                                                                       00049000
+*        NONE                                                           00050000
+*                                                                       00051000
+* TABLES / WORK AREAS -                                                 00052000
+*                                                                       00053000
+*        NONE                                                           00054000
+*                                                                       00055000
+* REGISTER USAGE -                                                      00056000
+*                                                                       00057000
+*        GR0-6 WORK REGISTERS                                           00058000
+*        GR  7 = IOERBLOK ADDRESS                                       00059000
+*        GR  8 = RDEVBLOK ADDRESS                                       00060000
+*        GR 10 = IOBLOK ADDRESS                                         00061000
+*        GR 11 = VMBLOK ADDRESS                                         00062000
+*        GR 12 = MODULE BASE REGISTER                                   00063000
+*        GR 13 = SAVE AREA ADDRESS                                      00064000
+*        GR14-15 LINKAGE REGISTERS                                      00065000
+*                                                                       00066000
+* NOTES -                                                               00067000
+*                                                                       00068000
+*        NONE                                                           00069000
+*                                                                       00070000
+* OPERATION -                                                           00071000
+*                                                                       00072000
+*     I. SETUP ADDRESSABILITY FOR THE BISYNC ERP                        00073000
+*                                                                       00074000
+*        1. DETERMINE IF THIS IS THE FIRST TIME ENTERING BSC ERP        00075000
+*           MODULE FOR THIS BISYNC LINE.                                00076000
+*                                                                       00077000
+*           A. IF RDEVIOER FIELD IS ZERO, SAVE THE IOERBLOK ADDRESS IN  00078000
+*              RDEVIOER, CLEAR RETRY COUNT AND FLAGS TO ZERO (IOBRCNT)  00079000
+*              AND GET STORAGE FOR THE RESTART CCWS USED BY ERP.        00080000
+*                                                                       00081000
+*        2. UPDATE THE RETRY COUNT BY ONE AND TEST FOR CHANNEL          00082000
+*           ERROR IN THE ORIGINAL IOERBLOK CSW FIELD AND IN THE         00083000
+*           CURRENT IOERBLOK CSW FIELD. IF CHANNEL ERROR IS INDICATED,  00084000
+*           SEND ERROR MESSAGE TO SYSTEM OPERATOR IF IT'S NOT CHANNEL   00085000
+*           DATA CHECK,SET IOBFATAL FLAG AND EXIT TO DMKIOS. IF         00086000
+*           CHANNEL DATA CHECK IS INDICATED, RETRY THE OPERATION        00087000
+*           SEVEN TIMES BEFORE INDICATING FATAL CONDITION.              00088000
+*                                                                       00089000
+*        3. IF THERE IS NOT A CURRENT IOERBLOK POINTER AFTER HANDLING   00090000
+*           THE ORIGINAL IOERBLOK, ASSUME THE BISYNC LINE ERROR HAS     00091000
+*           BEEN CORECTED AND RETURN TO DMKIOS.                         00092000
+*                                                                       00093000
+*    II. ANALYZE THE CSW FOR A CHANNEL CONDITION (MSG. NO. DMKBSC520)   00094000
+*                                                                       00095000
+*        1. FOR CHANNEL INTERFACE AND CONTROL CHECK, SEND ERROR MESSAGE 00096000
+*           TO SYSTEM OPERATOR.                                         00097000
+*                                                                       00098000
+*        2. FOR CHANNEL DATA CHECK, RETRY THE OPERATION SEVEN TIMES     00099000
+*           BEFORE INDICATING FATAL CONDITION AND SENDING A MESSAGE     00100000
+*           TO THE SYSTEM OPERATOR.                                     00101000
+*                                                                       00102000
+*           WRITE OPERATION -                                           00103000
+*           . ANY WRITE EXECPT WRITE TEXT, RETRY THE FAILING CCW.       00104000
+*                                                                       00105000
+*           READ OPERATION -                                            00106000
+*           . FOR READ RESPONSE, GENERATE A CHANNEL PROGRAM TO          00107000
+*             WRITE ENQ TO THE STATION AND TRANSFER CONTROL TO THE      00108000
+*             FAILING READ CCW.                                         00109000
+*                                                                       00110000
+*           . FOR READ TEXT OR DATA, GENERATE A CHANNEL PROGRAM TO      00111000
+*             WRITE NAK TO THE STATION AND TRANSFER CONTROL TO THE      00112000
+*             FAILING READ CCW.                                         00113000
+*                                                                       00114000
+*     III.  ANALYZE THE CSW FOR A UNIT CHECK CONDITION                  00115000
+*                                                                       00116000
+*        ACTION 1                                                       00117000
+*                                                                       00118000
+*        SEND ERROR MESSAGE TO SYSTEM OPERATOR AND INDICATE             00119000
+*        FATAL CONDITION ON BISYNC LINE.                                00120000
+*                                                                       00121000
+*        ACTION 2                                                       00122000
+*                                                                       00123000
+*        HANDLE FAILING READ CCW                                        00124000
+*        . FOR READ RESPONSE, GENERATE A CHANNEL PROGRAM TO WRITE       00125000
+*          ENQ TO THE STATION AND TRANSFER CONTROL TO THE FAILING       00126000
+*          READ CCW.                                                    00127000
+*                                                                       00128000
+*        . FOR READ TEXT OR DATA, GENERATE A CHANNEL PROGRAM TO WRITE   00129000
+*          NAK TO THE STATION AND TRANSFER CONTROL TO THE FAILING       00130000
+*          READ CCW.                                                    00131000
+*                                                                       00132000
+*        ACTION 3                                                       00133000
+*                                                                       00134000
+*        . RETRY FAILING CCW UNTIL RETRY COUNT REACHED 7                00135000
+*                                                                       00136000
+*        . IF 3275 SWITCHED AND A TIMEOUT CONDITION OCCURS:             00136100
+*          IF WRITE RESET CCW GO RETRY.                                 00136200
+*          IF WRITE CONTINUE OR READ CONTINUE ISSUE ERROR MSG.          00136300
+*          IF READ CCW RETRY THE OPERATION 7 TIMES.                     00136400
+*                                                                       00136500
+*     PRIORITY  CONDITION            STATUS BIT ACTION                  00137000
+*     ________  _________            __________ ______                  00138000
+*                                                                       00139000
+*     1         EQUIPMENT CHECK      3          ACTION 1                00140000
+*     2         LOST DATA            6          ACTION 2                00141000
+*     3         TIME OUT             7          ACTION 2 & 3            00142000
+*     4         INTERVENTION REQ.    1          ACTION 1 & 2            00143000
+*     5         BUS OUT CHECK        2          ACTION 3                00144000
+*     6         DATA CHECK           4          ACTION 2                00145000
+*     7         OVERRUN              5          ACTION 2                00146000
+*     8         COMMAND REJECT       0          ACTION 2                00147000
+*                                                                       00148000
+*     IV. ANALYZE THE CSW FOR PROGRAM, PROTECTION & CHAINING CHECK      00149000
+*                                                                       00150000
+*         . INDICATE FATAL CONDITION, SEND ERROR MESSAGE TO             00151000
+*           SYSTEM OPERATOR AND RETURN CONTROL TO DMKIOS.               00152000
+*                                                                       00153000
+*      V. WHEN THE RETRY PROCEDURE IS FINISHED (EITHER CORRECTED        00153100
+*         OR UNCORRECTABLE) CALL DMKIOEST TO CAUSE STATISTICAL          00153200
+*         DATA COUNTERS TO BE UPDATED..                                 00153300
+         SPACE                                                          00153400
+* ERROR MESSAGES -                                                      00154000
+*                                                                       00155000
+*     DMKBSC500I LINE 'ADDR' CMD REJECT ...                             00156000
+*     DMKBSC501A LINE 'ADDR' INT REQ                                    00157000
+*     DMKBSC502I LINE 'ADDR' BUSOUT CK ...                              00158000
+*     DMKBSC503I LINE 'ADDR' EQUIP CK ...                               00159000
+*     DMKBSC504I LINE 'ADDR' DATA CK ...                                00160000
+*     DMKBSC505I LINE 'ADDR' OVERRUN CK ...                             00161000
+*     DMKBSC516I LINE 'ADDR' BAD SENSE ...                              00162000
+*     DMKBSC517I LINE 'ADDR' NOT/KNOWN ...                              00163000
+*     DMKBSC520I LINE 'ADDR' CHAN ERROR ...                             00164000
+*     DMKBSC527I LINE 'ADDR' LOST DATA ...                              00165000
+*     DMKBSC528I LINE 'ADDR' TIMEOUT ...                                00166000
+*                                                                       00167000
+**************************************************************          00168000
+         EJECT                                                          00169000
+DMKBSC   CSECT                                                 @V2D3931 00170000
+         EXTRN DMKFREE,DMKFRET,DMKMSWR                         @V2D3931 00171000
+         EXTRN DMKIOEST       STATISTICAL COUNTER UPDATE       @VA03757 00171100
+         SPACE 1                                                        00172000
+         USING SAVEAREA,R13                                    @V2D3931 00173000
+         USING PSA,R0                                          @V2D3931 00174000
+         USING BSCBLOK,R2     SET UP ADDRESSABILITY FOR BSCBLOK@V2D3931 00175000
+         USING ERPBSC,R6      SET UP ADDRESSABILITY FOR ERP CCW@V2D3931 00176000
+         USING RDEVBLOK,R8    SETUP ADDRESSABILITY FOR RDEVBLOK@V2D3931 00177000
+         USING IOBLOK,R10     SET UP ADDRESSABILITY FOR IOBLOK @V2D3931 00178000
+         DC    CL8'DMKBSC'                                     @V2D3931 00179000
+DMKBSCER RELOC                                                 @V2D3931 00180000
+         SWITCH          MAKE SURE WE ARE ON THE IO PROCESSOR  @V4075A0 00180100
+         ICM   R7,15,RDEVIOER GET THE FIRST IOERBLOK, IF ANY.  @V2D3931 00181000
+         BP    NOTFIRST       IF NONE THIS IS THE FIRST TIME IN@V2D3931 00182000
+         L     R7,IOBIOER     LOAD IOERBLOK IN REG.7           @V2D3931 00183000
+         USING IOERBLOK,R7    ESTABLISH ADDRESSABILTY.         @V2D3931 00184000
+         ST    R7,RDEVIOER    STORE ADDRESS IN RDEVBLOK.       @V2D3931 00185000
+         SR    R3,R3          CLEAR REG.3                      @V2D3931 00186000
+         ST    R3,IOBIOER     CLEAR POINTER OF IOERBLOK        @V2D3931 00187000
+         STH   R3,IOBRCNT     ZERO IOBRCNT FOR FIRST TIME      @V2D3931 00188000
+         NI    IOBSTAT,X'FF'-IOBFATAL INSURE BIT IS OFF.       @V2D3931 00189000
+         NI    IOBFLAG,X'FF'-(IOBRSTRT+IOBERP) CLEAR FLAGS     @V2D3931 00190000
+         LTR   R7,R7          IS THERE AN IOERBLOK POINTER     @V2D3931 00191000
+         BZ    EXIT1          NO, RETURN TO IOS                @V2D3931 00192000
+         OI    IOBFLAG,IOBERP SET ERP IN CONTROL.              @V2D3931 00193000
+         NI    IOERFLG2,X'FF'-IOERMSW CLEAR MESSAGE WRITER FLAG@V2D3931 00194000
+         NI    IOERFLG3,X'FF'-IOERREAD RESET FLAG              @VA03757 00194100
+         LA    R0,ERPSIZE     GET SIZE OF WORK AREA            @V2D3931 00195000
+         CALL  DMKFREE                                         @V2D3931 00196000
+         STH   R0,IOERDW      SAVE NUMBER OF DOUBLEWORDS       @V2D3931 00197000
+         ST    R1,IOERLOC     ALSO REMEMBER AT WHAT ADDRESS.   @V2D3931 00198000
+         LR    R6,R1          GET WORK AREA POINTER            @V2D3931 00199000
+         XC    0(8*ERPSIZE,R1),0(R1) CLEAR THE WORK AREA       @V2D3931 00200000
+NOTFIRST EQU   *              R7 WILL POINT TO FIRST IOERBLOK  @V2D3931 00201000
+         L     R2,RDEVBSC     GET ADDRESS OF BSC CONTROL BLOCK @V2D3931 00202000
+         L     R6,IOERLOC     GET POINTER TO ERP CCW AREA      @V2D3931 00203000
+         SR    R4,R4          CLEAR REG.4                      @V2D3931 00204000
+         LH    R4,IOBRCNT     LOAD ERROR COUNT.                @V2D3931 00205000
+         A     R4,F1          UPDATE RETRY COUNT BY ONE        @V2D3931 00206000
+         STH   R4,IOBRCNT     STORE RESULT IN IOBRCNT.         @V2D3931 00207000
+         L     R3,IOBIOER     GET ADDRESS OF SECOND IOERBLOK   @V2D3931 00208000
+         TM    IOERCSW+5,IFCC+CCC IS THIS A CHANNEL ERROR      @V2D3931 00209000
+         BNZ   CHANICC        YES, GO HANDLE CHANNEL ERROR     @V2D3931 00210000
+         LTR   R3,R3          IS THERE A SECOND IOERBLOK ?     @V2D3931 00211000
+         BZ    RGACOUNT       NO, CONTINUE PROCESSING          @V2D3931 00212000
+         TM    IOERCSW+5-IOERBLOK(R3),IFCC+CCC IS CHANNEL ERROR@V2D3931 00213000
+         BNZ   CHANICC        YES, GO HANDLE CHANNEL ERROR     @V2D3931 00214000
+         SPACE 1                                                        00215000
+RGACOUNT EQU   *              PROCESS ERROR CONDITION          @V2D3931 00216000
+         TM    IOERFLG2,IOERMSW IS MESSAGE WRITER IN CONTROL ? @V2D3931 00217000
+         BZ    CONTIN         NO, CONTINUE PROCESSING ERROR    @V2D3931 00218000
+         BAL   R5,FRETIOER    RELEASE THE IOERBLOK             @V2D3931 00219000
+         NI    IOBFLAG,X'FF'-IOBRSTRT CLEAR RESTART FLAG       @V2D3931 00220000
+         EXIT                 RETURN TO IOS                    @V2D3931 00221000
+         SPACE 1                                                        00222000
+CONTIN   EQU   *              ANALYZE CSW FOR ERROR CONDITION  @V2D3931 00223000
+         CLC   IOBRCNT,F1+2   IS THIS THE FIRST ERROR CONDITION@V2D3931 00224000
+         BNE   *+6            BYPASS SWITCHING REGISTERS       @V2D3931 00225000
+         LR    R3,R7          GET ADDR. OF IOERBLOK IN REG3    @V2D3931 00226000
+         LTR   R3,R3          DID OPERATION FINISH CORRECTLY ? @V2D3931 00227000
+         BZ    CORRECT        YES, GO RETURN TO IOS            @V2D3931 00228000
+         TM    IOERCSW+5-IOERBLOK(R3),CDC IS CHAN. DATA CHECK  @V2D3931 00229000
+         BO    BADCHAN        YES, CHECK RETRY COUNT           @V2D3931 00230000
+         TM    IOERCSW+4-IOERBLOK(R3),UC IS THIS A UNIT CHECK  @V2D3931 00231000
+         BO    UNITCK         YES, GO HANDLE UNIT CHECK        @V2D3931 00232000
+CHANPRG  EQU   *              HANDLE MESSAGE FOR CHAN. CHECKS  @V2D3931 00233000
+         MVI   IOERNUM,CHANERR INDICATE CHANNEL ERROR MESSAGE  @V2D3931 00234000
+         BAL   R5,FRETPTR     RELEASE WORK AREA                @V2D3931 00235000
+         TM    IOERCSW+5-IOERBLOK(R3),PRGC+PRTC+CHC IS STATUS  @V2D3931 00236000
+         BNZ   CALLWTR1       YES, GO WRITE ERROR MESSAGE      @V2D3931 00237000
+         MVI   IOERNUM,FALSE  INDICATE INVALID  SENSE MESSAGE  @V2D3931 00238000
+         B     CALLWTR1       GO WRITE ERROR MESSAGE           @V2D3931 00239000
+BADCHAN  EQU   *              HANDLE CHANNEL DATA CHECK        @V2D3931 00240000
+         CLC   IOBRCNT,F7+2   IS COUNT GREATER THAN 7          @V2D3931 00241000
+         BH    CHANICC        YES, INDICATE CHANNEL ERROR MSG. @V2D3931 00242000
+         BAL   R5,GETCUCCW    GET FAILING CCW ADDRESS          @V2D3931 00243000
+         BAL   R5,READSUB     GO HANDLE FAILING READ CCW       @V2D3931 00244000
+         B     WRITE          GO TO WRITE SECTION              @V2D3931 00245000
+CHANICC  EQU   *              HANDLE CHANNEL ERROR MESSAGE     @V2D3931 00246000
+         MVI   IOERNUM,CHANERR INDICATE CHANNEL ERROR MESSAGE  @V2D3931 00247000
+         BAL   R5,FRETPTR     RELEASE WORK AREA                @V2D3931 00248000
+         L     R3,IOBIOER     IS THERE A SECOND IOERBLOK       @V2D3931 00249000
+         LTR   R3,R3          IS THERE ONE ?                   @V2D3931 00250000
+         BZ    CALLWTR1       NO, GO WRITE ERROR MESSAGE       @V2D3931 00251000
+         TM    IOERCSW+5,CDC+CCC+IFCC IS THIS A CHANNEL ERROR  @V2D3931 00252000
+         BNZ   CALLWTR1       YES, GO WRITE ERROR MESSAGE      @V2D3931 00253000
+         ST    R3,RDEVIOER    SAVE CHANNEL IOERBLOK POINTER    @V2D3931 00254000
+         ST    R7,IOBIOER     SAVE ORIGINAL IOERBLOK ADDRESS   @V2D3931 00255000
+         LR    R7,R3          GET CURRENT IOERBLOK             @V2D3931 00256000
+         MVI   IOERNUM,CHANERR INDICATE CHANNEL ERROR MSG.     @V2D3931 00257000
+         B     CALLWTR1       GO WRITE ERROR MESSAGE           @V2D3931 00258000
+         SPACE 1                                                        00259000
+WRITE    EQU   *              HANDLE WRITE OPERATION           @V2D3931 00260000
+         CLI   5(R4),X'0A'    IS TEXT BEING TRANSFER           @V2D3931 00261000
+         BNE   FAILCCW        NO, GO RETRY FAILING CCW         @V2D3931 00262000
+         BAL   R5,RESCOUN     CHECK ON RESIDUAL COUNT          @V2D3931 00263000
+         B     CHANICC        GO WRITE CHANNEL ERROR MESSAGE   @V2D3931 00264000
+         SPACE 1                                                        00265000
+UNITCK   EQU   *                                               @V2D3931 00266000
+         MVI   IOERNUM,EQUIP  INDICATE EQUIPMENT CHECK MSG     @V2D3931 00267000
+         TM    IOERDATA,EQUI1 IS THIS AN EQUIPMENT CHECK       @V2D3931 00268000
+         BO    CALLWTR1       YES, GO WRITE ERROR MESSAGE      @V2D3931 00269000
+LOSTDAT  EQU   *              HANDLE LOST DATA CONDITION       @V2D3931 00270000
+         BAL   R5,GETCUCCW    GET THE FAILING CCW              @V2D3931 00271000
+         MVI   IOERNUM,LOST   INDICATE LOST DATA MESSAGE       @V2D3931 00272000
+         TM    IOERDATA,LDATA IS THIS A LOST DATA CONDITION    @V2D3931 00273000
+         BZ    TIMEOUT        NO, GO CHECK FOR TIMEOUT         @V2D3931 00274000
+         BAL   R5,READSUB     GO HANDLE FAILING READ CCW       @V2D3931 00275000
+         B     CALLWTR1       IF WRITE CCW, GO WRITE MESSAGE   @V2D3931 00276000
+ERPCCW   EQU   *                                               @V2D3931 00277000
+         CLI   5(R4),X'00'    IS THIS AN ERP CCW               @V2D3931 00278000
+         BNE   CALLWTR1       NO, GO WRITE ERROR MESSAGE       @V2D3931 00279000
+         B     FAILCCW        GO RETRY FAILING CCW             @V2D3931 00280000
+TIMEOUT  EQU   *              HANDLE TIMEOUT CONDITION         @V2D3931 00281000
+         MVI   IOERNUM,TIMOUT SET TIMEOUT ERROR MESSAGE FLAG   @V2D3931 00282000
+         TM    IOERDATA,TIMEOT IS THIS A TIMEOUT CONDITION     @V2D3931 00283000
+         BZ    INTREQID       NO, CHECK FOR INTERVENTION REQ.  @V2D3931 00284000
+         TM    RDEVFTR,FTRDIAL    SWITCHED 3275?               @V346931 00284050
+         BZ    RETDIAL        NO, GO CHECK FOR DISABLE         @V346931 00284100
+         CLI   5(R4),X'0D'    WRITE RESET CCW?                 @V346931 00284150
+         BE    INITREAD       YES, GO RETRY OPERATION          @V346931 00284200
+         CLI   5(R4),X'0B'    WRITE CONTINUE CCW?              @V346931 00284250
+         BE    CALLWTR1       YES, BYPASS RETRY                @V346931 00284300
+         CLI   5(R4),X'0C'    READ REMAINING DATA CCW?         @V346931 00284350
+         BE    CALLWTR1       YES, BYPASS RETRY                @V346931 00284400
+         CLI   5(R4),X'0A'    READ DATA CCW?                   @V346931 00284450
+         BE    RESTLINE       YES, RESTORE LINE TO CONTROL MODE@V346931 00284500
+RETDIAL  EQU   *              HANDLE NON-SWITCHED RECOVERY     @V346931 00284550
+         BAL   R5,READSUB     HANDLE READ CCW                  @V2D3931 00285000
+         B     WRITE1         GO TO WRITE SECTION              @V2D3931 00286000
+         B     CALLWTR1       GO WRITE ERROR MESSAGE           @V2D3931 00287000
+WRITE1   EQU   *              HANDLE WRITE CCW                 @V2D3931 00288000
+         CLI   0(R4),X'2F'    IS THIS A DISABLE CCW            @V2D3931 00289000
+         BNE   CALLWTR1       NO, GO WRITE ERROR MESSAGE       @V2D3931 00290000
+FAILCCW  EQU   *              SET UP RETRY FROM THE BEGINNING  @V2D3931 00291000
+         ST    R4,IOBRCAW     SAVE FAILING CCW ADDRESS         @V2D3931 00292000
+         B     SETFLAG        SET RESTART FLAG                 @V2D3931 00293000
+INTREQID EQU   *                                               @V2D3931 00294000
+         MVI   IOERNUM,INTREQU SET INTERVENTION REQ MESSAGE    @V2D3931 00295000
+         TM    IOERDATA,INTRV IS THIS AN INTERVENTION CONDITION@V2D3931 00296000
+         BZ    BUSOCK         NO, CHECK FOR BUS OUT CHECK      @V2D3931 00297000
+         BAL   R5,READSUB     GO HANDLE FAILING READ CCW       @V2D3931 00298000
+         B     WRITE2         GO TO WRITE SECTION              @V2D3931 00299000
+*        B     *+4                                                      00300000
+POLCMD   EQU   *                                               @V2D3931 00301000
+         CLI   0(R4),X'09'    IS THIS A POLL CCW               @V2D3931 00302000
+         BE    SETRET         YES, RETRY FROM BEGINNING OF CCWS@V2D3931 00303000
+         CLI   5(R4),X'00'    IS THIS AN ERP CCW               @V2D3931 00304000
+         BE    FAILCCW        YES, GO RETRY FAILING CCW        @V2D3931 00305000
+SETRET   EQU   *              SET UP RESTART FIELD             @V2D3931 00306000
+         MVC   IOBRCAW(4),IOBCAW RESTART CCW STRING            @V2D3931 00307000
+         B     SETFLAG        GO SET RESTART FLAG              @V2D3931 00308000
+         SPACE 1                                                        00309000
+WRITE2   EQU   *              HANDLE WRITE CCW                 @V2D3931 00310000
+         CLI   5(R4),X'0A'    IS TEXT BEING TRANSFER           @V2D3931 00311000
+         BE    CHKRES         YES, CHECK RESIDUAL COUNT        @V2D3931 00312000
+         B     POLCMD         GO CHECK FOR POLL COMMAND        @V2D3931 00313000
+BUSOCK   EQU   *              HANDLE BUS OUT CHECK             @V2D3931 00314000
+         MVI   IOERNUM,BUSOUTCK SET BUSOUT ERROR MESSAGE FLAG  @V2D3931 00315000
+         TM    IOERDATA,BUSCE IS THIS A BUS OUT CHECK          @V2D3931 00316000
+         BZ    DATCHECK       NO, CHECK FOR DATA CHECK         @V2D3931 00317000
+         CLC   IOBRCNT,F15+2  HIT THE LIMIT ?                  @VA08380 00318100
+         BH    CALLWTR1       YES, GO WRITE ERROR MESSAGE      @V2D3931 00319000
+         CLI   0(R4),X'02'    IS THIS A READ CCW               @V2D3931 00320000
+         BE    CALLWTR1       YES, GO WRITE ERROR MESSAGE      @V2D3931 00321000
+         CLI   0(R4),X'09'    IS THIS A POLL CCW               @V2D3931 00322000
+         BE    SETRET         YES, RETRY FROM THE BEGINNING    @V2D3931 00323000
+         CLI   0(R4),X'01'    IS THIS A WRITE CCW              @V2D3931 00324000
+         BNE   FAILCCW        GO RETRY FROM FAILING CCW        @V2D3931 00325000
+         CLI   5(R4),X'0A'    IS ERROR PRIOR TO TEXT           @V2D3931 00326000
+         BNE   FAILCCW        YES, GO RETRY FAILING CCW        @V2D3931 00327000
+CHKRES   EQU   *              CHECK RESIDUAL COUNT AGAIN CCW   @V2D3931 00328000
+         BAL   R5,RESCOUN     GO CHECK RESIDUAL COUNT          @V2D3931 00329000
+         B     CALLWTR1       GO WRITE ERROR MESSAGE           @V2D3931 00330000
+DATCHECK EQU   *              HANDLE DATA CHECK                @V2D3931 00331000
+         MVI   IOERNUM,DATAER INDICATE DATA CHECK MESSAGE      @V2D3931 00332000
+         TM    IOERDATA,DATACK IS THIS A DATA CHECK ERROR      @V2D3931 00333000
+         BO    READHAN        YES, GO CHECK FOR READ CCW       @V2D3931 00334000
+OVERRUN  EQU   *              HANDLE OVERRUN CONDITION         @V2D3931 00335000
+         MVI   IOERNUM,OVERERR INDICATE OVERRUN MESSAGE        @V2D3931 00336000
+         TM    IOERDATA,OVERN IS THIS A OVERRUN CONDITION      @V2D3931 00337000
+         BO    READHAN        YES, GO CHECK FOR READ CCW       @V2D3931 00338000
+COMDREJ  EQU   *              HANDLE COMMAND REJECT            @V2D3931 00339000
+         MVI   IOERNUM,BDSNS  INDICATE BAD SENSE MESSAGE       @V2D3931 00340000
+         TM    IOERDATA,COMRJ IS THIS A COMMAND REJECT         @V2D3931 00341000
+         BZ    CALLWTR1       NO, GO WRITE ERROR MESSAGE       @V2D3931 00342000
+         MVI   IOERNUM,REJ    INDICATE COMMAND REJECT MESSAGE  @V2D3931 00343000
+READHAN  EQU   *              HANDLE READ CCW                  @V2D3931 00344000
+         BAL   R5,READSUB     HANDLE READ CCW                  @V2D3931 00345000
+         B     CALLWTR1       IF NOT READ CCW, GO WRITE MSG.   @V2D3931 00346000
+         B     CALLWTR1       GO WRITE ERROR MESSAGE           @V2D3931 00347000
+         SPACE 1                                                        00348000
+NOCCW    EQU   *                                               @V2D3931 00349000
+         MVI   IOERNUM,FALSE  INDICATE BAD SENSE MESSAGE       @V2D3931 00350000
+CALLWTR1 EQU   *                                               @V2D3931 00351000
+         OI    IOERIND3,IOERCAN+IOERINFO SET ON CANCEL & INFORM@V2D3931 00352000
+         BAL   R5,FRETIOER    RELEASE THE SECOND IOERBLOK      @V2D3931 00354000
+         L     R0,=C'BSC '    IDENTIFICATION OF MODULE         @V2D3931 00355000
+         OI    IOERFLG2,IOERMSW SET MESSAGE WRITER ACTIVE      @V2D3931 00356000
+         CLI   IOERNUM,INTREQU IS IT INTERVENTION REQ.         @VA04766 00357100
+         BNE   CALLMSW        NO - LEAVE ACTION CODE INTACT    @VA04766 00357200
+         MVI   IOERIND3,IOERACT MESSAGE IND. TO 'A'            @VA04766 00357300
+CALLMSW  CALL  DMKMSWR        ISSUE ERROR MESSAGE              @VA04766 00357400
+         NI    IOERFLG2,X'FF'-IOERMSW CLEAR MESSAGE WRITER FLAG@V2D3931 00358000
+         BAL   R5,FRETIOER    RELEASE THE SECOND IOERBLOK      @V2D3931 00359000
+         OI    IOBSTAT,IOBFATAL SET I/O FATAL FLAG             @V2D3931 00360000
+CORRECT  EQU   *              FINISH SUCCESSFULLY              @V2D3931 00361000
+         SLR   R1,R1          ZERO PARAMETER REG               @VA03757 00362100
+         CALL  DMKIOEST       GO UPDATE STATISTICAL COUNTERS   @VA03757 00362200
+INITREAD EQU   *                                               @V346931 00362300
+         BAL   R5,FRETPTR     RELEASE THE WORK AREA            @V346931 00362400
+EXIT1    EQU   *              NO IOERBLOK POINTER              @V2D3931 00363000
+         NI    IOBFLAG,X'FF'-(IOBRSTRT+IOBERP) RESET ERP &     @V2D3931 00364000
+*                             RSTRT                                     00365000
+         EXIT                 RETURN TO IOS                    @V2D3931 00366000
+         EJECT                                                          00367000
+FRETIOER EQU   *              RELEASE THE SECOND IOERBLOK      @V2D3931 00368000
+         ICM   R1,15,IOBIOER  IS THERE A SECOND IOERBLOK       @V2D3931 00369000
+         BZ    NOTUSED        NO, RETURN TO IN LINE CODE       @V2D3931 00370000
+         TM    IOERCSW+5-IOERBLOK(R1),IFCC+CCC+CDC IS CHANNEL  @V2D3931 00371000
+         BZ    CKEND          NO, GO FRET IOERBLOK             @V2D3931 00372000
+         LR    R3,R1          SAVE SECOND IOERBLOK ADDRESS     @V2D3931 00373000
+         L     R1,IOERCCRA-IOERBLOK(R3) CHANNEL REC ADDR       @V508690 00374500
+         L     R0,IOERCCRL-IOERBLOK(R3) CHANNEL REC LENGTH     @V508690 00375500
+         CALL  DMKFRET        RELEASE STORAGE FOR RECORD       @V2D3931 00376000
+         LR    R1,R3          RESTORE SECOND IOERBLOK ADDRESS  @V2D3931 00377000
+CKEND    EQU   *                                               @V2D3931 00378000
+         LA    R0,IOERSIZE    GET SIZE IN DOUBLEWORDS          @V2D3931 00379000
+         AH    R0,IOEREXT-IOERBLOK(,R1) ADD EXTRA LENGTH       @V2D3931 00380000
+         CALL  DMKFRET        RELEASE STORAGE FOR IOERBLOK     @V2D3931 00381000
+NOTUSED  EQU   *                                               @V2D3931 00382000
+         MVC   IOBIOER,ZEROES CLEAR POINTER TO IOERBLOK        @V2D3931 00383000
+         BR    R5             RETURN TO IN LINE CODE           @V2D3931 00384000
+         SPACE 2                                                        00385000
+FRETPTR  EQU   *                                               @V2D3931 00386000
+         SR    R0,R0          CLEAR REGISTER ZERO              @V2D3931 00387000
+         ICM   R0,3,IOERDW    GET ALLOCATED SIZE IN DOUBLEWORDS@V2D3931 00388000
+         BCR   8,R5           IF ZERO, DON'T FRET STORAGE      @V2D3931 00389000
+         L     R1,IOERLOC     GET ADDRESS OF ALLOCATED STORAGE @V2D3931 00390000
+         CALL  DMKFRET        RELEASE STORAGE                  @V2D3931 00391000
+         SR    R0,R0          CLEAR REGISTER 0                 @V2D3931 00392000
+         ST    R0,IOERLOC     CLEAR ADDR OF ALLOCATED STORAGE  @V2D3931 00393000
+         STH   R0,IOERDW      CLEAR SIZE AREA                  @V2D3931 00394000
+         XC    IOBRCAW,IOBRCAW CLEAR ADDRESS OF RETRY CCW'S    @VA08266 00394100
+         LA    R1,ERPCCW3-ERPBSC(,R1) 8 BYTES AFTER WRITE      @VA08266 00394200
+         CL    R1,IOBCSW      CSW POINT TO THE WRITE ?         @VA08266 00394300
+         BNER  R5             NO,ALL OK - RETURN               @VA08266 00394400
+         XC    IOBCSW,IOBCSW  YES, CLEAR OUT THE CSW           @VA08266 00394500
+         BR    R5             RETURN TO IN LINE CODE           @V2D3931 00395000
+         SPACE 2                                                        00395050
+RESTLINE EQU   *              RESTORE LINE TO CONTROL MODE     @V346931 00395100
+         CLC   IOBRCNT,F15+2  HIT THE LIMIT ?                  @VA08380 00395160
+         BH    CALLWTR1       YES, GO ISSUE ERROR MESSAGE      @V346931 00395200
+         MVC   BSCPCCW1(TWOCCW),WRITEOT WRITE EOT, READ RESPONS@V346931 00395250
+         XC    BSCRESP(L'BSCRESP),BSCRESP CLEAR INPUT BUFFER   @V346931 00395300
+         LA    R5,BSCRESP     GET ADDRESS OF RESPONSE BUFFER   @V346931 00395350
+         STCM  R5,B'0111',BSCPCCW2+1 RESPONSE BUF ADDR TO CCW  @V346931 00395400
+         LA    R1,BSCPCCW1    POINT TO START OF CCW CHAIN      @V346931 00395450
+         ST    R1,IOBRCAW     SAVE CCW CHAIN START ADDRESS     @V346931 00395500
+         B     SETFLAG        GO SET UP FOR RESTART OPERATION  @V346931 00395550
+         SPACE 2                                                        00396000
+GETCUCCW EQU   *                                               @V2D3931 00397000
+         L     R4,IOERCSW     GET FAILING CCW ADDRESS PLUS 8   @V2D3931 00398000
+         LA    R4,0(R4)       CLEAR HIGH ORDER BYTE            @V2D3931 00399000
+         S     R4,F8          GET FAILING CCW ADDRESS          @V2D3931 00400000
+         BM    NOCCW          IF NEGATIVE, WRITE ERROR MESSAGE @V2D3931 00401000
+         BR    R5             RETURN TO IN LINE CODE           @V2D3931 00402000
+         SPACE 2                                                        00403000
+NAKSUB   EQU   *              SET UP CCWS FOR NAK RESPONSE     @V2D3931 00404000
+         MVC   ERPCCW2(8),WRITNAK GET WRITE CCW FOR NAK REPLY  @V2D3931 00405000
+         MVC   ERPCCW3(8),TICCCW SET UP TIC CCW                @V2D3931 00406000
+         STCM  R4,7,ERPCCW3+1 SAVE ADDRESS OF FAILING CCW      @V2D3931 00407000
+         XC    BSCREAD(256),BSCREAD CLEAR READ BUFFER          @V305798 00408000
+         XC    BSCREAD+256(L'BSCREAD-256),BSCREAD+256          @V305798 00409000
+         BR    R5             RETURN TO IN LINE CODE           @V2D3931 00410000
+         SPACE 2                                                        00411000
+ENQSUB   EQU   *              SET UP TO SEND ENQ RESPONSE      @V2D3931 00412000
+         MVC   ERPCCW2(8),WRITENQ GET WRITE CCW FOR ENQ RESP.  @V2D3931 00413000
+         MVC   ERPCCW3(8),TICCCW SET UP TIC CCW                @V2D3931 00414000
+         STCM  R4,7,ERPCCW3+1 SAVE ADDRESS OF FAILING CCW      @V2D3931 00415000
+         XC    BSCRESP(L'BSCRESP),BSCRESP CLEAR RESPONSE BUFFER@V2D3931 00416000
+         BR    R5             RETURN TO IN LINE CODE           @V2D3931 00417000
+         SPACE 2                                                        00418000
+RESCOUN  EQU   *              CHECK THE RESIDUAL COUNT         @V2D3931 00419000
+         LH    R9,IOERCSW+6   GET RESIDUAL COUNT               @V2D3931 00420000
+         LH    R6,6(R4)       GET CCW COUNT                    @V2D3931 00421000
+         CR    R9,R6          ARE COUNTS EQUAL                 @V2D3931 00422000
+         BE    FAILCCW        YES, GO RETRY FAILING CCW        @V2D3931 00423000
+         BR    R5             RETURN TO IN LINE CODE           @V2D3931 00424000
+         SPACE 2                                                        00425000
+READSUB  EQU   *              HANDLE A FAILING READ CCW        @V2D3931 00426000
+         CLC   IOBRCNT,F15+2  HIT THE LIMIT ?                  @VA08380 00427100
+         BH    CALLWTR1       YES, GO WRITE ERROR MESSAGE      @V2D3931 00428000
+         CLI   0(R4),X'02'    IS THIS A READ CCW               @V2D3931 00429000
+         BNER  R5             NO, RETURN TO IN LINE CODE       @V2D3931 00430000
+         TM    IOERDATA-IOERBLOK(R3),TIMEOT IS THIS A TIMEOUT  @VM01049 00431000
+         BO    SETRET         YES, GO RESTART CCW STRING       @VM01049 00432000
+         CLC   IOBRCNT,F1+2   IS THIS THE FIRST ERROR ??       @VA03757 00432100
+         BNE   FORGETFG       NO, FORGET THE READ FLAG         @VA03757 00432200
+         OI    IOERFLG3,IOERREAD TURN ON READ FLAG FOR SDR     @VA03757 00432300
+FORGETFG EQU   *                                               @VA03757 00432400
+         CLI   5(R4),X'0A'    IS TEXT BEING TRANSFER           @VM01094 00433000
+         BE    RETRAN         YES, SEND NAK RESPONSE TO DEVICE @VM01094 00434000
+         CLI   5(R4),X'0C'    IS THIS A BLOCK READ CCW         @VM03043 00435000
+         BE    RETRAN         YES, SEND NAK RESPONSE TO DEVICE @VM03043 00436000
+         CLI   5(R4),X'04'    TEXT BEING TRANSFER (STATION ERR)@VM01094 00437000
+         BNE   CHKRESP        NO, EXPECTED REPLY FROM STATION  @VM01094 00438000
+RETRAN   EQU   *              ASK STATION TO RETRANSMIT TEXT   @V2D3931 00439000
+         BAL   R5,NAKSUB      SET UP CCWS TO SEND NAK RESPONSE @V2D3931 00440000
+         LA    R1,ERPCCW2     GET ADDRESS OF CCW STRING        @V2D3931 00441000
+         ST    R1,IOBRCAW     SET UP RESTART CAW FIELD         @V2D3931 00442000
+         B     SETFLAG        GO SET RESTART FLAG              @V2D3931 00443000
+CHKRESP  EQU   *                                               @V2D3931 00444000
+         CLI   5(R4),X'0D'    WRITE RESET CCW?                 @V346931 00444200
+         BE    SETRET         YES, GO RESTART CCW STRING       @V346931 00444400
+         CLI   5(R4),X'05'    IS THIS A READ RESPONSE TO ADDR. @V2D3931 00445000
+         BE    SENDENQ        YES, GO SEND ENQ RESPONSE        @V2D3931 00446000
+         CLI   5(R4),X'0B'    IS THIS A RESPONSE FROM TEXT     @V2D3931 00447000
+         BNE   4(R5)          NO, RETURN TO IN LINE CODE PLUS 4@V2D3931 00448000
+SENDENQ  EQU   *              SET UP CCWS FOR ENQ RESPONSE     @V2D3931 00449000
+         BAL   R5,ENQSUB      SET UP CCWS FOR ENQ RESPONSE     @V2D3931 00450000
+         LA    R1,ERPCCW2     GET START OF CCW STRING          @V2D3931 00451000
+         ST    R1,IOBRCAW     SET UP RESTART CAW FIELD         @V2D3931 00452000
+SETFLAG  EQU   *              SET UP TO DO A RESTART OPERATION @V2D3931 00453000
+         OI    IOBFLAG,IOBRSTRT SET THE RESTART FLAG           @V2D3931 00454000
+         BAL   R5,FRETIOER    RELEASE THE SECOND IOERBLOK      @V2D3931 00455000
+         EXIT                 RETURN TO IOS FOR RESTART        @V2D3931 00456000
+*************************************************************           00457000
+         EJECT                                                          00458000
+*        SENSE STATUS FOR THE TRANSMISSION CONTROL UNIT                 00459000
+EQUI1    EQU   X'10'          EQUIPMENT CHECK                  @V2D3931 00460000
+BUSCE    EQU   X'20'          BUS OUT CHECK                    @V2D3931 00461000
+INTRV    EQU   X'40'          INTERVENTION CONDITION           @V2D3931 00462000
+COMRJ    EQU   X'80'          COMMAND REJECT                   @V2D3931 00463000
+OVERN    EQU   X'04'          OVERRUN CONDITION                @V2D3931 00464000
+DATACK   EQU   X'08'          DATA CHECK ERROR                 @V2D3931 00465000
+TIMEOT   EQU   X'01'          TIMEOUT CONDITION                @V2D3931 00466000
+LDATA    EQU   X'02'          LOST DATA CHECK                  @V2D3931 00467000
+         SPACE 2                                                        00468000
+*        CODES USED FOR ERROR MESSAGE                                   00469000
+REJ      EQU   0              COMMAND REJECT                   @V2D3931 00470000
+INTREQU  EQU   1              INTERVENTION REQUEST             @V2D3931 00471000
+BUSOUTCK EQU   2              BUSOUT CHECK                     @V2D3931 00472000
+EQUIP    EQU   3              EQUIPMENT CHECK                  @V2D3931 00473000
+DATAER   EQU   4              DATA CHECK                       @V2D3931 00474000
+OVERERR  EQU   5              OVERRUN CHECK                    @V2D3931 00475000
+BDSNS    EQU   16             BAD SENSE INFORMATION            @V2D3931 00476000
+FALSE    EQU   17             NOT/KNOWN                        @V2D3931 00477000
+TIMOUT   EQU   28             TIMEOUT CONDITION                @V2D3931 00478000
+LOST     EQU   27             LOST DATA CHECK                  @V2D3931 00479000
+CHANERR  EQU   20             CHANNEL ERROR                    @V2D3931 00480000
+******* THE ABOVE CODES MUST BE IDENTICAL TO THE ****************       00481000
+******* CODES IN THE MESSAGE WRITER (DMKMSW) ****************           00482000
+         SPACE 2                                                        00483000
+*        DATA-LINK CONTROL CHARACTERS FOR 3270 REMOTE SYSTEM            00484000
+NAK      EQU   X'3D'          NEGATIVE ACKNOWLEDGMENT          @V2D3931 00485000
+ENQ      EQU   X'2D'          ENQUIRY                          @V2D3931 00486000
+EOT      EQU   X'37'          END OF TRANSMISSION              @V346931 00486100
+         SPACE 2                                                        00487000
+*        CCWS FOR BISYNC ERROR PROCEDURES                               00488000
+         DS    0D                                              @V2D3931 00489000
+TICCCW   DC    X'08',AL3(0),AL1(SILI,X'00'),AL2(1)             @V2D3931 00490000
+WRITNAK  DC    X'01',AL3(RGANAK),AL1(SILI+CC,X'00'),AL2(1)     @V2D3931 00491000
+WRITENQ  DC    X'01',AL3(RGAENQ),AL1(SILI+CC,X'00'),AL2(1)     @V2D3931 00492000
+         SPACE 2                                                        00492100
+* 3275 DIAL SELECTION CCWS (PSUEDO POLLING OPERATION)          @V346931 00492200
+WRITEOT  DC    X'01',AL3(RGAEOT),AL1(SILI+CC,X'02'),AL2(1)     @V346931 00492300
+         DC    X'02',AL3(0),AL1(SILI,X'0D'),AL2(2)             @V346931 00492400
+TWOCCW   EQU   (8*2)          LENGTH OF TWO CCWS               @V346931 00492500
+         SPACE 2                                                        00493000
+*        STORAGE FOR DATA LINK CONTROL CHARACTERS                       00494000
+RGANAK   DC    AL1(NAK)       NEGATIVE RESPONSE CHARACTER      @V2D3931 00495000
+RGAENQ   DC    AL1(ENQ)       INQUIRY CHARACTER                @V2D3931 00496000
+RGAEOT   DC    AL1(EOT)       END OF TRANSMISSION              @V346931 00496100
+********************************************************************    00497000
+         EJECT                                                          00498000
+         LTORG                                                 @V2D3931 00499000
+         EJECT                                                          00500000
+ERPBSC   DSECT                                                 @V2D3931 00501000
+ERPCCW1  DS    D              CCW FOR READ SLIP                @V2D3931 00502000
+ERPCCW2  DS    D              CCW FOR WRITE RESPONSE TO STATION@V2D3931 00503000
+ERPCCW3  DS    D              CCW TRANSFER CONTROL TO FAIL. CCW@V2D3931 00504000
+ERPSIZE  EQU   (*-ERPBSC)/8   ERPBSC SIZE IN DOUBLE WORDS      @V2D3931 00505000
+         EJECT                                                          00506000
+         COPY  BSCBLOKS                                        @V2D3931 00507000
+         EJECT                                                          00508000
+         COPY  IOER                                            @V2D3931 00509000
+         EJECT                                                          00510000
+         COPY  RBLOKS                                          @V2D3931 00511000
+         EJECT                                                          00512000
+         COPY  IOBLOKS                                         @V2D3931 00513000
+         EJECT                                                          00514000
+         COPY  CONBUF                                          @V2D3931 00515000
+         EJECT                                                          00516000
+         COPY  DEVTYPES                                        @V2D3931 00517000
+         EJECT                                                          00518000
+         COPY  EQU                                             @V2D3931 00519000
+         EJECT                                                          00520000
+         COPY  SAVE                                            @V2D3931 00521000
+         EJECT                                                          00522000
+         PSA                                                   @V2D3931 00523000
+         END                                                            00524000

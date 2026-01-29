@@ -1,0 +1,215 @@
+GND      TITLE 'DMSGND     (CMS)       VM/370 - RELEASE 6'              00001000
+         SPACE 2                                                        00002000
+* MODULE NAME -                                                         00003000
+*                                                                       00004000
+*        DMSGND (GENDIRT)                                               00005000
+*                                                                       00006000
+* FUNCTION -                                                            00007000
+*                                                                       00008000
+*        TO GENERATE AN AUXILLARY SYSTEM STATUS TABLE                   00009000
+*                                                                       00010000
+* ATTRIBUTES -                                                          00011000
+*                                                                       00012000
+*        TRANSIENT, CALLED VIA SVC                                      00013000
+* NOTE:  GENDIRT MUST BE GENMOD'D WITH THE SYSTEM OPTION                00013100
+*                                                                       00014000
+* ENTRY POINTS -                                                        00015000
+*                                                                       00016000
+*|       DMSGND - GENERATE AN AUXILLARY DIRECTORY                       00017000
+*                                                                       00018000
+* ENTRY CONDITIONS -                                                    00019000
+*                                                                       00020000
+*|       GPR  1 = ADDRESS OF A PARAMETER LIST WITH THE FOLLOWING FORMAT 00021000
+*|                                                                      00022000
+*|             DC   CL8'GENDIRT'                                        00023000
+*|             DC   CL8'DIRTNAME'                                       00024000
+*               DC   CL8'TARGET MODE'   OPTIONAL PARAMETER              00024500
+*|             DC   8X'FF'                                              00025000
+*|                                                                      00026000
+*|       THE TEXT FOR DIRTNAME MUST HAVE BEEN PREVIOUSLY LOADED         00027000
+*                                                                       00028000
+* EXIT CONDITIONS -                                                     00029000
+*                                                                       00030000
+*|       NORMAL -                                                       00031000
+*|       GPR 15 = 0 - THE AUXILLARY DIRECTORY IS COMPLETE               00032000
+*|                                                                      00033000
+*|       ERROR -                                                        00034000
+*|       GPR 15 = 4 - ONE OR MORE MODULES COULD NOT BE FOUND            00035000
+*|       GPR 15 = 24 - THE INPUT PARAMETER LIST IS INVALID              00036000
+*|       GPR 15 = 40 - DIRECTORY NAME NOT FOUND IN LOADER TABLES        00037000
+*                                                                       00038000
+* CALLS TO OTHER ROUTINES -                                             00039000
+*                                                                       00040000
+*|       DMSSTT - TO FIND THE FST ENTRY FOR A FILE                      00041000
+*|       DMSERR - TO SEND AN ERROR MESSAGE                              00042000
+*                                                                       00043000
+* EXTERNAL REFERENCES -                                                 00044000
+*                                                                       00045000
+*|       NONE                                                           00046000
+*                                                                       00047000
+* TABLES / WORKAREAS -                                                  00048000
+*                                                                       00049000
+*|       NONE                                                           00050000
+*                                                                       00051000
+* REGISTER USAGE -                                                      00052000
+*                                                                       00053000
+*|       GPR  0 = PARAMETER REGISTER                                    00054000
+*|       GPR  1 = PARAMETER LIST BASE REGISTER                          00055000
+*|       GPR  2 = LOADER TABLE ENTRY BASE REGISTER AND                  00056000
+*|                FST BASE REGISTER                                     00057000
+*|       GPR  3 = COUNT OF LOADER TABLE ENTRIES AND                     00058000
+*|                CURRENT DIRECTORY ENTRY POINTER                       00059000
+*|       GPR  4 = LOADER TABLE ENTRY SIZE AND                           00060000
+*|                FST ENTRY SIZE                                        00061000
+*|       GPR  5 = ADDRESS OF LAST ENTRY IN AUXILLARY DIRECTORY          00062000
+*|       GPR  6 - GPR 10 = NOT USED                                     00063000
+*|       GPR 11 = RETURN CODE                                           00064000
+*|       GPR 12 = PROGRAM BASE REGISTER                                 00065000
+*|       GPR 13 = NOT USED                                              00066000
+*|       GPR 14 = RETURN ADDRESS                                        00067000
+*|       GPR 15 = RETURN CODE                                           00068000
+*                                                                       00069000
+* NOTES -                                                               00070000
+*                                                                       00071000
+*        NONE                                                           00072000
+*                                                                       00073000
+* OPERATION -                                                           00074000
+*                                                                       00075000
+*|       DMSGND FIRST VERIFIES THAT THE INPUT PARAMETER LIST IS VALID.  00076000
+*|       IT THEN SERACHES THE LOADER TABLES FOR THE SPECIFIED DIRECTORY 00077000
+*|       NAME.  AFTER LOCATING THE DIRECTORY, DMSGND CALLS 'STATE' TO   00078000
+*|       LOCATE THE FST ENTRY FOR EACH NAME IN THE DIRECTORY.  EACH     00079000
+*|       ENTRY IS COMPLETED BY MOVING THE LAST 24 BYTES OF THE FST DATA 00080000
+*        TO THE DIRECTORY ENTRY. IF THE TARGET MODE WAS SPECIFIED       00081000
+*        ON THE COMMAND, THAT MODE IS PUT INTO THE FSTMODE FIELD.       00081500
+*        OTHERWISE THE FSTMODE FIELD IS SET TO 'S' TO INDICATE THE      00082000
+*        SYSTEM DISK.                                                   00082500
+*        IF ONE OR MORE FST ENTRIES IS NOT FOUND, THE DATA AREA         00083000
+*        IS ZEROED AND THE RETURN CODE SET TO 4.                        00083500
+*        WHEN ALL THE ENTRIES IN THE DIRECTORY HAVE BEEN PROCESSED      00084000
+*        DMSGND RETURNS TO THE CALLER.                                  00084500
+*.                                                                      00085000
+         EJECT                                                          00086000
+DMSGND   START X'E000'        GENERATE AN AUXILIARY DIRECTORY           00087000
+         ENTRY GENDIRT                                                  00088000
+GENDIRT  EQU   *                                                        00089000
+         USING NUCON,R0                                                 00090000
+         USING PSECT,R9                                           V0742 00091000
+         USING DMSGND,R12                                               00092000
+         LR    R9,R1              SAVE INPUT PLIST                V0742 00092100
+         SR    R11,R11        ZERO THE RETURN CODE                      00093000
+         CLI   DIRNAME,X'FF'  IS THE DIRECTORY NAME SPECIFIED ?         00094000
+         BE    GNDERR1        NO, CANNOT CONTINUE WITHOUT A NAME        00095000
+         CLI   DIRMODE,X'FF'      TARGET MODE SPECIFIED?          V0742 00095100
+         BE    DIRT2              NO                              V0742 00095200
+         LA    R2,DIRMODE         LOAD ERROR 2 REGISTER        @VA00981 00095240
+         CLI   DIRMODE+1,X'40'    MODE MORE THAN 1 CHARA.?     @VA00981 00095280
+         BNE   GENERR2A           YES, ERROR                   @VA00981 00095320
+         CLI   DIRMODE,C'A'       MODE MUST BE A-G             @VA00981 00095360
+         BL    GENERR2A              OR S, Y, OR Z             @VA00981 00095400
+         CLI   DIRMODE,C'G'                                    @VA00981 00095440
+         BNH   CKEND                                           @VA00981 00095480
+         CLI   DIRMODE,C'S'                                    @VA00981 00095520
+         BL    GENERR2A                                        @VA00981 00095560
+         BE    CKEND                                           @VA00981 00095600
+         CLI   DIRMODE,C'Y'                                    @VA00981 00095640
+         BL    GENERR2A                                        @VA00981 00095680
+         CLI   DIRMODE,C'Z'                                    @VA00981 00095720
+         BH    GENERR2A                                        @VA00981 00095760
+CKEND    EQU   *                                               @VA00981 00095800
+         CLI   PARMEND,X'FF'  IS THIS THE END OF THE PARAMETER LIST ?   00096000
+         BNE   GNDERR2        NO, THE PARAMETER LIST IS INVALID         00097000
+DIRT2    EQU   *                                                  V0742 00097100
+         LH    R3,TBENT       LOAD THE NUMBER OF LOADER TABLE ENTRIES   00098000
+         LTR   R3,R3          HAVE ANY MODULES BEEN LOADED ?            00099000
+         BZ    GNDERR3        NO, ERROR IF DIRECTORY CANNOT BE FOUND    00100000
+         L     R2,ALDRTBLS    POINT TO THE TOP OF THE LOADER TABLES     00101000
+         LA    R2,0(,R2)      ZERO THE HIGH ORDER BYTE OF THE ADDRESS   00102000
+         USING LDRTSECT,R2                                              00103000
+         LA    R4,LDRTSIZE    GET THE SIZE OF EACH LOADER TABLE ENTRY   00104000
+DIRLOOP  SR    R2,R4          POINT TO THE NEXT LOADER TABLE ENTRY      00105000
+         CLC   LDRTNAME,DIRNAME    IS THIS THE ENTRY FOR THE DIRECTORY  00106000
+         BE    GNDNAME        YES, FILL IN THE FST ENTRIES              00107000
+         BCT   R3,DIRLOOP     NO, TRY THE NEXT ENTRY IN THE TABLE       00108000
+         B     GNDERR3        ERROR IF DIRECTORY HAS NOT BEEN LOADED    00109000
+         SPACE                                                          00110000
+GNDNAME  L     R3,LDRTADDR    LOAD THE AUXILIARY DIRECTORY ADDRESS      00111000
+         L     R4,0(,R3)      LOAD THE FST ENTRY SIZE                   00112000
+         L     R5,4(,R3)      LOAD THE AUXILIARY DIRECTORY SIZE         00113000
+         LA    R5,0(R5,R3)    POINT TO THE LAST DIRECTORY ENTRY         00114000
+         SR    R5,R4          ...                                       00115000
+         LA    R3,8(,R3)      POINT TO THE FIRST DIRECTORY ENTRY        00116000
+         USING FSTSECT,R3                                               00117000
+FSTLOOP  MVC   STATENME,FSTDATA    MOVE FILE NAME & TYPE TO STATE PLIST 00118000
+         LA    R1,STATELST    POINT TO THE PLIST FOR THE STATE FUNCTION 00119000
+         L     R15,ASTATE     LOCATE FIRST ENTRY FOR FILE      @V305066 00120000
+         LR    R6,R14         SAVE RETURN REGISTER FOR NOW..   @VM03059 00120050
+         BALR  R14,R15        ...                              @V305066 00120100
+         LR    R14,R6         RESTORE RETURN REGISTER AND      @VM03059 00120150
+         BNZ   GNDERR4        SEND WARNING IF FILE NOT FOUND   @V305066 00120200
+         L     R2,STATEFST    LOAD THE POINTER TO THE FST ENTRY         00122000
+         USING FSTD,R2                                                  00123000
+         MVC   FSTDATA,FSTDATEW    COPY THE DATA TO THE DIRECTORY ENTRY 00124000
+         MVI   FSTMODE,C'S'       SET MODE TO 'S'                 V0742 00124100
+         CLI   DIRMODE,X'FF'      WAS A TARGET MODE SPECIFIED?    V0742 00124200
+         BE    FSTNEXT            NO, BRANCH AROUND               V0742 00124300
+         MVC   FSTMODE(1),DIRMODE  YES, USE THAT MODE             V0742 00124400
+FSTNEXT  BXLE  R3,R4,FSTLOOP  POINT TO NEXT DIRECTORY ENTRY AND BRANCH  00125000
+         LR    R15,R11        LOAD THE RETURN CODE                      00126000
+         BR    R14            RETURN TO THE CALLER                      00127000
+         EJECT                                                          00128000
+GNDERR1  DMSERR NUM=22,LET=E,TEXT='NO DIRECTORY NAME SPECIFIED'         00129000
+         LA    R15,24         LOAD THE RETURN CODE                      00130000
+         BR    R14            RETURN TO THE CALLER                      00131000
+         SPACE                                                          00132000
+GNDERR2  LA    R2,PARMEND     POINT TO THE INVALID PARAMETER            00133000
+GENERR2A EQU   *                                               @VA00981 00133500
+         DMSERR NUM=70,LET=E,TEXT='INVALID PARAMETER ''........''',SUB=X00134000
+               (CHARA,(2))                                              00135000
+         LA    R15,24         LOAD THE RETURN CODE                      00136000
+         BR    R14            RETURN TO THE CALLER                      00137000
+         SPACE                                                          00138000
+GNDERR3  LA    R2,DIRNAME     POINT TO THE DIRECTORY NAME               00139000
+         DMSERR NUM=21,LET=E,TEXT='ENTRY POINT ''........'' NOT FOUND 'X00140000
+               ,SUB=(CHARA,(2))                                         00141000
+         LA    R15,40         LOAD THE RETURN CODE                      00142000
+         BR    R14            RETURN TO THE CALLER                      00143000
+         SPACE                                                          00144000
+GNDERR4  LA    R2,FSTDATA     POINT TO THE FILE NAME                    00145000
+         DMSERR NUM=2,LET=W,TEXT='FILE ''.................'' NOT FOUND'X00146000
+               ,SUB=(CHAR8A,(2))                                        00147000
+         XC    FSTDATA,FSTDATA     ZERO THE DIRECTORY DATA              00148000
+         LA    R11,4          LOAD THE RETURN CODE                      00149000
+         B     FSTNEXT        CONTINUE BUILDING THE DIRECTORY           00150000
+         EJECT                                                          00151000
+STATELST DS    0D                                                       00152000
+         DC    CL8'STATE'                                               00153000
+STATENME DC    CL16' '                                                  00154000
+         DC    CL4'A1'                                                  00155000
+STATEFST DC    AL4(0)                                                   00156000
+         SPACE                                                          00157000
+         LTORG                                                          00158000
+         SPACE 3                                                        00159000
+PSECT    DSECT                                                          00160000
+         DS    CL8                                                      00161000
+DIRNAME  DS    CL8                                                      00162000
+DIRMODE  DS    CL8                                                V0742 00162100
+PARMEND  DS    CL8                                                      00163000
+         SPACE 2                                                        00164000
+LDRTSECT DSECT                                                          00165000
+LDRTNAME DS    CL8                                                      00166000
+         DS    AL4                                                      00167000
+LDRTADDR DS    AL4                                                      00168000
+         DS    XL4                                                      00169000
+LDRTSIZE EQU   *-LDRTSECT                                               00170000
+         SPACE 2                                                        00171000
+FSTSECT  DSECT                                                          00172000
+         DS    CL16                                                     00173000
+FSTDATA  DS    CL24                                                     00174000
+         ORG   FSTSECT+X'18'                                      V0742 00174100
+FSTMODE  DS    CL2                                                V0742 00174200
+         EJECT                                                          00175000
+         FSTD                                                           00176000
+         NUCON                                                          00177000
+         REGEQU                                                         00178000
+         END                                                            00179000

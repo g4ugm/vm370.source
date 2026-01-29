@@ -1,0 +1,332 @@
+NMT      TITLE 'DMKNMT     (CP)        VM/370 - RELEASE 6'              00001000
+         ISEQ  73,80          VALIDATE INPUT SERIALIZATION              00002000
+*.                                                                      00003000
+*                                                                       00004000
+* MODULE NAME -                                                         00005000
+*                                                                       00006000
+*        DMKNMT (IMAGELIB)                                              00007000
+*                                                                       00008000
+* FUNCTION -                                                            00009000
+*                                                                       00010000
+*        CONSTRUCT AN IMAGE LIBRARY FROM TEXT FILES ON USER DISKS       00011000
+*        AND CREATE OR REPLACE THAT IMAGE LIBRARY VIA DIAG CODE X'74'   00012000
+*        A CONTROL FILE IS USED TO CONSTRUCT THE IMAGE LIBRARY.         00013000
+*                                                                       00014000
+* ATTRIBUTES -                                                          00015000
+*                                                                       00016000
+*        DISK RESIDENT AS 'IMAGELIB', LOADED INTO CMS USER AREA,        00017000
+*        CALLED VIA SVC 202, SERIALLY RESUABLE                          00018000
+*                                                                       00019000
+* ENTRY POINTS -                                                        00020000
+*                                                                       00021000
+*        DMKNMTBL - PERFORM THE ABOVE-DESCRIBED FUNCTION                00022000
+*                                                                       00023000
+* ENTRY CONDITIONS -                                                    00024000
+*                                                                       00025000
+*        GPR1 -> STANDARD CMS PLIST                                     00026000
+*              ONE ARGUMENT IS ALLOWED - THE IMAGE LIBRARY NAME         00027000
+*        THE FORMAT IS:                                                 00028000
+*                  +-----------+-----------------------+                00029000
+*                  | IMAGELIB  |    IMAGELIB           |                00030000
+*                  +-----------+-----------------------+                00031000
+*                                                                       00032000
+* EXIT CONDITIONS -                                                     00033000
+*                                                                       00034000
+*        NORMAL                                                         00035000
+*              R15 = 0                                                  00036000
+*              THE IMAGE LIBRARY HAS BEEN UPDATED AS REQUESTED          00037000
+*        ERROR                                                          00038000
+*              R15 = 4  CONTROL FILE NOT FOUND OR IN ERROR              00039000
+*              R15 = 8  SPECIFIC IMAGE NON-EXISTENT                     00040000
+*              R15 = 12 SPECIFIC IMAGE CAUSED LOAD ERROR                00041000
+*              R15 = 16 INSUFFICIENT VIRTUAL STORAGE                    00042000
+*              R15 = 20 THE IMAGE LIBRARY IS CURRENTLY ACTIVE           00043000
+*              R15 = 100+(FSREAD RC) ERROR IN FSREAD                    00044000
+*          IN THESE CASES THE IMAGE LIBRARY IS NOT UPDATED              00045000
+*                                                                       00046000
+* CALLS TO OTHER ROUTINES -                                             00047000
+*                                                                       00048000
+*        FSSTATE  - SEE IF CNTRL AND TEXT FILES EXIST                   00049000
+*        FSREAD   - READ IN THE CNTRL FILE                              00050000
+*        CMS LOAD - LOAD THE TEXT FILE INTO THE TRANSIENT AREA          00051000
+*                                                                       00052000
+* TABLES / WORKAREAS -                                                  00053000
+*                                                                       00054000
+*        NONE                                                           00055000
+*                                                                       00056000
+* REGISTER USAGE -                                                      00057000
+*                                                                       00058000
+*        GPR0  = TEMPORARY WORK REGISTER                                00059000
+*        GPR1  = PLIST REGISTER AND TEMP. WORK REGISTER                 00060000
+*        GPR2  = SOURCE ADDRESS FOR MVCL                                00061000
+*        GPR3  = SOURCE LENGTH FOR MVCL                                 00062000
+*        GPR4  = TARGET ADDRESS FOR MVCL                                00063000
+*        GPR5  = TARGET LENGTH FOR MVCL                                 00064000
+*        GPR6  = CURRENT END OF IMAGE LIBRARY IN STORAGE                00065000
+*        GPR7  = POINTER TO NEXT AVAILABLE DIRECTORY ENTRY              00066000
+*        GPR8  = RUNNING COUNTER FOR NUMBER OF DRCTRY ENTRIES           00067000
+*        GPR9  = STARTING ADDRESS OF THE IMAGELIB IN STORAGE            00068000
+*        GPR10 = UNUSED                                                 00069000
+*        GPR11 = UNUSED                                                 00070000
+*        GPR12 = DMKNMT MODULE BASE                                     00071000
+*        GPR13 = UNUSED                                                 00072000
+*        GPR14 = BALR RETURN ADDRESS AND SCRATCH REGISTER               00073000
+*        GPR15 = BALR BRANCH ADDRESS AND SCRATCH REGISTER               00074000
+*                                                                       00075000
+* NOTES -                                                               00076000
+*                                                                       00077000
+*        A MAXIMUM OF 3 PAGES OF DIRECTORY IS ALLOWED                   00078000
+*        THE STARTING POINT FOR THE DATA AREA WOULD HAVE TO BE          00079000
+*        CHANGED TO INCREASE THIS MAXIMUM.                              00080000
+*                                                                       00081000
+*        THE MAXIMUM SIZE OF A IMAGELIB MEMBER IS 8192 BYTES.  THIS     00082000
+*        REPRESENTS A RESTRICTION ONLY IN THE CASE OF A COPY            00083000
+*        MODIFICATION WHERE IT IS 8 BYTES LESS THAN THE                 00084000
+*        HARDWARE MAXIMUM.                                              00085000
+*                                                                       00086000
+* OPERATION -                                                           00087000
+*                                                                       00088000
+*        1.    VERIFY THE EXISTENCE OF THE CNTRL FILE.  IF IT DOES      00089000
+*              NOT EXIST, EXIT WITH RC=4 AND NO MESSAGE.                00090000
+*              OTHERWISE, CONTINUE.                                     00091000
+*              CREATE A DUMMY DIRECTORY ENTRY WHICH WILL BE USED        00092000
+*              TO HOLD THE NUMBER OF ENTRIES AND SET THE START          00093000
+*              OF DATA TO BE 3 PAGES PAST THE START OF THE DIRECTORY.   00094000
+*              THIS ALLOW FOR A MAXIMUM OF 3 PAGES OF DIRECTORY.        00095000
+*                                                                       00096000
+*        2.    READ THE NEXT LINE IN THE CNTRL FILE.  IF END OF FILE,   00097000
+*              GO TO STEP 6. OTHERWISE CONTINUE.                        00098000
+*                                                                       00099000
+*        3.    IF THE TEXT FILE DOES NOT EXIST, EXIT WITH DMKNMT248E.   00100000
+*                                                                       00101000
+*        4.    LOAD THE INDICATED TEXT FILE INTO THE TRANSIENT AREA.    00102000
+*              IF ERROR, EXIT WITH ERROR MESSAGE DMKNMT249E.            00103000
+*                                                                       00104000
+*        5.    ALLOWING 3 PAGES FOR THE DIRECTORY AREA, CREATE A        00105000
+*              NEW DIRECTORY ENTRY AFTER THE LAST, AND MOVE THE         00106000
+*              FILE FROM THE TRANSIENT AREA INTO THE NEXT AVAILABLE     00107000
+*              LOCATION IN THE USER AREA.  IF IT EXCEEDS AVAILABLE      00108000
+*              STORAGE, EXIT WITH DMKNMT256E.  OTHERWISE, UPDATE        00109000
+*              THE POINTERS TO THE NEXT AVAILABLE DIRECTORY ENTRY       00110000
+*              AND NEXT AVAILABLE DATA AREA.  THEN GO TO STEP 2.        00111000
+*                                                                       00112000
+*        6.    ENTER THE TOTAL NUMBER OF MEMBERS INTO THE FIRST         00113000
+*              DUMMY ENTRY, MOVE THE DATA AREA SO THAT IT               00114000
+*              IMMEDIATELY FOLLOWS THE DIRECTORY, AND ALTER THE         00115000
+*              DISPLACEMENTS IN EACH DIRECTORY ENTRY.                   00116000
+*                                                                       00117000
+*        7.    ISSUE DIAGNOSE X'74' TO SAVE THE NAMED SYSTEM.           00118000
+*              IF THE RETURN CODE IS 0, ISSUE DMKNMT247I.               00119000
+*              OTHERWISE, ISSUE DMKNMT254E.                             00120000
+*                                                                       00121000
+*        8.    RETURN TO CALLER WITH APPROPRIATE RETURN CODE.           00122000
+*                                                                       00123000
+* RESPONSE -                                                            00124000
+*                                                                       00125000
+*        NONE                                                           00126000
+*                                                                       00127000
+* ERROR MESSAGES -                                                      00128000
+*                                                                       00129000
+*        DMKNMT247I 3800 NAMED SYSTEM (NAME) CREATED                    00130000
+*        DMKNMT248E SPECIFIED IMAGE (NAME) NON-EXISTENT                 00131000
+*        DMKNMT249E ERROR LOADING IMAGE (NAME)                          00132000
+*        DMKNMT256E INSUFFICIENT VIRTUAL STORAGE                        00133000
+*        DMKNMT254E ERROR SAVING (IMAGELIB) - RC = (RC)                 00134000
+*                                                                       00135000
+*.                                                                      00136000
+         EJECT                                                          00137000
+DMKNMT   CSECT LOADER              CONTROL ONLY                @V60B9BA 00138000
+         ENTRY DMKNMTBL                                        @V60B9BA 00139000
+         USING NUCON,R0                                        @V60B9BA 00140000
+         SPACE 3                                                        00141000
+DMKNMTBL DS    0H                                              @V60B9BA 00142000
+IMAGELIB EQU   *              NAME OF THE MODULE               @V60B9BA 00143000
+         LR    R12,R15        SET UP OUR BASE REGISTER         @V60B9BA 00144000
+         USING DMKNMTBL,R12   ADDRESSIBILITY                   @V60B9BA 00145000
+         ST    R14,SAVE14     SAVE OUR RETURN REGISTER         @V60B9BA 00146000
+         CLI   8(R1),X'FF'    ANY PARAMETERS PASSED?           @V60B9BA 00147000
+         BE    ERR004         ERROR IF NOT                     @V60B9BA 00148000
+         MVC   CNTRLFN,8(R1)  MOVE IN THE IMAGELIB NAME        @V60B9BA 00149000
+         MVC   CNTRLFM(2),=C'* '   SEARCH ALL DISKS            @V60B9BA 00150000
+         LA    R2,CNTRLFN     SET UP CNTRL FILE                @V60B9BA 00151000
+         FSSTATE (R2),ERROR=ERR004 DOES IT EXIST?              @V60B9BA 00152000
+*                             ERROR IF NOT                     @V60B9BA 00153000
+         MVC   CNTRLFM(2),FSTFMODE-FSTFNAME(R1)  GET THE MODE  @V60B9BA 00154000
+         GETMAIN R,LV=8       GET STORAGE FOR AN ADDRESS       @V60B9BA 00155000
+         LR    R7,R1          HOLD THE START OF GETMAIN        @V60B9BA 00156000
+         FREEMAIN R,LV=8,A=(1)          GIVE IT BACK           @V60B9BA 00157000
+         LA    R7,4095(R7)         GO TO NEXT PAGE             @V60B9BA 00158000
+         N     R7,=X'00FFF000'     ROUND TO PAGE BDY           @V60B9BA 00159000
+         LR    R9,R7               KEEP START IN R9 TROUGHOUT  @V60B9BA 00160000
+         L     R6,THREEPGS         WHERE WE START MEMBERS      @V60B9BA 00161000
+         ALR   R6,R7               ...                         @V60B9BA 00162000
+         SPACE 2                                                        00163000
+         USING PDEBLOK,R7          ADDRESSIBILITY              @V60B9BA 00164000
+         MVC   PDEIMAG,CNTRLFN     IMAGELIB NAME               @V60B9BA 00165000
+         MVC   PDEDIRLN,THREEPGS   TEMPORARY DRCTRY LENGTH     @V60B9BA 00166000
+         SR    R8,R8               NUMBER OF DIRECTORY ENTRIES @V60B9BA 00167000
+         LA    R7,PDESIZE(R7)      POINT TO FIRST REAL ENTRY   @V60B9BA 00168000
+         SPACE                                                          00169000
+*        LOOP THROUGH EACH RECORD IN THE CONTROL FILE                   00170000
+         SPACE                                                          00171000
+RDLOOP   LA    R2,CNTRLFN          POINT TO FILE NAME          @V60B9BA 00172000
+         FSREAD (R2),ERROR=RDERR,BUFFER=MEMNAME,BSIZE=8        @V60B9BA 00173000
+AFTERRD  MVC   TXTNAME,MEMNAME     SAVE THE NAME HERE ALSO     @V60B9BA 00174000
+         LA    R2,TXTNAME          FILE FOR STATE              @V60B9BA 00175000
+         FSSTATE (R2),ERROR=NOTEXT   SEE IF IT EXISTS          @V60B9BA 00176000
+         LA    R1,LDPLIST          SET UP TO LOAD INTO THE     @V60B9BA 00177000
+         SVC   202                 ... TRANSIENT AREA          @V60B9BA 00178000
+         DC    AL4(LDERR)          ERROR ADDRESS               @V60B9BA 00179000
+         USING MHDBLOK,R2          MEMBER HEADER               @V60B9BA 00180000
+         L     R2,TRANS            START OF TRANSIENT AREA     @V60B9BA 00181000
+*                                  SOURCE ADDRESS FOR MVCL     @V60B9BA 00182000
+         LH    R3,MHDLEN           LENGTH OF DATA AREA         @V60B9BA 00183000
+         LA    R3,MHDSIZE(R3)      PLUS HEADER SIZE            @V60B9BA 00184000
+*                                  SOURCE LENGTH FOR MVCL      @V60B9BA 00185000
+         LA   R3,7(R3)             ROUND TO NEXT DOUBLEWORD    @V60B9BA 00186000
+         N     R3,=X'FFFFFFF8'     ...                         @V60B9BA 00187000
+         DROP  R2                  NO LONGER NEEDED            @V60B9BA 00188000
+         LR    R4,R6               TARGET ADDRESS FOR MVCL     @V60B9BA 00189000
+         LR    R5,R3               TARGET LENGTH FOR MVCL      @V60B9BA 00190000
+         LR    R1,R6               GET STARTING ADDRESS        @V60B9BA 00191000
+         SLR   R1,R9               GET DISPLACEMENT FROM START @V60B9BA 00192000
+         ST    R1,PDEDISP          SAVE IT IN DRCTRY ENTRY     @V60B9BA 00193000
+         ST    R5,PDELGTH          LENGTH OF MEMBER            @V60B9BA 00194000
+         MVC   PDENAME,MEMNAME     NAME OF MEMBER              @V60B9BA 00195000
+         ALR   R6,R5               WHERE IT WILL END IN STORAGE@V60B9BA 00196000
+         C     R6,FREELOWE         WILL WE GO TOO FAR?         @V60B9BA 00197000
+         BH    RANOUT              XFER IF SO                  @V60B9BA 00198000
+         MVCL  R4,R2               MOVE THE DATA IN            @V60B9BA 00199000
+         LA    R8,1(R8)            ONE MORE MEMBER IN IMAGELIB @V60B9BA 00200000
+         LA    R7,PDESIZE(R7)      NEXT AVAILABLE ENTRY        @V60B9BA 00201000
+         B     RDLOOP              READ NEXT LINE IN CNTRL FILE@V60B9BA 00202000
+         SPACE 2                                                        00203000
+RDERR    C     R15,=F'12'          END OF FILE ?               @V60B9BA 00204000
+         BE    RDEOF               XFER IF SO                  @V60B9BA 00205000
+         C     R15,=F'8'           INCORRECT LENGTH?           @V60B9BA 00206000
+         BE    AFTERRD             XFER BACK IF SO             @V60B9BA 00207000
+         B     BADCNTRL            BAD CONTROL FILE OTHERWISE  @V60B9BA 00208000
+RDEOF    LA    R2,CNTRLFN          FILE NAME FOR CLOSE         @V60B9BA 00209000
+         FSCLOSE (R2)                                          @V60B9BA 00210000
+         ST    R8,PDENUM-PDEBLOK(R9)  NUMBER OF MEMBERS        @V60B9BA 00211000
+         L     R3,THREEPGS         CALCULATE WHERE DIRECTORY   @V60B9BA 00212000
+         AR    R3,R9               ... ENDS TO TEST FOR        @V60B9BA 00213000
+         SR    R3,R7               ... OVERLAP                 @V60B9BA 00214000
+         BM    RANOUT              NO GOOD, DIRECTORY TOO BIG  @V60B9BA 00215000
+         LR    R4,R7               TARGET ADDRESS FOR COMPRESS @V60B9BA 00216000
+         LR    R0,R7               FIND DIRECTORY LENGTH       @V60B9BA 00217000
+         SLR   R0,R9               ...                         @V60B9BA 00218000
+         ST    R0,PDEDIRLN-PDEBLOK(R9)  SAVE IT                @V60B9BA 00219000
+         LR    R2,R9               GET SOURCE ADDRESS FOR MVCL @V60B9BA 00220000
+         AL    R2,THREEPGS         ...                         @V60B9BA 00221000
+         LR    R3,R6               END OF IMAGE LIBRARY        @V60B9BA 00222000
+         SLR   R3,R2               SOURCE LENGTH FOR MVCL      @V60B9BA 00223000
+         LR    R5,R3               TARGET LENGTH               @V60B9BA 00224000
+         MVCL  R4,R2               DO THE MOVE                 @V60B9BA 00225000
+         SPACE                                                          00226000
+*        ADJUST DISPLACEMENTS IN DIRECTORY ENTRIES                      00227000
+         SPACE                                                          00228000
+         LA    R2,PDESIZE(R9)      FIRST REAL ENTRY            @V60B9BA 00229000
+         LA    R4,PDESIZE          INCREMENT                   @V60B9BA 00230000
+         L     R5,PDEDIRLN-PDEBLOK(R9)  GET COMPARAND          @V60B9BA 00231000
+         ALR   R5,R9               .....                       @V60B9BA 00232000
+         BCTR  R5,0                ...                         @V60B9BA 00233000
+         LR    R0,R9               CALCULATE THE AMOUNT        @V60B9BA 00234000
+         AL    R0,THREEPGS         ... BY WHICH THE DISPS      @V60B9BA 00235000
+         SLR   R0,R7               ... MUST BE ALTERED         @V60B9BA 00236000
+DSPLOOP  L     R1,PDEDISP-PDEBLOK(R2)  OLD DISPLACEMENT        @V60B9BA 00237000
+         SLR   R1,R0               ALTER IT                    @V60B9BA 00238000
+         ST    R1,PDEDISP-PDEBLOK(R2)  SAVE NEW DISPLACEMENT   @V60B9BA 00239000
+         BXLE  R2,R4,DSPLOOP       TRY NEXT ONE                @V60B9BA 00240000
+         SLR   R6,R0               NEW END OF THE IMAGE LIBRARY@V60B9BA 00241000
+         SPACE                                                          00242000
+*        SAVE THE IMAGE LIBRARY                                         00243000
+         SPACE                                                          00244000
+         LM    R0,R1,CNTRLFN       NAME OF THE IMAGELIB        @V60B9BA 00245000
+         LR    R2,R9               START OF THE IMAGELIB       @V60B9BA 00246000
+         LR    R3,R6               END OF THE IMAGELIB         @V60B9BA 00247000
+         SLR   R3,R9               NUMBER OF BYTES TO SAVE     @V60B9BA 00248000
+         ICM   R3,B'1000',=X'04'   THE SAVE OPERATION          @V60B9BA 00249000
+         DIAG  R0,R2,X'0074'       ISSUE DIAGNOSE 74           @V60B9BA 00250000
+         LTR   R2,R2               ANY ERRORS?                 @V60B9BA 00251000
+         BNZ   DIAGERR             XFER IF SO                  @V60B9BA 00252000
+         SPACE                                                          00253000
+         LINEDIT TEXT='DMKNMT247I 3800 NAMED SYSTEM ........ CREATED', *00254000
+               SUB=(CHARA,CNTRLFN),DISP=ERRMSG                 @V60B9BA 00255000
+         SR    R15,R15             ZERO ERROR RETURN CODE      @V60B9BA 00256000
+RETURN   L     R14,SAVE14          GET RETURN ADDRESS          @V60B9BA 00257000
+         BR    R14                 RETURN TO CALLER            @V60B9BA 00258000
+         SPACE                                                          00259000
+DIAGERR  LINEDIT TEXT='DMKNMT254E ERROR SAVING ........ - RC = ....',  *00260000
+               SUB=(CHARA,CNTRLFN,DEC,(2)),DISP=ERRMSG,RENT=NO @VMI0083 00261000
+         C     R2,=F'20'           IMAGELIB TOO BIG?           @VMI0083 00262000
+         BNE   DIAGERR2            XFER IF NOT                 @VMI0083 00263000
+         LINEDIT TEXT='DMKNMT257E RESIDUAL BYTE COUNT = ........ (HEX)'*00264000
+               ,SUB=(HEX,(3)),DISP=ERRMSG                      @VMI0083 00265000
+DIAGERR2 LA    R15,20              RETURN CODE = 20            @VMI0083 00266000
+         B     RETURN              RETURN TO CALLER            @V60B9BA 00267000
+         SPACE                                                          00268000
+RANOUT   LINEDIT TEXT='DMKNMT256E INSUFFICIENT VIRTUAL STORAGE',       *00269000
+               DISP=ERRMSG                                     @V60B9BA 00270000
+         LA    R15,16              RETURN CODE = 16            @V60B9BA 00271000
+         B     RETURN              RETURN TO CALLER            @V60B9BA 00272000
+         SPACE                                                          00273000
+LDERR    LINEDIT TEXT='DMKNMT249E ERROR LOADING IMAGE ........',       *00274000
+               SUB=(CHARA,MEMNAME),DISP=ERRMSG                 @V60B9BA 00275000
+         LA    R15,12              RETURN CODE = 12            @V60B9BA 00276000
+         B     RETURN              RETURN TO CALLER            @V60B9BA 00277000
+         SPACE                                                          00278000
+NOTEXT   LINEDIT TEXT='DMKNMT248E SPECIFIED IMAGE ........ NON-EXISTENT*00279000
+               ',SUB=(CHARA,TXTNAME),DISP=ERRMSG               @V60B9BA 00280000
+         LA    R15,8               RETURN CODE = 8             @V60B9BA 00281000
+         B     RETURN              RETURN TO CALLER            @V60B9BA 00282000
+         SPACE                                                          00283000
+BADCNTRL EQU   *                                               @V60B9BA 00284000
+ERR004   LA    R15,4               RETURN CODE = 4             @V60B9BA 00285000
+         B     RETURN              RETURN TO CALLER            @V60B9BA 00286000
+         EJECT                                                          00287000
+*        LOCAL DATA AREAS                                               00288000
+         SPACE                                                          00289000
+         DS    0D                                              @V60B9BA 00290000
+CNTRLFN  DC    CL8' '              CNTRL FILE FILENAME         @V60B9BA 00291000
+CNTRLFT  DC    CL8'CNTRL'          CNTRL FILE FILETYPE         @V60B9BA 00292000
+CNTRLFM  DC    CL8'*'              CNTRL FILE FILETYPE         @V60B9BA 00293000
+         SPACE                                                          00294000
+THREEPGS DC    A(X'3000')          MAXIMUM DIRECTORY SIZE      @V60B9BA 00295000
+         SPACE                                                          00296000
+         DS    0D                                              @V60B9BA 00297000
+LDPLIST  DC    CL8'LOAD'           FOR LOADING THE REQUIRED    @V60B9BA 00298000
+MEMNAME  DC    CL8' '              .. MEMBER NAME INTO THE     @V60B9BA 00299000
+         DC    CL8'('              .. CMS TRANSIENT AREA       @V60B9BA 00300000
+         DC    CL8'ORIGIN'         ...                         @V60B9BA 00301000
+         DC    CL8'TRANS'          ...                         @V60B9BA 00302000
+         DC    8X'FF'              FENCE                       @V60B9BA 00303000
+         SPACE                                                          00304000
+TXTNAME  DC    CL8' '              NAME OF MEMBER              @V60B9BA 00305000
+         DC    CL8'TEXT'           FOR STATE ON TEXT FILE      @V60B9BA 00306000
+         DC    CL8'*'              ..                          @V60B9BA 00307000
+         SPACE                                                          00308000
+TRANS    DC    A(X'E000')          START OF CMS TRANSIENT AREA @V60B9BA 00309000
+SAVE14   DS    1F                  RETURN REGISTER SAVE AREA   @V60B9BA 00310000
+         EJECT                                                          00311000
+PDEBLOK  DSECT ,                                               @V60B9BA 00312000
+PDENAME  DS    CL8                 MEMBER NAME                 @V60B9BA 00313000
+PDEDISP  DS    1F                  RBA OF START OF MEMBER      @V60B9BA 00314000
+PDELGTH  DS    1F                  LENGTH OF MEMBER IN BYTES   @V60B9BA 00315000
+         ORG   PDENAME             FIRST DUMMY ENTRY           @V60B9BA 00316000
+PDEIMAG  DS    CL8                 NAME SYSTEM NAME            @V60B9BA 00317000
+PDEDIRLN DS    1F                  LENGTH OF DIRECTORY IN BYTES@V60B9BA 00318000
+PDENUM   DS    1F                  NUMBER OF MEMBERS           @V60B9BA 00319000
+PDESIZE  EQU   *-PDEBLOK           SIZE OF ENTRY IN BYTES      @V60B9BA 00320000
+         SPACE 3                                                        00321000
+MHDBLOK  DSECT ,                   HEADER OF ALL MEMBERS       @V60B9BA 00322000
+MHDNAME  DS    CL4                 LAST PART OF MEMBER NAME    @V60B9BA 00323000
+         DS    1H                  RESERVED                    @V60B9BA 00324000
+MHDLEN   DS    1H                  LENGTH OF DATA PART OF MEMBE@V60B9BA 00325000
+MHDSIZE  EQU   *-MHDBLOK           SIZE OF HEADER IN BYTES     @V60B9BA 00326000
+         EJECT                                                          00327000
+         FSTD                                                           00328000
+         COPY  EQU                                             @V60B9BA 00329000
+         COPY  DEVTYPES                                        @V60B9BA 00330000
+         NUCON ,                                               @V60B9BA 00331000
+         END                                                            00332000

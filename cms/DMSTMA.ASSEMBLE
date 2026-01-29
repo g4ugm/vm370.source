@@ -1,0 +1,719 @@
+TMA      TITLE 'DMSTMA     (CMS)       VM/370 - RELEASE 6'              00001000
+*.                                                                      00002000
+* MODULE NAME:                                                          00003000
+*                                                                       00004000
+*        DMSTMA (TAPEMAC)                                               00005000
+*                                                                       00006000
+* FUNCTION:                                                             00007000
+*                                                                       00008000
+*        READ AN IEHMOVE UNLOADED PDS FROM TAPE AND PLACE IT IN         00009000
+*        CMS MACLIB(S).                                                 00010000
+*                                                                       00011000
+* ATTRIBUTES:                                                           00012000
+*                                                                       00013000
+*        DISK RESIDENT                                                  00014000
+*                                                                       00015000
+* ENTRY POINTS:                                                         00016000
+*                                                                       00017000
+*        DMSTMA                                                         00018000
+*                                                                       00019000
+* ENTRY CONDITIONS:                                                     00020000
+*                                                                       00021000
+*        R1    =    A(PLIST)                                            00022000
+*        PLIST DC   CL8'MODULE NAME'                                    00023000
+*              DC   CL8'FNAME'                                          00024000
+*              DC   CL8'('         INDICATES START OF OPTIONS           00025000
+*              DC   CL8'TAP1|TAP2|TAP3|TAP4|ITEMCT XXXXX'               00026000
+*                                                                       00027000
+* EXIT CONDITIONS:                                                      00028000
+*        NORMAL                                                         00029000
+*        R15  = 0 - NO ERRORS                                           00030000
+*        R15 ^= 0 - ERROR AS DESCRIBED BELOW                            00031000
+*                                                                       00032000
+*                  MESSAGES:                              RETURN CODES: 00033000
+*                                                                       00034000
+*    DMSTMA001E NO FILENAME SPECIFIED                           24      00035000
+*    DMSTMA003E INVALID OPTION OPT                              24      00036000
+*    DMSTMA057E INVALID RECORD FORMAT                           32      00037000
+*    DMSTMA070E INVALID PARAMETER PARM                          24      00038000
+*    DMSTMA105S ERROR XXX WRITING FILE FN FT ON DISK           100      00039000
+*    DMSTMA109S VIRTUAL STORAGE CAPACITY EXCEEDED              104      00040000
+*    DMSTMA110S ERROR READING TAPX                             100      00041000
+*    DMSTMA137S ERROR XXX ON STATE FOR FN FT                   100      00042000
+*    DMSTMA138S ERROR XXX ERASING FN FT BEFORE LOADING TAPE    100      00043000
+*    DMSTMA139S TAPE FILE EXCEEDS 9 CMS MACLIBS                104      00044000
+*                                                                       00045000
+* CALLS TO OTHER ROUTINES:                                              00046000
+*                                                                       00047000
+*        DMSBWR, DMSFNS, DMSAUD, DMSERS, DMSCWR, DMSERR, DMSTIO         00048000
+*                                                                       00049000
+* EXTERNAL REFERENCES:                                                  00050000
+*                                                                       00051000
+*        NONE                                                           00052000
+*                                                                       00053000
+* TABLES/WORKAREAS                                                      00054000
+*                                                                       00055000
+*        PLISTS FOR VARIOUS CALLS TO OTHER ROUTINES                     00056000
+*        BUFFERS FOR TAPE READS, RECORD DEBLOCKING, DISK WRITES         00057000
+*                                                                       00058000
+* REGISTER USAGE                                                        00059000
+*                                                                       00060000
+*        R1  = A(PLIST)                                                 00061000
+*        R3  = A(IEHMOVE RECORD BEING PROCESSED)                        00062000
+*        R5  = A(NEXT AVAILABLE DICTIONARY ENTRY)                       00063000
+*        R9  = LENGTH OF CURRENT IEHMOVE RECORD                         00064000
+*        R10 = INTERNAL LINKAGE                                         00065000
+*        R11 = CMS FILE ITEM NUMBERS                                    00066000
+*        R12 = BASE REGISTER                                            00067000
+*                                                                       00068000
+* OPERATION:                                                            00069000
+*                                                                       00070000
+*        1. VALIDATE PARAMETERS AND OPTIONS PASSED BY THE USER. IF      00071000
+*        ALL OK, ISSUE A GETMAIN FOR UP TO 32768 BYTES OF STORAGE.      00072000
+*        FROM STORAGE OBTAINED, BREAK OFF A 4096 BYTE SECTION           00073000
+*        FOR MAINTAINING THE MACLIB DICTIONARY. REMAINDER OF THE        00074000
+*        BUFFER WILL BE SPLIT FURTHER INTO A BUFFER FOR TAPE I/O        00075000
+*        AND IEHMOVE RECORD RECONSTRUCTION.                             00076000
+*                                                                       00077000
+*        2. READ THE TAPE, DISPLAYING ANY 'VOL' AND 'HDR' RECORDS       00078000
+*        AT THE USER'S TERMINAL, UNTIL A NON-LABEL TYPE RECORD IS       00079000
+*        FOUND. VERIFY THAT THE TAPE CONTAINS AN UNLOADED PDS           00080000
+*        CREATED BY IEHMOVE AND RETRIEVE PERTINENT INFO FROM THE        00081000
+*        DSCB. CONTINUE TO SCAN THE TAPE UNTIL A MEMBER HEADER          00082000
+*        RECORD IS FOUND.                                               00083000
+*                                                                       00084000
+*        3. SET UP NECESSARY PARAMETER INFO TO WRITE THE DISK FILE      00085000
+*        AND WRITE A DUMMY 80 BYTE HEADER RECORD TO THE FILE.           00086000
+*                                                                       00087000
+*        4. MOVE THE MEMBER NAME FROM THE MEMBER HDR RECORD ON          00088000
+*        TAPE INTO THE CURRENT DICTIONARY ENTRY AND SAVE THE ITEM       00089000
+*        NUMBER OF THE FIRST DATA RECORD TO BE WRITTEN IN THE           00090000
+*        DICTIONARY ENTRY.                                              00091000
+*                                                                       00092000
+*        5. RECONSTRUCT THE NEXT IEHMOVE RECORD IN CORE AND TEST        00093000
+*        IT'S TYPE. IF IT IS A DATA RECORD, WRITE THE RESULTING 80      00094000
+*        BYTE DATA RECORDS TO THE DISK FILE. IF IT IS A MEMBER          00095000
+*        HEADER RECORD GO TO STEP 3. OTHERWISE, IGNORE THE RECORD       00096000
+*        AND REPEAT THIS STEP.                                          00097000
+*                                                                       00098000
+*        6. IF THE NUMBER OF ITEMS (80 BYTE RECORDS) EXCEEDS            00099000
+*        THE VALUE OF ITEMCT (DEFAULT = 50000),                         00100000
+*        OR THE DICTIONARY BUFFER BECOMES FULL, THE CHARACTER '2' IS    00101000
+*        APPENDED TO THE FILE NAME (OVERLAYS LAST CHARACTER IF FN=8     00102000
+*        CHARACTERS) AND PROCESSING CONTINUES.  IF 9 MACLIBS ARE        00103000
+*        THUSLY FILLED UP, PROCESSING TERMINATES WITH AN ERROR          00104000
+*        MESSAGE.                                                       00105000
+*                                                                       00106000
+*        7. AFTER DETERMINING THE NEXT NAME TO USE, THE DICTIONARY      00107000
+*        FOR THE CURRENT LIBRARY IS PREPARED AND WRITTEN AT THE END     00108000
+*        OF THE FILE AND THE MACLIB HEADER RECORD IS BUILT AND          00109000
+*        WRITTEN OVER THE DUMMY HEADER RECORD PUT OUT AT THE            00110000
+*        BEGINNING. A CHECK IS MADE TO SEE IF THIS STEP WAS ENTERED     00111000
+*        AS A RESULT OF AN EOF ON TAPE. IF SO, PROGRAM EXECUTION        00112000
+*        RETURNS CONTROL TO THE USER. IF NOT, EXECUTION PROCEEDS        00113000
+*        STEP 3.                                                        00114000
+*                                                                       00115000
+*.                                                                      00116000
+         EJECT                                                          00117000
+DMSTMA   CSECT                                                 @V305238 00118000
+         USING DMSTMA,R12                                      @V305238 00119000
+         LR    R12,R15             GET ADDRESSABILITY          @V305238 00120000
+         LA    R1,8(,R1)           STEP OVER THE MODULE NM     @V305238 00121000
+         TM    0(R1),X'FF'         ANY PARMS AT ALL?           @V305238 00122000
+         BO    ERROR01             NO ERROR MSG AND EXIT       @V305238 00123000
+         CLI   0(R1),C'('          WILL TAPE ADDR BE NEXT      @V305238 00124000
+         BE    ERROR01             THAT'S ALSO AN ERROR        @V305238 00125000
+         MVC   FN1(8),0(R1)        MOVE IN THE NAME            @V305238 00126000
+         LA    R1,8(,R1)           ADVANCE TO NEXT PARM        @V305238 00127000
+         CLI   0(R1),X'FF'         ANYMORE ANYTHING?           @V305238 00128000
+         BE    GETCORE             NO - GO GET SOME STORAGE    @V305238 00129000
+         CLI   0(R1),C'('          BETTER BE OPTIONS FOLLOWING @V305238 00130000
+         BNE   ERROR70             ILLEGAL CALLING SEQUENCE    @VM03122 00131000
+         SPACE 2                                                        00132000
+SRCHOPT  LA    R1,8(R1)       REPOSITION ON THE OPTION         @V305238 00133000
+         LA    R3,OPTABB                                       @V305238 00134000
+         LA    R4,OPTABL                                       @V305238 00135000
+         LA    R5,OPTABE                                       @V305238 00136000
+         SPACE                                                          00137000
+FINDOPT  CLC   0(8,R1),0(R3)  IS THIS THE OPTION?              @V305238 00138000
+         BNE   BXLE1          NOPE, KEEP LOOKIN                @V305238 00139000
+         LH    R3,8(R3)       GET DISPLACEMENT TO ROUTINE      @V305238 00140000
+         B     0(R3,R12)      AND GO TO IT.                    @V305238 00141000
+BXLE1    BXLE  R3,R4,FINDOPT  CONTINUE TO SEARCH               @V305238 00142000
+         B     ERROR03        INVALID OPTION                   @V305238 00143000
+         SPACE 3                                                        00144000
+OPTABB   DC    C'TAP1    ',AL2(SETTPAD-DMSTMA)                 @V305238 00145000
+         DC    C'TAP2    ',AL2(SETTPAD-DMSTMA)                 @V305238 00146000
+         DC    C'TAP3    ',AL2(SETTPAD-DMSTMA)                 @V305238 00147000
+         DC    C'TAP4    ',AL2(SETTPAD-DMSTMA)                 @V305238 00148000
+         DC    C'ITEMCT  ',AL2(SETITEM-DMSTMA)                 @V305238 00149000
+         DC    C')       ',AL2(GETCORE-DMSTMA)                 @V305238 00150000
+OPTABE   DC    8X'FF',AL2(GETCORE-DMSTMA)                      @V305238 00151000
+OPTABL   EQU   *-OPTABE       SIZE OF AN ENTRY                 @V305238 00152000
+         EJECT                                                          00153000
+SETTPAD  EQU   *                                               @V305238 00154000
+         MVC   TAPEID(4),0(R1)     OK - SAVE IN THE PLIST      @V305238 00155000
+         B     SRCHOPT        KEEP LOOKIN' FOR OPTIONS         @V305238 00156000
+         SPACE 2                                                        00157000
+SETITEM  LA    R1,8(R1)       INCREMENT TO THE ITEM COUNT      @V305238 00158000
+         BAL   R15,SCANUMB    GO SCAN THE ITEM COUNT           @V305238 00159000
+         BNZ   ERROR70        NONE THERE, TOO BAD              @VM03122 00160000
+         CL    R2,=F'4'       MORE THAN 5 DIGITS ENTERED?      @V305238 00161000
+         BH    ERROR70        YUP, TOOBAD.                     @VM03122 00162000
+         LA    R2,X'70'(R2)   FOR PACK INSTRUCTION, L1         @V305238 00163000
+         EX    R2,PACK        PACK THE ITEM COUNT              @V305238 00164000
+         CVB   R2,PACKED      CONVERT IT TO BINARY             @V305238 00165000
+         CL    R2,=F'62500'   CAN'T BE TOO BIG...              @V305238 00166000
+         BH    ERROR70        TOOBAD.                          @VM03122 00167000
+         ST    R2,CUTOFF      SAVE IT                          @V305238 00168000
+         B     SRCHOPT        CONTINUE WITH NEXT OPTION        @V305238 00169000
+         SPACE                                                          00170000
+PACK     PACK  PACKED(*-*),0(*-*,R1)    PACK OPTION COUNT      @V305238 00171000
+         SPACE 3                                                        00172000
+SCANUMB  LA    R3,8           MAX SIZE OF COUNT                @V305238 00173000
+         LR    R2,R1          SET BEGINNING ADDRESS            @V305238 00174000
+NEXTCHAR CLI   0(R2),C' '     IS IT THE END OF THE FIELD?      @V305238 00175000
+         BE    FNDBLK         YUP, BR                          @V305238 00176000
+         CLI   0(R2),C'0'     IS IT LESS THAN A ZERO?          @V305238 00177000
+         BL    SETCC3         YUP, BAD NEWS                    @V305238 00178000
+         CLI   0(R2),C'9'     BIGGER THAN A NINE?              @V305238 00179000
+         BH    SETCC3         YUP, BAD NEWS                    @V305238 00180000
+         LA    R2,1(R2)       INCREMENT TO NEXT CHARACTER      @V305238 00181000
+         BCT   R3,NEXTCHAR    KEEP LOOKING                     @V305238 00182000
+         SPACE                                                          00183000
+FNDBLK   SR    R2,R1          GET THE FIELD SIZE               @V305238 00184000
+         BZ    SETCC1         ITS NULL, SO INDICATE            @V305238 00185000
+         BCTR  R2,0           DECREMENT BY ONE FOR USE WITH EX @V305238 00186000
+SETCC0   TM    *+1,X'00'      SET CONDITION CODE 0             @V305238 00187000
+         BR    R15            AND RETURN                       @V305238 00188000
+SETCC1   TM    *+0,X'FF'      SET CONDITION CODE 1             @V305238 00189000
+         BR    R15            AND RETURN                       @V305238 00190000
+SETCC2   CLI   *+0,X'00'      SET CONDITION CODE 2             @V305238 00191000
+         BR    R15            AND RETURN                       @V305238 00192000
+SETCC3   TM    *+1,X'FF'      SET CONDITION CODE 3             @V305238 00193000
+         BR    R15            AND RETURN                       @V305238 00194000
+         EJECT                                                          00195000
+GETCORE  EQU   *                                               @V305238 00196000
+         GETMAIN VC,LA=SZLIST,A=GMBUFF                         @V305238 00197000
+         L     R3,GMBUFF           GET BUFFER ADDRESS          @V305238 00198000
+         ST    R3,DICTBUFF         SAVE AS DICT STRT ADDR      @V305238 00199000
+         LA    R4,(4096-12)(,R3)   ADDRESS OF LAST ENTRY       @V305238 00200000
+         ST    R4,ENDDICT          SAVE IT                     @V305238 00201000
+         LA    R4,12(,R4)          END OF DICTIONARY AREA      @V305238 00202000
+         STCM  R4,7,TPBUFFAD       SAVE AS TAPE BUFF STRT      @V305238 00203000
+         A     R3,GMBUFF+4         CALC END OF GETMAIN AREA    @V305238 00204000
+         ST    R3,TPBUFFND         SAVE IT FOR LATER           @V305238 00205000
+         SR    R3,R4               GETMAIN AREA - DICT AREA    @V305238 00206000
+         ST    R3,TPBUFFSZ         SAVE IN TAPE PLIST          @V305238 00207000
+*                                                                       00208000
+* READ TAPE UNTIL NON-HEADER RECORD FOUND                               00209000
+*                                                                       00210000
+RDHDR    EQU   *                                               @V305238 00211000
+         LA    R1,TAPLIST          LOAD PLIST ADDR             @V305238 00212000
+         SVC   202                 CALL DMSTIO                 @V305238 00213000
+         DC    AL4(ERROR110)       ERROR RETURN ADDRESS        @V305238 00214000
+         TM    CSW+5(R0),ILI       INCORRECT LENGTH???         @V305238 00215000
+         BZ    NOTILI              NO                          @V305238 00216000
+         CLC   CSW+6(2,R0),H0      YES - ANYTHING READ AT ALL? @V305238 00217000
+         BE    GIVE110             NO - ARGH!                  @V305238 00218000
+NOTILI   EQU   *                                               @V305238 00219000
+         ICM   R6,7,TPBUFFAD       GET BUFFER ADDRESS          @V305238 00220000
+         CLC   0(3,R6),VOL         VOLUME HEADER?              @V305238 00221000
+         BE    RDHDR               YES - 'HDR' DUE NEXT        @V305238 00222000
+         CLC   0(3,R6),HDR         IS IT 'HDR' RECORD?         @V305238 00223000
+         BNE   CHKIEHMV            NO - SEE IF IEHMOVE HDR     @V305238 00224000
+         LA    R1,TYPLIST          YES - DISPLAY THE HDR       @V305238 00225000
+         STCM  R6,7,TYPBUFAD       STORE BUFFER ADDR IN LIST   @V305238 00226000
+         MVC   TYPCNT(3),TPCNT+1   LENGTH OF THE DATA          @V305238 00227000
+         SVC   202                                             @V305238 00228000
+         DC    AL4(*+4)            ASSUME NO ERRORS            @V305238 00229000
+         B     RDHDR               GO READ NEXT RECORD         @V305238 00230000
+         EJECT                                                          00231000
+*                                                                       00232000
+* AFTER VERIFYING TAPE WAS CREATED BY IEHMOVE, WRITE A DUMMY 80 BYTE    00233000
+* MACLIB HEADER RECORD, READ FROM TAPE AND RECONSTRUCT IEHMOVE          00234000
+* INFORMATION IN CORE. WHEN COMPLETE RECORD IS ASSEMBLED, WRITE         00235000
+* RESULTANT NUMBER OF 80 BYTE DATA RECORDS TO THE CMS FILE.             00236000
+*                                                                       00237000
+CHKIEHMV EQU   *                                               @V305238 00238000
+         OI    SWITCHES,NHDR       SHOW NON HDR REC READ       @V305238 00239000
+         CLC   0(2,R6),H1          LOOK LIKE AN UNLOADED PDS?  @V305238 00240000
+         BNE   ERROR57             NO - MSG TO USER & EXIT     @V305238 00241000
+         L     R4,TPCNT            YES - GET TAPE RECORD SIZE  @V305238 00242000
+         LA    R4,0(R4,R6)         CALC END OF REC IN CORE     @V305238 00243000
+         ST    R4,BLDBUFF          SAVE AS START OF BUILD AREA @V305238 00244000
+         ST    R4,BLDEND           SAVE HERE TOO               @V305238 00245000
+         BAL   R10,STRIP2          GO STRIP OFF UNWANTED CHARS @V305238 00246000
+* IF RECORD N.G. STRIP2 WILL NOT RETURN HERE                            00247000
+         L     R3,BLDBUFF          POINT TO STRT OF BLD AREA   @V305238 00248000
+         LA    R9,75               GET EXPECTED REC LENGTH     @V305238 00249000
+         CH    R9,0(,R3)           MATCH??                     @V305238 00250000
+         BNE   ERROR57             NOPE - THATS TOO BAD        @V305238 00251000
+         LA    R9,3(,R9)           YES - BUMP LENGTH           @V305238 00252000
+         CLC   3(75,R3),IEHMVHDR   IS HDR INFO THERE?          @V305238 00253000
+         BNE   ERROR57             NO - MSG TO USER AND PUNT   @V305238 00254000
+         BAL   R10,NEXTR           GET NEXT IEHMOVE RECORD     @V305238 00255000
+*                                  (IT SHOULD BE THE DSCB)              00256000
+         TM    87(R3),FXD          FIXED LENGTH RECORDS??      @V305238 00257000
+         BZ    ERROR57             NO - CAN'T USE IT THEN      @V305238 00258000
+         TM    87(R3),BLK          ARE THE RECORDS BLOCKED?    @V305238 00259000
+         BZ    LOCMEM              NOPE                        @V305238 00260000
+         OI    SWITCHES,BLK        YES - REMEMBER IT           @V305238 00261000
+         CLC   91(2,R3),F80+2      IS LRECL 80??               @V305238 00262000
+         BNE   ERROR57             GULP!                       @V305238 00263000
+LOCMEM   EQU   *                   LOCATE FIRST MEMBER HDR     @V305238 00264000
+         BAL   R10,NEXTR           GET THE NEXT RECORD         @V305238 00265000
+         TM    2(R3),MEMREC        IS THIS A MEMBER HDR?       @V305238 00266000
+         BZ    LOCMEM              NO - KEEP LOOKING           @V305238 00267000
+         SPACE 2                                                        00268000
+STRTLIB  EQU   *                                               @V305238 00269000
+         MVC   MACFN(8),FN1        PUT FILENAME IN PLISTS      @V305238 00270000
+         MVC   STATELST+8(8),FN1   . . .                       @V305238 00271000
+         MVC   STATELST(8),STATEW  CHANGE CMD TO 'STATEW'      @V305238 00272000
+         LA    R1,STATELST         CALL DMSSTT TO SEE IF       @V305238 00273000
+         SVC   202                 THE FILE ALREADY EXITS      @V305238 00274000
+         DC    AL4(*+4)            RETURN HERE REGARDLESS      @V305238 00275000
+         CH    R15,H28             DID FILE EXIST?             @V305238 00276000
+         BE    NEWLIB              NO - START THE PROCESS      @V305238 00277000
+         LTR   R15,R15             ANY OTHER ERRORS?           @V305238 00278000
+         BNZ   ERROR137            YES - GAK                   @V305238 00279000
+         MVC   STATELST(8),ERASE   ERASE THE OLD FILE          @V305238 00280000
+         SVC   202                 (R1 ALREADY SET UP)         @V305238 00281000
+         DC    AL4(ERROR138)       MAYBE READ ONLY DISK???     @V305238 00282000
+         EJECT                                                          00283000
+*                                                                       00284000
+* START BY WRITING A DUMMY 80 BYTE HEADER RECORD                        00285000
+*                                                                       00286000
+NEWLIB   EQU   *                                               @V305238 00287000
+         BAL   R10,LMSG       GO TELL HIM WHAT MACLIB WERE BLDG@VM03122 00288000
+         MVI   REC1BUF,X'40'       CLEAR BUFFER                @V305238 00289000
+         MVC   REC1BUF+1(79),REC1BUF    . . .                  @V305238 00290000
+         MVC   REC1BUF(3),ASTERS   INVALID HDR IN CASE PROBS   @V305238 00291000
+         LA    R1,REC1BUF          SO MACLIB UNUSABLE          @V305238 00292000
+         ST    R1,MACBUFF          SET DATA ADDRESS            @V305238 00293000
+         LA    R1,MACWRT           PLIST ADDRESS               @V305238 00294000
+         SVC   202                 CALL DMSBWR                 @V305238 00295000
+         DC    AL4(ERROR105)       ERROR RETURN ADDRESS        @V305238 00296000
+         L     R5,DICTBUFF         GET START OF DICT. BUFFER   @V305238 00297000
+         LA    R11,2               SET ITEM COUNT TO 2         @V305238 00298000
+NEWMAC   EQU   *                                               @V305238 00299000
+         TM    SWITCHES,AT1MAC     HAS A MACRO BEEN WRITTEN?   @V305238 00300000
+         BZ    NEWMAC1             NO - BYPASS NEXT SECTION    @V305238 00301000
+         MVI   REC1BUF,X'40'       YES - CLEAR 80 BYTE BUFFER  @V305238 00302000
+         MVC   REC1BUF+1(79),REC1BUF    . . .                  @V305238 00303000
+         MVC   REC1BUF(4),SLASHREC      WRITE SPEC ENDING REC  @V305238 00304000
+         LA    R1,REC1BUF                                      @V305238 00305000
+         ST    R1,MACBUFF                                      @V305238 00306000
+         MVC   MACNOIT(2),H1       ONLY WRITING 1 RECORD       @V305238 00307000
+         MVC   MACSZ(4),F80        RESET REC SIZE IN PLIST     @V305238 00308000
+         LA    R1,MACWRT                                       @V305238 00309000
+         SVC   202                                             @V305238 00310000
+         DC    AL4(ERROR105)                                   @V305238 00311000
+         LA    R11,1(,R11)         BUMP THE ITEM COUNT         @V305238 00312000
+         C     R11,CUTOFF          NO. OF ITEMS > CUTOFF?      @V305238 00313000
+         BNL   CHKFNS              YES - GET A NEW NAME        @V305238 00314000
+         SPACE                                                          00315000
+         C     R5,ENDDICT          DICTIONARY OVRFLOW??        @V305238 00316000
+         BNL   CHKFNS              YES - TRY FOR ANOTHER NAME  @V305238 00317000
+NEWMAC1  EQU   *                                               @V305238 00318000
+         OI    SWITCHES,AT1MAC     AT LEAST 1 MACRO WRITTEN    @V305238 00319000
+         MVC   0(8,R5),6(R3)       MEMBER NAME = MACRO NAME    @V305238 00320000
+         STH   R11,8(,R5)          SAVE ITEM NO. OF 1ST REC    @V305238 00321000
+         CLI   9(R5),X'00'    MOD START ON 256-ITEM BDRY?      @VA04691 00321050
+         BNE   NOTAPROB       NOT A POTENTIAL OS PROBLEM       @VA04691 00321100
+         MVI   9(R5),X'01'    MAKE IT AN ACCEPTABLE TTR        @VA04691 00321150
+         LA    R11,1(,R11)    NO CHK REQ'D IF CUTOFF UNCHANGED @VA04691 00321200
+         LA    R1,*           GET SOME KIND OF ADDRESS         @VA04691 00321250
+         ST    R1,MACBUFF     LET IT BE OUR WRITE BUFFER       @VA04691 00321300
+         LA    R1,80          CALL IT 80 BYTES LONG            @VA04691 00321350
+         ST    R1,MACSZ       AND TELL WRBUF ABOUT IT          @VA04691 00321400
+         XC    MACNOIT,MACNOIT DEFAULT THE ITEM COUNT          @VA04691 00321450
+         LA    R1,MACWRT      ADDRESS THE P-LIST               @VA04691 00321500
+         SVC   202            CALL DMSBWR                      @VA04691 00321550
+         DC    AL4(ERROR105)  ERROR RETURN                     @VA04691 00321600
+NOTAPROB EQU   *                                               @VA04691 00321650
+         MVC   10(2,R5),H0         CLEAR REMAINDER OF ENTRY    @V305238 00322000
+         LA    R5,12(,R5)          POINT TO NEXT DICT. SLOT    @V305238 00323000
+         SPACE 2                                                        00324000
+NEWMAC2 EQU    *                                               @V305238 00325000
+         BAL   R10,NEXTR           GET NEXT IEHMOVE REC        @V305238 00326000
+         TM    2(R3),NOTEDUM       NOTELIST OR DUMMY REC?      @V305238 00327000
+         BM    NEWMAC2             YES - SKIP IT               @V305238 00328000
+         TM    2(R3),MEMREC        MEMBER HEADER RECORD?       @V305238 00329000
+         BO    NEWMAC              YES - HANDLE IT             @V305238 00330000
+         TM    2(R3),DATAREC       IS IT A DATA RECORD?        @V305238 00331000
+         BZ    NEWMAC2             NO - TRY ANOTHER            @V305238 00332000
+         EJECT                                                          00333000
+*                                                                       00334000
+* WRITE OUT APPROPRIATE NUMBER OF 80 BYTE RECORDS TO THE DISK FILE      00335000
+*                                                                       00336000
+         LA    R6,3(,R3)           POINT TO DATA (MAYBE)       @V305238 00337000
+         TM    2(R3),TTR           ANY TTR INFO?               @V305238 00338000
+         BZ    NOTTR               NO                          @V305238 00339000
+         LA    R6,3(,R6)           YES - SKIP OVER IT          @V305238 00340000
+NOTTR    EQU   *                                               @V305238 00341000
+         ST    R6,MACBUFF          SET DATA ADDR IN PLIST      @V305238 00342000
+         LH    R6,0(,R3)           GET RECORD LENGTH           @V305238 00343000
+         ST    R6,MACSZ            SAVE IN THE PLIST           @V305238 00344000
+         XC    MACNOIT(2),MACNOIT  CLEAR CNT OF ITEMS TO WRT   @V305238 00345000
+         TM    SWITCHES,BLK        TAPE INPUT BLOCKED?         @V305238 00346000
+         BZ    DSKWRT              NO                          @V305238 00347000
+         SRDA  R6,32               YES - SET REGS FOR DIVIDE   @V305238 00348000
+         D     R6,F80              BY LRECL                    @V305238 00349000
+         LTR   R6,R6               ANY REMAINDER?              @V305238 00350000
+         BNZ   ERROR57             YES - TAPE BAD              @V305238 00351000
+         STH   R7,MACNOIT          NO - SAVE NO. OF ITEMS      @V305238 00352000
+DSKWRT   EQU   *                                               @V305238 00353000
+         LA    R1,MACWRT           GET PLIST ADDR              @V305238 00354000
+         SVC   202                 CALL DMSBWR                 @V305238 00355000
+         DC    AL4(ERROR105)                                   @V305238 00356000
+         LA    R11,0(R7,R11)       ADD NEW RECS TO ITEM COUNT  @V305238 00357000
+*                                                                       00358000
+* HERE R10 POINTS TO FIRST TEST AFTER 'NEWMAC2' FOR USE IN NEXTR RTN    00359000
+*                                                                       00360000
+         EJECT                                                          00361000
+*                                                                       00362000
+* ROUTINE TO BUILD THE NEXT COMPLETE IEHMOVE RECORD IN CORE. LAST       00363000
+* RECORD'S LENGTH IS IN R9, START ADDRESS IN R3, RETURN ADDRESS IN R10  00364000
+*                                                                       00365000
+NEXTR    EQU   *                                               @V305238 00366000
+         AR    R3,R9               GET NEXT RECORD'S START     @V305238 00367000
+CHKR     EQU   *                                               @V305238 00368000
+         LH    R9,0(,R3)           GET LENGTH OF NEW REC       @V305238 00369000
+         LA    R9,3(,R9)           BUMP BY THREE               @V305238 00370000
+         TM    2(R3),TTR           ANY TTR INFORMATION?        @V305238 00371000
+         BZ    CHKR1               NO                          @V305238 00372000
+         LA    R9,3(,R9)           YES - BYPASS IT             @V305238 00373000
+CHKR1    EQU   *                                               @V305238 00374000
+         LA    R6,0(R3,R9)         POINT TO END OF RECORD      @V305238 00375000
+         C     R6,BLDEND           IS WHOLE THING IN CORE?     @V305238 00376000
+         BLR   R10                 YES - RETURN                @V305238 00377000
+*                                                                       00378000
+* IF BEGINNING OF THE IEHMOVE RECORD IS NOT AT THE BEGINNING OF         00379000
+* BLDBUFF MOVE IT DOWN AND CONTINUE TO BUILD THE RECORD                 00380000
+*                                                                       00381000
+         L     R6,BLDBUFF          GET BUFFER START ADDR       @V305238 00382000
+         CR    R3,R6               REC & BUFFER START SAME?    @V305238 00383000
+         BE    SVR10               YES - ALL SET - READ TAPE   @V305238 00384000
+         L     R7,BLDEND           NO - GET CURR DATA END      @V305238 00385000
+         SR    R7,R3               LENGTH OF DATA TO BE MOVED  @V305238 00386000
+         LR    R0,R3               GET RECORD START            @V305238 00387000
+         LR    R1,R7               AND LENGTH                  @V305238 00388000
+         MVCL  R6,R0               MOVE THE DATA DOWN          @V305238 00389000
+         ST    R6,BLDEND           SAVE NEW END ADDR           @V305238 00390000
+SVR10    EQU   *                                               @V305238 00391000
+         ST    R10,SAVER10         SAVE RETURN ADDRESS         @V305238 00392000
+         BAL   R10,RDTAPE          READ ANOTHER TAPE RECORD    @V305238 00393000
+         L     R10,SAVER10         RESTORE RETURN ADDR         @V305238 00394000
+         L     R3,BLDBUFF          GET REC START ADDR          @V305238 00395000
+         B     CHKR                SEE IF ALL IN CORE NOW      @V305238 00396000
+         EJECT                                                          00397000
+*                                                                       00398000
+* ROUTINE TO READ A TAPE RECORD AND STRIP OFF UNWANTED CHARACTERS       00399000
+* FROM THE DATA READ.                                                   00400000
+*                                                                       00401000
+RDTAPE   EQU   *                                               @V305238 00402000
+         LA    R1,TAPLIST          PLIST ADDR                  @V305238 00403000
+         SVC   202                 CALL DMSTIO                 @V305238 00404000
+         DC    AL4(ERROR110)       ERROR RETURN ADDRESS        @V305238 00405000
+STRIP2   EQU   *                                               @V305238 00406000
+         L     R6,TPCNT            GET BYTE COUNT READ IN      @V305238 00407000
+         C     R6,F80              SHORTER THAN LRECL?         @V305238 00408000
+         BL    ERROR57             YES - TAPE IS BAD           @V305238 00409000
+         SRDA  R6,32               NO - PREPARE FOR DIVIDE     @V305238 00410000
+         D     R6,F80              GET NUMBER OF 80 BYTE RECS  @V305238 00411000
+         LR    R4,R7               PUT QUOTIENT IN R4          @V305238 00412000
+         SLL   R4,1                MULTIPLY BY 2               @V305238 00413000
+         L     R6,TPCNT            GET BYTE COUNT AGAIN        @V305238 00414000
+         SR    R6,R4               MINUS CHARS TO BE STRIPPED  @V305238 00415000
+         L     R3,BLDEND           SET UP DATA TARGET          @V305238 00416000
+         LA    R8,0(R6,R3)         PLUS NEW DATA LENGTH        @V305238 00417000
+         C     R8,TPBUFFND         WILL THIS OVERFLOW          @V305238 00418000
+         BH    ERROR109            YES - LET USER KNOW         @V305238 00419000
+         ST    R8,BLDEND           SAVE NEW END ADDR           @V305238 00420000
+         ICM   R2,7,TPBUFFAD       GET TAPE BUFFER ADDR        @V305238 00421000
+MVC78    EQU   *                                               @V305238 00422000
+         MVC   0(78,R3),2(R2)      MOVE DATA - SKIP 1ST 2 BYTES@V305238 00423000
+         LA    R2,80(,R2)          NEXT LRECL FROM TAPE        @V305238 00424000
+         LA    R3,78(,R3)          WHERE TO MOVE IT TO         @V305238 00425000
+         BCT   R7,MVC78            DO IT 'TIL FINISHED         @V305238 00426000
+         BR    R10                 RETURN TO CALLER            @V305238 00427000
+         EJECT                                                          00428000
+*                                                                       00429000
+* HERE TO GET ANOTHER FILENAME TO USE. IF THIS HASN' BEEN DONE BEFORE   00430000
+* THEN LOCATE THE END OF THE FILE NAME SPECIFIED IN THE COMMAND LINE.   00431000
+* IF NO BLANK IS FOUND BEFORE THE END OF THE NAME (NAME = 8 CHARS),     00432000
+* USE THE LAST CHARACTER OF THE NAME. WHEREVER THE END IS FOUND, APPEND 00433000
+* (OVERLAY) THE DIGIT 2.                                                00434000
+* SUBSEQUENTLY, APPEND THE DITIT 3, 4, ... 9.                           00435000
+* IF WE HAVE BEEN THROUGH HERE SO MANY TIMES THAT WE ARE APPENDING      00436000
+* A DIGIT > 9, THEN SKIDOODLE OFF TO ERROR139.                          00437000
+* ONCE THE NEW NUMBER HAS BEEN DETERMINED, WRITE OUT THE DICTIONARY     00438000
+* AT THE END OF THE FILE, THEN BUILD AND WRITE OUT THE MACLIB           00439000
+* HEADER RECORD AT THE BEGINNING OF THE FILE. AFTER ALL THIS IS DONE,   00440000
+* GO BACK AND BEGIN PROCESSING THE TAPE INTO THE NEXT FILE NAME.        00441000
+*                                                                       00442000
+CHKFNS   EQU   *                                               @V305238 00443000
+         L     R6,NUMPTR      GET ADDR OF APPENDED DIGIT       @V305238 00444000
+         LTR   R6,R6          HAS THE ADDR BEEN FOUND YET?     @V305238 00445000
+         BNZ   NEXTNUM        YES, BEEN HERE BEFORE...         @V305238 00446000
+         LA    R6,FN1         ADDR OF THE FILE NAME            @V305238 00447000
+         LA    R1,7           NUMBER OF INTERATIONS            @V305238 00448000
+FINDBLK  LA    R6,1(R6)       ADVANCE TO NEXT POSITION         @V305238 00449000
+         CLI   0(R6),C' '     IS THIS THE END OF THE FILE NAME?@V305238 00450000
+         BE    *+8            YES, SKIP                        @V305238 00451000
+         BCT   R1,FINDBLK     NOPE, KEEP LOOKING               @V305238 00452000
+         ST    R6,NUMPTR      SAVE THE POINTER                 @V305238 00453000
+         MVI   CURNUM,C'1'    FIRST DIGIT APPENDED = 2...      @V305238 00454000
+NEXTNUM  IC    R1,CURNUM      GET CURRENT NUMBER (1 TO START)  @V305238 00455000
+         LA    R1,1(R1)       INCREMENT                        @V305238 00456000
+         STC   R1,CURNUM      AND RE-SAVE                      @V305238 00457000
+         STC   R1,0(R6)       PUT NEW DIGIT IN THE RIGHT PLACE @V305238 00458000
+*                                                                       00459000
+* WRITE OUT THE DICTIONARY AT THE END OF THE FILE                       00460000
+*                                                                       00461000
+WRAPMAC  EQU   *                                               @V305238 00462000
+         LA    R1,REC1BUF          ADDR OF OUT 80 BYTE AREA    @V305238 00463000
+         ST    R1,MACBUFF          SAVE IN BWR PLIST           @V305238 00464000
+         MVC   MACNOIT(2),H1       WRITE ONE ITEM AT A TIME    @V305238 00465000
+         MVC   MACSZ(4),F80        BUFFER SIZE IS 80           @V305238 00466000
+         MVI   REC1BUF,X'40'       CLEAR THE BUFFER            @V305238 00467000
+         MVC   REC1BUF+1(79),REC1BUF    . . .                  @V305238 00468000
+         MVC   REC1BUF(4),SLASHREC MOVE IN LAST MACRO 'EOF'    @V305238 00469000
+         LA    R1,MACWRT           POINT TO PLIST              @V305238 00470000
+         SVC   202                 CALL DMSBWR                 @V305238 00471000
+         DC    AL4(ERROR105)       ERROR RETURN ADDRESS        @V305238 00472000
+         LA    R11,1(,R11)         BUMP ITEM NO. BY ONE        @V305238 00473000
+         L     R4,DICTBUFF         ADDR OF DICTIONARY AREA     @V305238 00474000
+         LA    R6,72               INDEX FOR BXLE              @V305238 00475000
+         LR    R7,R5               END OF DICTIONARY INFO      @V305238 00476000
+         CR    R4,R5               EMPTY DICTIONARY??          @V305238 00477000
+         BNE   DICTWRT             NOPE                        @V305238 00478000
+         BAL   R10,EMERS           YES - GET RID OF CURR FILE  @V305238 00479000
+         B     ERROR57             BAD FORMAT MSG TOO          @V305238 00480000
+         EJECT                                                          00481000
+DICTWRT  EQU   *                                               @V305238 00482000
+         MVC   REC1BUF(72),0(R4)   MOVE IN SIX ENTRIES         @V305238 00483000
+         XC    REC1BUF+72(8),REC1BUF+72 CLEAR REMAINDER        @V305238 00484000
+         LA    R1,MACWRT           PLIST ADDRESS               @V305238 00485000
+         SVC   202                                             @V305238 00486000
+         DC    AL4(ERROR105)                                   @V305238 00487000
+         BXLE  R4,R6,DICTWRT       DO IT ALL                   @V305238 00488000
+*                                                                       00489000
+* BUILD AND WRITE COMPLETE MACLIB HEADER RECORD                         00490000
+*                                                                       00491000
+         MVI   REC1BUF,X'40'       CLEAR THE BUFFER 1ST        @V305238 00492000
+         MVC   REC1BUF+1(79),REC1BUF    . . .                  @V305238 00493000
+         MVC   REC1BUF(6),DMSLIB   MOVE IN THE HEADER          @V305238 00494000
+         STH   R11,REC1BUF+6       SAVE ITEM NO OF DICT STRT   @V305238 00495000
+         S     R5,DICTBUFF         GET DICTIONARY LENGTH       @V305238 00496000
+         ST    R5,REC1BUF+8        PUT IT IN THE HEADER        @V305238 00497000
+         MVC   MACITEM(2),H1       THIS WILL BE ITEM 1         @V305238 00498000
+         SVC   202                                             @V305238 00499000
+         DC    AL4(ERROR105)                                   @V305238 00500000
+         MVC   STATELST(8),FINIS   SET UP TO CLOSE THE FILE    @V305238 00501000
+         LA    R1,STATELST         . . .                       @V305238 00502000
+         SVC   202                 DO IT                       @V305238 00503000
+         DC    AL4(*+4)                                        @V305238 00504000
+         TM    SWITCHES,TPEOF      TAPE FINISHED?              @V305238 00505000
+         BZ    FSET                NOPE                        @V305238 00506000
+         SR    R8,R8               YES - ZERO RETURN CODE      @V305238 00507000
+         B     FREX                EXIT AFTER FREEMAIN         @V305238 00508000
+*                                                                       00509000
+* FINALLY, SET UP NECESSARY INFO TO START A NEW LIBRARY                 00510000
+*                                                                       00511000
+FSET     EQU   *                                               @V305238 00512000
+         CLI   CURNUM,C'9'    HAVE WE FILLED UP 9 MACLIBS?     @V305238 00513000
+         BH    ERROR139       YES, TOO BAD.                    @V305238 00514000
+         NI    SWITCHES,255-AT1MAC RESET THIS SWITCH           @V305238 00515000
+         MVC   MACITEM(2),H0       RESET THE ITEM NUMBER       @V305238 00516000
+         B     STRTLIB             GO START THE NEW LIBRARY    @V305238 00517000
+         EJECT                                                          00518000
+*                                                                       00519000
+* VARIOUS ERROR RETURN POINTS AND WHATNOT                               00520000
+*                                                                       00521000
+         SPACE                                                          00522000
+LMSG     LINEDIT TEXT='LOADING ''........ MACLIB''',SUB=(CHARA,FN1)     00523000
+         BR    R10            RETURN TO CALLER                 @VM03122 00524000
+EMERS    EQU   *                                               @V305238 00525000
+         MVC   STATELST(8),FINIS   CLOSE THE FILE FIRST        @V305238 00526000
+         LA    R1,STATELST                                     @V305238 00527000
+         SVC   202                                             @V305238 00528000
+         DC    AL4(+4)                                         @V305238 00529000
+         MVC   STATELST(8),ERASE   THEN ERASE IT               @V305238 00530000
+         SVC   202                                             @V305238 00531000
+         DC    AL4(*+4)                                        @V305238 00532000
+         BR    R10                 RETURN TO CALLER            @V305238 00533000
+         SPACE                                                          00534000
+ERROR01  EQU   *                                               @V305238 00535000
+         DMSERR TEXT='NO FILENAME SPECIFIED',NUM=1,LET=E       @V305238 00536000
+         LA    R8,24               RETURN CODE FOR THIS ERROR  @V305238 00537000
+         B     EXIT                EXIT - NO FREEMAIN          @V305238 00538000
+         SPACE                                                          00539000
+ERROR03  EQU   *                                               @V305238 00540000
+         LR    R4,R1               POINT TO OPTION IN ERROR    @V305238 00541000
+         DMSERR TEXT='INVALID OPTION ''........''',NUM=3,LET=E,        X00542000
+               SUB=(CHARA,(R4))                                @V305238 00543000
+         LA    R8,24               ERROR CODE                  @V305238 00544000
+         B     EXIT                EXIT - NO FREEMAIN          @V305238 00545000
+         SPACE                                                          00546000
+ERROR70  EQU   *                                               @VM03122 00547000
+         LR    R4,R1               POINT TO PARM IN ERROR      @V305238 00548000
+         DMSERR TEXT='INVALID PARAMETER ''........''',NUM=70,  @VM03122X00549000
+               LET=E,SUB=(CHARA,(R4))                          @V305238 00550000
+         LA    R8,24               RETURN CODE TO USER         @V305238 00551000
+         B     EXIT                                            @V305238 00552000
+         SPACE                                                          00553000
+ERROR57  EQU   *                                               @V305238 00554000
+         DMSERR TEXT='INVALID RECORD FORMAT',NUM=57,LET=E      @V305238 00555000
+         LA    R8,32               RETURN CODE                 @V305238 00556000
+         B     FREX                FREEMAIN AND EXIT           @V305238 00557000
+         SPACE                                                          00558000
+ERROR105 EQU   *                                               @V305238 00559000
+         LA    R2,MACFN            POINT TO FILENAME AND TYPE  @V305238 00560000
+         LR    R4,R15              SAVE CODE FROM BWR          @V305238 00561000
+         DMSERR TEXT=('ERROR ... WRITING FILE ..............', @V305238X00562000
+               '.... ON DISK'),NUM=105,LET=S,SUB=(DEC,(R4),    @V305238X00563000
+               CHAR8A,(R2)),MF=(E,REC1BUF)                     @V305238 00564000
+         LA    R8,100              RETURN CODE                 @V305238 00565000
+         B     FREX                FREEMAIN AND EXIT           @V305238 00566000
+         SPACE                                                          00567000
+ERROR109 EQU   *                                               @V305238 00568000
+         DMSERR TEXT='VIRTUAL STORAGE CAPACITY EXCEEDED',      @V305238X00569000
+               NUM=109,LET=S                                   @V305238 00570000
+         LA    R8,104              RETURN CODE                 @V305238 00571000
+         B     FREX                FREEMAIN AND EXIT           @V305238 00572000
+         SPACE                                                          00573000
+ERROR110 EQU   *                                               @V305238 00574000
+         CH    R15,H2              IS IT EOF ON TAPE??         @V305238 00575000
+         BNE   GIVE110             NO - GIVE THE MSG           @V305238 00576000
+         TM    SWITCHES,NHDR       ANY DATA READ??             @V305238 00577000
+         BZ    RDHDR               NOPE - GO BACK AND TRY AGAIN@V305238 00578000
+         OI    SWITCHES,TPEOF      YES - SET FLAG FOR WRAPMAC  @V305238 00579000
+         B     WRAPMAC             AND CLOSE UP SHOP           @V305238 00580000
+         SPACE                                                          00581000
+GIVE110  EQU   *                                               @V305238 00582000
+         DMSERR TEXT='ERROR READING ''....''',NUM=110,LET=S,   @V305238X00583000
+               SUB=(CHARA,TAPEID)                              @V305238 00584000
+         LA    R8,100              RETURN CODE                 @V305238 00585000
+         B     FREX                                            @V305238 00586000
+         SPACE                                                          00587000
+ERROR137 EQU   *                                               @V305238 00588000
+         LR    R2,R15              SAVE 'STATE' ERROR CODE     @V305238 00589000
+         LA    R4,MACFN            POINT TO FILE NAME & TYPE   @V305238 00590000
+         DMSERR TEXT=('ERROR ... ON ''STATE'' FOR ..........', @V305238X00591000
+               '........'),NUM=137,LET=S,SUB=(DEC,(R2),CHAR8A, @V305238X00592000
+               (R4)),MF=(E,REC1BUF)                            @V305238 00593000
+         LA    R8,100              ERROR CODE FOR USER         @V305238 00594000
+         B     FREX                DO FREEMAIN AND EXIT        @V305238 00595000
+ERROR138 LR    R2,R15         SAVE THE ERASE ERROR CODE        @V305238 00596000
+         LA    R4,MACFN       POINT TO FILE TRYING TO ERASE    @V305238 00597000
+         DMSERR TEXT=('ERROR ... ERASING .................. BEFORE',   X00598000
+               ' LOADING TAPE'),NUM=138,LET=S,SUB=(DEC,(R2),CHAR8A,    X00599000
+               (R4)),MF=(E,REC1BUF)                            @V305238 00600000
+         LA    R8,100         ERROR CODE                       @V305238 00601000
+         B     FREX           DO FREEMAIN AND BEATIT           @V305238 00602000
+         SPACE                                                          00603000
+ERROR139 EQU   *                                               @V305238 00604000
+         DMSERR TEXT='TAPE FILE EXCEEDS 9 CMS MACLIBS',NUM=139,        X00605000
+               LET=S                                           @V305238 00606000
+         LA    R8,104                                          @V305238 00607000
+         EJECT                                                          00608000
+*                                                                       00609000
+* ISSUE FREEMAIN TO RETURN STORAGE AND EXIT USING RETURN CODE IN R8     00610000
+*                                                                       00611000
+FREX     EQU   *                                               @V305238 00612000
+         FREEMAIN V,A=GMBUFF                                   @V305238 00613000
+EXIT     EQU   *                                               @V305238 00614000
+         LR    R15,R8              PUT CODE IN R15             @V305238 00615000
+         BR    R14                 RETURN TO CMS               @V305238 00616000
+         EJECT                                                          00617000
+*                                                                       00618000
+* CONSTANTS, PARAMETER LISTS, BUFFERS, ETC.                             00619000
+*                                                                       00620000
+MACWRT   DS    0D                                              @V305238 00621000
+         DC    CL8'WRBUF'                                      @V305238 00622000
+MACFN    DC    CL8' '              FILENAME PUT HERE           @V305238 00623000
+         DC    CL8'MACLIB'                                     @V305238 00624000
+         DC    CL2'A1'                                         @V305238 00625000
+MACITEM  DC    H'0'                ITEM NO. OF NEXT REC.       @V305238 00626000
+MACBUFF  DC    F'0'                BUFFER START ADDRESS        @V305238 00627000
+MACSZ    DC    F'80'               AND SIZE                    @V305238 00628000
+         DC    CL2'F'                                          @V305238 00629000
+MACNOIT  DC    H'1'                NO. OF ITEMS TO WRITE       @V305238 00630000
+         SPACE                                                          00631000
+TAPLIST  DS    0D                                              @V305238 00632000
+         DC    CL8'TAPEIO'                                     @V305238 00633000
+         DC    CL8'READ'                                       @V305238 00634000
+TAPEID   DC    CL4'TAP1'           LOGICAL TAPE ADDRESS        @V305238 00635000
+         DC    X'CB'               9 TRK - 800 BPI             @V305238 00636000
+TPBUFFAD DC    AL3(0)              BUFFER ADDRESS              @V305238 00637000
+TPBUFFSZ DC    F'0'                AND SIZE                    @V305238 00638000
+TPCNT    DC    F'0'                COUNT OF BYTES READ         @V305238 00639000
+         DC    F'-1'                                           @V305238 00640000
+         SPACE                                                          00641000
+TYPLIST  DS    0D                                              @V305238 00642000
+         DC    CL8'TYPLIN'                                     @V305238 00643000
+         DC    AL1(1)                                          @V305238 00644000
+TYPBUFAD DC    AL3(0)              ADDR OF OUTPUT INFO         @V305238 00645000
+         DC    C'B'                                            @V305238 00646000
+TYPCNT   DC    AL3(0)              LENGTH OF OUTPUT            @V305238 00647000
+         SPACE                                                          00648000
+STATELST DS    0D                                              @V305238 00649000
+         DC    CL16' '             OPERATION AND NAME SUPPLIED @V305238 00650000
+         DC    CL8'MACLIB'                                     @V305238 00651000
+         DC    CL8'A1'                                         @V305238 00652000
+         SPACE                                                          00653000
+PACKED   DC    D'0'                WORK AREA FOR PACKED DATA   @V305238 00654000
+FN1      DC    CL8' '              FILENAME FROM USER PUT HERE @V305238 00655000
+F80      DC    F'80'               STD LOGICAL RECORD LENGTH   @V305238 00656000
+GMBUFF   DC    2F'0'               GETMAIN RETURNS INFO HERE   @V305238 00657000
+SZLIST   DC    F'12288'            MIN SIZE REQUESTED          @V305238 00658000
+         DC    F'32768'            MAX SIZE REQUESTED          @V305238 00659000
+DICTBUFF DC    F'0'                START OF DICTIONARY BUFFER  @V305238 00660000
+ENDDICT  DC    F'0'                END OF SAME                 @V305238 00661000
+TPBUFFND DC    F'0'                END OF GETMAIN'D AREA       @V305238 00662000
+BLDBUFF  DC    F'0'                START OF REC. BUILD AREA    @V305238 00663000
+BLDEND   DC    F'0'                CURRENT END OF DATA ADDR    @V305238 00664000
+CUTOFF   DC    F'50000'            MACLIB ITEM CUTOFF BDY      @V305238 00665000
+SAVER10  DC    F'0'           SAVE R10 ACROSS INTERNAL CALLS   @V305238 00666000
+NUMPTR   DC    F'0'                ADDR OF NUMBER APPENDED BYTE@V305238 00667000
+STATEW   DC    CL8'STATEW'                                     @V305238 00668000
+ERASE    DC    CL8'ERASE'                                      @V305238 00669000
+FINIS    DC    CL8'FINIS'                                      @V305238 00670000
+VOL      DC    C'VOL'                                          @V305238 00671000
+HDR      DC    C'HDR'                                          @V305238 00672000
+DMSLIB   DC    C'DMSLIB'                                       @V305238 00673000
+SLASHREC DC    X'61FFFF61'                                     @V305238 00674000
+REC1BUF  DC    CL80' '                                         @V305238 00675000
+H0       EQU   F80                                             @V305238 00676000
+H1       DC    H'1'                                            @V305238 00677000
+H2       DC    H'2'                                            @V305238 00678000
+H28      DC    H'28'                                           @V305238 00679000
+IEHMVHDR DC    C'THIS IS AN UNLOADED DATA SET PRODUCED BY'     @V305238 00680000
+         DC    X'80'                                           @V305238 00681000
+         DC    C'THE IBM UTILITY, SYSMOVE.OMMBRLDWB'           @V305238 00682000
+ASTERS   DC    C'***'                                          @V305238 00683000
+CURNUM   DC    C'1'           CURRENT FILE NUMBER APPENDED     @V305238 00684000
+SWITCHES DC    X'00'                                           @V305238 00685000
+*                                                                       00686000
+* BITS DEFINED IN 'SWITCHES'                                            00687000
+*                                                                       00688000
+NHDR     EQU   X'80'               NON-HDR TAPE REC READ       @V305238 00689000
+AT1MAC   EQU   X'40'               AT LEAST 1 MACRO WRITTEN    @V305238 00690000
+BLK      EQU   X'10'               DATA ON TAPE IS BLOCKED     @V305238 00691000
+TPEOF    EQU   X'08'               EOF ON TAPE                 @V305238 00692000
+*        REMAINING BITS IN 'SWITCHES' NOT USED                          00693000
+*                                                                       00694000
+* OTHER EQUATES                                                         00695000
+CSW      EQU   X'40'               LOW CORE CSW ADDR           @V305238 00696000
+ILI      EQU   X'40'               BIT IN CSW+5                @V305238 00697000
+FXD      EQU   X'80'                                           @V305238 00698000
+MEMREC   EQU   X'08'                                           @V305238 00699000
+NOTEDUM  EQU   X'14'                                           @V305238 00700000
+DATAREC  EQU   X'20'                                           @V305238 00701000
+TTR      EQU   X'80'                                           @V305238 00702000
+         SPACE 2                                                        00703000
+         REGEQU                                                @V305238 00704000
+         LTORG                                                 @V305238 00705000
+         END                                                            00706000

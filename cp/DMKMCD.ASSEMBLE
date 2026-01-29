@@ -1,0 +1,1063 @@
+MCD      TITLE 'DMKMCD     (CP)        VM/370 - RELEASE 6'              00001000
+*.                                                                      00002000
+*                                                                       00003000
+* MODULE NAME -                                                         00004000
+*                                                                       00005000
+*        DMKMCD                                                         00006000
+*                                                                       00007000
+* FUNCTION -                                                            00008000
+*                                                                       00009000
+*        TO HANDLE MONITOR CONTROL COMMANDS, AN EXTENSION TO            00010000
+*        DMKMCC, THE CONTROLLER OF MONITOR COMMAND PROCESSING           00011000
+*                                                                       00012000
+* ATTRIBUTES -                                                          00013000
+*                                                                       00014000
+*        REENTRANT, PAGEABLE, CALLED VIA SVC                            00015000
+*                                                                       00016000
+* ENTRY POINTS -                                                        00017000
+*                                                                       00018000
+*        DMKMCDLI - TO PROCESS THE MONITOR LIMIT COMMAND                00019000
+*        DMKMCDIN - TO PROCESS THE MONITOR INTERVAL COMMAND             00020000
+*        DMKMCDST - TO PROCESS THE MONITOR STOP COMMAND                 00021000
+*        DMKMCDTI - TO PROCESS THE MONITOR TIME COMMAND                 00022000
+*                                                                       00023000
+* ENTRY CONDITIONS -                                                    00024000
+*                                                                       00025000
+*        GPR9  - ADDRESS OF COMMAND LINE BUFFER                         00026000
+*        GPR11 - ADDRESS OF  VMBLOK                                     00027000
+*        GPR12 - ADDRESS OF ENTRY POINT                                 00028000
+*        GPR13 - ADDRESS OF STANDARD SAVEAREA                           00029000
+*                                                                       00030000
+* EXIT CONDITIONS -                                                     00031000
+*                                                                       00032000
+*        NONE                                                           00033000
+*                                                                       00034000
+* CALLS TO OTHER ROUTINES -                                             00035000
+*                                                                       00036000
+*        DMKSCNFD - TO LOCATE NEXT FIELD IN INPUT LINE                  00037000
+*        DMKQCNWT - TO SEND A MESSAGE TO THE TERMINAL                   00038000
+*        DMKERMSG - TO SEND CANNED ERROR MESSAGE TO TERMINAL            00039000
+*        DMKPTRFR - TO OBTAIN A PAGE OF STORAGE FOR MONITOR DATA        00040000
+*        DMKMONSH - MONITOR STOP ROUTINE                                00041000
+*        DMKCVTHB - TO CONVERT DEVICE ADDRESS TO BINARY                 00042000
+*        DMKCVTDB - TO CONVERT INTERVAL TO BINARY                       00043000
+*        DMKSCNRU - TO OBTAIN RDEVBLK ADDRESS FROM DEV. ADDRESS         00044000
+*        DMKFREE  - TO OBTAIN STORAGE FOR MESSAGES                      00045000
+*        DMKFRET  - TO RELEASE STORAGE USED FOR MESSAGES                00046000
+*        DMKSCHST - TO ENQUEUE A TIMER RQST. BLOCK FOR MONITORING       00047000
+*        DMKSCHRT - TO REMOVE A TIMER RQST. BLOCK FROM QUEUE            00048000
+*        DMKMONTH - TAPE HEADER ROUTINE                                 00049000
+*                                                                       00050000
+* EXTERNAL REFERENCES -                                                 00051000
+*                                                                       00052000
+*        DMKPRGC8 - STORAGE FOR CONTROL REGISTER 8                      00053000
+*        DMKENTUT - ADDRESS OF I/O UTILIZATION INTERVAL                 00054000
+*        DMKPRGMC - ADDRESS OF MONITOR COMMUNICATIONS AREA              00055000
+*        DMKPRGTI - INTERVAL BETWEEN TIMER INTERRUPTS                   00056000
+*        DMKPRGMI - ADDRESS OF THE MONITOR PROGRAM INTERRUPT HANDLER    00057000
+*                                                                       00058000
+         EJECT                                                          00059000
+* REGISTER USAGE -                                                      00060000
+*                                                                       00061000
+*        GPR0  - COMMAND ARGUMENT LENGTH, AND OUTPUT MSG LENGTH         00062000
+*        GPR1  - COMMAND ARGUMENT ADDRESS, AND OUTPUT MSG ADDRESS       00063000
+*        GPR2  - GPR10 - WORK REGISTERS                                 00064000
+*        GPR11 - VMBLOK ADDRESS                                         00065000
+*        GPR12 - BASE REG                                               00066000
+*        GPR13 - SAVE AREA ADDRESS                                      00067000
+*        GPR14 - LINKAGE REG                                            00068000
+*        GPR15 - LINKAGE REG                                            00069000
+*                                                                       00070000
+* COMMAND FORMAT -                                                      00071000
+*                                                                       00072000
+*        +---------+---------+-------------------------------------+    00073000
+*        | MONITOR |         |                                     |    00074000
+*        | MON     |         |                                     |    00075000
+*        |         | TIME    | FROM H1.M1 TO H2.M2                 |    00076000
+*        |         |         | FOR HH.MM                           |    00077000
+*        |         |         | ALL                                 |    00078000
+*        |         |         | NONE                                |    00079000
+*        |         |         |                                     |    00080000
+*        |         | INTERVAL| INT SEC UTINT                       |    00081000
+*        |         |         |     MIN                             |    00082000
+*        |         |         |                                     |    00083000
+*        |         | LIMIT   | NO.     | STOP                      |    00084000
+*        |         |         | *       | NOSTOP                    |    00085000
+*        |         |         |         | SAMPLE                    |    00086000
+*        |         |                                               |    00087000
+*        |         | SEEKS   | INCLUDE                             |    00088000
+*        |         |         | EXCLUDE                             |    00089000
+*        |         |         | DELETE                              |    00090000
+*        |         |         | DISPLAY                             |    00091000
+*        |         |                                               |    00092000
+*        |         |         |                                     |    00093000
+*        |         |         |                                     |    00094000
+*        |         | STOP    | CPTRACE                             |    00095000
+*        |         |         | SPOOL                               |    00096000
+*        |         |         | TAPE                                |    00097000
+*        |         |         |                                     |    00098000
+*        +---------+---------+-------------------------------------+    00099000
+*                                                                       00100000
+* OPERATION -                                                           00101000
+*                                                                       00102000
+*                         MONITOR COMMAND PROCESSING                    00103000
+*                                                                       00104000
+*             DMKMCC WILL CALL DMKSCNFD TO LOCATE AN ARGUMENT.          00105000
+*             THIS MODULE WILL BE CALLED FOR THE ARGUMENTS LISTED       00106000
+*             BELOW.                                                    00107000
+*                                                                       00108000
+*             IF THE ARGUMENT IS TIME THEN GO TO DMKMCDTI               00109000
+*             IF THE ARGUMENT IS INTERVAL THEN GO TO DMKMCDIN.          00110000
+*             IF THE ARGUMENT IS LIMIT THEN GO TO DMKMCDLI.             00111000
+*             IF THE ARGUMENT IS STOP THEN GO TO DMKMCDST.              00112000
+*             IF THE ARGUMENT IS SEEKS THEN GO TO DMKMCDSE.             00113000
+*             IF THE ARGUMENT IS NONE OF  THESE THEN EXIT WITH AN       00114000
+*             APPROPRIATE ERROR MESSAGE.                                00115000
+*                                                                       00116000
+*    TIME:                                                              00117000
+*                                                                       00118000
+*             BUILDS TRQS TO TO START AND STOP THE MONITOR              00119000
+*             AUTOMATICALLY.                                            00120000
+*                                                                       00121000
+*    INTERVAL:                                                          00122000
+*                                                                       00123000
+*                                                                       00124000
+*             CALL DMKSCNFD TO  GET THE INTERVAL VALUE.   IF NONE       00125000
+*             WAS  GIVEN  THEN  EXIT WITH  AN  APPROPRIATE  ERROR       00126000
+*             MESSAGE.   IF  THE  INTERVAL WAS  GIVEN  THEN  CALL       00127000
+*             DMKCVTDB TO CONVERT IT TO BINARY.                         00128000
+*                                                                       00129000
+*             CALL DMKSCNFD TO  LOCATE THE NEXT ARGUMENT.   IF IT       00130000
+*             IS 'SEC'  THEN DON'T MULTIPLY. IF IT IS  'MIN' THEN       00131000
+*             MULTIPLY  THE  INTERVAL  BY 60  TO  CONVERT  IT  TO       00132000
+*             SECONDS.                                                  00133000
+*                                                                       00134000
+*             IF THE SPECIFIED  VALUE IS LESS THAN  30 SECONDS OR       00135000
+*             MORE THAN  9 HOURS, THEN  EXIT WITH  AN APPROPRIATE       00136000
+*             ERROR  MESSAGE. CALL DMKSCNFD TO CHECK FOR A UTILIZATION  00137000
+*             INTERVAL. IF NOT SPECIFIED, USE THE DEFAULT IN DMKENTUT.  00138000
+*             THE UTILIZATION INTERVAL IS ONLY INTERPRETED AS SECONDS.  00139000
+*             SAVE THE MONITOR SAMPLE INTERVAL IN DMKPRGTI. SAVE THE    00140000
+*             I/O UTILIZATION INTERVAL IN DMKENTUT.                     00141000
+*                                                                       00142000
+*    SEEKS:                                                             00143000
+*                                                                       00144000
+*             MONITOR SEEKS PROCESSING - OPTIONS ARE:                   00145000
+*             INCLUDE, EXCLUDE, DISPLAY, DELETE                         00146000
+*                                                                       00147000
+*    STOP:                                                              00148000
+*                                                                       00149000
+*             CALL DMKSCNFD TO  LOCATE THE NEXT ARGUMENT.   IF IT       00150000
+*             IS 'CPTRACE'  THEN GO  TO STOP  CPTRACE.  IF  IT IS       00151000
+*             'TAPE' THEN GO  TO STOP TAPE.  IF IT  IS NEITHER OF       00152000
+*             THESE THEN EXIT WITH AN APPROPRIATE ERROR MESSAGE.        00153000
+*                                                                       00154000
+*    STOP CPTRACE:                                                      00155000
+*                                                                       00156000
+*             IF CP INTERNAL TRACING IS NOT ACTIVE THEN EXIT WITH       00157000
+*             AN APPROPRIATE  ERROR MESSAGE.  OTHERWISE,  SET THE       00158000
+*             TRACE FLAGS  TO ZEROES AND  EXIT AFTER  SENDING THE       00159000
+*             'COMMAND COMPLETE' MESSAGE.                               00160000
+*                                                                       00161000
+*    STOP TAPE/SPOOL                                                    00162000
+*                                                                       00163000
+*             IF MONITORING IS CURRENTLY  INACTIVE THEN EXIT WITH       00164000
+*             AN APPROPRIATE ERROR MESSAGE.                             00165000
+*                                                                       00166000
+*             IF THE  MONITOR IS CURRENTLY  IN ERROR  RECOVERY OR       00167000
+*             PROCESSING A 'STOP SPOOL / TAPE' COMMAND THEN EXIT        00168000
+*             WITH AN APPROPRIATE ERROR MESSAGE.                        00169000
+*                                                                       00170000
+*             CLEAR CONTROL REGISTER 8 TO INHIBIT FURTHER MONITOR       00171000
+*             CALL  INTERRUPTS.  INDICATE  THAT  A 'MONITOR  STOP       00172000
+*             TAPE' COMMAND IS BEING PROCESSED.                         00173000
+*                                                                       00174000
+*             OBTAIN  STORAGE  FOR  AND  INITIALIZE  A  CPEXBLOK.       00175000
+*             'STACK' THE  CPEXBLOK ON  THE COMMUNICATIONS  AREA.       00176000
+*             IF THE MONITOR TAPE IS CURRENTLY BUSY THEN SKIP THE       00177000
+*             NEXT STEP.                                                00178000
+*                                                                       00179000
+*             CALL   DMKMNISH   TO  COMPLETE   MONITOR   SHUTDOWN       00180000
+*             PROCESSING.  WHEN CONTROL RETURNS FROM DMKMNI, EXIT       00181000
+*             AFTER ISSUING THE 'COMMAND COMPLETE' MESSAGE.             00182000
+*                                                                       00183000
+*             SET  THE RETURN  ADDRESS  IN  THE CPEXBLOK  TO  THE       00184000
+*             'COMMAND COMPLETE'  MESSAGE ROUTINE  AND GO  TO THE       00185000
+*             DISPATCHER.  SINCE THE TAPE IS  BUSY AND THE CFSTOP       00186000
+*             FLAG HAS  BEEN SET, THE  MONITOR WILL BE  SHUT DOWN       00187000
+*             WHEN THE NEXT TAPE I/O INTERRUPT OCCURS.  FOLLOWING       00188000
+*             THAT, THE  CPEXBLOK WILL BE 'UNSTACKED'  AND RETURN       00189000
+*             WILL  BE  MADE TO  THIS  ROUTINE  TO TYPE  OUT  THE       00190000
+*             'COMMAND COMPLETE' MESSAGE.                               00191000
+*                                                                       00192000
+*.                                                                      00193000
+         EJECT                                                          00194000
+DMKMCD   CSECT                                                 @VA08291 00195000
+MODID    DC    CL8'DMKMCD'                                     @VA08291 00196000
+         SPACE 1                                                        00197000
+         USING SAVEAREA,R13                                    @V2B2638 00198000
+         USING MONCOM,R7                                       @VA08291 00199000
+         USING VMBLOK,R11                                      @VA08291 00200000
+         USING PSA,R0                                          @V2B2638 00201000
+         SPACE 1                                                        00202000
+         EXTRN DMKSCNFD                                        @V2B2638 00203000
+         EXTRN DMKPRGC8,DMKPRGMC,DMKPRGTI                      @V2B2638 00204000
+         EXTRN DMKERMSG                                        @V2B2638 00205000
+         EXTRN DMKENTUT         UTILIZATION INTERVAL           @V60BEBC 00206000
+         EXTRN DMKSCNRU         FIND DEVBLOK ROUTINE           @V60BEBC 00207000
+         EXTRN DMKENTSK         PTR TO SEEKS LIST              @V60BEBC 00208000
+         EXTRN DMKCVTHB         HEX TO BINARY CONVERT          @V60BEBC 00209000
+         EXTRN DMKCVTBH         BINARY TO HEX ROUTINE          @V60BEBC 00210000
+         EXTRN DMKCFCSC         SCAN FOR CHARACTER ROUTINE     @V60BEBC 00211000
+         EXTRN DMKCVTDB                                        @V2B2638 00212000
+         EXTRN DMKSYSAT,DMKSYSTS,DMKSYSTE,DMKSYSMX             @V50A2B5 00213000
+         EXTRN DMKMNIST,DMKMIAMU                               @VMD0138 00214000
+         EXTRN DMKMNISH                                                 00215000
+         EXTRN DMKSCHRT,DMKFRET                                @VMI0083 00216000
+         EXTRN DMKSTKOP                                        @VA08291 00217000
+         EJECT                                                          00218000
+         COPY  OPTIONS                                         @V2B2638 00219000
+         COPY  LOCAL                                           @V2B2638 00220000
+         EJECT                                                          00221000
+*********************************************************************** 00222000
+*                                                                       00223000
+*                 MONITOR INTERVAL                                      00224000
+*                                                                       00225000
+*        CALCULATE THE INTERVAL IN SECONDS AND STORE IT IN DMKPRGTI.    00226000
+*                                                                       00227000
+*        THERE IS A 9 HOUR LIMIT ON THE INTERVAL.  THE MONITOR SHOULD   00228000
+*        NOT BE RUN FOR MORE THAN 9 1/2 HOURS DUE TO THE 5 BYTE TIME    00229000
+*        STAMP USED IN THE DATA COLLECTION ROUTINES.                    00230000
+*                                                                       00231000
+*********************************************************************** 00232000
+         SPACE 1                                                        00233000
+DMKMCDIN RELOC                                                 @VA08291 00234000
+         CALL  DMKSCNFD       OBTAIN THE INTERVAL VALUE        @VM01082 00235000
+         BNZ   MSG026         MUST SPECIFY SOMETHING.          @V2B2638 00236000
+         LR    R3,R0          SAVE LENGTH AND ADDR IN CASE...  @V2B2638 00237000
+         LR    R4,R1          ... OF AN ERROR                  @V2B2638 00238000
+         CALL  DMKCVTDB       CONVERT INTERVAL TO BINARY       @V2B2638 00239000
+         BZ    GETUNIT        DONE, NOW GET NEXT ARG           @V2B2638 00240000
+         LR    R0,R3          RESTORE LENGTH AND ADDR ...      @V2B2638 00241000
+         LR    R1,R4          ... FOR THE ERROR MESSAGE        @V2B2638 00242000
+         B     MSG002         GARBAGE IN, GARBAGE OUT          @V2B2638 00243000
+         SPACE 1                                                        00244000
+GETUNIT  LR    R5,R1          SAVE INTERVAL IN R5              @V2B2638 00245000
+         CALL  DMKSCNFD       OBTAIN NEXT FIELD                @V2B2638 00246000
+         BNZ   DEFINT         NOTHING SPECIFIED, DEFAULT TO SEC@V2B2638 00247000
+         C     R0,F3          SEC OR MIN, 3 CHAR REQUIREMENT   @V2B2638 00248000
+         BNE   MSG003         GARBAGE IN, GARBAGE OUT.         @V2B2638 00249000
+         CLC   =C'SEC',0(R1)  IS IT SECONDS?                   @V2B2638 00250000
+         BE    DEFINT         YES, GO HANDLE                   @V2B2638 00251000
+         CLC   =C'MIN',0(R1)  BETTER BE MINUTES THEN           @V2B2638 00252000
+         BNE   MSG003         TOO BAD.                         @V2B2638 00253000
+         MH    R5,F60+2       CONVERT IT TO SECONDS            @V2B2638 00254000
+DEFINT   LR    R0,R3          RESTORE LENGTH AND ADDRESS ...   @V2B2638 00255000
+         LR    R1,R4          ... IN CASE OF AN ERROR          @V2B2638 00256000
+         CL    R5,=A(5)         CAN'T BE LESS THAN 5 SECONDS   @V60BEBC 00257000
+         BL    MSG002         IT IS, TOO BAD.                  @V2B2638 00258000
+         CL    R5,=A(9*60*60) CHECK AGAINST 9 HOUR VALUE       @V2B2638 00259000
+         BH    MSG002         TOO HIGH, REJECT.                @V2B2638 00260000
+         CALL  DMKSCNFD         OBTAIN UTILIZATION INTERVAL    @V60BEBC 00261000
+         BNZ   NOUTIL           ASSUME DEFAULT IF NOT SPECIFIED@V60BEBC 00262000
+         C     R0,F2            MUST NOT BE MORE THAN 2 CHARS  @V60BEBC 00263000
+         BH    MSG002           IT IS, SO ISSUE ERROR MSG      @V60BEBC 00264000
+         LR    R7,R0            SAVE LENGTH AND ADDR           @V60BEBC 00265000
+         LR    R8,R1            IN CASE OF ERROR               @V60BEBC 00266000
+         CALL  DMKCVTDB         CONVERT TO BINARY              @V60BEBC 00267000
+         BZ    CHKRANG          OK, CHECK AGAINST SAMPLE INTERV@V60BEBC 00268000
+TOOBIG   LR    R0,R7          RESTORE LENGTH AND ADDRESS       @VMI0031 00269000
+         LR    R1,R8            FOR ERROR MSG                  @V60BEBC 00270000
+         B     MSG002           GARBAGE IN, GARBAGE OUT        @V60BEBC 00271000
+NOUTIL   LA    R1,DEFINTVL      SEC. DEFAULT FOR NON-SPEC'D UT @V60BEBC 00272000
+CHKRANG  CR    R1,R5           COMPARE SAMPLE INT WITH UT INTER@V60BEBC 00273000
+         BH    TOOBIG        RESTORE REGS FOR ERROR MSG        @VMI0031 00274000
+         L     R4,=A(DMKENTUT)  GET UT INTERVAL ADDRESS        @V60BEBC 00275000
+         STH   R1,0(R4)         SAVE IT THERE                  @V60BEBC 00276000
+         L     R4,=A(DMKPRGTI) GET ADDR OF INT. IN DMKPRG      @V2B2638 00277000
+         STH   R5,0(R4)       STORE INTERVAL IN DMKPRG         @V2B2638 00278000
+         LTR   R1,R1          NEW INTERVAL IS 0?               @VMI0083 00279000
+         BNZ   ACK            NO, SO JUST RETURN               @VMI0083 00280000
+         L     R7,=A(DMKPRGMC) IF MONITOR IS ACTIVE            @VMI0083 00281000
+         ICM   R7,B'1111',0(R7) THEN FREE CURRENT UTILIZATION  @VMI0083 00282000
+         BZ    ACK            NO, JUST RETURN                  @VMI0083 00283000
+         L     R1,MONUTRB     IS UTILIZATION ACTIVE??          @VMI0083 00284000
+         LTR   R1,R1          IF SO, RESET AND FREE TRQ        @VMI0083 00285000
+         BZ    ACK            ELSE JUST RETURN                 @VMI0083 00286000
+         CALL  DMKSCHRT       REMOVE FROM QUEUE                @VMI0083 00287000
+         LA    R0,TRQBSIZE    SIZE TO FREE                     @VMI0083 00288000
+         CALL  DMKFRET        FREE TRQ                         @VMI0083 00289000
+         L     R1,MONCHPTR    POINT TO CHANNEL SAMPLES         @VMI0083 00290000
+         LA    R0,5           CHANNEL SAMPLE DOUBLE WORDS      @VMI0083 00291000
+         CALL  DMKFRET        FREE CHANNEL SAMPLES             @VMI0083 00292000
+         SR    R1,R1          RESET VALUES IN MONCOM           @VMI0083 00293000
+         ST    R1,MONUTRB     TRQ PT TO 0                      @VMI0083 00294000
+         ST    R1,MONCHPTR    SET CHANNEL SAMPLES TO 0         @VMI0083 00295000
+         B     ACK            ACKNOWLEDGE & RETURN             @VA08291 00296000
+         EJECT                                                          00297000
+*                                                                       00298000
+*********************************************************************** 00299000
+*                                                                       00300000
+*                        MONITOR LIMIT                                  00301000
+*                                                                       00302000
+*     SETS THE LIMIT ON THE MONITOR SPOOL FILE SIZE                     00303000
+*                                                                       00304000
+*********************************************************************** 00305000
+*                                                                       00306000
+DMKMCDLI RELOC                                                          00307000
+         CALL  DMKSCNFD         FIND THE NEXT FIELD IN COMMAND @V50A2B5 00308000
+         BNZ   MSG026           CARRIAGE RETURN OR ENDBUFF     @V50A2B5 00309000
+         C     R0,F5            IS IT ILLEGAL                  @V50A2B5 00310000
+         BH    MSG002           YES                            @V50A2B5 00311000
+         C     R0,F1            SEE IF * SPECIFIED             @V50A2B5 00312000
+         BNE   TRYNUM           PROBABLY                       @V50A2B5 00313000
+         CLI   0(R1),C'*'       CHECK IF IN FACT IS *          @V50A2B5 00314000
+         BNE   TRYNUM           PERHAPS THIS IS A NUMBER       @V50A2B5 00315000
+         L     R3,=A(DMKSYSMX)  GET THE CURRENT MAX            @V50A2B5 00316000
+         L     R5,0(R3)         FROM DMKSYS                    @V50A2B5 00317000
+         B     GETMAX1          USE THIS LATER                 @V50A2B5 00318000
+TRYNUM   LR    R3,R0            SAVE IN CASE OF ERROR          @V50A2B5 00319000
+         LR    R4,R1            REGS 0 AND 1                   @V50A2B5 00320000
+         CALL  DMKCVTDB         CONVERT TO BINARY              @V50A2B5 00321000
+         BZ    GETMAX           SUCCESS, NO STORE              @V50A2B5 00322000
+         LR    R0,R3            RESTORE FOR ERROR              @V50A2B5 00323000
+         LR    R1,R4            REGS 0 AND 1                   @V50A2B5 00324000
+         B     MSG002           GARBAGE OUT                    @V50A2B5 00325000
+         SPACE 1                                               @V50A2B5 00326000
+GETMAX   LR    R0,R3            RESTORE FOR ERROR MESSAGE      @V50A2B5 00327000
+         LR    R5,R1            STORE IN REGISTER 5            @V50A2B5 00328000
+         LR    R1,R4            RESTORE REGISTER 1             @V50A2B5 00329000
+GETMAX1  C     R5,=F'10'        SHOULD BE OVER 10 AT LEAST     @V50A2B5 00330000
+         BL    MSG224           NO, ERROR                      @V50A2B5 00331000
+         C     R5,=F'50000'     SHOULD BE LESS THAN 50000      @V50A2B5 00332000
+         BH    MSG224           NO, ERROR                      @V50A2B5 00333000
+         L     R6,=A(DMKSYSAT)  GET THE FLAG                   @V50A2B5 00334000
+         CALL  DMKSCNFD         GET THE NEXT ARGUMENT          @V50A2B5 00335000
+         BNZ   SETNST           DEFAULT IS NOSTOP              @V50A2B5 00336000
+         CLC   0(4,R1),=C'STOP' SEE IF STOP SPECIFIED          @V60BEBC 00337000
+         BNE   TRY6             NO, CHECK FOR NOSTOP           @V60BEBC 00338000
+         NI    0(R6),X'FF'-AUTOSPL-MONSLMT TURN OFF FLAG       @V60BEBC 00339000
+         B     ARND1            SKIP TO LEAVE                  @V60BEBC 00340000
+TRY6     CLC   0(6,R1),=C'NOSTOP' SEE IF NOSTOP SPEC'D         @V60BEBC 00341000
+         BNE   TRYSAMP          NO, CHECK FOR SAMPLE           @V60BEBC 00342000
+SETNST   OI    0(R6),AUTOSPL    SET AUTOSPOOL RESTART FLAG     @V60BEBC 00343000
+         NI    0(R6),X'FF'-MONSLMT TURN REAL TIME FLAG OFF     @V60BEBC 00344000
+         B     ARND1            SKIP TO LEAVE                  @V60BEBC 00345000
+TRYSAMP  CLC   0(6,R1),=C'SAMPLE' SEE IF SAMPLE SPEC'D         @V60BEBC 00346000
+         BNE   MSG002           UNDEFINED PARAMETER            @V60BEBC 00347000
+         OI    0(R6),AUTOSPL+MONSLMT SET LIMIT FLAG            @V60BEBC 00348000
+ARND1    L     R8,=A(DMKSYSMX)  GET CURRENT MAX                @V60BEBC 00349000
+         ST    R5,0(R8)         STORE THE NEW                  @V60BEBC 00350000
+         B     ACK              ACKNOWLEDGE COMPLETION         @VA08291 00351000
+         EJECT                                                          00352000
+*                                                                       00353000
+**********************************************************************  00354000
+*                                                                       00355000
+*                     MONITOR TIME                                      00356000
+*                                                                       00357000
+*     CHANGES THE TIME OPTIONS FOR AUTOMATIC SPOOLING                   00358000
+*                                                                       00359000
+**********************************************************************  00360000
+*                                                                       00361000
+DMKMCDTI RELOC                                                 @VA08291 00362000
+         CALL  DMKSCNFD         FIND THE NEXT FIELD IN COMMAND @V50A2B5 00363000
+         BNZ   MSG026           MUST SPECIFY SOMETHING         @V50A2B5 00364000
+         CL    R0,F3            SEE IF ALL IS SPECIFIED        @V50A2B5 00365000
+         BNE   CHKNONE          NO, SEE IF NONE IS SPECIFIED   @V50A2B5 00366000
+         CLC   0(3,R1),=C'ALL'  IS ALL SPECIFIED               @V50A2B5 00367000
+         BZ    SETALL           YES, GO TO APPROPRIATE SECTION @V50A2B5 00368000
+         CLC   0(3,R1),=C'FOR'  IS FOR SPECIFIED               @V50A2B5 00369000
+         BE    SETFOR           GO TO THE FOR LOGIC            @V50A2B5 00370000
+         B     MSG002           BAD SYNTAX                     @V50A2B5 00371000
+SETALL   L     R5,=A(DMKSYSTS)  GIVE START TIME OF 0           @V50A2B5 00372000
+         MVC   0(8,R5),ZEROES   SET THE ZEROES                 @V50A2B5 00373000
+         L     R5,=A(DMKSYSTE)  SET END TO END OF DAY          @V50A2B5 00374000
+         MVC   0(8,R5),SET24    24 HOUR DAY                    @V50A2B5 00375000
+         L     R5,=A(DMKSYSAT)  GET THE FLAGS                  @V50A2B5 00376000
+         TM    0(R5),AUTGO      IS AUTO SET                    @V50A2B5 00377000
+         BNO   ACK              JUST LEAVE AND DO NOTHING      @V50A2B5 00378000
+         CALL  DMKMNIST        TURN ON THE TRQS                @VMD0138 00379000
+         B     ACK              AND RETURN                     @V50A2B5 00380000
+         SPACE 1                                               @V50A2B5 00381000
+CHKNONE  CL    R0,F4            IS THIS 4 IN LENGTH            @V50A2B5 00382000
+         BNZ   MSG002           U. F. O.                       @V50A2B5 00383000
+         CLC   0(4,R1),=C'NONE' IS IT IN FACT NONE             @V50A2B5 00384000
+         BZ    SETNONE          YES, DO NONE CODE              @V50A2B5 00385000
+         CLC   0(4,R1),=C'FROM' IS IT FROM                     @V50A2B5 00386000
+         BE    SETFROM          YES, DO FROM LOGIC             @V50A2B5 00387000
+         B     MSG002           NOT UNDERSTOOD                 @V50A2B5 00388000
+SETNONE  EQU   *                                               @V50A2B5 00389000
+         L     R5,=A(DMKSYSTS)  GET TIME START                 @V50A2B5 00390000
+         MVC   0(8,R5),SET24    MOVE IN HOUR 24                @V50A2B5 00391000
+         L     R5,=A(DMKSYSTE)  GET TIME END                   @V50A2B5 00392000
+         MVC   0(8,R5),SET24    SET SAME TIME                  @V50A2B5 00393000
+         CALL  DMKMNIST        TURN ON THE TRQS                @VMD0138 00394000
+         L     R5,=A(DMKSYSAT)  SEE IF AUTO IS ON              @V50A2B5 00395000
+         TM    0(R5),AUTGO      DO THE TEST                    @V50A2B5 00396000
+         BNO   ACK              DO NOT TAKE ANY ACTION         @V50A2B5 00397000
+         L     R5,=A(DMKPRGMC)  SEE IF MONITOR IS ON           @V50A2B5 00398000
+         ICM   R5,B'1111',0(R5) ADDR OF COMMUNICATIONS AREA    @V50A2B5 00399000
+         BZ    ACK              MONITOR IS OFF,NO ACTION TAKEN @V50A2B5 00400000
+         B     TAPESTP1         STOP MONITOR                   @V50A2B5 00401000
+         SPACE 1                                                        00402000
+PARSE    LR    R14,R0           SEE IF THERE                   @V50A2B5 00403000
+         LR    R15,R1           IS A COLON                     @V50A2B5 00404000
+CHKCOL   CLI   0(R15),C':'      COLON CHECK                    @V50A2B5 00405000
+         BZ    DOCONV           FOUND IT                       @V50A2B5 00406000
+         LA    R15,1(R15)       NO, LOOK AT NEXT               @V50A2B5 00407000
+         BCT   R14,CHKCOL       LOOP TO END                    @V50A2B5 00408000
+         B     MSG002           COULDN'T FIND IT               @V50A2B5 00409000
+DOCONV   LA    R7,1(R15)        WHERE SECOND FIELD BEGINS      @V50A2B5 00410000
+         LR    R15,R7           FIND LENGTH OF FIRST FIELD     @V50A2B5 00411000
+         SR    R15,R1           COMPUTATION                    @V50A2B5 00412000
+         S     R15,F1           MINUS ONE                      @V50A2B5 00413000
+         BNH   MSG002           MUST BE POSITIVE               @V50A2B5 00414000
+         LR    R3,R0            SAVE REGISTER 0                @V50A2B5 00415000
+         LR    R4,R1            AND ONE                        @V50A2B5 00416000
+         LR    R0,R15           USE THIS LENGTH                @V50A2B5 00417000
+         CALL  DMKCVTDB         CONVERT TO BINARY              @V50A2B5 00418000
+         BNZ   CONVERR          CONVERT ERROR                  @V50A2B5 00419000
+         STH   R1,0(R6)         KEEP THIS NUMBER               @V50A2B5 00420000
+         LR    R0,R3            RESTORE REGISTER 0             @V50A2B5 00421000
+         LR    R1,R4            RESTORE REGISTER ONE           @V50A2B5 00422000
+         LA    R14,0(R3,R4)     COMPUTE LENGTH OF SECOND OP    @V50A2B5 00423000
+         SR    R14,R7           COMPUTE                        @V50A2B5 00424000
+         BNH   MSG002           ERROR CONDITION                @V50A2B5 00425000
+         LR    R3,R0            SAVE REGISTER 0                @V50A2B5 00426000
+         LR    R4,R1            SAVE REGISTER ONE              @V50A2B5 00427000
+         LR    R0,R14           USE THE LENGTH                 @V50A2B5 00428000
+         LR    R1,R7            AND THE ADDRESS                @V50A2B5 00429000
+         CALL  DMKCVTDB         CONVERT TO COMPUTER NUMBER     @V50A2B5 00430000
+         BNZ   CONVERR          ERROR CONDITION                @V50A2B5 00431000
+         STH   R1,2(R6)         STORE VALUE                    @V50A2B5 00432000
+         LR    R0,R3            RESTORE REGISTER ZERO          @V50A2B5 00433000
+         LR    R1,R4            RESTORE REGISTER ONE           @V50A2B5 00434000
+         BR    R8               BRANCH OUT                     @V50A2B5 00435000
+CONVERR  LR    R0,R3            SEND ERROR MSG                 @V50A2B5 00436000
+         LR    R1,R4            BUT RESTORE REGS AS BEFORE     @V50A2B5 00437000
+         B     MSG002           GO TO ERROR MSG                @V50A2B5 00438000
+         SPACE 1                                                        00439000
+CONVTOD  EQU   *                                               @V50A2B5 00440000
+         LH    R7,0(R5)         COMPUTE TOTAL NO OF SECS.      @V50A2B5 00441000
+         CH    R7,=H'24' ,      SEE IF LEGAL                   @V50A2B5 00442000
+         BH    MSG222           NO, SEND MESSAGE               @V50A2B5 00443000
+         MH    R7,=H'3600'      CONVERT TO SECONDS             @V50A2B5 00444000
+         ST    R7,4(R5)         TEMPORARY KEEP AROUND          @V50A2B5 00445000
+         LH    R7,2(R5)         LOAD IN MINUTES                @V50A2B5 00446000
+         CH    R7,=H'60'        SEE IF IN 60 MIN RANGE         @V50A2B5 00447000
+         BH    MSG222           NO, ERROR CONDITION            @V50A2B5 00448000
+         MH    R7,=H'60'        CONVERT TO SECONDS             @V50A2B5 00449000
+         A     R7,4(R5)         GET TOTAL SECONDS              @V50A2B5 00450000
+         SR    R2,R2            PREPARE TO MULTIPLY            @V50A2B5 00451000
+         LR    R3,R7            MULTIPLY SETUP                 @V50A2B5 00452000
+         M     R2,=F'1000000'   MULTIPLY BY 1000000            @V50A2B5 00453000
+         SLDL  R2,12            SHIFT BY 12                    @V50A2B5 00454000
+         STM   R2,R3,0(R5)      STORE RESULT                   @V50A2B5 00455000
+         BR    R8               RETURN                         @V50A2B5 00456000
+         SPACE 1                                                        00457000
+SETFROM  CALL  DMKSCNFD         DO NEXT PARSE                  @V50A2B5 00458000
+         BNZ   MSG026           NOTHING LEFT                   @V50A2B5 00459000
+         LA    R6,TIMEFROM      R6 POINTS TO THE VALUES PARSED @V50A2B5 00460000
+         BAL   R8,PARSE         CHECK SYSTAX AND VALIDITY      @V50A2B5 00461000
+         CALL  DMKSCNFD         NOTE THE NEXT PARSING          @V50A2B5 00462000
+         BNZ   MSG026           MUST BE SOMETHING              @V50A2B5 00463000
+         CL    R0,F2            THIS MUST BE TO                @V50A2B5 00464000
+         BNE   MSG002           NO, ERROR                      @V50A2B5 00465000
+         CLC   0(2,R1),=C'TO'   IS IT TO                       @V50A2B5 00466000
+         BNZ   MSG002           NO, ERROR                      @V50A2B5 00467000
+         CALL  DMKSCNFD         GET FINAL PARSE                @V50A2B5 00468000
+         BNZ   MSG026           MUST BE SUCCESSFUL             @V50A2B5 00469000
+         LA    R6,TIMETO        THE AREA FOR TO VALUES         @V50A2B5 00470000
+         BAL   R8,PARSE         PARSE IT OUT                   @V50A2B5 00471000
+         LA    R5,TIMEFROM      PROCESS FROM TIME INFORMATION  @V50A2B5 00472000
+         BAL   R8,CONVTOD       BY CONVERTING TO TOD FORMAT    @V50A2B5 00473000
+         LA    R5,TIMETO        PROCESS TO IMFORMATION         @V50A2B5 00474000
+         BAL   R8,CONVTOD       CONVERT TO TIME TO TOD FORMAT  @V50A2B5 00475000
+         CLC   TIMEFROM(4),TIMETO     SEE IF THESE MAKE SENSE  @V50A2B5 00476000
+         BNL   MSG223           IMPOSSIBLE SITUATION           @V50A2B5 00477000
+         L     R6,=A(DMKSYSTS)  STORE THE START TIME           @V50A2B5 00478000
+         MVC   0(8,R6),TIMEFROM STORE NEW START TIME           @V50A2B5 00479000
+         L     R6,=A(DMKSYSTE)  STORE NEW STOP TIME            @V50A2B5 00480000
+         MVC   0(8,R6),TIMETO   STORE NEW STOP TIME            @V50A2B5 00481000
+         L     R5,=A(DMKSYSAT)  FIRST SEE IF AUTO IS ON        @V50A2B5 00482000
+         TM    0(R5),AUTGO      TEST AUTO FLAG                 @V50A2B5 00483000
+         BNO   ACK              NOPE, JUST EXIT                @V50A2B5 00484000
+         CALL  DMKMNIST        TURN ON THE TRQS                @VMD0138 00485000
+         B     ACK              RETURN                         @V50A2B5 00486000
+         SPACE 1                                                        00487000
+SETFOR   EQU   *                                               @V50A2B5 00488000
+         L     R6,=A(DMKPRGMC) FIRST SEE IF ALREADY ON         @V50A2B5 00489000
+         ICM   R6,B'1111',0(R6) BY LOOKING AT MONCOM POINTER   @V50A2B5 00490000
+         BNZ   MSG228          IT IS ALREADY ON                @V50A2B5 00491000
+         L     R6,=A(DMKSYSAT) SEE IF AUTODISK IS ON           @V50A2B5 00492000
+         TM    0(R6),AUTGO     TEST THE FLAG                   @V50A2B5 00493000
+         BNO   MSG227          CANNOT DO THIS                  @V50A2B5 00494000
+         CALL  DMKSCNFD        DO THE FINAL PARSE              @V50A2B5 00495000
+         BNZ   MSG002          IT MUST BE THERE                @V50A2B5 00496000
+         LA    R6,TIMETO       WE WILL USE TIMEFROM AREA       @V50A2B5 00497000
+         BAL   R8,PARSE        PARSE THE FIELDS                @V50A2B5 00498000
+         LA    R5,TIMETO       NEXT CHANGE TO TOD FORMAT       @V50A2B5 00499000
+         BAL   R8,CONVTOD      CALL CONVERSION ROUTINE         @V50A2B5 00500000
+         STCK  TEMPSTRT        LOAD THE START TIME AS NOW      @V50A2B5 00501000
+         LM    R6,R7,TEMPSTRT  ACQUIRE THE START TIME          @V50A2B5 00502000
+         SL    R7,TODATE+4     FIRST SUBTRACT THE END          @V50A2B5 00503000
+         BC    8+2+1,NOCARRY   SEE IF THERE IS A CARRY         @V50A2B5 00504000
+         SL    R6,F1           SUBTRACT ONE FROM HIGH ORDER    @V50A2B5 00505000
+NOCARRY  SL    R6,TODATE       FINISH UP THE SUBTRACTION       @V50A2B5 00506000
+         LR    R2,R6           KEEP AROUND UNTIL               @V50A2B5 00507000
+         LR    R3,R7           AFTER THE 24 HR TEST            @V50A2B5 00508000
+         A     R7,TIMETO+4     COMPUTE END TIME SS+DEL         @V50A2B5 00509000
+         BC    12,*+8          SEE IF THERE IS A CARRY         @V50A2B5 00510000
+         AL    R6,F1           ADD THE CARRY                   @V50A2B5 00511000
+         AL    R6,TIMETO       FINISH ADDITION                 @V50A2B5 00512000
+         STM   R6,R7,TIMETO    SEE IF OVER HR 24               @V50A2B5 00513000
+         CLC   TIMETO(8),SET24 WITH THE COMPARE                @V50A2B5 00514000
+         BH    MSG226          YES, ERROR                      @V50A2B5 00515000
+         L     R5,=A(DMKSYSTS) STORE IN DMKSYS                 @V50A2B5 00516000
+         STM   R2,R3,0(R5)     THE START TIME                  @V50A2B5 00517000
+         L     R5,=A(DMKSYSTE) STORE THE END TIME              @V50A2B5 00518000
+         STM   R6,R7,0(R5)     IN THE DMKSYS AREA              @V50A2B5 00519000
+         CALL  DMKMNIST        TURN OFF THE TRQS               @VMD0138 00520000
+         B     ACK                                             @VA08291 00521000
+         EJECT                                                          00522000
+*********************************************************************** 00523000
+*                                                                       00524000
+*                 MONITOR STOP                                          00525000
+*                                                                       00526000
+**********************************************************************  00527000
+         SPACE 1                                                        00528000
+DMKMCDST RELOC                                                 @VA08291 00529000
+         CALL  DMKSCNFD       GET NEXT PARAMETER               @V2B2638 00530000
+         BNZ   TAPESTP1         DEFAULT IS TO SHUT OFF MONITOR @V50A2B5 00531000
+         C     R0,F8          TOO BIG?                         @V2B2638 00532000
+         BH    MSG002         YES, GARBAGE IN, GARBAGE OUT     @V2B2638 00533000
+         MVC   SAVEWRK3(8),BLANKS BLANK OUT PARM AREA          @V2B2638 00534000
+         LR    R2,R0          LENGTH OF PARM INTO R2           @V2B2638 00535000
+         BCTR  R2,0           LESS 1 FOR EXECUTE               @V2B2638 00536000
+         EX    R2,PARMOVE     MOVE PARM INTO TEMPORARY AREA    @V2B2638 00537000
+         CLC   =CL8'TAPE',SAVEWRK3 IS IT PERF MONITOR?         @V2B2638 00538000
+         BE    TAPESTOP       YES                              @V2B2638 00539000
+         CLC   =CL8'SPOOL',SAVEWRK3   SEE IF SPOOL STOP        @V50A2B5 00540000
+         BE    TAPESTOP               YES, CONTINUE            @V50A2B5 00541000
+         AIF   (NOT &TRACE(9)).NTR92                           @V2B2638 00542000
+         CLC   =CL8'CPTRACE',SAVEWRK3 IS IT INTERNAL TRACE     @V2B2638 00543000
+.NTR92   ANOP                                                           00544000
+         BNE   MSG002         NOPE, BAD OPERAND                @V2B2638 00545000
+         B     STOPCPTR                                        @V50A2B5 00546000
+         SPACE 1                                                        00547000
+*.                                                                      00548000
+*********************************************************************** 00549000
+*                                                                       00550000
+*                 MONITOR STOP CPTRACE   (TRACE TABLE)                  00551000
+*                                                                       00552000
+*        STOP ALL FLAVORS OF INTERNAL TRACING.                          00553000
+*                                                                       00554000
+*********************************************************************** 00555000
+*.                                                                      00556000
+         SPACE 1                                                        00557000
+STOPCPTR EQU   *                                               @V50A2B5 00558000
+         L     R2,TRACEFLG    GET THE TRACE FLAGS              @V2B2638 00559000
+         LTR   R2,R2          IS ANY TRACING ACTIVE?           @V2B2638 00560000
+         BZ    MSG214         NO, THEN CAN'T STOP TRACING      @V2B2638 00561000
+         SR    R2,R2          CLEAR THE TRACE TABLE FLAG       @V2B2638 00562000
+         ST    R2,TRACEFLG    TO INDICATE NO TRACING           @V2B2638 00563000
+         L     R8,PREFIXB     ADDRESS OTHER PSA IF ANY         @VA08263 00564000
+         ST    R2,TRACEFLG(R8) AND RESET ITS TRACE FLAGS       @VA08263 00565000
+         B     ACK                                             @V2B2638 00566000
+         SPACE 4                                                        00567000
+PARMOVE  MVC   SAVEWRK3(0),0(R1) MOVE ARG TO TEMP AREA         @V2B2638 00568000
+PARMOVE1 MVC   SAVEWRK1(0),0(R1)     MOVE ARG TO TEMP AREA     @V50A2B5 00569000
+         EJECT                                                          00570000
+*.                                                                      00571000
+*********************************************************************** 00572000
+*                                                                       00573000
+*                 MONITOR STOP TAPE                                     00574000
+*                                                                       00575000
+*        MAKE SURE THAT THE MONITOR DATA COLLECTION IS ACTIVE.          00576000
+*        IF AN ERROR IS BEING PROCESSED THEN THE MONITOR WILL SHUTDOWN  00577000
+*        WITH A DMKMON ERROR MESSAGE BY ITSELF.                         00578000
+*        IF THE CFSTOP FLAG HAS ALREADY BEEN SET THEN THINGS ARE        00579000
+*        SET UP TO STOP ALREADY, SO EXIT WITH AN ERROR MESSAGE.         00580000
+*                                                                       00581000
+*        OTHERWISE, SET CFSTOP AND OBTAIN AND INITIALIZE A CPEXBLOK.    00582000
+*        STORE ITS ADDRESS IN MONCOM.                                   00583000
+*                                                                       00584000
+*        IF THE MONITOR TAPE IS NOT BUSY THEN CALL DMKMONSH TO          00585000
+*        SHUTDOWN THE MONITOR.                                          00586000
+*        DMKMONSH WILL USE THE CPEXBLOK TO RETURN TO ITSELF AFTER       00587000
+*        THE I/O INTERRUPT ROUTINE HAS RECEIVED THE FINAL INTERRUPT     00588000
+*        AND CLEANED UP THE VARIOUS BLOCKS.                             00589000
+*        DMKMONSH WILL THEN EXIT BACK TO HERE; WHEREUPON WE ISSUE       00590000
+*        A 'COMMAND COMPLETE' MESSAGE AND EXIT.                         00591000
+*                                                                       00592000
+*        IF THE TAPE IS BUSY THEN SET THE CPEXADD (EXECUTION            00593000
+*        ADDRESS) TO ISSUE THE 'COMMAND COMPLETE' MESSAGE FROM THIS     00594000
+*        MODULE AND GO TO THE DISPATCHER.                               00595000
+*        THE DMKMONIO TAPE I/O INTERRUPT HANDLER WILL CHECK FOR CFSTOP  00596000
+*        WHEN THE NEXT I/O INTERRUPT COMES IN.                          00597000
+*        HE WILL THEN CLEAN UP AND EXIT BACK TO HERE WHEN HE'S          00598000
+*        FINISHED.                                                      00599000
+*                                                                       00600000
+*********************************************************************** 00601000
+*.                                                                      00602000
+         SPACE 1                                                        00603000
+TAPESTP1 MVC   SAVEWRK3(8),BLANKS    DO THIS FOR LATER         @V50A2B5 00604000
+TAPESTOP L     R7,=A(DMKPRGMC) SOME KEY FIELDS IN DMKPRG       @V2B2638 00605000
+         L     R7,0(R7)       PICK UP COMM. AREA ADDRESS       @V2B2638 00606000
+         LTR   R7,R7          IS THER ONE                      @V2B2638 00607000
+         USING MONCOM,R7                                                00608000
+         BZ    MSG212         NO, THEN STOP IS INVALID PARM    @V2B2638 00609000
+         CLC   SAVEWRK3(8),=CL8'TAPE'   VALIDITY CHECK TAPE    @V50A2B5 00610000
+         BNE   CHKSPLW             SEE IF SPOOL SAID HERE      @V50A2B5 00611000
+         TM    MONFLAG3,SPOOLED        THIS FLAG BETTER BE OFF @V50A2B5 00612000
+         BNO   OKSTOP              FINE STOP                   @V50A2B5 00613000
+         B     MSG002              ELSE ERROR                  @V50A2B5 00614000
+CHKSPLW  CLC   SAVEWRK3(8),=CL8'SPOOL'  SEE IF SPOOL HERE      @V50A2B5 00615000
+         BNE   OKSTOP               SHUT OFF ANYTHING          @V50A2B5 00616000
+         TM    MONFLAG3,SPOOLED     SPOOL BETTER BE ON         @V50A2B5 00617000
+         BNO   MSG002               ELSE ERROR                 @V50A2B5 00618000
+OKSTOP   EQU   *                                               @V50A2B5 00619000
+         SPACE 1                                                        00620000
+         TM    MONFLAG1,ERROR+CFSTOP IS ERROR OR STOP          @V2B2638 00621000
+*              BEING HANDLED NOW. IF SO CAN'T DO IT TWICE               00622000
+         BNZ   MSG218         YES, CANT STOP IT YET, SORRY     @V2B2638 00623000
+         SLR   R0,R0          ZIP FOR STORE                    @VA03658 00624000
+         L     R1,=A(DMKPRGC8) ADDRESS ENABLED CLASSES         @VA03658 00625000
+         ST    R0,0(R1)       SHUT OFF IN CASE OF SUSPEND      @VA03658 00626000
+         ST    R0,CPCREG8     SHUT OFF ACTIVE CLASSES          @VA03658 00627000
+         TM    APSTAT1,APUOPER APMODE?                         @VA08291 00628000
+         BNO   CONTINUE       NO, GO AROUND AP CODE            @VA08291 00629000
+         L     R2,PREFIXB     ADDRESS OTHER PROCESSOR'S PSA             00630000
+         ST    R0,CPCREG8(R2) PROPAGATE MC MASK TO OTHER PROCESSOR      00631000
+         LCTL  C8,C8,ZEROES   ...                              @V2B2638 00632000
+         LA    R0,CPEXSIZE    SIZE OF CPEXBLOK                 @VA08291 00633000
+         CALL  DMKFREE        GET CPEXBLOK                     @VA08291 00634000
+         USING CPEXBLOK,R1                                     @VA08291 00635000
+         STM   R0,R15,CPEXREGS STORE REGS                      @VA08291 00636000
+         LA    R2,CONTINUE    PLACE TO RETURN FOR OTHER        @VA08291 00637000
+*                             PROCESSOR                                 00638000
+         ST    R2,CPEXADD     TO DO LOAD CNTL REG 8            @VA08291 00639000
+         CALL  DMKSTKOP       STACK FOR OTHER PROCESSOR        @VA08291 00640000
+         GOTO  DMKDSPCH                                        @VA08291 00641000
+         DROP  R1                                              @VA08291 00642000
+CONTINUE EQU   *                                               @VA08291 00643000
+         LCTL  C8,C8,ZEROES   LOAD CONTROL REG 8               @VA08291 00644000
+         OI    MONFLAG1,CFSTOP INDICATE CONSOLE FUNCTION STOP  @V2B2638 00645000
+         MVC   MONUSER(8),VMUSER INDICATE STOP REQUESTORS NAME @VA03693 00646000
+         L     R1,MONIOBF    IS TAPE BUSY?                              00647000
+         LTR   R1,R1          NON-ZERO VALUE INDICATES IT IS            00648000
+         BNZ   ACK            BUSY, DMKMON WILL DO THE REST             00649000
+         LR    R9,R7          R9=MONCOM FOR DMKMON             @V2B2638 00650000
+         CALL  DMKMNISH       REQUEST MONITOR TO SHUT ITSELF DOWN       00651000
+         L     R1,SAVER12         SEE WHO DOES CALLING         @V50A2B5 00652000
+         CLC   0(8,R1),=C'DMKMIA  ' IF IT IS MIA               @V50A2B5 00653000
+         BE    GETACK             SKIP THIS MESSAGE            @V50A2B5 00654000
+         LA    R0,L'STOPMSG       GET LENGTH OF MESSAGE        @V50A2B5 00655000
+         LA    R1,STOPMSG         GET ADDRESS OF MESSAGE       @V50A2B5 00656000
+         CALL  DMKMIAMU           SEND THE MESSAGE             @V50A2B5 00657000
+GETACK   EQU   *                                               @V50A2B5 00658000
+ACK      XC    PARMTYPE(2),PARMTYPE  RESET SEEKS ACTIVE FLAG   @V60BEBC 00659000
+         EXIT                        ACKNOWLEDGE COMPLETE      @V60BEBC 00660000
+         EJECT                                                          00661000
+* ENTRY POINT -                                                         00662000
+*                                                                       00663000
+*        DMKMCDSE - TO PROCESS THE MONITOR SEEKS COMMAND                00664000
+*                                                                       00665000
+* ENTRY CONDITIONS -                                                    00666000
+*                                                                       00667000
+*        GPR9  - ADDRESS OF COMMAND LINE BUFFER                         00668000
+*        GPR11 - ADDRESS OF  VMBLOK                                     00669000
+*        GPR12 - ADDRESS OF ENTRY POINT                                 00670000
+*        GPR13 - ADDRESS OF STANDARD SAVEAREA                           00671000
+*                                                                       00672000
+* EXIT CONDITIONS -                                                     00673000
+*                                                                       00674000
+*        NONE                                                           00675000
+*                                                                       00676000
+* CALLS TO OTHER ROUTINES -                                             00677000
+*                                                                       00678000
+*        DMKSCNFD - TO LOCATE NEXT FIELD IN INPUT LINE                  00679000
+*        DMKQCNWT - TO SEND A MESSAGE TO THE TERMINAL                   00680000
+*        DMKERMSG - TO SEND CANNED ERROR MESSAGE TO TERMINAL            00681000
+*        DMKCVTHB - TO CONVERT DEVICE ADDRESS TO BINARY                 00682000
+*        DMKSCNRU - TO OBTAIN RDEVBLK ADDRESS FROM DEV. ADDRESS         00683000
+*        DMKFREE  - TO OBTAIN STORAGE FOR MESSAGES                      00684000
+*        DMKCFCSC - SCAN FOR A CHARACTER ROUTINE                        00685000
+*        DMKCVTBH - CONVERT BINARY DEV ADDR TO HEX PRINTABLE            00686000
+*        DMKFRET  - TO RELEASE STORAGE USED FOR MESSAGES                00687000
+*                                                                       00688000
+* EXTERNAL REFERENCES -                                                 00689000
+*                                                                       00690000
+*        DMKPRGMC - ADDRESS OF MONITOR COMMUNICATIONS AREA              00691000
+*                                                                       00692000
+* REGISTER USAGE -                                                      00693000
+*                                                                       00694000
+*        GPR0  - COMMAND ARGUMENT LENGTH, AND OUTPUT MSG LENGTH         00695000
+*        GPR1  - COMMAND ARGUMENT ADDRESS, AND OUTPUT MSG ADDRESS       00696000
+*        GPR2  - GPR10 - WORK REGISTERS                                 00697000
+*        GPR11 - VMBLOK ADDRESS                                         00698000
+*        GPR12 - BASE REG                                               00699000
+*        GPR13 - SAVE AREA ADDRESS                                      00700000
+*        GPR14 - LINKAGE REG                                            00701000
+*        GPR15 - LINKAGE REG                                            00702000
+*                                                                       00703000
+* OPERATION -                                                           00704000
+*                                                                       00705000
+*        MONITOR SEEKS PROCESSING - OPTIONS ARE:                        00706000
+*        INCLUDE, EXCLUDE, DISPLAY, DELETE                              00707000
+*                                                                       00708000
+***************************************************************         00709000
+DMKMCDSE RELOC                                                 @V60BEBC 00710000
+         TS    SEEKACTV         SEEKS COMMAND ALREADY ACTIVE?  @V60BEBC 00711000
+         BC    4,EMSG2          YES, GET OUT                   @V60BEBC 00712000
+         CALL  DMKSCNFD         LOOK FOR SPEC'D OPTION         @V60BEBC 00713000
+         BNZ   MSG026           NOT THERE, BAD NEWS            @V60BEBC 00714000
+         CL    R0,F7            INVALID OPERAND IF             @V60BEBC 00715000
+         BH    MSG026           MORE THAN 7 CHARS              @V60BEBC 00716000
+         LR    R2,R0            GET LENGTH                     @V60BEBC 00717000
+         BCTR  R2,0             LESS 1 FOR EXECUTE             @V60BEBC 00718000
+         LA    R3,OPTABENO      OPERAND TABLE COUNT            @V60BEBC 00719000
+         LA    R4,MONOPTAB      OPERAND TABLE ADDRESS          @V60BEBC 00720000
+COMPLEN  CH    R2,0(R4)         CHECK OPERAND LENGTH           @V60BEBC 00721000
+         BL    NEXTARG          TOO SMALL, NEXT ARGUMENT       @V60BEBC 00722000
+         EX    R2,COMPARG       CHECK AN OPERAND FOR EQUAL     @V60BEBC 00723000
+         BE    10(R4)           GO TO PROPER ROUTINE           @V60BEBC 00724000
+NEXTARG  LA    R4,14(R4)        NEXT ARGUMENT ADDRESS          @V60BEBC 00725000
+         BCT   R3,COMPLEN       LOOP THROUGH ALL VALID ARGS    @V60BEBC 00726000
+         B     MSG002           NOT FOUND, INVALID OPERAND     @V60BEBC 00727000
+COMPARG  CLC   2(0,R4),0(R1)    TARGET OF THE EXECUTE          @V60BEBC 00728000
+         SPACE 1                                               @V60BEBC 00729000
+SEDELETE OI    PARMTYPE,DELET   INDICATE DELETE PROCESSING     @V60BEBC 00730000
+FREEUPL  L     R2,=A(DMKENTSK)  SEE IF SEEKS   IS ACTIVE       @V60BEBC 00731000
+         ICM   R1,B'1111',0(R2) ....                           @V60BEBC 00732000
+         USING SEEKLIST,R1                                     @V60BEBC 00733000
+         BZ    TESTYPE          NO, NO NEED TO FREE            @V60BEBC 00734000
+         LH    R0,SEEKSIZE      GET NUMBER OF DWORDS           @V60BEBC 00735000
+         CALL  DMKFRET          FREE THE LIST                  @V60BEBC 00736000
+         XC    0(4,R2),0(R2)     CLEAR THE POINTER IN DMKENT   @V60BEBC 00737000
+         DROP  R1                                              @V60BEBC 00738000
+         B     TESTYPE         SEE WHO CALLED                  @V60BEBC 00739000
+         SPACE 1                                               @V60BEBC 00740000
+SEINCLUD EQU   *                                               @V60BEBC 00741000
+         OI    PARMTYPE,INCLUDE INDICATE INCLUDE               @V60BEBC 00742000
+         B     INOREX           DELETE OLD LIST                @V60BEBC 00743000
+SEEXCLUD EQU   *                                               @V60BEBC 00744000
+         OI    PARMTYPE,EXCLUDE INDICATE EXCLUDE               @V60BEBC 00745000
+INOREX   LA    R10,TEMPTBL      SYMBOL TABLE ADDR              @V60BEBC 00746000
+         SLR   R5,R5            INIT DEVICE COUNT              @V60BEBC 00747000
+GETDEVCT CALL  DMKSCNFD         GET NEXT PARM IN CMD BUFFER    @V60BEBC 00748000
+         BNZ   CHECKCNT         NONE LEFT, CHECK DEVICE COUNT  @V60BEBC 00749000
+         CL    R0,F7            CAN'T BE MORE THAN 7 CHARS     @V60BEBC 00750000
+         BH    MSG021           SEND ERROR MSG                 @V60BEBC 00751000
+         LA    R2,DASH          SCAN FOR A DASH                @V60BEBC 00752000
+         CALL  DMKCFCSC         ....                           @V60BEBC 00753000
+         BZ    NOTRANGE         NO RANGE PROCESSING            @V60BEBC 00754000
+         LR    R3,R2            GET LENGTH OF FIRST OPERAND    @V60BEBC 00755000
+         SR    R3,R1            ....                           @V60BEBC 00756000
+         CL    R3,F3            3 CHARACTERS ONLY ALLOWED      @V60BEBC 00757000
+         BNE   MSG021           ILLEGAL OPERAND                @V60BEBC 00758000
+         LR    R4,R0            TOT OPERAND LENGTH             @V60BEBC 00759000
+         LR    R0,R3            1ST OPERAND LENGTH             @V60BEBC 00760000
+         MVI   0(R2),BLANK      BLANK OUT DASH                 @V60BEBC 00761000
+         CALL  DMKCVTHB         CONVERT TO BINARY              @V60BEBC 00762000
+         BNZ   MSG021           NO GOOD, ERROR MSG             @V60BEBC 00763000
+         STH   R1,SAVEWRK6      SAVE FOR LATER                 @V60BEBC 00764000
+         LA    R1,1(R2)         2ND OPERAND IN RANGE           @V60BEBC 00765000
+         SR    R4,R3            LENGTH OF 2ND OPERAND          @V60BEBC 00766000
+         BCTR  R4,0             LESS 1 FOR DASH                @V60BEBC 00767000
+         CL    R4,F3            SEE IF 3 CHARS                 @V60BEBC 00768000
+         BNE   MSG021           NO, ISSUE ERROR MSG            @V60BEBC 00769000
+         LR    R0,R4            READY FOR CONVERT              @V60BEBC 00770000
+         CALL  DMKCVTHB         CONVERT TO BINARY              @V60BEBC 00771000
+         BNZ   MSG021           BAD CONVERT, ISSUE ERROR MSG   @V60BEBC 00772000
+         LH    R4,SAVEWRK6      RESTORE RADDR1                 @V60BEBC 00773000
+         CR    R1,R4            RADDR2 > RADDR1                @V60BEBC 00774000
+         BNH   MSG021           NO, INVALID OPERAND            @V60BEBC 00775000
+         STH   R4,0(R10)        BEGINNING OF RANGE             @V60BEBC 00776000
+         STH   R1,2(R10)        END OF RANGE TO TABLE          @V60BEBC 00777000
+         OI    0(R10),RANGE     INDICATES RANGE                @V60BEBC 00778000
+         SR    R1,R4            DIFFERENCE PLUS 1 ADDED TO DEV @V60BEBC 00779000
+         LA    R5,1(R5,R1)      COUNT                          @V60BEBC 00780000
+         LA    R10,4(R10)       NEXT POS IN TABLE              @V60BEBC 00781000
+         B     GETDEVCT         GET NEXT PARM                  @V60BEBC 00782000
+NOTRANGE EQU   *                                               @V60BEBC 00783000
+         CL    R0,F3            LENGTH=3?                      @V60BEBC 00784000
+         BNE   MSG021           NO, ISSUE ERROR MSG            @V60BEBC 00785000
+         CALL  DMKCVTHB         CONVERT TO BINARY              @V60BEBC 00786000
+         BNZ   MSG021           BAD CONVERT                    @V60BEBC 00787000
+         STH   R1,0(R10)        SAVE I/O ADDR                  @V60BEBC 00788000
+         LA    R10,2(R10)       NEXT POS IN TABLE              @V60BEBC 00789000
+         LA    R5,1(R5)         INCR DEVICE COUNT              @V60BEBC 00790000
+         B     GETDEVCT         GET NEXT DEVICE                @V60BEBC 00791000
+         SPACE 1                                               @V60BEBC 00792000
+CHECKCNT LTR   R5,R5            MORE THAN 0 DEVICES?           @V60BEBC 00793000
+         BZ    MSG026           NO, ISSUE ERROR MSG            @V60BEBC 00794000
+         B     FREEUPL          DELETE OLD LIST ATTEMPT        @V60BEBC 00795000
+TESTYPE  LA    R8,SEEKHALF(R5)  X HALFWORDS FOR HEADER         @V60BEBC 00796000
+         TM    PARMTYPE,DELET   WHICH OPTION?                  @V60BEBC 00797000
+         BO    ACK              JUST DELETE, SO LEAVE          @V60BEBC 00798000
+         SLR   R9,R9            COMPUTE DOUBLE WORDS           @V60BEBC 00799000
+         SRDL  R8,2             FOR SEEKS LIST                 @V60BEBC 00800000
+         LTR   R9,R9            ANY REMAINDER?                 @V60BEBC 00801000
+         BZ    NORMDR           NO, DON'T ROUND UP             @V60BEBC 00802000
+         LA    R8,1(R8)         1 MORE DWORD                   @V60BEBC 00803000
+NORMDR   LR    R0,R8            GO GET THE STORAGE             @V60BEBC 00804000
+         CALL  DMKFREE          ...                            @V60BEBC 00805000
+         L     R2,=A(DMKENTSK)  SAVE ADDR OF SEEKS LIST        @V60BEBC 00806000
+         ST    R1,0(R2)         ....                           @V60BEBC 00807000
+         USING SEEKLIST,R1                                     @V60BEBC 00808000
+         STH   R8,SEEKSIZE      SAVE DWORDS IN SEEKS LIST      @V60BEBC 00809000
+         LA    R4,SEEKHDR(R1)   SKIP OVER HEADER               @V60BEBC 00810000
+         DROP  R1                                              @V60BEBC 00811000
+         LA    R6,0             INIT DEVICE COUNTER            @V60BEBC 00812000
+         LA    R2,TEMPTBL       TABLE OF ADDRS                 @V60BEBC 00813000
+START    TM    0(R2),RANGE      RANGE TEST                     @V60BEBC 00814000
+         BNO   ONEDEV           NOT A RANGE                    @V60BEBC 00815000
+         NI    0(R2),X'FF'-RANGE TURN OFF RANGE INDICATOR      @V60BEBC 00816000
+         LH    R3,2(R2)         GET ENDING I/O ADDRESS         @V60BEBC 00817000
+         LH    R1,0(R2)         GET STARTING I/O ADDRESS       @V60BEBC 00818000
+         LA    R2,4(R2)         NEXT POS IN TEMPTBL            @V60BEBC 00819000
+NEXTDEV  STM   R6,R8,SAVEWRK6   SAVE IN CASE OF ERROR          @V60BEBC 00820000
+         BCTR  R5,0             COUNT NUMBER OF SCANS          @V60BEBC 00821000
+         CALL  DMKSCNRU         SEE IF DEVICE EXISTS           @V60BEBC 00822000
+         BNZ   MSG040           NO, ISSUE ERROR MSG            @V60BEBC 00823000
+         LM    R6,R8,SAVEWRK6   RESTORE CURRENT I/O ADDRESS    @V6OBEBC 00824000
+         STH   R1,0(R4)         SAVE IT IN SEEKS LIST          @V60BEBC 00825000
+         LA    R6,1(R6)         INCR DEV COUNT                 @V60BEBC 00826000
+         LA    R4,2(R4)         NEXT POS IN SEEKS LIST         @V60BEBC 00827000
+ERRETURN CR    R3,R1            TEST FOR COMPLETED RANGE       @V60BEBC 00828000
+         BE    TESTDONE         CHECK FOR ALL DEVICES COVERED  @V60BEBC 00829000
+         LA    R1,1(R1)         INCR DEV RANGE ADDRESS         @V60BEBC 00830000
+         B     NEXTDEV          NEXT DEVICE                    @V60BEBC 00831000
+ONEDEV   LH    R1,0(R2)         GET BIN DEV ADDRESS            @V60BEBC 00832000
+         LA    R2,2(R2)         INCR TEMPTBL PTR               @V60BEBC 00833000
+         LR    R3,R1            ONLY ONE DEVICE                @V60BEBC 00834000
+         B     NEXTDEV          VALIDITY CHECK & INSERT        @V60BEBC 00835000
+TESTDONE C     R5,F0            COVERED ALL DEVICES?           @V60BEBC 00836000
+         BH    START            NO, DO NEXT DEVICE             @V60BEBC 00837000
+         SPACE 1                                               @V60BEBC 00838000
+SORTLIST L     R3,=A(DMKENTSK)  ADDRESS THE LIST               @V60BEBC 00839000
+         ICM   R3,B'1111',0(R3) ...                            @V60BEBC 00840000
+         USING SEEKLIST,R3                                     @V60BEBC 00841000
+         STH   R6,SEEKDEVS      SAVE NUMBER OF DEVS            @V60BEBC 00842000
+         MVC   SEEKTYPE,PARMTYPE INCLUDE/EXCLUDE INDICATOR     @V60BEBC 00843000
+         LA    R3,SEEKHDR(R3)   SKIP OVER HEADER               @V60BEBC 00844000
+         DROP  R3                                              @V60BEBC 00845000
+         C     R6,F1            MUST BE AT LEAST 2 DEVICES TO S@V60BEBC 00846000
+         BE    ACK              ONLY 1, ACKNOWLEDGE COMPLETE   @V60BEBC 00847000
+         BL    NODEVS           NO GEN'D DEVICES IN LIST       @V60BEBC 00848000
+         S     R6,F2            DERIVE LAST OFFSET             @V60BEBC 00849000
+         SLL   R6,1             FOR BXLE LOOP                  @V60BEBC 00850000
+         LA    R5,0(R3,R6)      LAST=FIRST+OFFSET              @V60BEBC 00851000
+NXTPASS  LR    R2,R3            START ADDRESS                  @V60BEBC 00852000
+         LA    R4,2             INCREMENT VALUE                @V60BEBC 00853000
+         LA    R6,0             CHANGE VARIABLE                @V60BEBC 00854000
+GOAGAIN  CLC   0(2,R2),2(R2)    N:N+1                          @V60BEBC 00855000
+         BNH   NOSWITCH         EXHANGE IF N > N+1             @V60BEBC 00856000
+         MVC   TEMP(2),0(R2)    SWITCH CODE                    @V60BEBC 00857000
+         MVC   0(2,R2),2(R2)    ...                            @V60BEBC 00858000
+         MVC   2(2,R2),TEMP     ...                            @V60BEBC 00859000
+         LR    R6,R2            SET CHANGE VARIABLE            @V60BEBC 00860000
+NOSWITCH BXLE  R2,R4,GOAGAIN    INNER LOOP                     @V60BEBC 00861000
+         LTR   R6,R6            ANY CHANGES OCCUR?             @V60BEBC 00862000
+         BZ    ACK              NO, FINISHED                   @V60BEBC 00863000
+         LR    R5,R6            NEW UPPER BOUND                @V60BEBC 00864000
+         B     NXTPASS          FOR NEXT PASS THROUGH TABLE    @V60BEBC 00865000
+NODEVS   OI    PARMTYPE,DELET    INDICATE DELETE               @V60BEBC 00866000
+         B     FREEUPL          FREE THE LIST                  @V60BEBC 00867000
+         SPACE 1                                               @V60BEBC 00868000
+DISPLAY  EQU   *                                               @V60BEBC 00869000
+         LA    R9,MSGBUFF       GET BUFFER AREA                @V60BEBC 00870000
+         MVI   MSGBUFF,BLANK    AND CLEAR IT                   @V60BEBC 00871000
+         MVC   MSGBUFF+1(L'MSGBUFF-1),MSGBUFF     .....        @V60BEBC 00872000
+         L     R6,=A(DMKENTSK)  IS SEL SEEKS ALIVE?            @V60BEBC 00873000
+         ICM   R6,B'1111',0(R6) ...                            @V60BEBC 00874000
+         BZ    EMSG1            NO, SEEKS NOT ACTIVE           @V60BEBC 00875000
+         MVC   MSGBUFF(L'SEEKMSG),SEEKMSG                      @V60BEBC 00876000
+         USING SEEKLIST,R6                                     @V60BEBC 00877000
+         LH    R3,SEEKDEVS      NUMBER OF DEVICES TO R3        @V60BEBC 00878000
+         TM    SEEKTYPE,INCLUDE TEST FOR INCLUDE/EXCLUDE       @V60BEBC 00879000
+         BNO   EXCLUD           NO, MUST BE EXCLUDE            @V60BEBC 00880000
+         MVC   MSGBUFF+8(2),INCL FILL MSG HEADER               @V60BEBC 00881000
+         B     WRITEOUT         AND WRITE TO CONSOLE           @V60BEBC 00882000
+EXCLUD   MVC   MSGBUFF+8(2),EXCL FILL MSG HEADER               @V60BEBC 00883000
+WRITEOUT LA    R0,L'MSGBUFF     LENGTH OF MSG                  @V60BEBC 00884000
+         LA    R1,MSGBUFF       POINT TO BUFFER                @V60BEBC 00885000
+         CALL  DMKQCNWT,PARM=NORET AND WRITE IT                @V60BEBC 00886000
+         LA    R6,SEEKHDR(R6)   SKIP OVER HEADER               @V60BEBC 00887000
+         DROP  R6                                              @V60BEBC 00888000
+         LR    R4,R3            COMPUTE NUMBER OF WRITES       @V60BEBC 00889000
+         SLR   R5,R5            AT 8 DEVS PER LINE             @V60BEBC 00890000
+         SRDL  R4,3             SO DIVIDE BY 8                 @V60BEBC 00891000
+         SRL   R5,29            MOVE TO LOW ORDER BITS         @V60BEBC 00892000
+         LTR   R5,R5            NO REMAINDER ON DIVIDE?        @V60BEBC 00893000
+         BZ    NOADD1           NO, DON'T ROUND UP             @V60BEBC 00894000
+         LA    R4,1(R4)         YES, ROUND                     @V60BEBC 00895000
+NOADD1   LA    R8,8             DEVS PER WRITE                 @V60BEBC 00896000
+         LA    R9,MSGBUFF       START OF BUFFER                @V60BEBC 00897000
+         C     R4,F1            LAST WRITE??                   @V60BEBC 00898000
+         BNE   SKIPIT           NO, THEN 8 DEVS ON THIS WRITE  @V60BEBC 00899000
+         LTR   R5,R5            ZERO REMAINDER?                @V60BEBC 00900000
+         BZ    SKIPIT           YES, KEEP AT 8 DEVS PER LINE   @V60BEBC 00901000
+         LR    R8,R5            NEW DEV COUNT FOR LAST WRITE   @V60BEBC 00902000
+SKIPIT   MVI   MSGBUFF,BLANK    BLANK THE LINE                 @V60BEBC 00903000
+         MVC   MSGBUFF+1(L'MSGBUFF-1),MSGBUFF  ......          @V60BEBC 00904000
+NXT1     LH    R1,0(R6)         GET BINARY DEVICE              @V60BEBC 00905000
+         CALL  DMKCVTBH         BACK TO HEX PRINTABLE          @V60BEBC 00906000
+         N     R1,X40FFS        BLANK HIGH ORDER BYTE          @V60BEBC 00907000
+         ST    R1,0(R9)         SAVE IN MSG AREA               @V60BEBC 00908000
+         LA    R6,2(R6)         NEXT DEVICE IN LIST            @V60BEBC 00909000
+         LA    R9,4(R9)         NEXT POS IN MSGBUFF            @V60BEBC 00910000
+         BCT   R8,NXT1          DO NEXT DEVICE                 @V60BEBC 00911000
+         LA    R0,L'MSGBUFF     GET LENGTH AND                 @V60BEBC 00912000
+         LA    R1,MSGBUFF       ADDR OF MSG                    @V60BEBC 00913000
+         CALL  DMKQCNWT,PARM=NORET AND WRITE IT                @V60BEBC 00914000
+         BCT   R4,NOADD1        INITIALIZE FOR NEXT WRITE      @V60BEBC 00915000
+         B     ACK              COMPLETE                       @V60BEBC 00916000
+EMSG1    MVC   MSGBUFF(L'SEERMSG),SEERMSG  SEEKS NOT ACTIVE    @V60BEBC 00917000
+         B     DUMPMSG          WRITE IT                       @V60BEBC 00918000
+EMSG2    MVC   MSGBUFF(L'SEACMSG),SEACMSG  CMD IN PROGRESS     @V60BEBC 00919000
+DUMPMSG  LA    R0,L'MSGBUFF     LENGTH AND                     @V60BEBC 00920000
+         LA    R1,MSGBUFF       ADDR OF MSGBUFF                @V60BEBC 00921000
+         CALL  DMKQCNWT,PARM=NORET WRITE MSG                   @V60BEBC 00922000
+         B     ACK                                             @V60BEBC 00923000
+*********************************************************************** 00924000
+*                                                                       00925000
+*        ALL ERROR MESSAGES ARE SENT FROM HERE.                         00926000
+*        DMKERM RETURNS DIRECTLY TO DMKCFM.                             00927000
+*                                                                       00928000
+*********************************************************************** 00929000
+         SPACE                                                          00930000
+MSG002   LA    R2,2           INVALID OPERAND MESSAGE          @V2B2638 00931000
+         XC    PARMTYPE(2),PARMTYPE RESET SEEKS FLAGS          @V60BEBC 00932000
+         B     BADARG                                          @V2B2638 00933000
+         SPACE 1                                                        00934000
+MSG003   LA    R2,3           INVALID OPTION                   @V2B2638 00935000
+         B     BADARG                                          @V2B2638 00936000
+         SPACE                                                          00937000
+MSG021   LA    R2,21            RADDR MISSING OR INVALID       @V60BEBC 00938000
+         XC    PARMTYPE(2),PARMTYPE RESET SEEKS FLAGS          @V60BEBC 00939000
+         B     ZIPR1            GO ISSUE MSG                   @V60BEBC 00940000
+MSG026   LA    R2,26          OPERAND MISSING OR INVALID       @V2B2638 00941000
+         XC    PARMTYPE(2),PARMTYPE RESET SEEKS FLAGS          @V60BEBC 00942000
+         B     ZIPR1                                           @V2B2638 00943000
+         SPACE                                                          00944000
+MSG040   STM   R1,R2,SAVEWRK4   SAVE REGS FOR RETURN           @V60BEBC 00945000
+         SLR   R2,R2            SET UP R2                      @V60BEBC 00946000
+         ICM   R2,B'1000',RETURN SET FOR RETURN                @V60BEBC 00947000
+         CALL  DMKCVTBH         BACK TO HEX                    @V60BEBC 00948000
+         N     R1,X40FFS        BLANK HIGH ORDER BYTE          @V60BEBC 00949000
+         IC    R2,FORTY         ERROR CODE                     @V60BEBC 00950000
+         SLR   R0,R0            .....                          @V60BEBC 00951000
+         B     BADARG           CALL ERROR RTN                 @V60BEBC 00952000
+MSG212   LA    R2,212         MON TAPE IS NOT ACTIVE           @V2B2638 00953000
+         B     ZIPR1                                           @V2B2638 00954000
+         SPACE                                                          00955000
+MSG214   LA    R2,214         CP TRACE TABLE IS NOT ACTIVE     @V2B2638 00956000
+         B     ZIPR1                                           @V2B2638 00957000
+         SPACE                                                          00958000
+MSG218   LA    R2,218         MON NOT STOPPED, TAPE I/O ACTIVE @V2B2638 00959000
+         B     ZIPR1                                           @V2B2638 00960000
+         SPACE                                                          00961000
+MSG222   LA    R2,222         TIME PARAMETER SPECIFIES ILLEGAL @V50A2B5 00962000
+         B     ZIPR1                                           @V50A2B5 00963000
+         SPACE 1                                                        00964000
+MSG223   LA    R2,223       START TIME MUST PRECEDE STOP TIME  @V50A2B5 00965000
+         B     ZIPR1                                           @V50A2B5 00966000
+         SPACE 1                                                        00967000
+MSG224   LA    R2,224       LIMIT NOT BETWEEN 10 AND 50000     @V50A2B5 00968000
+         B     ZIPR1                                           @V50A2B5 00969000
+         SPACE 1                                                        00970000
+MSG226   LA    R2,226         FOR VALUE SPANS MIDNIGHT         @V50A2B5 00971000
+         B     ZIPR1                                           @V50A2B5 00972000
+         SPACE 1                                                        00973000
+MSG227   LA    R2,227         FOR ILLEGAL WITHOUT AUTODISK ON  @V50A2B5 00974000
+         B     ZIPR1                                           @V50A2B5 00975000
+         SPACE 1                                                        00976000
+MSG228   LA    R2,228         FOR ILLEGAL WITH MONITOR ON      @V50A2B5 00977000
+         B     ZIPR1                                           @V50A2B5 00978000
+         SPACE 1                                                        00979000
+ZIPR1    SLR   R1,R1          NO SUBSTITUTABLES FOR ERM        @V2B2638 00980000
+         SPACE                                                          00981000
+BADARG   ICM   R0,B'1110',MODID+3 MODULE ID FOR MSG            @V2B2638 00982000
+         CALL  DMKERMSG       SEND ERROR MESSAGE               @V2B2638 00983000
+         SPACE                                                          00984000
+*                                                                       00985000
+* AFTER ALL MESSAGES DMKERMSG RETURNS TO DMKCFM DIRECTLY.               00986000
+* EXCEPT MSG040, WHICH RETURNS HERE AND SUBSEQUENTLY RETURNS   @V60BEBC 00987000
+* BACK TO THE DEVICE LIST SCAN ROUTINE OF THE SEEKS PROCESSOR  @V60BEBC 00988000
+*                                                              @V60BEBC 00989000
+         LM    R1,R2,SAVEWRK4   RESTORE R1 & R2                @V60BEBC 00990000
+         LM    R6,R8,SAVEWRK6   DITTO IO SCAN REGS             @V60BEBC 00991000
+         B     ERRETURN         BACK TO SCAN ROUTINE           @V60BEBC 00992000
+         EJECT                                                          00993000
+*********************************************************************** 00994000
+*                                                                       00995000
+*                 CONSTANTS, WORK AREAS, EQUATES                        00996000
+*                                                                       00997000
+*********************************************************************** 00998000
+         SPACE 1                                                        00999000
+*                                                                       01000000
+*                                                                       01001000
+TIMVAL   DS    0D                                              @V50A2B5 01002000
+         DC    CL8' '                                          @V50A2B5 01003000
+TEMPSTRT DC    CL8' '                                          @V50A2B5 01004000
+TEMPEND  DC    CL8' '                                          @V50A2B5 01005000
+SET24    DC    XL8'000141DD76000000'                           @V50A2B5 01006000
+         DS    0F                                              @V50A2B5 01007000
+TIMEFROM DS    4H                                              @V50A2B5 01008000
+TIMETO   DS    4H                                              @V50A2B5 01009000
+MONOPTAB DS    0F                                              @V60BEBC 01010000
+         DC    H'1',C'INCLUDE '                                @V60BEBC 01011000
+         B     SEINCLUD                                        @V60BEBC 01012000
+         DC    H'1',C'EXCLUDE '                                @V60BEBC 01013000
+         B     SEEXCLUD                                        @V60BEBC 01014000
+         DC    H'2',C'DELETE  '                                @V60BEBC 01015000
+         B     SEDELETE                                        @V60BEBC 01016000
+         DC    H'2',C'DISPLAY '                                @V60BEBC 01017000
+         B     DISPLAY                                         @V60BEBC 01018000
+OPTABENO EQU   (*-MONOPTAB)/14                                 @V60BEBC 01019000
+TEMPTBL  DS    40H                                             @V60BEBC 01020000
+TEMP     DS    H                                               @V60BEBC 01021000
+SEEKMSG  DC    C'--SEEKS   CLUDED DEVICES'                     @V60BEBC 01022000
+MSGBUFF  DS    CL40                                            @V60BEBC 01023000
+EXCL     DC    C'EX'                                           @V60BEBC 01024000
+INCL     DC    C'IN'                                           @V60BEBC 01025000
+BLANK    EQU   C' '                                            @V60BEBC 01026000
+DASH     DC    C'-'                                            @V60BEBC 01027000
+FORTY    DC    AL1(40)                                         @V60BEBC 01028000
+RETURN   DC    X'80'                                           @V60BEBC 01029000
+PARMTYPE DC    X'00'                                           @V60BEBC 01030000
+INCLUDE  EQU   X'80'                                           @V60BEBC 01031000
+EXCLUDE  EQU   X'40'                                           @V60BEBC 01032000
+DELET    EQU   X'20'                                           @V60BEBC 01033000
+SEEKACTV DC    X'00'                                           @V60BEBC 01034000
+RANGE    EQU   X'80'                                           @V60BEBC 01035000
+SEERMSG  DC    C'SELECTIVE SEEKS NOT CURRENTLY ACTIVE    '     @V60BEBC 01036000
+SEACMSG  DC    C'SEEKS COMMAND IN PROGRESS, RE-ISSUE     '     @V60BEBC 01037000
+STOPMSG  DC    C'MONITOR HAS BEEN MANUALLY STOPPED'            @V50A2B5 01038000
+LENMSG   EQU   21             LENGTH OF DISPLAY MESSAGE        @V2B2638 01039000
+MONTINT  EQU   60             DEFAULT INTERVAL = 60 SEC        @V2B2638 01040000
+         EJECT                                                          01041000
+         LTORG                                                 @V2B2638 01042000
+         EJECT                                                          01043000
+SEEKLIST DSECT                                                 @V60BEBC 01044000
+SEEKDEVS DS    H                                               @V60BEBC 01045000
+SEEKSIZE DS    H                                               @V60BEBC 01046000
+SEEKTYPE DS    H                                               @V60BEBC 01047000
+SEEKHDR  EQU   *-SEEKLIST                                      @V60BEBC 01048000
+SEEKENT  DS    H                                               @V60BEBC 01049000
+ENTLEN   EQU   *-SEEKENT                                       @V60BEBC 01050000
+SEEKHALF EQU   SEEKHDR/2                                       @V60BEBC 01051000
+         COPY  EQU                                             @V2B2638 01052000
+         PSA                                                   @V2B2638 01053000
+         COPY  MONBLOKS                                        @V2B2638 01054000
+         COPY  VMBLOK                                          @V2B2638 01055000
+         COPY  SAVE                                            @V2B2638 01056000
+         COPY  IOBLOKS                                         @V2B2638 01057000
+         COPY  CORE                                            @V2B2638 01058000
+         COPY  DEVTYPES                                        @V2B2638 01059000
+         COPY  RBLOKS                                          @V2B2638 01060000
+         COPY  TIMER                                           @V2B2638 01061000
+         COPY  UDIRECT                                         @V50A2B5 01062000
+         END                                                            01063000

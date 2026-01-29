@@ -1,0 +1,382 @@
+HDS      TITLE 'DMSHDS     (CMS)       VM/370 - RELEASE 6'              00001000
+         SPACE 2                                                        00002000
+*.                                                                      00002500
+* MODULE NAME -                                                         00003000
+*                                                                       00004000
+*        DMSHDS (HNDSVC)                                                00005000
+*                                                                       00006000
+* FUNCTION -                                                            00007000
+*                                                                       00008000
+*        TO INITIALIZE THE SVCINT SVC INTERRUPT HANDLER TO TRANSFER     00009000
+*        CONTROL TO A GIVEN LOCATION FOR A SPECIFIC SVC NUMBER          00010000
+*        (OTHER THAN 202) OR TO CLEAR SUCH PREVIOUS HANDLING            00011000
+*                                                                       00012000
+* ATTRIBUTES -                                                          00013000
+*                                                                       00014000
+*        DISK RESIDENT, REENTRANT AND EXECUTES IN THE TRANSIENT AREA    00015000
+* NOTE:  HNDSVC MUST BE GENMOD'D WITH THE SYSTEM OPTION                 00015100
+*                                                                       00016000
+* ENTRY POINTS -                                                        00017000
+*                                                                       00018000
+*        DMSHDS (HNDSVC)                                                00019000
+*                                                                       00020000
+* ENTRY CONDITIONS -                                                    00021000
+*                                                                       00022000
+*        LA    R1,PLIST                                                 00023000
+*        SVC   202                                                      00024000
+*                                                                       00025000
+*        PLIST = CL8'HNDSVC'                                            00026000
+*                CL4'SET'|'CLR'                                         00027000
+*                AL1 - SVC NUMBER                                       00028000
+*                AL3 - LOCATION WHERE ROUTINE IS TO HANDLE IT           00029000
+*                .                                                      00030000
+*                 .                                                     00031000
+*                XL8 - FENCE                                            00032000
+*                                                                       00033000
+* EXIT CONDITIONS -                                                     00034000
+*                                                                       00035000
+*        NORMAL -                                                       00036000
+*        GPR15 = 0: SUCCESSFUL COMPLETION                               00037000
+*                                                                       00038000
+*        ERROR -                                                        00039000
+*        GPR15 = XXX: INCORRECT PARAMETER LIST                          00040000
+*                YYY: SVC NUMBER REPLACES AN EXISTING SVC NUMBER        00041000
+*                ZZZ: SVC NUMBER CLEARING ONE THAT WASN'T SET           00042000
+*                                                                       00043000
+* CALLS TO OTHER ROUTINES -                                             00044000
+*                                                                       00045000
+*        FREE - GET FREE STORAGE                                        00046000
+*        FRET - RETURN FREE STORAGE                                     00047000
+*        TYPLIN - TYPE A MESSAGE TO THE TERMINAL                        00048000
+*                                                                       00049000
+* EXTERNAL REFERENCES -                                                 00050000
+*                                                                       00051000
+*        NUCON - NUCLEUS AREA CONSTANTS                                 00052000
+*        SVCSECT - TABLE CONTAINING USER SVC INFORMATION                00053000
+*                                                                       00054000
+* TABLES / WORKAREAS -                                                  00055000
+*                                                                       00056000
+*        TEMP - TEMPORARY STORAGE SUPPLIED BY SVCINT                    00057000
+*                                                                       00058000
+* REGISTER USAGE -                                                      00059000
+*                                                                       00060000
+*        GPR1, GPR2 = A(PLIST)                                          00061000
+*        GPR3, GPR4, GPR5, GPR6, GPR7, GPR8, GPR9 = WORK REGISTERS      00062000
+*        GPR10 = A(SVCSECT)                                             00063000
+*        GPR11 = UNUSED                                                 00064000
+*        GPR12 = BASE REGISTER                                          00065000
+*        GPR13 = A(TEMP)                                                00066000
+*        GPR14 = LINK REGISTER                                          00067000
+*        GPR15 = BRANCH REGISTER                                        00068000
+*                                                                       00069000
+* NOTES -                                                               00070000
+*                                                                       00071000
+*        NONE                                                           00072000
+*                                                                       00073000
+* OPERATION -                                                           00074000
+*                                                                       00075000
+*        1.  CHECKS THE PARAMETER LIST FOR ERRORS.                      00076000
+*                                                                       00077000
+*        2.  IF 'CLR' CALL, GOT 'CLR'.  ELSE 'SET'.                     00078000
+*                                                                       00079000
+*        SET -                                                          00080000
+*        1.  IF AN OLD USER SVC TABLE DOES NOT EXIST, HNDSVC SIMPLY     00081000
+*            STORES THE USER'S FIRST ADCON AND LAST ADCON  INTO THE     00082000
+*            APPROPRIATE SLOTS OF SVCSECT, AND EXITS.                   00083000
+*                                                                       00084000
+*        2.  IF AN OLD USER SVC TABLE DOES EXIST, FREE IS CALLED TO     00085000
+*            GET ENOUGH STORAGE(ROUNDED UP TO A DOUBLE WORD BOUNDARY)   00086000
+*            TO HOLD BOTH THE EXISTING TABLE AND THE NEW TABLE.         00087000
+*                                                                       00088000
+*        3.  THE OLD TABLE IS MOVED INTO THE FREE STORAGE.  THEN EACH   00089000
+*            SVC NUMBER SPECIFIED IS COMPARED WITH EACH SVC IN THE OLD  00090000
+*            TABLE.  IF A MATCH IS FOUND, THE SVC IN THE OLD TABLE IS   00091000
+*            REPLACED BY THE SVC IN THE PLIST.  IF NO MATCH IS FOUND    00092000
+*            THE SVC IS ADDED TO THE END OF THE TABLE.  THIS CONTINUES  00093000
+*            UNTIL ALL SVC'S IN THE PLIST REPLACE OR ARE                00094000
+*            ADDED TO THE SVC'S IN THE OLD SVC TABLE.                   00095000
+*                                                                       00096000
+*        4.  IF A PREVIOUS OLD TABLE HAD EXISTED, IT'S SPACE            00097000
+*            IS RETURNED TO FREE STORAGE (VIA FRET) AND EXIT.           00098000
+*                                                                       00099000
+*        CLR -                                                          00100000
+*        1.  HNDSVC CHECKS TO SEE IF A USER SVC TABLE EXISTS.  IF IT    00101000
+*            DOES NOT, EXIT WITH ERROR CODE.                            00102000
+*                                                                       00103000
+*        2.  CHECKS TO SEE IF THE TABLE OF SVC'S TO BE CLEARED EXACTLY  00104000
+*            MATCHES THE EXISTING TABLE OF USER SVC'S.  IF IT DOES,     00105000
+*            IT'S SPACE IS RETURNED TO FREE STORAGE (VIA FRET) AND      00106000
+*            STORES 0 INTO JNUMB, JFIRST AND JLAST OF SVCSECT.          00107000
+*            EXIT.                                                      00108000
+*                                                                       00109000
+*        3.  IF THERE IS NOT AN EXACT MATCH, JNUMB IS CHECKED FOR 0.    00110000
+*            IF JNUMB = 0, THEN ENOUGH FREE STORAGE IS GOTTEN TO HOLD   00111000
+*            THE OLD USER SVC TABLE (VIA FREE) AND THE OLD TABLE IS     00112000
+*            MOVED IN.                                                  00113000
+*                                                                       00114000
+*        4.  EACH SVC IN THE 'CLR' PLIST IS MATCHED AGAINST EACH ENTRY  00115000
+*            FOR THE SVC IN THE OLD TABLE IS ZEROED.  DO THIS FOR       00116000
+*            EACH ENTRY IN THE PLIST.  IF A MATCH                       00117000
+*            IS NOT FOUND FOR A PLIST ENTRY OR WHEN ALL ENTRIES HAVE    00118000
+*            BEEN MATCHED, COMPACT THE SVC TABLE.  IF NO ENTRIES        00119000
+*            REMAIN, RETURN THE SVC TABLE TO FREE STORAGE (VIA FRET),   00120000
+*            SET JNUMB, JFIRST AND JLAST TO 0                           00121000
+*            AND EXIT.  ELSE RESET JNUMB, JFIRST AND JLAST AND EXIT.    00122000
+*.                                                                      00123000
+         EJECT                                                          00124000
+DMSHDS   START X'E000'                                                  00125000
+         BALR  R12,0          ADDRESSABILITY                            00126000
+         USING *,R12          ...                                       00127000
+         USING NUCON,R0       ACCESS NUCLEUS AREA CONSTANTS             00128000
+         L     R10,ASVCSECT   R10 = USER SVC TABLE                      00129000
+         USING SVCSECT,R10    ACCESS USER SVC TABLE                     00130000
+         USING TEMP,R13       USE FREE STORAGE PROVIDED BY SVCINT.      00131000
+         ST    R14,JS14       SAVE R14,                                 00132000
+         ST    R1,JS01        SAVE R1 (PARAMETER-LIST)                  00133000
+         CLC   =CL4'SET',8(R1)    IS IT 'SET' ?                         00135000
+         BE    HSET           BE IF YES, HANDLE 'SET'.                  00136000
+         LA    R9,CLC4        IF NOT, SET UP FOR 'CLR'                  00137000
+         CLC   =CL4'CLR',8(R1)            IS IT 'CLR' ?                 00138000
+         BE    LAR2           BE IF YES, START CHECKING P-LIST.         00139000
+ERR01    DS    0H             ERROR 1                                   00140000
+        WRTERM 'INCORRECT ''HNDSVC'' PARAMETER-LIST'                    00141000
+         LA    R15,1          ERROR NUMBER 1                            00142000
+         B     RETURN         GO EXIT.                                  00143000
+*                                                                       00144000
+*        COMES HERE IF 'SET' ...                                        00145000
+HSET     LA    R9,CONTIN      SET R9 TO CONTINUE (BELOW)                00146000
+         L     R7,ANUCEND     R7 = A(END OF NUCLEUS AREA)               00147000
+         L     R8,VMSIZE      SIZE OF VERTUAL MACHINE                   00148000
+LAR2     LA    R2,12(,R1)     NOW LET R2 BE START OF SVC-NUMBERS ETC.   00149000
+         LR    R3,R2          R3 WILL BE LAST SVC-NUMBER                00150000
+         LA    R4,4           SET R4 = 4                                00151000
+         CLC   0(4,R3),FENCE   MAKE SURE 'FENCE' ISN'T FIRST            00152000
+         BNE   CLI202         OK IF NOT, START CHECKING P-LIST.         00153000
+         B     ERR01          ERROR IF DEFICIENT PARAMETER-LIST.        00154000
+*                                                                       00155000
+LAR3     AR    R3,R4          INCREMENT R3 AND KEEP LOOKING ...         00156000
+CLI202   CLI   0(R3),201      COMPARE WITH 201                    V0032 00157100
+         BCR   4,R9           O.K. IF LOW                         V0032 00157110
+         CLI   0(R3),205      COMPARE WITH 205                    V0032 00157120
+         BCR   2,R9           O.K. IF HIGHER                      V0032 00157130
+         B     ERR01          ERROR OTHERWISE.                    V0032 00157140
+CONTIN   L     R15,0(,R3)     CHECK THE 'ADDRESS'                       00162000
+         LA    R15,0(,R15)    (WITHOUT HIGH-ORDER BYTE)                 00163000
+         CR    R15,R7         COMPARE WITH LOWEST REASONABLE VALUE      00164000
+         BL    ERR01          ERROR IF LESS THAN THAT.                  00165000
+         CR    R15,R8         COMPARE WITH HIGHEST REASONABLE VALUE     00166000
+         BL    NR15               BRANCH IF LOW                @VA04919 00166100
+         IC    R7,DOSFLAGS        SAVE DOS FLAG                @VA04919 00166200
+         NI    DOSFLAGS,255-DOSSVC CLEAR DOSSVC (IF DOS )      @VA04919 00166300
+         SPIE  PROGCHK,(5)        SET FOR ADDRESSING EXCEPT.   @VA04919 00166400
+         SR    R5,R5              CLEAR FOR IDENTIFICATION     @VA04919 00166500
+         CLI   0(R15),B0          CHECK FOR DCSS ADDRESS       @VA04919 00166600
+         SPIE  ,MF=(E,(1))        RESTORE PREVIOUS SPIE        @VA04919 00166700
+         STC   R7,DOSFLAGS        RESTORE DOS FLAG             @VA04919 00166800
+         LTR   R5,R5              WAS THERE AN ITERRUPTION?    @VA04919 00166900
+         BNZ   ERR01              BRANCH IF YES, NO GOOD       @VA04919 00167000
+         L     R1,JS01            RESTORE REGISTER 1           @VA04919 00167100
+NR15     EQU   *                                               @VA04919 00167200
+         N     R15,ONE        CHECK LOWEST BIT                          00168000
+         BNZ   ERR01          ERROR IF IT WAS AN ODD-NUMBERED ADDRESS.  00169000
+*        LOW-ORDER 24-BYTES OF THE ADDRESS SEEMS REASONABLE ...         00170000
+CLC4     CLC   4(4,R3),FENCE  LOOK FOR FENCE AFTER PARAMETER-LIST       00171000
+         BNE   LAR3           BNE IF NOT FOUND, KEEP LOOKING...         00172000
+*        R3 NOW POINTS TO THE 'LAST' SVC-NUMBER (BEFORE THE 'FENCE')    00173000
+         LR    R8,R4          SET R8 = 4 FOR USE LATER,                 00174000
+         LR    R9,R3          LOCATION OF 'LAST' ADCON INTO R9,         00175000
+         CR    R2,R3          IS THERE ONLY ONE ENTRY ?                 00176000
+         BE    PLISTOK        BE IF YES, P-LIST IS OK.                  00177000
+*        IF MORE THAN ONE, MAKE SURE THERE ISN'T MORE THAN ONE          00178000
+*        WITH THE SAME SVC-NUMBER ...                                   00179000
+         LA    R7,4(,R2)      SET UP R7, R8, & R9 FOR OUTER LOOP        00180000
+*              (NOTE - R8 AND R9 HAVE ALREADY BEEN SET UP)              00181000
+*              (NOTE - R4 ALREADY = 4)                                  00182000
+         LA    R6,ERR01       (FOR 'BCR' BELOW)                         00183000
+LR32     LR    R3,R2          SET UP STARTING-ADDRESS                   00184000
+         LR    R5,R7          AND ENDING-ADDRESS OF                     00185000
+         SR    R5,R4          THE 'PREVIOUS' ONES                       00186000
+CLC37    CLC   0(1,R3),0(R7)       CHECK THE SVC-NUMBER BYTES,          00187000
+         BCR   8,R6           'BE' IF THEY'RE EQUAL (AN ERROR)          00188000
+         BXLE  R3,R4,CLC37    ITERATE ALL PRECEDING ONES                00189000
+         BXLE  R7,R8,LR32     GET NEXT ONE AND CHECK AGAIN.             00190000
+PLISTOK  EQU   *              USER'S P-LIST IS OK ...                   00191000
+         SR    R15,R15        CLEAR 15,                                 00192000
+         CLI   8(R1),C'C'     IS THIS A 'CLR' CALL ?                    00193000
+         BE    HCLR           BE IF YES, GO HANDLE IT.                  00194000
+         C     R15,JFIRST     IS THERE AN OLD TABLE AT ALL ?            00195000
+         BNE   YESO           BNE IF YES, THERE IS ONE.                 00196000
+         ST    R15,JNUMB      IF NOT, CLEAR JNUMB (JUST FOR SURE)       00197000
+         ST    R2,JFIRST      STORE POINTER TO CALLER'S FIRST ADCON     00198000
+         ST    R9,JLAST       AND POINT TO HIS LAST ONE.  (THAT'S ALL)  00199000
+*              R15 ALREADY HOLDS ZERO, NOW EXIT .....                   00200000
+         B     RESETKEY                AND EXIT (R14 STILL INTACT)      00201000
+         SPACE 2                                                        00202000
+*        COMES HERE IF THE OLD TABLE IS REALLY THERE ...                00203000
+YESO     ST    R15,ERRCODE    (CLEAR ERROR-CODE)                        00204000
+         L     R5,JLAST       GET ADDRESS OF OLD LAST ADCON,            00205000
+         L     R3,JFIRST      AND THAT OF OLD FIRST ADCON,              00206000
+         SR    R5,R3          LAST - FIRST                              00207000
+         AR    R5,R8          PLUS 4 GIVES NO. OF BYTES IN OLD TABLE    00208000
+         ST    R9,NEWLAST     SAVE R9 = (NEW LAST ADCON) FOR LATER      00209000
+         SR    R9,R2          ADD. OF NEW LAST-ONE MINUS ADD. NEW 1ST   00210000
+         AR    R9,R8          +4 GIVES NO. BYTES IN NEW TABLE           00211000
+         LA    R0,7(R5,R9)  GET NO. BYTES (ROUNDED) FOR BOTH TABLES  JS 00212000
+SRA03    SRA   R0,3           DIVIDE BY 8 FOR DOUBLE-WORDS,             00213000
+         DMSFREE DWORDS=(0),TYPCALL=BALR GET FREE STORAGE FOR  @VM03083 00214100
+*                             FOR OLD + NEW TABLES                      00214200
+         STM   R0,R1,NEWNUMB  STORE 'NEWNUMB' & 'NEWFIRST'.             00215000
+         LR    R6,R5          SAVE BYTE-COUNT OF OLD TABLE FOR LATER    00216000
+         C     R5,F256        IS BYTE-COUNT OF OLD TABLE 256 OR LESS?   00217000
+         BNH   EXMVC          BNH IF YES, ONE EX-MVC WILL DO IT.        00218000
+MVC256   MVC   0(256,R1),0(R3)     IF > 256, MOVE 256 BYTES,            00219000
+         LA    R1,256(,R1)    ADJUST FOR NEXT MVC,                      00220000
+         LA    R3,256(,R3)    ...                                       00221000
+         S     R5,F256        ...                                       00222000
+         C     R5,F256        IS IT STILL MORE THAN 256 ?               00223000
+         BH    MVC256         BE IF YES, GO MOVE ANOTHER BIG CHUNK.     00224000
+EXMVC    BCTR  R5,0           IF 256 OR LESS, ADJUST R5 AND             00225000
+         EX    R5,DMVC        MOVE THE CORRECT NUMBER OF BYTES.         00226000
+         L     R3,NEWFIRST    LET R3 POINT TO OLD 1ST ONE IN FREE STRG. 00227000
+         LA    R5,0(R3,R6)    LET R5 POINT TO OLD LAST ONE              00228000
+         SR    R5,R4          IN FREE STORAGE,                          00229000
+         A     R6,NEWFIRST    LET R6 POINT TO WHERE NEW ONES SHOULD GO, 00230000
+         LR    R7,R2          R7 POINTS TO NEW FIRST ONE,               00231000
+         L     R1,JS01        RESTORE R1 BRIEFLY,                       00232000
+         CLI   8(R1),C'C'     IS THIS A 'CLR' CALL ?                    00233000
+         BE    REJOIN         BE IF YES, REJOIN CODE BELOW.             00234000
+         L     R9,NEWLAST     AND R9 POINTS TO NEW LAST ONE,            00235000
+         LA    R0,2           '2' INTO R0,                              00236000
+         LA    R1,REPLACE     (FOR BCR BELOW)                           00237000
+LR3N     L     R3,NEWFIRST    LET R3 POINT TO OLD 1ST ONE IN FREE STRG. 00238000
+CLC37A   CLC   0(1,R3),0(R7)  COMPARE NEW ONE WITH AN OLD ONE           00239000
+         BCR   8,R1           'BE' IF IT MATCHES, GO REPLACE IT.        00240000
+         BXLE  R3,R4,CLC37A   ITERATE FOR ALL OLD ONES                  00241000
+         MVC   0(4,R6),0(R7)  IF NEW ONE REALLY NEW, ADD TO END OF TBL. 00242000
+         AR    R6,R8          AND ADJUST R6 FOR NEXT TIME               00243000
+         BXLE  R7,R8,LR3N     GO CHECK ANOTHER NEW-ONE AGAINST OLD TABL 00244000
+SR68     SR    R6,R8          LET R6 POINT TO LAST ONE IN NEW TABLE     00245000
+         LM    R0,R1,JNUMB    CHECK THE OLD TABLE (STILL THERE)         00246000
+         LTR   R0,R0          IF R0 = 0, WASN'T IN FREE STORAGE         00247000
+         BZ    MOVNEW                                                   00248000
+         DMSFRET DWORDS=(0),LOC=(1),TYPCALL=BALR               @VM03083 00249100
+MOVNEW   MVC   JNUMB(8),NEWNUMB    MOVE NEW TABLE INTO POSITION         00250000
+         ST    R6,JLAST       (INCLUDING ADDRESS OF LAET ADCON)         00251000
+LR15E    L     R15,ERRCODE    ERROR CODE INTO R15 AND                   00252000
+RETURN   L     R14,JS14       RESTORE R14, AND                          00253000
+         B     RESETKEY                RETURN TO CALLER                 00254000
+*                                                                       00255000
+REPLACE  MVC   0(4,R3),0(R7)    IF NEW-ONE HAS SAME NO. AS OLD, REPLACE 00256000
+         ST    R0,ERRCODE     MAKE SURE ERROR-CODE WILL BE 2,           00257000
+         BXLE  R7,R8,LR3N     ITERATE LOOP AS ABOVE.                    00258000
+         B     SR68           (JOIN OTHER CODE IF DROPS THRU BXLE)      00259000
+         SPACE 2                                                        00260000
+*        HANDLE 'CLR' CALL ...                                          00261000
+HCLR     C     R15,JFIRST     IS THERE AN OLD TABLE AT ALL ?            00262000
+         BNE   YES2           BNE IF YES (NORMALLY WOULD BE)            00263000
+         LA    R15,3          ERROR 3 IF OLD TABLE UTTERLY NONEXISTENT. 00264000
+         B     RETURN         ...                                       00265000
+*                                                                       00266000
+YES2     ST    R15,ERRCODE    (CLEAR ERROR-CODE)                        00267000
+         L     R5,JLAST       GET ADDRESS OF OLD LAST ADCON,            00268000
+         L     R3,JFIRST      AND THAT OF OLD FIRST ADCON,              00269000
+         SR    R5,R3          LAST - FIRST                              00270000
+         AR    R5,R8          PLUS 4 GIVES NO. OF BYTES IN OLD TABLE    00271000
+         LR    R7,R9          SAVE R9 = (NEW LAST ADCON) FOR LATER      00272000
+         SR    R9,R2          ADD. OF NEW LAST-ONE MINUS ADD. NEW 1ST   00273000
+         AR    R9,R8          +4 GIVES NO. BYTES IN NEW TABLE           00274000
+         LA    R6,NOTPERF     SET R6 FOR 'NOT A PERFECT MATCH'          00275000
+         CR    R5,R9          ARE THE COUNTS EQUAL ?                    00276000
+         LR    R9,R7          (RESTORE R9 - DOESN'T AFFECT COND. CODE)  00277000
+         BCR   7,R6           'BNE' IF NOT A PERFECT MATCH.             00278000
+         LR    R7,R2          R7 POINTS TO FIRST ONE IN CALLER'S TABLE, 00279000
+CLC37B   CLC   0(1,R3),0(R7)  DOES THE SVC-NUMBER MATCH THE TABLE ?     00280000
+         BCR   7,R6           'BNE' IF NOT A PERFECT MATCH.             00281000
+         AR    R3,R8          ADD 4 TO R3, AND                          00282000
+         BXLE  R7,R8,CLC37B   ITERATE FOR WHOLE TABLE.                  00283000
+         LM    R0,R1,JNUMB    IF PERFECT MATCH, GET OLD JNUMB & JFIRST, 00284000
+         LTR   R0,R0          CHECK R0                                  00285000
+         BZ    CLR1ST         BZ IF NO FRET-CALL NEEDED.                00286000
+LR15D    EQU   *                                                        00287000
+         DMSFRET DWORDS=(0),LOC=(1),TYPCALL=BALR               @VM03083 00288100
+         SR    R0,R0          CLEAR R0,                                 00289000
+         ST    R0,JNUMB       CLEAR 'JNUMB'                             00290000
+CLR1ST   ST    R0,JFIRST      AND 'JFIRST'                              00291000
+         ST    R0,JLAST       (ALSO 'JLAST' (TO BE NEAT)                00292000
+         B     LR15E          GO LOAD ERROR-CODE AND EXIT.              00293000
+*                                                                       00294000
+NOTPERF  LA    R0,7(,R5)   TENTATIVELY SET R0 FOR OLD TABLE BYTE-COUNT  00295000
+         C     R15,JNUMB      IS 'JNUMB' = 0 ?                          00296000
+         BE    SRA03          BE IF YES, GET FREE STORAGE AND MOVE IT.  00297000
+         MVC   NEWNUMB(8),JNUMB    IF NOT, MOVE THE TABLE,              00298000
+         L     R5,JLAST       SET UP R5  (R3 SET UP SHORTLY BELOW)      00299000
+         LR    R7,R2          AND R7 AS IF HAD COME FROM OTHER PLACE.   00300000
+REJOIN   SR    R15,R15        CLEAR 15,                                 00301000
+         LA    R0,3           3 INTO R3 FOR POSSIBLE ERROR-CODE,        00302000
+         LA    R1,ZREPLACE    LET R1 POINT TO ZERO-REPLACE,             00303000
+LR3NE    L     R3,NEWFIRST    START WITH BEGINNING OF OLD TABLE,        00304000
+CLC37C   CLC   0(1,R3),0(R7)  DO WE HAVE A MATCH ?                      00305000
+         BCR   8,R1           'BE' IF YES, REPLACE BY ZERO.             00306000
+         BXLE  R3,R4,CLC37C   ITERATE ...                               00307000
+         ST    R0,ERRCODE     'SET' ERROR-CODE 3 IF DROPS THRU BXLE     00308000
+         BXLE  R7,R8,LR3NE    ITERATE FOR ALL OF CALLER'S LIST.         00309000
+         B     FINTST         GO TO FINAL TEST IF DROP THRU BXLE HERE.  00310000
+*                                                                       00311000
+ZREPLACE ST    R15,0(,R3)     CLEAR WORD IN TABLE,                      00312000
+         BXLE  R7,R8,LR3NE    ITERATE FOR ALL OF CALLER'S P-LIST.       00313000
+FINTST   L     R3,NEWFIRST    FINAL TEST - 'COMPACT' EMPTY SPACES ---   00314000
+         LR    R6,R3          R3 AND R6 POINT TO THE BEGINNING ...   JS 00315000
+         LA    R1,BXLE3       FOR 'BCR' BELOW ...                       00316000
+LR73     L     R7,0(,R3)      PICK UP A WORD FROM TABLE                 00317000
+         LTR   R7,R7          IS IT ZERO ?                              00318000
+         BCR   8,R1           'BZ' IF YES, GO GET NEXT ONE.             00319000
+         ST    R7,0(,R6)      IF NOT, STORE NEAR FRONT OF TABLE         00320000
+         AR    R6,R4          INCREMENT R6 FOR NEXT TIME,               00321000
+BXLE3    BXLE  R3,R4,LR73     ITERATE THRU TABLE LOOKING FOR ZEROES     00322000
+         LM    R0,R1,NEWNUMB  TENTATIVELY SET UP R0 AND R1,             00323000
+         CR    R6,R1          IF R6 STILL = NEWFIRST ?                  00324000
+         BE    LR15D          BE IF YES, TABLE EMPTY, GIVE IT BACK.     00325000
+         MVC   JNUMB(8),NEWNUMB    IF TABLE NOT EMPTY, SET IT UP AGAIN  00326000
+         SR    R6,R4          INCLUDING THE POINTER                     00327000
+         ST    R6,JLAST       TO THE LAST ONE.                          00328000
+         B     LR15E          GO LOAD ERROR-CODE AND EXIT.              00329000
+         SPACE                                                          00330000
+RESETKEY EQU   *                                                        00331000
+         LR    R6,R15                  SAVE RETURN CODE                 00332000
+         LR    R15,R6                  RESTORE RETURN CODE              00334000
+         BR    R14                     RETURN TO CALLER                 00335000
+         SPACE 1                                               @VA04919 00335200
+PROGCHK  EQU   *                                               @VA04919 00335400
+         LR    R5,R14             MAKE REGISTER 5 NON-ZERO     @VA04919 00335600
+         BR    R14                AND RETURN                   @VA04919 00335800
+         EJECT                                                          00336000
+*        CONSTANTS ...                                                  00337000
+*                                                                       00338000
+DMVC     MVC   0(*-*,R1),0(R3) MOVES 1 TO 256 BYTES TO FREE STORAGE.    00339000
+ONE      DC    F'1'                                                     00340000
+F256     DC    F'256'         LIMIT OF IBM360 MVC INSTRUCTION           00341000
+FENCE    DC    X'FFFFFFFF'                                              00342000
+B0       EQU   0                  CHARACT FIELD FOR IMMED INST.@VA04919 00342500
+         SPACE 2                                                        00343000
+         LTORG                                                          00344000
+         SPACE 2                                                        00345000
+TEMP     DSECT TEMPORARY STORAGE (VIA R13)                              00346000
+*                                                                       00347000
+JS01     DS    1F             R1(POINTS TO PARAMETER LIST) SAVED HERE   00348000
+JS14     DS    1F             R14 (RETURN-REGISTER) SAVED HERE          00349000
+*                                                                       00350000
+ERRCODE  DC    F'0'           ERROR-CODE FOR R15 AT EXIT.               00351000
+         SPACE 2                                                        00352000
+*                                                                       00353000
+* TABLE OF 'NEW' INFORMATION                                            00354000
+*                                                                       00355000
+NEWNUMB  DC    F'0'           NO. OF DBL-WORDS OF FREE STORAGE          00356000
+NEWFIRST DC    A(*-*)         ADDRESS OF FIRST ITEM IN TABLE            00357000
+         DC    F'4'           (FOR BXLE)                                00358000
+NEWLAST  DC    A(*-*)         ADDRESS OF LAST ITEM IN TABLE             00359000
+         SPACE 2                                                        00360000
+         EJECT                                                          00361000
+         NUCON                                                          00362000
+         REGEQU                                                         00363000
+         SVCSECT                                                        00364000
+         END                                                            00365000

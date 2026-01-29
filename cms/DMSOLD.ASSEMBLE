@@ -1,0 +1,1629 @@
+OLD      TITLE 'DMSOLD     (CMS)       VM/370 - RELEASE 6'              00001000
+         SPACE 2                                                        00002000
+*.                                                                      00003000
+*   SUBROUTINE NAME:                                                    00004000
+*                                                                       00005000
+*        DMSOLD                                                         00006000
+*                                                                       00007000
+*   FUNCTION:                                                           00008000
+*                                                                       00009000
+*        TO INITIALIZE FOR AND TO PERFORM EACH LOADING OPERATION        00010000
+*        BY  PROCESSING   TEXT  FILES  WHICH  MAY   CONTAIN  THE        00011000
+*        FOLLOWING CARDS:  SLC, ICS,  ESD, TXT,  REP, RLD,  END,        00012000
+*        LDT, LIBRARY, AND ENTRY.                                       00013000
+*                                                                       00014000
+*   ATTRIBUTES:                                                         00015000
+*                                                                       00016000
+*        REENTRANT, DCSS/MODULE RESIDENT                                00017000
+*                                                                       00018000
+*   ENTRY POINTS:                                                       00019000
+*                                                                       00020000
+*        DMSOLD  - ENTERED FROM DMSSLN WHEN LOAD REQUESTED              00021000
+*        DMSLDRC   - ENTERED BY VARIOUS LOADER ROUTINES WHEN AN INVALID 00022000
+*                    CARD IS DETECTED IN A TEXT FILE                    00023000
+*        DMSLDRD   - ENTERED WHEN A FATAL ERROR OCCURS DURING LOADING   00024000
+*                                                                       00025000
+*   ENTRY CONDITIONS:                                                   00026000
+*                                                                       00027000
+*        DMSLDRB R1=PLIST, R14=RETURN ADDRESS,                          00028000
+*                SAVES REGISTERS 9-12                                   00029000
+*        PLIST - CL8'LOAD'                                              00030000
+*                CL8'FILENAME1'                                         00031000
+*                . . . .                                                00032000
+*                CL8'FILENAMEN'                                         00033000
+*                CL8'('                                                 00034000
+*                CL8'OPTIONS'                                           00035000
+*                CL8'FFFFFFFF'                                          00036000
+*                                                                       00037000
+*                OPTIONS -                                              00038000
+*                CL8'CLEAR'                                             00039000
+*                CL8'START'                                             00040000
+*                CL8'RESET', CL8'ENTRY NAME'                            00041000
+*                CL8'INV' OR CL8'NOINV'                                 00042000
+*                CL8'REP' OR CL8'NOREP'                                 00043000
+*                CL8'MAP' OR CL8'NOMAP'                                 00044000
+*                CL8'ORIGIN', CL8'HEX LOCATION'|'TRANS'                 00045000
+*                CL8'NOLIBE' OR CL8'LIBE'                               00046000
+*                CL8'NOAUTO' OR CL8'AUTO'                               00047000
+*                CL8'TYPE' OR CL8'NOTYPE'                               00048000
+*                                                                       00049000
+*                                                                       00050000
+*   EXIT CONDITIONS:                                                    00051000
+*                                                                       00052000
+*        NORMAL -  RETURN ON  R14, LOADING  COMPLETE .                  00053000
+*                                                                       00054000
+*        ERROR - ERROR MESSAGE TYPED, RETURN TO CALLER.                 00055000
+*                                                                       00056000
+*   CALLS TO OTHER ROUTINES:                                            00057000
+*                                                                       00058000
+*        DMSLSBA  - FROM VARIOUS ROUTINES FOR HEX TO BINARY CONVERSION  00059000
+*        DMSLSBC  - FROM ICS ROUTINE TO DEFINE CSECT, FROM ESD          00060000
+*                   TYPE 1 TO DEFINE ENTRY                              00061000
+*        DMSLSY  - FROM ESD PRIVATE CODE RTN.                           00062000
+*        DMSLGTB  - TO SETUP TEMPORARY TXTLIB DICTIONARIES.             00063000
+*        DMSLIO   - FOR ERROR MESSAGES AND LOAD MAP PROCESSING          00064000
+*        DMSLIB   - TO SEARCH TEXT LIBRARIES FOR UNDEFINED ENTRY NAMES  00065000
+*        DMSSLNDY - FROM ESD ROUTINE IF OS LINK OR LOAD WAS ISSUED      00066000
+*        DMSSCN   - FROM CTLCRD1 TO A TEXT FILE CARD                    00067000
+*        DMSSMNSB - TO INITIALIZE FREE STORAGE IF START.                00068000
+*        DMSBRD   - TO READ TEXT FILES AND TXTLIBS.                     00069000
+*        DMSFNS   - TO CLOSE READING                                    00070000
+*        DMSLSBB  - FROM RLD ROUTINE TO ADD TO UNDEFINED STRINGS        00071000
+*        DMSLSBD  - TO PROCESS LOADER OPTIONS                           00072000
+*        DMSLGTA  - TO FREE TXTLIB DIRECTIONS                           00073000
+*        DMSFREB   - FOR FREE STORAGE                                   00074000
+*                                                                       00075000
+*   REGISTER USAGE:                                                     00076000
+*                                                                       00077000
+*        R8,R9 BASE                                                     00078000
+*        R13 - LDRST                                                    00079000
+*        REST - WORK                                                    00080000
+*                                                                       00081000
+*   OPERATION:   DMSOLD                                                 00082000
+*                                                                       00083000
+*        1.   ACQUIRE AND INITIALIZE A WORK AREA (LDRST).               00084000
+*                                                                       00085000
+*        2.   CALL DMSLIO TO SET UP LOADER I/O OPERATIONS.              00086000
+*                                                                       00087000
+*        3.   IF  TXTLIB DIRECTORIES  ARE NOT  IN FREE  STORAGE,        00088000
+*             CALL DMSLGTB TO BRING THEM IN.                            00089000
+*                                                                       00090000
+*        4.   CALL DMSLSBD TO PROCESS LOADER OPTION LIST.               00091000
+*                                                                       00092000
+*        5.   PROCESS EACH TEXT FILE SEQUENTIALLY BY READING TEN        00093000
+*             CARDS AT A TIME, THEN  ANALYZING EACH OF THE CARDS        00094000
+*             TO DETERMINE ITS  TYPE.  FOR EACH CARD,  BRANCH TO        00095000
+*             THE  APPROPRIATE ROUTINE.                                 00096000
+*                EACH ROUTINE  WILL RETURN  TO THIS  READ               00097000
+*             ROUTINE FOR THE NEXT CARD.                                00098000
+*                                                                       00099000
+*        6.   AT END-OF-FILE ON  LAST TEXT FILE OR  UPON FINDING        00100000
+*             AN LDT CARD, BEGIN TXTLIB SEARCHING TO SATISFY ANY        00101000
+*             UNDEFINED  REFERENCES  (DMSLIB).  FOR  EACH  MATCH        00102000
+*             DMSLIB WILL RETURN TO THE READ ROUTINE (IN STEP 5)        00103000
+*             TO CONTINUE LOADING.                                      00104000
+*                                                                       00105000
+*        7.   WHEN NO MORE  MATCHES CAN BE MADE,  SAVE SPECIFIED        00106000
+*             STARTING  ADDRESS,  SAVE  VALUE  OF  THE  LOCATION        00107000
+*             COUNTER,  AND LIST  ANY UNDEFINED  ENTRIES AT  THE        00108000
+*             TERMINAL.                                                 00109000
+*                                                                       00110000
+*        8.   CLOSE TXTLIBS AND FREE THE WORK AREA                      00111000
+*                                                                       00112000
+*        9.   RETURN TO DMSSLN.                                         00113000
+*                                                                       00114000
+*        NOTE:  ANY CHANGES MADE TO THIS MODULE SHOULD                  00115000
+*              ALSO BE CONSIDERED FOR DMSLDR.                           00116000
+*.                                                                      00117000
+         EJECT                                                          00118000
+DMSOLD   START 0                                               @V305665 00119000
+         ENTRY DMSLDRC,DMSLDRD                                 @V305665 00120000
+         EXTRN DMSLSBA,DMSLSBB,DMSLSBC                         @V305665 00121000
+RELDR    EQU   *                                               @V305665 00122000
+         BALR  R8,0                                            @V305665 00123000
+         BCTR  R8,0                                            @V305665 00124000
+         BCTR  R8,0                                            @V305665 00125000
+         USING RELDR,R8,R9                                     @VA05785 00126000
+         LA    R9,4095(0,R8)  SET SECOND BASE REGISTER         @VA05785 00127000
+         LA    R9,1(,R9)                                       @VA05785 00128000
+         LA    4,PERMIT        SETUP TO TEST FOR PRINT CONTROL @V305665 00129000
+         EJECT                                                          00130000
+*********************************************************************** 00131000
+*                                                                       00132000
+*        COMMON ROUTINE TO GET AND INITIALIZE THE LOADER                00133000
+*        WORK AREA AND TO SET UP LOADER I/O                             00134000
+*                                                                       00135000
+*********************************************************************** 00136000
+*                                                                       00137000
+INIT     LR    2,1                      SAVE ADDRESS OF PARAM LIST      00138000
+         LR    3,14                     AND ADDRESS OF RETURN LOCATION  00139000
+         LA    0,NEED                   GET FREE STORAGE                00140000
+         DMSFREE DWORDS=(0),TYPCALL=BALR                                00141000
+         USING LDRST,R1                                                 00142000
+         ST    R13,REG13SAV   PROTECT LDRST REGISTER                    00143000
+         DROP  R1                                                       00144000
+         USING LDRST,R13                                                00145000
+         LR    13,1                     SAVE ADDR. OF SAVE AREA IN REG. 00146000
+         ST    3,RETREG       SAVE RETURN                               00147000
+         LR    R1,R2                                           @VA02828 00148000
+         LA    R2,8(0,R2)     GET TO FILENAMES                          00149000
+         ST    R2,PARMLIST                                              00150000
+         SRL   R1,24          RESTORE CALL CODE                @VA02828 00151000
+         STC   R1,PARMLIST                                     @VA02828 00152000
+         STM   R9,R12,GPRSAV                                            00153000
+         MVC   BRAD(4),STRTADDR    MOVE IN STARTING ADDRESS             00154000
+         MVC   TBLREF(4),ALDRTBLS  MOVE IN TOP OF LOADER TBL ADDR       00155000
+         MVC   TBLCT(2),TBENT MOVE IN NUMBER OF LOADER TABLE ENTRIES    00156000
+         MVC   LOCCT(4),LOCCNT     MOVE IN LOCATION COUNTER             00157000
+         XC    MEMBOUND(4),MEMBOUND                                     00158000
+         XC    LDRADDR+4(4),LDRADDR+4   CLEAR ERROR LOCATION            00159000
+         SR    5,5                      GET ZERO                        00160000
+         ST    5,FLAGS                  CLEAR LIBRARY FLAGS             00161000
+         STC   R5,FLAG3            CLEAR ANOTHER FLAG AREA     @VA01699 00162000
+         XC    ENTADR,ENTADR  CLEAR 'ENTRY' CARD POINTER                00163000
+         XC    ESIDTB(256),ESIDTB  CLEAR ESDID TABLE                    00164000
+         XC    ESIDTB+256(256),ESIDTB+256 CLEAR ESID TABLE     @VA02083 00165000
+         XC    PRVCNT(2),PRVCNT CLEARING FIELD                 @VA05785 00166000
+         NI    FLAG1,255-WORKFILE BE SURE RLD FLAG OFF NOW     @VA01846 00167000
+         MVC   FLAG1(2),LDRFLAGS   MOVE IN FLAGS FROM NUCON             00168000
+         CLI   UNRES,X'80'    UNRESOLVED BIT ON?               @VA02829 00169000
+         BNE   AWAY           NO, CONTINUE NORMALLY            @VA02829 00170000
+         OI    FLAGS,LUNDEF   FORCE SEARCH FOR UNRESOLVED      @VA02829 00171000
+AWAY     LA    R5,LDRSET      SET UP LOADER I/O                @VA02829 00172000
+         L     R11,ADMSLIO    GET LINKAGE TO IO ROUTINE        @V305614 00173000
+         LR    R14,R4         SET RETURN REG                            00174000
+         BR    R11            GO SET I/O                                00175000
+         EJECT                                                          00176000
+*********************************************************************** 00177000
+*                                                                       00178000
+*        READ IN TEXT LIBRARY DIRECTORIES, PROCESS USER OPTIONS         00179000
+*                                                                       00180000
+*********************************************************************** 00181000
+*                                                                       00182000
+PERMIT   L     R5,TXTDIRC     GET TXTLIB ANCHOR                         00183000
+         LTR   R5,R5          ARE TXTLIB DIRECTORIES IN STOR.           00184000
+         BNZ   INIT1          YES, CONTINUE                             00185000
+         STM   R0,R15,APSV    SAVE REGS                                 00186000
+         L     R15,=V(DMSLGTB)     GO READ THEM IN                      00187000
+         BALR  R14,R15                                                  00188000
+         OI    OSSFLAGS,OSRESET    INDICATE CLEAN UP NEEDED             00189000
+INIT1    EQU   *                                                        00190000
+         EJECT                                                          00191000
+         SPACE 1                                                        00192000
+         STM   R0,R15,APSV    SAVE REGISTERS                            00193000
+         L     R15,=V(DMSLSBD)     GO PROCEES USER OPTIONS              00194000
+         BALR  R14,R15                                                  00195000
+         TM    FLAGS,RESET    WAS RESET 'ENTRY' SPECIFIED               00196000
+         BNO   RDSET          NO                                        00197000
+         NI    FLAGS,255-RESET     TEMPORARILY TURN OFF           P3093 00198000
+         BAL   R6,CTLENT1     YES, SET ENTRY NAME IN LDR TBL            00199000
+         OI    FLAGS,RESET    TURN BACK ON                        P3093 00200000
+         EJECT                                                          00201000
+*********************************************************************** 00202000
+*                                                                       00203000
+*        INPUT READ ROUTINE                                             00204000
+*                                                                       00205000
+*********************************************************************** 00206000
+*                                                                       00207000
+RDSET    MVC   READBUF(44),RDISK   SET PLIST TO READ CARDS              00208000
+         MVC   FINIS(26),FDISK          IMAGES FROM DISK                00209000
+         OI    FLAG3,CMD           PROCESSING COMMAND LINE     @VA01699 00210000
+         LA    3,SPEC                                                   00211000
+         ST    R3,READBUF+28  BUFFER ADR TO READ PLIST                  00212000
+         MVC   SYSUT1(44),WORKSET  SET WORK FILE PLIST                  00213000
+         ST    R3,SYSUT1+28   BUFFER ADDRESS TO PLIST                   00214000
+         LA    R1,SYSUT1      PLIST ADDRESS                             00215000
+         L     R15,AERASE     ERASE OLD WORK FILE                 V0304 00216000
+         BALR  R14,R15                                            V0304 00217000
+         BC    15,CHKLST                GO READ IN FIRST PARAMETER      00218000
+ERRDBF   LA    5,12                     WAS ERROR END OF FILE           00219000
+         CR    15,5                                                     00220000
+         BC    8,FINISH                 YES - GO CLOSE OUT FILE         00221000
+         MVC   OUTBUF(18),8(R1)    MOVE NAME TO BUFFER                  00222000
+         LA    R5,RDERR62     SET CODE FOR READ ERROR MSG               00223000
+         B     FATERR         TERMINATE LOADING                         00224000
+*   FILE NOT FOUND. IF DLYD IS ON, IT MEANS A LIBE ONLY SEARCH.         00225000
+FINISH   LA    1,FINIS                  CLOSE FILE                      00226000
+         L     R15,AFINIS                                         V0304 00227000
+         BALR  R14,R15                                            V0304 00228000
+CHKLST   L     R3,PARMLIST    UPDATE PARAMETER LIST POINTER             00229000
+         CLI   0(3),X'FF'         IS THERE ANOTHER PARAMETER         TR 00230000
+         BE    LIBGO                    GO TO LIBE SERCH IN LDT         00231000
+         CLI   0(R3),C'('     END OF FNAMES                    @VA00857 00232000
+         BE    LIBGO          YES                              @VA00857 00233000
+         MVC   READBUF+8(8),0(R3)  GET NEXT FILE FROM DISK              00234000
+         MVC   FINIS+8(8),0(3)                                          00235000
+HALF8    LA    R3,8(R3,R0)        UPDATE PLIST POINTER                  00236000
+         ST    R3,PARMLIST    SAVE IT                                   00237000
+         LA    R1,READBUF     CHECK FOR FILE                            00238000
+         L     R15,ASTATE                                               00239000
+         BALR  R14,R15                                                  00240000
+         LA    R3,SPEC        RESTORE BUFFER ADDRESS                    00241000
+         ST    R3,READBUF+28                                            00242000
+         BZ    NXTRD          FOUND IT OK                               00243000
+         CH    R15,=H'28'     WAS IT FILE NOT FOUND                     00244000
+         BE    NTFND          YES                                       00245000
+         ST    R15,LDRADDR+4  SAVE STATE ERROR CODE            @VA02822 00246000
+         B     N03            TERMINATE LOADING                         00247000
+NXTRD    LA    1,SPEC                   PTR TO BUFFER AREA              00248000
+         ST    1,CRDPTR                 SAVE IT                         00249000
+         LA    R1,READBUF     READ 10 CARDS                             00250000
+         L     R15,ARDBUF                                         V0304 00251000
+         BALR  R14,R15                                            V0304 00252000
+         BNZ   ERRDBF         BRANCH IF ERROR                     V0304 00253000
+         B     RDCONT                   PROCEED                         00254000
+NTFND    EQU   *                                               @V1D1705 00255000
+         LA    R1,READBUF+8   SET NAME OF LIBE ENTRY NEEDED             00256000
+         LA    2,LIB4FND      SET NOT FOUND ADDRESS                     00257000
+         BAL   3,SERCH1       SEARCH LOADER TABLE                       00258000
+         TM    OSSFLAGS,DYLD  DYNAMIC LOAD                     @V1D1705 00259000
+         BNO   CKUND               CHECK COMMD LINE PROC       @VA01699 00260000
+         MVC   BRAD+1(3),13(R12)   SET ENTRY ADDRESS  FOR DMSSL@V1D1705 00261000
+CKUND    TM    REFLG1(R12),REFUND  IF TXTLIB GLOBALED BETWEEN  @VA01699 00262000
+         BZ    CKLIB               LOAD AND INCLUDE, MAY MISS  @VA01699 00263000
+         B     SETUND              SEARCHING FOR UNDEFINEDS.   @VA01699 00264000
+LIB4FND  EQU   *                                                        00265000
+         OI    8(12),X'80'    MAKE UNDEFINED, FORCE LIBE SEARCH         00266000
+SETUND   OI    FLAGS,LUNDEF         AT LEAST 1 UNDEFINED       @VA01699 00267000
+CKLIB    TM    FLAG3,CMD           IF PROCESSING COMMAND LINE  @VA01699 00268000
+         BZ    SKPOBLIG              NAME, OVERRIDE LIBRARY    @VA01699 00269000
+         OI    REFLG2(R12),REFCMD    CARD 'NO SEARCH' OPTION   @VA01699 00270000
+         NI    REFLG1(R12),X'FF'-REFLIB RESET 'LIBE-SUPPRESS'  @VA01699 00271000
+SKPOBLIG DS    0H                                              @VA01699 00272000
+         B     CHKLST         PROCESS NEXT FILE                         00273000
+RD       L     1,CRDPTR                 GET CURRENT CARD PTR            00274000
+         LA    1,80(0,1)                ADVANCE PTR                     00275000
+         LA    R3,SPEC        GET END OF DATA READ             @VA01419 00276000
+         A     R3,NUMBYTE     BY ADDING BYTES READ             @VA01419 00277000
+         CR    1,3                      END OF CARD BUFF REACHED?       00278000
+         BL    GO             STILL SOME LEFT IN BUFFER        @VA01419 00279000
+         CLC   NUMBYTE,SETBYTE     ARE WE AT END OF BUFFER ?   @VA01419 00280000
+         BE    NXTRD          YES, READ SOME MORE              @VA01419 00281000
+         B     FINISH         ELSE ALL DONE                    @VA01419 00282000
+GO       ST    R1,CRDPTR      SAVE NEW RECORD POINTER          @VA01419 00283000
+         MVC   SPEC(80),0(1)            MOVE NEW CARD INTO SPEC         00284000
+RDCONT   SR    6,6                      ZERO 6                          00285000
+         LA    11,1                     REGISTER 11 ALWAYS SET TO 1     00286000
+         L     1,SPEC                                                   00287000
+         EJECT                                                          00288000
+*                                                                       00289000
+*********************************************************************** 00290000
+*                                                                       00291000
+*                       SET LOCATION COUNTER ROUTINE   (SLC)            00292000
+*      THIS ROUTINE HAS TWO ENTRIES                                     00293000
+*      (1) AT THE BEGINNING WHEN RESUME FALLLS THRU                     00294000
+*      (2) ORG2- USED TO OBTAIN THE CURRENT ADDRESS OF A GIVEN          00295000
+*                SYMBOLIC LOCATION.                                     00296000
+*         THIS ROUTINE SETS THE LOCATION COUNTER TO THE SLC-            00297000
+*         CARD SPECIFIED ADDRESS AND/OR OBTAINS THE CURRENT             00298000
+*         ADDRESS OF A GIVEN SYMBOLIC LOC. FROM THE REFTBL TABLE.       00299000
+*         NOTE THAT IF NO ABS LOC IS PUNCHED AND THE SYMBOLIC NAME      00300000
+*         IS AS YET UNDEFINED, AN ERROR IS CREATED.                     00301000
+*                                                                       00302000
+*********************************************************************** 00303000
+*                                                                       00304000
+         C     1,SLC                                                    00305000
+         BC    7,C2AE1                                                  00306000
+         CLI   SPEC+6,C' '              CMP ADDR FOR BLANKS             00307000
+         BC    7,C2AD                   BR- ADDR IN CRD                 00308000
+         OI    FLAGS,NOSLCADR NO ADDR, TURN ON SWITCH                   00309000
+         BC    15,C2A                                                   00310000
+C2AD     LA    4,6(0,0)                 CONVERT ADDR TO BINARY          00311000
+         LA    5,SPEC+6                                                 00312000
+         L     1,HEXBB                  LOAD CONVERSION ROUTINE ADDRESS 00313000
+         BALR  0,1                      BR TO HEXB ROUTINE              00314000
+         LTR   R2,R2          BAD CONVERSION?                  @VA02089 00315000
+         BM    BADCRD         YES, BRANCH TO ERROR             @VA02089 00316000
+         LR    6,0                      SAVE ADDR IN REGISTER           00317000
+C2A      CLI   SPEC+16,C' '             TEST IMAGE FOR NAME             00318000
+*                            SYMBOL IS LEFT ADJUSTED                    00319000
+         BC    7,C2AE3                  BR- NAME IN CRD                 00320000
+         TM    FLAGS,NOSLCADR CHECK FOR ADR IN CARD                     00321000
+         BO    BADCRD                   PRINT INVALID CARD              00322000
+         SR    0,0                                                      00323000
+C2B      NI    FLAGS,255-NOSLCADR RESET SWITCH                          00324000
+         AR    6,0                      ADD CONVERTED ADDR TO ORG2      00325000
+         ST    6,LOCCT                  SET THE LOCATION COUNTER        00326000
+         BC    15,RD                    RETURN TO READ A CARD           00327000
+C2AE3    LA    2,ERRSLC                                                 00328000
+         BAL   3,SERCH                                                  00329000
+         LA    14,C2B                   LINK AGE                        00330000
+         L     R0,12(0,R12)   GET ABSOLUTE ADDRESS                      00331000
+         BCR   15,14                                                    00332000
+ERRSLC   LH    3,TBLCT                                                  00333000
+         SR    3,11                                                     00334000
+         STH   3,TBLCT                                                  00335000
+         LA    5,ERRORU                                                 00336000
+         LA    14,RD                                                    00337000
+         MVC   OUTBUF(8),0(12)          MOVE NAME TO BUFF               00338000
+         L     R11,ADMSLIO    GET LINKAGE TO IO ROUTINE        @V305614 00339000
+         BR    11                       GO PRINT                        00340000
+         EJECT                                                          00341000
+*********************************************************************** 00342000
+*                                                                       00343000
+*                       INCLUDE CONTROL SECTION                         00344000
+*                          ROUTINE  (ICS)                               00345000
+*                                                                       00346000
+*********************************************************************** 00347000
+*                                                                       00348000
+C2AE1    C     1,ICS                                                    00349000
+         BC    7,C3AA1                  BR NO                           00350000
+         CLI   SPEC+24,C' '             TEST FOR HEX ADDR               00351000
+         BE    BADCRD                   INVALID CARD                    00352000
+         LA    4,4                                                      00353000
+         LA    5,SPEC+24                TO BINARY                       00354000
+         L     1,HEXBB                  LOAD CONVERSION ROUTINE ADDRESS 00355000
+         BALR  0,1                      BR TO HEXB                      00356000
+         LTR   R2,R2          BAD CONVERSION?                  @VA02089 00357000
+         BM    BADCRD         YES, BRANCH TO ERROR             @VA02089 00358000
+         LR    6,0                      SAVE LENGTH IN REG              00359000
+         LA    14,RD                    LOAD LINKAGE TO BRANCH TO RD WH 00360000
+         LA    3,SYMDEF                 IF NAME IN REFTBL, IS IT DEFINE 00361000
+         BAL   2,SERCH                                                  00362000
+*                            ENTERED C2AJ1 FROM ESD00 ROUTINE           00363000
+C2AJ1    L     1,LOCCT                  LOD PRESENT LOCATION            00364000
+         LA    1,7(0,1)                 ALIGN TO DBL WRD BOUND          00365000
+         N     1,DBLBND                 ...                             00366000
+         ST    1,LOCCT                  ...                             00367000
+         LR    7,14                     TEST FOR UNDEFINED BIT          00368000
+         L     5,AADDEF                 AND DEFINE IF NECESSARY         00369000
+         BALR  14,5                                                     00370000
+         ST    R1,12(0,R12)   STORE VALUE OF LOCCT IN REFTBL            00371000
+         AR    1,6                      UPDATE LOCCT                    00372000
+         ST    1,LOCCT                                                  00373000
+         SR    5,5                      IO INDEX FOR ENTRY PRINT        00374000
+         ST    R5,8(0,R12)    CLEAR FLAG BYTE OF REFTBL                 00375000
+         L     R11,ADMSLIO    GET LINKAGE TO IO ROUTINE        @V305614 00376000
+         BALR  14,11                    GO PRINT NAME 'AT' LOC          00377000
+         LR    14,7                                                     00378000
+         SR    6,6                                                      00379000
+         BCR   15,14                    RETURNS TO RD OR C3AD4 (IN ESD  00380000
+SYMDEF   TM    8(12),X'80'              IS UNDEFINED BIT ON             00381000
+         BCR   8,14                     IF DEFINED, IGNORE ICS CARD     00382000
+         BC    15,C2AJ1                 YES - ALIGN ABS ADDR OF PROGRAM 00383000
+*                            WORD BOUNDARY AND GO GET NEXT CARD         00384000
+         EJECT                                                          00385000
+*********************************************************************** 00386000
+*                                                                       00387000
+*                       DETERMINE IF ESD TYPE CARD                      00388000
+*                                                                       00389000
+*********************************************************************** 00390000
+*                                                                       00391000
+C3AA1    C     1,ESD                                                    00392000
+         BC    7,C4AA1                  NO- TEST FOR TXT CRD            00393000
+         SPACE 1                                                        00394000
+CA3A1    CLI   SPEC+24,X'0A'  WEAK EXTRN ?                              00395000
+         BE    WEAKEXT        YES                                       00396000
+         NI    SPEC+24,X'07'  MASK ESD TYPE BYTE                        00397000
+         CLI   SPEC+24,X'04'      IS THIS A PC                          00398000
+         BE    PC                 YES                                   00399000
+CA3A11   EQU   *                                                        00400000
+         LH    12,SPEC+24               GET ESD NO                      00401000
+         SRL   12,8               (ISOLATE IT)                       JS 00402000
+         AR    12,12              DOUBLE ESD NO. FOR JUMP-TBL,       JS 00403000
+         LH    12,ESDANAL(12)           GET TBL ADDR FOR BRANCH         00404000
+         LA    R15,RELDR                                                00405000
+         B     0(12,15)       BRANCH TO APPROPRIATE ROUTINE             00406000
+         EJECT                                                          00407000
+*********************************************************************** 00408000
+*                                                                       00409000
+*                       ESD TYPE 1 ROUTINE  (ENTRY)                     00410000
+*                                                                       00411000
+*********************************************************************** 00412000
+*                                                                       00413000
+ENTESD   SR    R3,R3          CLEAR R3                                  00414000
+         IC    R3,SPEC+31     GET ID OF SECTION DEFINITION              00415000
+         BAL   14,REFADR                OBTAINS ADDR OF THE ENTRY IN RE 00416000
+         LA    R10,ESD00      SET PROCESS TO ESD00                      00417000
+LATESD   L     R7,8(0,R12)    LOAD RELOCATION FACTOR OF CSECT           00418000
+         LA    R7,0(0,R7)     CLEAR FLAG BYTE                           00419000
+         STC   6,SPEC+24      (IF CSECT NOT DEFINED, BRANCH HERE)       00420000
+         A     7,SPEC+24                FORM ENTRY POINT                00421000
+         LA    R7,0(0,R7)     CLEAR HI BYTE                       P0966 00422000
+         LA    2,C3AD1                  NOT FOUND RETURN                00423000
+         BAL   3,SERCH                  SEARCH FOR NAME IN REFTBL       00424000
+         L     R0,12(0,R12)   LOAD ABSOLUTE ADDRESS                     00425000
+         TM    8(12),X'80'              IS ENTRY DEFINED                00426000
+         BC    1,C3AD2                  NO - DEFINE IT                  00427000
+         TM    FLAG1,NODUP    IS MSG TO ISSUED ?               @VM08875 00428000
+         BO    ESD1OK         NO, BRANCH                       @VM08875 00429000
+         MVC   OUTBUF(8),0(12)       MOVE NAME TO BUFF                  00430000
+         LA    5,ERRORM       ERROR 202W                                00431000
+         L     R11,ADMSLIO    GET LINKAGE TO IO ROUTINE        @V305614 00432000
+         BALR  14,11                    GO PRINT MESS AND NAME          00433000
+ESD1OK   BR    R10            GO TO ESD00 OR SDDEF RTN         @VM08875 00434000
+C3AD2    LR    1,7                      LOAD REG 1 FROM 7               00435000
+         L     5,AADDEF                                                 00436000
+         BALR  14,5                                                     00437000
+         ST    R1,12(0,R12)   UPDATE REFTBL, STORE ABS. ADDRESS         00438000
+         BC    15,PRNT                                                  00439000
+C3AD1    ST    R7,12(0,R12)   STORE ABS. ADDR. IN REFTBL                00440000
+PRNT     SR    5,5                      IO INDEX FOR ENTRY PRINT        00441000
+         ST    R5,8(0,R12)    CLEAR FLAG BYTE OF REFTBL                 00442000
+         L     R11,ADMSLIO    GET LINKAGE TO IO ROUTINE        @V305614 00443000
+         BALR  14,11                    GO PRINT NAME 'AT' LOC          00444000
+         BR    R10            GO TO ESD00 OR SDDEF RTN                  00445000
+         EJECT                                                          00446000
+*********************************************************************** 00447000
+*                                                                       00448000
+*                       ESD TYPE 0 ROUTINE (SEGMENT NAME)               00449000
+*                                                                       00450000
+*********************************************************************** 00451000
+*                                                                       00452000
+C3AA3    EQU   *                                               @V1D1705 00453000
+         LR    R11,R8             INSURE NON-ZERO R11          @VA04910 00454000
+         TM    FLAGS,ESD1ST       IS FIRST ESDID SET YET?      @VA04910 00455000
+         BO    C3AA3A             BRANCH IF YES                @VA04910 00456000
+         SR    R11,R11            INDICATE FIRST ESDID         @VA04910 00457000
+C3AA3A   EQU   *                                               @VA04910 00458000
+         BAL   R3,ESIDINC     CHECK AND UPDATE ESDID NO.                00459000
+         LA    2,C3AC3                  NAME NOT IN TBL RETURN          00460000
+         BAL   3,SERCH                  SEARCH FOR NAME IN REFTBL       00461000
+         CLI   SPEC+24,PCTYPE     IS THIS PC CODE?             @VA04910 00462000
+         BNE   CHKCOM             BRANCH IF NOT                @VA04910 00463000
+         LTR   R11,R11            WAS ESDID NUMBER UPDATED?    @VA04910 00464000
+         BNZ   DECESID            BRANCH IF YES                @VA04910 00465000
+         NI    FLAGS,255-ESD1ST   REMOVE ESD PROCESSED BIT     @VA04910 00466000
+         B     PC                 GO TRY AGAIN                 @VA04910 00467000
+DECESID  EQU   *                                               @VA04910 00468000
+         LH    R2,SPEC+14         GET ESDID NUMBER             @VA04910 00469000
+         BCTR  R2,0               DECREMENT BY ONE             @VA04910 00470000
+         STH   R2,SPEC+14         AND SAVE IT(KEEP ORIG.NO.)   @VA04910 00471000
+         B     PC                 GET ANOTHER NUMBER           @VA04910 00472000
+CHKCOM   EQU   *                                               @VA04910 00473000
+         TM    8(12),X'82'        WAS THIS NAME DEFINED AS COMMON       00474000
+         BO    COMFIX2            YES IT WAS                            00475000
+         TM    8(12),X'80'              IS ENTRY DEFINED                00476000
+         BC    7,C3AC3                  NO - GET STARTING LOCATION      00477000
+         TM    FLAG1,NODUP    IS MSG TO BE ISSUED ?            @VM08875 00478000
+         BO    ESD0OK         NO, BRANCH                       @VM08875 00479000
+         LA    5,ERRORM       ERROR 202W                                00480000
+         MVC   OUTBUF(8),0(12)       MOVE NAME TO BUFF                  00481000
+         L     R11,ADMSLIO    GET LINKAGE TO IO ROUTINE        @V305614 00482000
+         BALR  14,11                    GO PRINT MESSAGE AND NAME       00483000
+ESD0OK   LH    R2,SPEC+14     GET ESID TABLE POSITION          @VM08875 00484000
+         AR    R2,R2          TIMES TWO                                 00485000
+         O     R4,ESIDDUPF    SET DUPLICATE SD FLAG                     00486000
+         STH   4,ESIDTB(2)    STORE POINTER IN ESID TABLE               00487000
+         B     ESD00          GET NEXT CARD                             00488000
+C3AD4    L     R0,12(0,R12)   GET ABS. ADDR. TO COMPUTE REL. FACTOR     00489000
+         LH    2,SPEC+14                LOD ESID                        00490000
+         AR    R2,R2          TIMES TWO                                 00491000
+         SR    R5,R5          CLEAR R5                                  00492000
+         IC    R5,ESIDTB(R2)  SAVE FLAG FIELD                           00493000
+         SRL   R5,4           ISOLATE 4 FLAG BITS                 V0308 00494000
+         SLL   R5,12                                              V0308 00495000
+         OR    R4,R5                                                    00496000
+         O     R4,ESIDSDF     SET SD FLAG                               00497000
+         STH   4,ESIDTB(2)              PUT INDEX IN ESID TABLE         00498000
+         STC   6,SPEC+24                LOD ASSEMBLED ADDR              00499000
+         L     2,SPEC+24                                                00500000
+         CR    0,2                                                      00501000
+         BC    5,COMP                   BR- ORG2 LESS THAN ADDR         00502000
+         SR    0,2                                                      00503000
+RELF     STCM  R0,B'0111',9(R12)   SAVE RELOCATION FACTOR         P0966 00504000
+         LH    R2,SPEC+14     GET ESID OF SD                            00505000
+         AR    R2,R2          DOUBLE FOR ESIDTB INDEX                   00506000
+         LA   R5,ESIDTB(R2)   POINT TO ID TABLE ENTRY                   00507000
+         TM   0(R5),ESIDLATE  ANY WAITING LD'S                          00508000
+         BO    SDDEF          YES, RESOLVE THEM                         00509000
+         BC    15,ESD00                 READ ANOTHER CARD               00510000
+COMP     SR    2,0                      ADDRESS MINUS ORIGIN            00511000
+         LCR   0,2                      COMPLEMENT (TWOS)               00512000
+         OI    16(R12),X'01'  INDICATE NEGATIVE RELOCATION FACT@V1D1705 00513000
+         BC    15,RELF                                                  00514000
+C3AC3    OI    16(R12),X'02'  INDICATE CSECT                            00515000
+         STC   6,SPEC+28                RETURNED HERE FOR NAME NOT FND  00516000
+         L     6,SPEC+28                LOD SEGMENT LENGTH              00517000
+         LA    14,C3AD4                                                 00518000
+         BC    15,C2AJ1                 CK ADDR                         00519000
+         SPACE 4                                                        00520000
+ESIDINC  LH    R2,SPEC+14     GET ESDID NUMBER                          00521000
+         CH    R2,=X'00FF'    COMPARE WITH 255                          00522000
+         BH    ESDTBOVR       ERROR IF > 255                            00523000
+         TM    FLAGS,ESD1ST   IS THIS 1ST ESDID ON CARD                 00524000
+         BZ    FSTESD         YES, DON'T INCREMENT                      00525000
+         LA    2,1(0,2)                 ADD 1                           00526000
+         STH   2,SPEC+14                INSERT AS NEW ESID NO           00527000
+FSTESD   OI    FLAGS,ESD1ST   INDICATE FIRST ESD PROCESSED THIS CARD    00528000
+         BR    3                        RETURN TO CALLER                00529000
+COMFIX2  MVI   8(12),X'80'        CHANGE IT TO REAL CSECT               00530000
+         L     6,8(,12)           GET LENGHTH UP UNTIL NOW              00531000
+         LA    6,0(,6)            CLEAR HIGH ORDER BYTE                 00532000
+         MVI   SPEC+28,0                                                00533000
+         C     6,SPEC+28          WAS PREV LENGTH GTR THAN CSECT        00534000
+         BNL   COMFIX3            BR YES                                00535000
+         L     6,SPEC+28          NO USE THIS LENGTH                    00536000
+COMFIX3  ST    6,SPEC+28                                                00537000
+         LA    14,C3AD4           GO TO ICS                             00538000
+         BC    15,C2AJ1                                                 00539000
+ESDTBOVR LA    R5,ESDOVER                                               00540000
+         B     FATERR         TERMINATE                                 00541000
+         EJECT                                                          00542000
+*********************************************************************** 00543000
+*                                                                       00544000
+*                       ESD TYPE 2 ROUTINE   (EXTRN)                    00545000
+* THIS ROUTINE HAS TWO ENTRY POINTS. LOC C3AH1 AND LOC ESD00            00546000
+* LOCATION C3AH1 IS ENTERED FROM THE ESD CARD ANALYSIS ROUTINE          00547000
+* LOCATION ESD00 IS ENTERED FROM...                                     00548000
+*     1. THE ESD CARD ANALYSIS ROUTINE WHEN THE CARD BEING              00549000
+*         PROCESSED IS A TYPE 1OR 2 , AND AN ABS LOAD IS INDICATED      00550000
+*     2. THE ESD TYPE 0 ROUTINE AND TYPE 1 ENTER AS THE LAST            00551000
+*        STEP OF THESE ROUTINES                                         00552000
+*********************************************************************** 00553000
+*                                                                       00554000
+C3AH1    BAL   3,ESIDINC                GO CHECK + UPDATE ESID NO       00555000
+         LA    R2,C3AH2       NOT FOUND RETURN                          00556000
+         BAL   R3,SERCH       LOOK FOR NAME IN REFTBL                   00557000
+         CLI   8(R12),X'83'   WEAK EXTRN REFERENCE                P3093 00558000
+         BNE   COM01          NO                                  P3093 00559000
+         L     R2,12(,R12)    GET RELOCATION FACTOR            @VM08899 00560000
+         ST    R2,TEMPST      SAVE FOR A WHILE                 @VM08899 00561000
+         XC    0(20,R12),0(R12)    ZERO OUT WXTRN ENTRY        @VM08899 00562000
+         BAL   R2,SERCH       GO PROMOTE ENTRY IN LDRTBLS      @VM08899 00563000
+         L     R2,TEMPST      GET RELOCATION FACTOR            @VM08899 00564000
+         ST    R2,12(,R12)    STORE IN NEW LOCATION            @VM08899 00565000
+         OI    8(R12),X'80'   TURN UNDEFINED BIT ON            @VM08899 00566000
+         OI    FLAGS,LUNDEF   SHOW UNDEF TO LIBE               @VM08899 00567000
+COM01    LH    R2,SPEC+14     GET ESID NUMBER                           00568000
+         SLL   2,1                      TIMES TWO                       00569000
+         STH   4,ESIDTB(2)              PUT INDEX IN ESID TABLE         00570000
+ESD00    LA    2,16                     TEST FOR MULTIPLE ENTRIES IN CA 00571000
+         LH    1,SPEC+10                                                00572000
+         SR    1,2                                                      00573000
+         BC    3,C3AH5                                                  00574000
+         NI    FLAGS,255-ESD1ST RESET FIRST ESD FLAG                    00575000
+         B     RD             NEXT CARD                        @V1D1705 00576000
+C3AH5    MVC   SPEC+16(32),SPEC+32                                      00577000
+         STH   1,SPEC+10                                                00578000
+         BC    15,CA3A1                                                 00579000
+C3AH2    OI    8(12),X'80'              PLACE UNDEFINED BIT ON          00580000
+         OI    FLAGS,LUNDEF             SHOW UNDEFS TO LIBE             00581000
+         SR    3,3                      CLEAR REGISTER 3                00582000
+         ST    3,12(,12)                STORE ZERO IN RELOCATION FACTOR 00583000
+         B     COM01          FINISH                                    00584000
+         EJECT                                                          00585000
+**********************************************************************  00586000
+*                                                                       00587000
+*        ESD TYPE A   (WEAK EXTRN)                                      00588000
+*                                                                       00589000
+**********************************************************************  00590000
+         SPACE                                                          00591000
+WEAKEXT  BAL   R3,ESIDINC     CHECK ESID                                00592000
+         LA    R2,WEAKEXT1    NOT FOUND RETURN                          00593000
+         BAL   R3,SERCH       LOOK FOR NAME IN REFTBL                   00594000
+         B     COM01          FINISH                                    00595000
+WEAKEXT1 OI    8(R12),WKEXT   INDICATE WEAK EXTRN                       00596000
+         B     C3AH2          FINISH                                    00597000
+         EJECT                                                          00598000
+*********************************************************************** 00599000
+*                                                                       00600000
+*        ESD 5 + 6 ROUTINE (COMMON + PSEUDO REGISTER )                  00601000
+*                                                                       00602000
+*********************************************************************** 00603000
+         SPACE 1                                                        00604000
+COMESD   BAL   3,ESIDINC                GO CHECK + UPDATE ESID NO       00605000
+         LA    2,COM03                                                  00606000
+         BAL   3,SERCH                                                  00607000
+         TM    8(12),X'80'                                              00608000
+         BZ    COM01                                                    00609000
+         CLI   8(R12),X'82'   PREVIOUSLY DEFINED AS COMMON     @V201005 00610000
+         BNER  R2                  TO 'COM04' - SKIP LENGTH CK @VA01759 00611000
+         CLC   9(3,12),SPEC+29    GET LONGEST COMMON                    00612000
+         BNL   COM04              KEEP OLD LENGTH                       00613000
+COM03    MVC   9(3,12),SPEC+29    MOVE CURRENT LENGTH                   00614000
+COM04    MVI   8(R12),X'82'   DEFINE AS COMMON                 @V201005 00615000
+         OI    FLAG1,COMMONEX INDICATE COMMON EXISTS                    00616000
+         B     COM01                                                 TR 00617000
+         EJECT                                                          00618000
+*        HANDLE PR (PSEDUO-REGISTER)                                    00619000
+PRVESD   BAL   R3,ESIDINC     CHECK AND UPDATE ESID NUMBER     @V1D1705 00620000
+         CLI   SPEC+28,C' '   BLANK ALIGNMENT FACTOR           @V201005 00621000
+         BNE   NONBLANK       NO                               @V201005 00622000
+         MVI   SPEC+28,X'03'  REPLACE WITH WORD ALIGN          @V201005 00623000
+NONBLANK LA    R2,DEFENTRY    IN CASE NOT FOUND                @V201005 00624000
+         BAL   3,PRSERCH                LOOK FOR ENTRY IN REFTBL        00625000
+         LH    2,SPEC+14                GET ESDID NO.                   00626000
+         SLL   2,1                      TIMES TWO                       00627000
+         STH   4,ESIDTB(2)              PUT INDEX IN ESID TABLE         00628000
+         CLC   9(3,12),SPEC+29          OLD LENGTH GREATER THAN NEW     00629000
+         BNL   ALTST                    YES, CHECK ALIGNMENT            00630000
+         MVC   9(3,12),SPEC+29          NO, KEEP GREATER LENGTH         00631000
+ALTST    TR    SPEC+28(1),PRTRAN   ENCODE ALIGNMENT BYTE       @V201005 00632000
+         CLC   8(1,12),SPEC+28          IS NEW AL MORE RESTRICTIVE      00633000
+         BNL   ESD00                    NO, LOOK FOR MORE ESD'S         00634000
+         LA    5,PRERR                  GET MESS # FOR PR ERR           00635000
+         L     R11,ADMSLIO    GET LINKAGE TO IO ROUTINE        @V305614 00636000
+         BALR  14,11                    ...                             00637000
+         B     ESD00                    BACK FOR MORE ESD'S             00638000
+DEFENTRY LH    2,SPEC+14                GET ESDID NO                    00639000
+         SLL   2,1                      TIMES TWO                       00640000
+         STH   4,ESIDTB(2)              PUT INDEX IN ESID TABLE         00641000
+         MVC   8(4,12),SPEC+28          PUT LENGTH AND ALIGN IN ENTRY   00642000
+         OI    FLAG1,PREXIST  INDICATE PR EXISTS                        00643000
+         SR    2,2                     GET A ZERO                       00644000
+         IC    2,SPEC+28               GET FLAG BYTE                    00645000
+         LCR   4,2                     AND ITS COMPLEMENT               00646000
+         BCTR  4,0                     ...                              00647000
+         AH    R2,PRVCNT      ALIGN PR DISPLACEMENT                     00648000
+         NR    2,4                     ...                              00649000
+         ST    2,12(0,12)              STORE IN REFTBL                  00650000
+         AH    2,10(0,12)              ADD LENGTH                       00651000
+         STH   R2,PRVCNT      AND STORE AS NEW COUNT                    00652000
+         TR    8(1,12),PRTRAN           CODE ALIGN BYTE                 00653000
+         B     ESD00                    BACK FOR MORE ESD'S             00654000
+         EJECT                                                          00655000
+******************************************************************      00656000
+*                                                                       00657000
+*        ESD 04 PRIVATE CODE                                            00658000
+*                                                                       00659000
+******************************************************************      00660000
+*                                                                       00661000
+PC       EQU   *                                               @V1D1705 00662000
+         L     R15,=V(DMSLSY) CREATE A UNIQUE SYMBOL                    00663000
+         BALR  R14,R15                                                  00664000
+         MVC   SPEC+16(8),NXTSYM   MOVE SYMBOL TO ESD NAME FIELD        00665000
+         MVI   SPEC+16,C'.'                                             00666000
+         B     CA3A11                                                   00667000
+         EJECT                                                          00668000
+*********************************************************************** 00669000
+*                                                                       00670000
+*                       TEXT CARD ROUTINE     (TXT)                     00671000
+*                                                                       00672000
+*********************************************************************** 00673000
+*                                                                       00674000
+C4AA1    C     1,TXT                                                    00675000
+         BC    7,C4AA3                  BR- NOT TEXT CRD                00676000
+         STC   6,SPEC+4                                                 00677000
+         LH    7,SPEC+10                NUM OF BYTES                    00678000
+         LTR   7,7                                                      00679000
+         BC    8,RD                     ZERO COUNT - DON'T NOVE ANY DAT 00680000
+         LA    R15,C4AK2+2                LINKAGE                       00681000
+REPENT   LH    R3,SPEC+14     GET ESDID TO FIND ADDRESS        @V1D1705 00682000
+         SLL   3,1            CHECK ESID TABLE                          00683000
+         LH    12,ESIDTB(3)   ...                                       00684000
+         LTR   12,12          IS IT NEGATIVE ENTRY (ALREADY LOADED)     00685000
+         BM    RD             YES, SKIP IT                              00686000
+         SRL   3,1            NO, RESET CONDITIONS AND CONTINUE         00687000
+         BAL   14,REFADR                                                00688000
+         L     R10,8(0,R12)   LOAD RELOCATION FACTOR                    00689000
+C4AC2    A     10,SPEC+4                ADD ADDR TO RELFAC              00690000
+         LA    R10,0(0,R10)   CLEAR HI BYTE                       P0966 00691000
+         ST    10,SPEC+4                                                00692000
+         LR    1,10                                                     00693000
+         AR    1,7                                                      00694000
+         LA    R5,ERRORC      ERROR 709S                                00695000
+         TM    BATFLAGS,BATLOAD    BATCH BEING LOADED?            V0742 00696000
+         BO    C4AJ2               YES: ALLOW FREE STORAGE LOAD   V0742 00697000
+         TM    MODFLGS,SYSLOAD     SYSTEM LOAD ?               @VA04666 00698000
+         BO    C4AJ2          YES, ALLOW FREE STORAGE LOAD     @VA04666 00699000
+         TM    OSSFLAGS,DYLD  OS TYPE LOAD ?                   @V1D1705 00700000
+         BNO   NONDYNA        BR IF NOT                        @V1D1705 00701000
+         C     R1,DYNAEND     CHECK AGAINST GETMAINED AREA     @V1D1705 00702000
+         BC    11,FATERR      ERROR IF TOO HIGH                @V1D1705 00703000
+         B     NONDY2                                          @V1D1705 00704000
+NONDYNA  EQU   *                                               @V1D1705 00705000
+         C     R1,FREELOWE    WOULD WE OVERLAY FREE STOR                00706000
+         BC    11,FATERR                YES - ERROR                     00707000
+NONDY2   EQU   *                                               @V1D1705 00708000
+         C     R10,AUSRAREA   ARE WE BELOW USER STOR ?                  00709000
+         BNL   C4AJ2          BNL IF NO PROBLEM.                     JS 00710000
+         C     R1,ALAST           ABOVE TRANS AREA?            @V305665 00711000
+         BH    FATERR         YES, OVERLAY ERROR               @VA02752 00712000
+         C     R1,ADTRANS         BELOW TRANSIENT AREA?        @V305665 00713000
+         BL    FATERR         YES, OVERLAY ERROR                        00714000
+C4AJ2    TM    FLAG1,FSTXTADR HAS 1ST TEXT ADDRESS BEEN SAVED ?         00715000
+         BO    C4AK2          YES DON'T SAVE                            00716000
+         OI    FLAG1,FSTXTADR INDICATE TEXT ADR SAVED                   00717000
+         ST    10,BRAD                  SAVE FIRST ADDR LOADED INTO     00718000
+C4AK2    BCR   15,R15                     LINKAGE                       00719000
+         SR    7,11                     SUB ONE FROM NUM OF BYTES       00720000
+         EX    7,CHAR                   MOVE TEXT TO STORAGE            00721000
+         BC    15,RD                    AND GO READ A CARD              00722000
+*                                                                       00723000
+CHAR     MVC   0(1,10),SPEC+16                                          00724000
+         EJECT                                                          00725000
+*********************************************************************** 00726000
+*                                                                       00727000
+*                       REPLACE CARD ROUTINE   (REP)                    00728000
+*                                                                       00729000
+*********************************************************************** 00730000
+*                                                                       00731000
+C4AA3    C     1,REP                                                    00732000
+         BC    7,C5AA1                  BR- NOT REPLACE CARD            00733000
+         TM    FLAG2,NOREP    IS REP CARD PRINTING SUPPRESSED           00734000
+         BC    1,C4AA4                  YES                             00735000
+         LA    5,CRDIMJ                 GO PRINT OUT REP CARD IMAGE     00736000
+         MVC   OUTBUF(79),SPEC+1        MOVE CRD IMAJE TO BUFF          00737000
+         L     R11,ADMSLIO    GET LINKAGE TO IO ROUTINE        @V305614 00738000
+         BALR  14,11                    GO PRINT REP CARD               00739000
+C4AA4    LA    4,6                      CONVERT REP CRD HEX ADDR TO BIN 00740000
+         LA    5,SPEC+6                                                 00741000
+         L     1,HEXBB                  LOAD CONVERSION ROUTINE ADDRESS 00742000
+         BALR  0,1                      BR TO HEXB                      00743000
+         LTR   R2,R2          BAD CONVERSION?                  @VA02089 00744000
+         BM    BADCRD         YES, BRANCH TO ERROR             @VA02089 00745000
+         ST    0,SPEC+4                 SAVE ADDR IN CARD IMAGE         00746000
+         LA    4,2(0,0)                                                 00747000
+         LA    5,SPEC+14                CONVERT REP ESID TO BIN         00748000
+         L     1,HEXBB                  LOAD CONVERSION ROUTINE ADDRESS 00749000
+         BALR  0,1                      BR TO HEXB                      00750000
+         STH   0,SPEC+14                SAVE THE ESID IN CARD IMAGE     00751000
+         LA    5,SPEC+16                                                00752000
+NUM      LA    7,2                      NUM OF BYTES                    00753000
+         ST    5,TMPLOC                                                 00754000
+         TM    FLAG2,APRILB                                             00755000
+         BC    1,APR10                                                  00756000
+         BAL   R15,REPENT                 CK ADDR                       00757000
+APRIL    LA    4,4                      CONVERT HALF WORD OF CORRECTION 00758000
+         L     5,TMPLOC                                                 00759000
+         L     1,HEXBB                  LOAD CONVERSION ROUTINE ADDRESS 00760000
+         BALR  0,1                      BR TO HEXB                      00761000
+         L     R1,SPEC+4                 LOD REPLACE ADDR               00762000
+         STH   0,0(0,R1)                 PLACE CORRECTION IN STORAGE    00763000
+         NI    FLAG2,255-APRILB                                         00764000
+         CLI   0(5),C','                                                00765000
+         BC    7,RD                                                     00766000
+         OI    FLAG2,APRILB                                             00767000
+         LA    R1,2(R1,0)                                               00768000
+         ST    R1,SPEC+4                 SAVE REPLACE ADDR              00769000
+         AR    5,11                                                     00770000
+         BC    15,NUM                                                   00771000
+APR10    LA    R15,APRIL                                                00772000
+         SR    R10,R10        ZERO RELOCATION FACTOR           @V1D1705 00773000
+         B     C4AC2                                           @V1D1705 00774000
+         EJECT                                                          00775000
+*********************************************************************** 00776000
+*                                                                       00777000
+*                       RELOCATION DICTIONARY CARD   (RLD)              00778000
+*            REG 6= 0 UPON ENTRY INTO C5AA1                             00779000
+*                                                                       00780000
+*********************************************************************** 00781000
+         SPACE 1                                                        00782000
+C5AA1    C     1,RLD                    IS IT RLD                       00783000
+         BNE   C6AA1                    NO,TEST FOR END                 00784000
+         LA    R1,SYSUT1      PLIST ADR                                 00785000
+         L     R15,AWRBUF     WRITE RLD CARD TO WORK FILE         V0304 00786000
+         BALR  R14,R15                                            V0304 00787000
+         BNZ   ERRUTW         BRANCH ON ERROR                     V0304 00788000
+         OI    FLAG1,WORKFILE INDICATE RLD EXISTS                       00789000
+         B     RD             PROCESS NEXT CARD                         00790000
+PASSTWO  TM    FLAG1,WORKFILE ANY RLDS ?                                00791000
+         BNO   C6AB6          NO, FINISH THE LOAD                       00792000
+         NI    FLAG1,255-WORKFILE RESET WORKFILE IND.                   00793000
+         LA    R1,SYSUT1      PLIST ADDRESS TO R1                       00794000
+         L     R15,AFINIS     CLOSE WORK FILE                     V0304 00795000
+         BALR  R14,R15                                            V0304 00796000
+         BNZ   ERRUTW         BRANCH ON ERROR                     V0304 00797000
+         SR    R6,R6          GET A ZERO                                00798000
+NXTRLDCD LA    R1,SYSUT1      ADDRESS OF PLIST                          00799000
+         L     R15,ARDBUF     READ AN RLD RECORD FROM WORK FILE   V0304 00800000
+         BALR  R14,R15                                            V0304 00801000
+         BNZ   ERRUT1RD       BRANCH IF ERROR                     V0304 00802000
+         LA    10,SPEC+16               ADDRESS OF DATA FIELD IN 10     00803000
+C5AC1    LH    3,0(0,10)                GET RH ESID                     00804000
+         N     R3,=X'00007FFF'     MASK ID FIELD                        00805000
+         LTR   3,3                      IS IT 0                         00806000
+         BZ    CXDTST                   YES, CHECK FOR PR CUM LENGTH    00807000
+CXDRET   BAL   14,REFADR                GET ADDR OF ENTRY IN REFTBLE    00808000
+         ST    12,TEMPST                SAVE ADDRESS                    00809000
+         C     R12,TBLREF     IS TXT ADDR INVALID              @VA06291 00810000
+         BE    RLDABND        YES. R12 IS AT STORAGE END       @VA06291 00811000
+         SR    R0,R0          GET A ZERO                       @V201005 00812000
+         TM    8(R12),X'80'   IS NAME DEFINED                  @V201005 00813000
+         BO    PLOAD1         NO                               @V201005 00814000
+         L     R0,12(R12)     GET NAME'S ADDRESS               @V201005 00815000
+         TM    4(R10),X'30'   NON BRANCH ADCON                 @V201005 00816000
+         BNZ   PLOAD1         NO                               @V201005 00817000
+         LH    R3,0(0,R10)        TEST IF SD ESIDTB            @VM08509 00818000
+         N     R3,=X'00007FFF'    MASK ID FIELD                @VM08509 00819000
+         AR    R3,R3              MULT. BY TWO                 @VM08509 00820000
+         LA    R3,ESIDTB(R3)      GET ADDR OF ESIDTB ENTRY     @VM08509 00821000
+         TM    0(R3),ESIDSDFB     TEST ESID SD BIT             @VM08509 00822000
+         BNO   PLOAD1         NO                               @V201005 00823000
+         L     R0,8(R12)      YES, USE RELOCATION FACTOR       @V201005 00824000
+         TM    16(R12),X'01'  NEGATIVE RELOCATION FACTOR       @V1D1705 00825000
+         BNO   PLOAD1         NO                               @V1D1705 00826000
+         ICM   R0,B'1000',=X'FF'   COMPENSATE FOR 3 BYTE RELOCA@V1D1705 00827000
+PLOAD1   LH    3,2(0,10)                GET PH                          00828000
+         N     R3,=X'00007FFF'     MASK ID FIELD                        00829000
+         LTR   3,3                      IS IT 0                         00830000
+         BZ    BADCRD2        YES, BAD CARD                    @VA01260 00831000
+         SLL   3,1            CHECK ESID TABLE                          00832000
+         LH    12,ESIDTB(3)   ...                                       00833000
+         LTR   12,12          IS IT NEGATIVE ENTRY (ALREADY LOADED)     00834000
+         BM    SKIPRLD        YES, SKIP THESE ENTRIES                   00835000
+         SRL   3,1            NO, RESET CONDITIONS AND CONTINUE         00836000
+         BAL   14,REFADR                GET REFTBL ADDR OF PH           00837000
+         L     R15,8(0,R12)    GET REL. FACTOR OF PH                    00838000
+         BAL   14,CTR                   SEE IF END OF CARD              00839000
+         SPACE 2                                                        00840000
+C5AA3    AR    10,5                     ADDR OF NEXT 4 BYTE DATA FIELD  00841000
+         BCTR  5,0                      C(REG 5) = 3                    00842000
+         IC    6,0(0,10)                GET FLAG BYTE                   00843000
+         SRL   6,2                      SHIFT OVER LENGTH BITS          00844000
+         NR    6,5                      MASK OUT ALL BUT LAST 2 BITS    00845000
+         LA    R5,RLDCONST+3  POINT TO WORK AREA +3            @V201005 00846000
+         SR    R5,R6          BACK UP ACCORDING TO ADCON LENGTH@V201005 00847000
+         L     3,0(0,10)                GET ASSIGNED ADDRESS OF (CON)   00848000
+         LA    3,0(3,R15)                 COMPUTE LOADED ADDRESS        00849000
+         TM    0(R10),X'30'   NONBRANCH ADCON                  @V201005 00850000
+         BNZ   ZERO           NO                               @V201005 00851000
+         EX    R6,MVCFROM     MOVE RLD CONSTANT TO WORK AREA   @V201005 00852000
+ZERO     L     R4,RLDCONST    GET CONSTANT IN R4               @V201005 00853000
+         TM    0(10),X'02'              SHOULD WE SUBTRACT              00854000
+         BO    C5AE4                    YES GO DO IT                    00855000
+         AR    4,R0                      VAL=CON+ RH REL FAC            00856000
+         EJECT                                                          00857000
+COMPP    ST    R4,RLDCONST    PUT VALUE BACK IN RLD CONST               00858000
+         EX    R6,MVCTO       MOVE CONSTANT TO STOR.           @V201005 00859000
+         L     12,TEMPST                GET ADDRESS OF RH SYMBOL        00860000
+         TM    8(12),X'80'              IS ENTRY DEFINED?               00861000
+         BZ    CTEX1          YES, SKIP REMEMBERING RTN.       @V201005 00862000
+         L     7,APPNT                  GET ADDRESS OF APOINT           00863000
+         BALR  14,7                     GO ADD TO STRING OF UNDEF'S     00864000
+CTEX1    SR    R6,R6          GET 0                            @V201005 00865000
+         BAL   14,CTR                   CHECK FOR END OF CARD           00866000
+         TM    0(10),X'01'              NEXT RH + PH SAME AS THIS ONE   00867000
+         BO    C5AA3                    YES, BACK TO EVAL ENTRY PT      00868000
+         AR    10,5                     NO, ADDR OF NEW DATA FIELD      00869000
+         B     C5AC1                    BACK TO GET NEW PH + RH         00870000
+C5AE4    SR    4,R0                     SUB RH FROM ASSIGNED VAL        00871000
+         B     COMPP                    BACK TO ROUTINE                 00872000
+MVCFROM  MVC   0(*-*,R5),0(R3)     EXECUTED MOVE               @V201005 00873000
+MVCTO    MVC   0(*-*,R3),0(R5)                                 @V201005 00874000
+         SPACE 2                                                        00875000
+CTR      LA    5,4                      4 BYTES PER DATA FIELD          00876000
+         ST    R6,RLDCONST    ZERO CONSTANT FIELD                       00877000
+         LH    4,SPEC+10                GET BYTE COUNT                  00878000
+         SR    4,5                      SUBTRACT 5                      00879000
+         BZ    NXTRLDCD       GET NEXT RLD CARD FROM WORK FILE          00880000
+         STH   4,SPEC+10                STORE NEW BYTE COUNT            00881000
+         BR    14                       BACK TO CALLLER                 00882000
+         SPACE 2                                                        00883000
+CXDTST   TM    4(10),X'30'              IS IT A PR CUM LENGTH CONST     00884000
+         BNO   BADCRD2        NO, BAD CARD                     @VA01260 00885000
+         LA    1,FAKECXD                YES, SET TO DEFINE CXD ENTRY    00886000
+         LA    2,NOCXD                  RETURN IF NOT FOUND             00887000
+         BAL   3,PRSERCH1               LOOK FOR ENTRY IN REFTBL        00888000
+NOCXD    MVI   8(12),X'81'              SET CXD CODE BYTE               00889000
+         B     CXDRET+4                 BACK TO ROUTINE                 00890000
+         SPACE 2                                                        00891000
+SKIPRLD  BAL   14,CTR         CHECK FOR END OF CARD                     00892000
+SKIPRLD2 AR    10,5           MOVE TO NEXT 4-BYTE FIELD                 00893000
+         BAL   14,CTR         CHECK FOR END OF CARD                     00894000
+         TM    0(10),X'01'    NEXT RH + PH SAME AS THIS ONE ?           00895000
+         BO    SKIPRLD2       YES                                       00896000
+         AR    10,5           NO, MOVE TO IT                            00897000
+         B     C5AC1          PROCESS IT                                00898000
+ERRUT1RD LA    R5,RDERR62     ERROR MSG 104S (READ ERROR)               00899000
+         CH    R15,=H'12'     WAS IT EOF ?                              00900000
+         BNE   ERRUTWA        NO, TERMINATE THIS COMMAND                00901000
+         L     R15,AERASE     ERASE WORK FILE                     V0304 00902000
+         BALR  R14,R15                                            V0304 00903000
+         B     C6AB6          COMPLETE THE LOADING                      00904000
+ERRUTW   LA    R5,WRERR46     ERROR MSG 105S (WRITE ERROR)              00905000
+ERRUTWA  MVC   OUTBUF(18),8(R1)    FILE NAME TO MSG BUFFER              00906000
+         LR    R2,R15         SAVE ERROR RETURN CODE                    00907000
+         B     FATERR         TERMINATE THIS COMMAND                    00908000
+         EJECT                                                          00909000
+*********************************************************************** 00910000
+*                                                                       00911000
+*                      END CARD ROUTINE    (END)                        00912000
+*                                                                       00913000
+*********************************************************************** 00914000
+*                                                                       00915000
+C6AA1    C     1,END                                                    00916000
+         BC    7,C6AC1                  BR-NOT END CARD                 00917000
+         CLC   SPEC+28(4),BLANKS        CHECK FOR CSECT LENGTH IN END   00918000
+         BE    C6AB5                    NO - CONTINUE NORMALLY          00919000
+         L     1,LOCCT                  YES - UPDATE THE LOCATION COUNT 00920000
+         A     1,SPEC+28                ...                             00921000
+         LA    1,7(0,1)                 ALIGN TO DBL BOUND              00922000
+         N     1,DBLBND                 ...                             00923000
+         ST    1,LOCCT                  ...                             00924000
+C6AB5    SR    2,2                      ...                             00925000
+         CLI   SPEC+5,C' '                                              00926000
+         BC    8,C6AB3                  BR IF NO ADDR                   00927000
+         STC   6,SPEC+4                                                 00928000
+         TM    FLAG1,ENDCDADR END CARD ADR ALLOWED                      00929000
+         BC    1,C6AB3                  BR NO, ADDR SAVED               00930000
+         LH    3,SPEC+14                LOD ESID                        00931000
+         BAL   14,REFADR                                                00932000
+         L     R2,8(0,R12)    GET RELOCATION FACTOR                     00933000
+C6AB4    A     2,SPEC+4                 FORM ADDR                       00934000
+         STCM  R2,B'0111',BRAD+1   SET ENTRY ADDRESS              P0966 00935000
+         OI    FLAG1,ENDCDADR INDICATE END CARD ADDRESS SAVED           00936000
+C6AB3    B     PASSTWO        PROCESS RLDS                              00937000
+C6AB6    XC    ESIDTB(256),ESIDTB  CLEAR ESID TABLE                     00938000
+         XC    ESIDTB+256(256),ESIDTB+256 CLEAR ESID TABLE     @VA02083 00939000
+         BC    15,RD                    TO RD                           00940000
+RLDABND  EQU   *                                               @VA06291 00941000
+         L     R11,ADMSLIO    SET R11 FOR LIO BASE ADDR        @VA06291 00942000
+         LA    R5,ERRORB      SET UP FUNCTION CODE FOR LIO     @VA06291 00943000
+         LA    R14,N03        SET UP RETURN EXIT ADDR          @VA06291 00944000
+         BR    11             GO TYPE MSG AND RETURN TO EXIT   @VA06291 00945000
+         EJECT                                                          00946000
+*********************************************************************** 00947000
+*                                                                       00948000
+*                      LOAD TERMINATE CARD ROUTINE   (LDT)              00949000
+*                                                                       00950000
+*********************************************************************** 00951000
+*                                                                       00952000
+C6AC1    C     1,LDT                                                    00953000
+         BE    C6AC2          LDT CARD, PROCESS IT                      00954000
+         B     CTLCRD1        PROCESS AS A CONTROL CARD                 00955000
+C6AC2    CLI   SPEC+16,C' '             IS THERE A NAME ?               00956000
+         BE    CHKTXT             CHECK FOR TEXT FILE          @VA04695 00957000
+         LA    2,ERLDT1                                                 00958000
+         BAL   3,SERCH                                                  00959000
+         MVC   BRAD(4),12(R12)     PUT NEW START IN BRAD                00960000
+CHKTXT   EQU   *                                               @VA04695 00961000
+         CLC   FTYPE,=CL8'TEXT'   IS THIS TEXT FILE?           @VA04695 00962000
+         BE    RD                 BRANCH IF YES, MORE PROC REQ @VA04695 00963000
+         EJECT                                                          00964000
+*********************************************************************** 00965000
+*                                                                       00966000
+*        INVOKE TEXT LIBRARY SEARCHING                                  00967000
+*                                                                       00968000
+*********************************************************************** 00969000
+*                                                                       00970000
+LIBGO    TM    FLAG2,NOAUTO+NOLIBE ARE SEARCHES SUPPRESSED              00971000
+         BO    C6AD7                    YES,  DON'T LOOK                00972000
+         NI    FLAG3,X'FF'-CMD     NO LONGER PROC COMMAND LINE @VA01699 00973000
+         TM    FLAGS,LUNDEF             ANY UNDEFINEDS?                 00974000
+         BZ    C6AD7                    NO - SKIP LIBE SEARCH           00975000
+         LA    3,NXTRD                  SET FOUND RETURN                00976000
+         L     11,ALIBE                 GO SEARCH LIBE                  00977000
+         BALR  14,11                    ...                             00978000
+         EJECT                                                          00979000
+*********************************************************************** 00980000
+*                                                                       00981000
+*        TERMINATE LOADING                                              00982000
+*                                                                       00983000
+*********************************************************************** 00984000
+C6AD7    EQU   *                                                        00985000
+         L     12,ENTADR      WAS 'ENTRY' SPECIFIED?                    00986000
+         LA    R12,0(,R12)                                              00987000
+         LTR   12,12          ...                                       00988000
+         BZ    NOENTCRD       NO                                        00989000
+         TM    8(12),X'80'    WAS ENTRY-POINT DEFINED?                  00990000
+         BO    NOENTCRD       NO                                        00991000
+         L     R3,12(0,R12)   GET V(ENTRY POINT)                        00992000
+         CLC   04(8,R3),=C'CMS"XEQ"'   SAVE NORMAL START ADDR?          00993000
+         BNE   NOENT          NO                               @VA03251 00994000
+         CLC   12(4,R3),=X'00000000' ADDR FILLED IN?           @VA03251 00995000
+         BNE   NOENTCRD       YES                              @VA03251 00996000
+         MVC   12(4,R3),BRAD   SAVE OLD START ADDR                      00997000
+NOENT    MVC   BRAD+1(3),13(R12) SET NEW START ADDRESS         @VA03251 00998000
+NOENTCRD EQU   *                                                        00999000
+         L     0,BRAD         LOAD START ADDRESS                        01000000
+         EX    0,C6AB6                  CLEAR ESID TABLE                01001000
+         ST    R0,STRTADDR    SAVE STARTING ADDRESS                     01002000
+         L     R4,FLAG1       GET FLAG1 AND 2                           01003000
+    ST   R4,LDRFLAGS    SAVE IN NUCON                                   01004000
+         STH   R4,TBENT       SAVE LDR TBL COUNT IN NUCON               01005000
+         MVI   LOCCNT,X'00'   CLEAR FIRST BYTE OF "LOCCNT"              01006000
+         MVC   LOCCNT+1(3),LOCCT+1 SAVE CURR VALUE OF "LOCCT"           01007000
+         CLC   LOCCNT,AUSRAREA ARE WE BELOW USER STOR?         @VA02752 01008000
+         BNL   TRANOVR        NO, PROCEED AS USUAL             @VA02752 01009000
+         CLC   LOCCNT,ALAST       ABOVE TRANSIENT AREA?        @V305665 01010000
+         BH    FATERR1        YES, ERROR                       @VA02752 01011000
+TRANOVR  EQU   *                                               @VA05785 01012000
+         L     12,TBLREF                                                01013000
+         SR    4,4                      SHOW NO ERRORS IF NOT           01014000
+         LH    R4,TBLCT       GET NUMBER OF LDR TBL ENTRIES             01015000
+         CH    R4,=H'2'       WAS ANYTHING LOADED                       01016000
+         BE    N03            NO, BACK TO USER                          01017000
+         LA    3,20           LDR TBL ENTRY SIZE                        01018000
+         SR    0,0                                                      01019000
+SUB1     SR    12,3                     POINT TI FIRST ENTRY IN REFTBL  01020000
+         CLI   8(12),X'80'              IS ENTRY DEFINED?               01021000
+         BNE   NO1                      YES - LOOK AT NEXT ENTRY        01022000
+         MVI   UNRES,X'80'    SAVE UNRESOLVED FLAG             @VA02829 01023000
+         TM    16(R12),X'04'  NAME FOUND IN A TXTLIB                    01024000
+         BO    NO1            YES, DON'T LIST AS UNDEF.                 01025000
+         EJECT                                                          01026000
+SYMCHK   LTR   0,0                      TEST FOR PREV UNDEF SYM         01027000
+         BC    7,SUB2                   IF NONE, PRINT HEADER           01028000
+         LA    5,ERRORS                 PRINT UNDEFINED SYMBOL MESSAGE  01029000
+         L     R11,ADMSLIO    GET LINKAGE TO IO ROUTINE        @V305614 01030000
+         BALR  14,11                    GO PRINT HEADING                01031000
+         LA    2,OUTPUT+1               INITIALIZE POINTERS             01032000
+         LA    5,OUTPUT+68                                              01033000
+SUB2     MVC   0(8,2),0(12)             MOVE NAME INTO OUTPUT LINE      01034000
+         LA    2,9(,2)                  SPACE UP LINE POINTER           01035000
+         CR    2,5                      ARE WE AT END OF LINE           01036000
+         BC    4,SUB3                   NO - CONTINUE                   01037000
+         LA    5,OUTR                   YES, PRINT OUT LINE             01038000
+         L     R11,ADMSLIO    GET LINKAGE TO IO ROUTINE        @V305614 01039000
+         BALR  14,11                    GO PRINT                        01040000
+         LA    2,OUTPUT+1               INITIALIZE POINTERS             01041000
+         LA    5,OUTPUT+68                                              01042000
+SUB3     LA    R0,4           ERROR (NON-FATAL)                         01043000
+NO1      BCT   4,SUB1                                                   01044000
+         LTR   0,0                      TEST FOR ERRORS                 01045000
+         BZ    LDXEQ          BRANCH NO ERRORS                 @VA05785 01046000
+         ST    R0,LDRADDR+4   SAVE ERROR CODE                           01047000
+         LA    5,OUTPUT                                                 01048000
+         CR    2,5                                                      01049000
+         BZ    LDXEQ          NO OUTPUT                        @VA05785 01050000
+         LA    5,OUTR                                                   01051000
+         L     R11,ADMSLIO    GET LINKAGE TO IO ROUTINE        @V305614 01052000
+         BALR  14,11                    PRINT LAST LINE                 01053000
+         EJECT 1                                                        01054000
+         USING XPRTAB,R10                                      @VA05785 01055000
+LDXEQ    EQU   *                                               @VA05785 01056000
+         LA    R10,SPEC       USE SPEC & ESIDTB FOR FREE       @VA05785 01057000
+         SR    R6,6           GET 0                            @VA05785 01058000
+         ST    R6,HALFAD      CLEAR SOME OF FREE               @VA05785 01059000
+         ST    R6,BYTEAD      ...                              @VA05785 01060000
+         ST    R6,FULLAD      ...                              @VA05785 01061000
+         ST    R6,DBLAD       ...                              @VA05785 01062000
+         ST    R6,CXDAD       ...                              @VA05785 01063000
+         MVC   COMMON(4),LOCCNT                                @VA05785 01064000
+         L     R12,TBLREF     POINT TO FIRST ITEM IN REFERENCE @VA05785 01065000
+         LH    R4,TBLCT                                        @VA05785 01066000
+         LTR   R4,R4          ANY LOADER TABLE ENTRIES         @VA05785 01067000
+         BZ    N03            NO, OMIT LOAD COMPLETION         @VA05785 01068000
+         LA    R3,20                                           @VA05785 01069000
+         L     R7,AADDEF      TR                               @VA05785 01070000
+         SPACE 2                                                        01071000
+         TM    FLAG1,COMMONEX DO COMMON ENTRIES EXIST          @VA05785 01072000
+         BZ    S1             NO, DON'T PRINT HEADER           @VA05785 01073000
+         NI    FLAG1,255-COMMONEX RESET COMMON BIT             @VA05785 01074000
+         LA    R5,CMDEF       GET IO INDEX FOR HEADER          @VA05785 01075000
+         L     R11,ADMSLIO    GET LINKAGE                      @VA05785 01076000
+         BALR  14,11          GO PRINT HEADING                 @VA05785 01077000
+         EJECT                                                          01078000
+S1       SR    R12,3          NEXT ENTRY IN REFTBL             @VA05785 01079000
+         CLI   8(12),X'00'    IS ENTRY DEFINED                 @VA05785 01080000
+         BE    N1             YES LOOK AT NEXT                 @VA05785 01081000
+         SR    R6,R6          GET 0                            @VA05785 01083000
+         LR    R1,6           DEFINE UNDEFS AT 0               @VA05785 01084000
+         IC    R6,8(0,12)     GET ENTRYS FLAG BYTE             @VA05785 01085000
+         IC    R6,TRANPR(R6)         TRANSLTE FLAG TO INDEX    @VA08338 01085100
+         SLL   R6,1           MULTIPLY BY 2                    @VA05785 01086000
+         LH    R6,XTRATBL(6)  INDEX TRANSFER TABLE             @VA05785 01087000
+         B     R0(6,R8)       GO TO APPROPRIATE ROUTINE        @VA05785 01088000
+N1       BCT   R4,S1          BACK FOR MORE ENTRIES            @VA05785 01089000
+         SPACE 2                                                        01090000
+         TM    FLAG1,PREXIST  ARE THERE ANY PR ENTRIES         @VA05785 01091000
+         BZ    N03                                             @VA05785 01092000
+         NI    FLAG1,255-PREXIST RESET PR PENDING BIT          @VA05785 01093000
+         LA    R5,PRDEF       IO INDEX FOR P-R HEADER          @VA05785 01094000
+         L     R11,ADMSLIO    PRINT HEADING                    @VA05785 01095000
+         BALR  14,11          ...                              @VA05785 01096000
+         SPACE 3                                                        01097000
+         LA    R3,DBLAD       ADDRESS OF DBL PR TBL            @VA05785 01098000
+         BAL   R15,XPRPRT     PRINT OUT DOUBLE AL PR           @VA05785 01099000
+         LA    R3,FULLAD      ADDRESS OF FULL PR TBL           @VA05785 01100000
+         BAL   R15,XPRPRT     PRINT FULL AL PR                 @VA05785 01101000
+         LA    R3,HALFAD      ADDRESS OF HALF PR TBL           @VA05785 01102000
+         BAL   R15,XPRPRT     PRINT HALF AL PR                 @VA05785 01103000
+         LA    R3,BYTEAD      ADDRESS OF BYTE PR TBL           @VA05785 01104000
+         BAL   R15,XPRPRT     PRINT BYTE AL PR                 @VA05785 01105000
+         LA    R3,CXDAD       ADDRESS OF CXD TBL               @VA05785 01106000
+         BAL   R15,XPRPRT     PRINT CXD LENGTH                 @VA05785 01107000
+         B     N03            RETURN TO USER                   @VA05785 01108000
+XDBL     LA    R6,DBLAD       ADDRESS OF DBL PR TBL            @VA05785 01109000
+         LA    R14,HALFAD-DBLAD SIZE OF DOUBLE TABLE           @VA05785 01110000
+         B     PRVSAVE        GO SAVE REFTBL LOC OF PR ENTRY   @VA05785 01111000
+XFULL    LA    R6,FULLAD      ADDRESS OF FULL PR TBL           @VA05785 01112000
+         LA    R14,DBLAD-FULLAD SIZE OF FULL TABLE             @VA05785 01113000
+         B     PRVSAVE        GO SAVE REFTBL LOC OF PR ENTRY   @VA05785 01114000
+XHALF    LA    R6,HALFAD      ADDRESS OF HALF PR TBL           @VA05785 01115000
+         LA    R14,BYTEAD-HALFAD SIZE OF HALF TABLE            @VA05785 01116000
+         B     PRVSAVE        GO SAVE REFTBL LOC OF PR ENTRY   @VA05785 01117000
+XBYTE    LA    R6,BYTEAD      LOC OF BYTE PR TBL               @VA05785 01118000
+         LA    R14,COMMON-BYTEAD SIZE OF BYTE TABLE            @VA05785 01119000
+         B     PRVSAVE        GO SAVE REFTBL LOC OF PR ENTRY   @VA05785 01120000
+XCXD     LA    R6,CXDAD       LOC OF PR CUM LENGTH TBL         @VA05785 01121000
+         LA    R14,8          SIZE OF CXD FIELD                @VA05785 01122000
+         OI    8(12),X'80'    UNDEFINE IT                      @VA05785 01123000
+         B     PRVSAVE        GO SAVE LOC OF PR CUM LENGTH     @VA05785 01124000
+XUNDEF   MVI   8(12),X'80'    RESET UNDEF BIT                  @VA05785 01125000
+         XC    0(8,12),0(12)  ZERO OUT UNDEFINED ENTRY         @VA05785 01126000
+         BALR  14,7           DEFINE ENTRY AT 0                @VA05785 01127000
+         B     N1             RETURN TO LOOK AGAIN             @VA05785 01128000
+         SPACE 2                                                        01129000
+XCOMSET  L     R1,COMMON      GET CURRENT LOC OF COMMON        @VA05785 01130000
+         L     R2,8(,12)      GET LENGTH OF CSECT              @VA05785 01131000
+         LA    R2,0(0,R2)     CLEAR HIGH ORDER BYTE            @VA05785 01132000
+         LA    R1,7(,1)                                        @VA05785 01133000
+         N     R1,DBLBND      ALIGN TO DOUBLE WRD              @VA05785 01134000
+         LR    R6,R1          SAVE BEGINNING OF THIS COMMON    @VA05785 01135000
+*                             SECT                                      01136000
+         AR    R6,R2          ADD THE LENGTH                   @VA05785 01137000
+         ST    R6,COMMON      RESET COMMON LOCATION COUNTER    @VA05785 01138000
+         ST    R6,LOCCNT      RESET LOCATION COUNTER           @VA05785 01139000
+         OI    8(12),X'80'    UNDEFINE THE ENTRY               @VA05785 01140000
+         BAL   R6,XENTDEF     NO, GO DEFINE ENTRY              @VA05785 01141000
+         LA    R5,CMVAL       IO INDES FOR COMMON PRINT        @VA05785 01142000
+         L     R11,ADMSLIO    PRINT NAME, VAL + LENGTH         @VA05785 01143000
+         BALR  14,11          ...                              @VA05785 01144000
+         CLC   COMMON,FREELOWE IS MEMORY EXCEEDED              @VA05785 01145000
+         BNL   FATERR1        YES, GIVE FATAL ERROR MESSAGE    @VA05785 01146000
+*                             AND GIVE UP                               01147000
+         B     N1             BACK TO LOOK AGAIN               @VA05785 01148000
+PRVSAVE  LH    R1,0(0,6)      GET DISP OF NEXT LOC IN TBL      @VA05785 01149000
+         LA    R1,2(0,1)      ...                              @VA05785 01150000
+         CR    R1,R14         WILL TABLE OVERFLOW              @VA05785 01151000
+         BNL   PRTBLOVR       YES, FATAL ERROR                 @VA05785 01152000
+         LH    R2,TBLCT       TOTAL NO OF ENTRIES IN REFTBL    @VA05785 01153000
+         SR    R2,R4          MINUS CNT GIVES INDEX FROM TOP   @VA05785 01154000
+         LA    R2,1(0,2)      OFF BY 1                         @VA05785 01155000
+         STH   R2,0(1,6)      PUT INTO TBL                     @VA05785 01156000
+         STH   R1,0(0,6)      SAVE TBL INDEX                   @VA05785 01157000
+         B     N1             BACK TO LOOK AGAIN               @VA05785 01158000
+PRTBLOVR LA    R5,PROVER      DMSLIO CODE                      @VA05785 01159000
+         B     FATERR         TERMINATE                        @VA05785 01160000
+         EJECT                                                          01161000
+XENTDEF  EQU   *                                               @VA05785 01162000
+         BALR  14,7           GO DEFINE ENTRY                  @VA05785 01163000
+         ST    R1,12(0,12)    SET LOCATION IN LOADER TABLE     @VA05785 01164000
+         MVI   8(12),X'00'    CLEAR FLAG BYTE                  @VA05785 01165000
+         BR    R6             BACK TO CALLER                   @VA05785 01166000
+         SPACE 2                                                        01167000
+XPRPRT   LH    R4,0(0,3)      GET ENTRY COUNT FROM TABLE       @VA05785 01168000
+         LTR   R4,R4          ANYTHING IN TBL                  @VA05785 01169000
+         BCR   8,R15          NO BACK TO CALLER                @VA05785 01170000
+XPRSET2  L     R12,TBLREF     ADDRESS OF REFTBL TOP            @VA05785 01171000
+         LA    R3,2(0,3)      INDEX PTR                        @VA05785 01172000
+         LH    R2,0(0,3)      GET REFTBL INDEX                 @VA05785 01173000
+         MH    R2,=H'20'      MULTIPLY BY 20                   @VA05785 01174000
+         SR    R12,R2         GET ADDRESS OF ENTRY             @VA05785 01175000
+         L     R1,12(0,12)    GET VALUE FROM REFTBL            @VA05785 01176000
+         LH    R5,PRVCNT      GET PRESENT PR COUNT             @VA05785 01177000
+         LH    R2,10(0,12)    GET LENGTH OF PR ENTRY           @VA05785 01178000
+         AR    R2,R1          ADD TO VALUE                     @VA05785 01179000
+         CLI   8(12),X'84'    IS THIS A CXD?                   @VA05785 01180000
+         BNE   XPRCNT         NO - PROCEED NORMALLY            @VA05785 01181000
+         LR    R1,5           YES - GET PRCNT AS VALUE         @VA05785 01182000
+XPRCNT   CLR   R2,R5          PRESENT PR VAL HIGHEST?          @VA05785 01183000
+         BNH   XPRDEF         NO - DON'T REPLACE               @VA05785 01184000
+         STH   R2,PRVCNT      NO, PUT NEW COUNT IN PRVCNT      @VA05785 01185000
+XPRDEF   BAL   R6,XENTDEF     GO DEFINE ENTRY                  @VA05785 01186000
+         LA    R5,PRVAL       IO INDEX FOR PR PRINT            @VA05785 01187000
+         L     R11,ADMSLIO    PRINT NAME, VAL + LENGTH         @VA05785 01188000
+         BALR  14,11          ...                              @VA05785 01189000
+         XC    0(8,R12),0(R12) CLEAR PR FROM TABLE             @VA05785 01190000
+         BCTR  R4,0           SUBTRACT 1                       @VA05785 01191000
+         BCT   R4,XPRSET2     BACK FOR ANOTHER ENTRY           @VA05785 01192000
+         BR    R15            RETURN TO CALLER                 @VA05785 01193000
+         EJECT 1                                                        01194000
+N03      L     3,RETREG                 SET TO RETURN TO CALLER         01195000
+N032     OI    FLAGS,CLOSELIB           SET TO CLOSE LIBRARIES          01196000
+         L     11,ALIBE                 GO TO LIBE ROUTINE              01197000
+         BALR  14,11                    ...                             01198000
+         LA    5,LDRFIN                 IO INDEX FOR LDR FINISH         01199000
+         L     R11,ADMSLIO    GET LINKAGE TO IO ROUTINE        @V305614 01200000
+         BALR  14,11                    GO FINISH                       01201000
+         TM    OSSFLAGS,DYLD  IS THIS A DYNAMIC LOAD                    01202000
+         BO    AROUND         YES,LEAVE TXTLIB DIRECTORIES IN STOR.     01203000
+         STM   R0,R15,APSV    SAVE REGISTERS                            01204000
+         L     R15,=V(DMSLGTA)     FREE THE TXTLIB DIRECTORY BLOCKS     01205000
+         BALR  R14,R15                                                  01206000
+         LM    R0,R15,APSV    RESTORE REGISTERS                         01207000
+AROUND   EQU   *                                                        01208000
+         LM    R9,R12,GPRSAV                                            01209000
+         LA    R0,NEED            RETURN FRRE STORAGE                   01210000
+         LR    1,13                                                     01211000
+         DMSFRET DWORDS=(0),LOC=(1),TYPCALL=BALR                        01212000
+         LR    1,6                                                      01213000
+         LR    14,3                                                     01214000
+         L     R15,LDRRTCD    GET RETURN CODE                     P0934 01215000
+         BCR   15,14                    RETURN                          01216000
+         SPACE 4                                                        01217000
+ERLDT1   LA    1,SPEC+16                SET POINTER TO NAME             01218000
+ERLDT    LA    R5,ERROR30     ERROR MSG 209E (NAME NOT FOUND)           01219000
+         MVC   OUTBUF(8),0(1)           MOVE NAME TO BUFF               01220000
+         BC    15,FATERR                                                01221000
+         EJECT                                                          01222000
+*********************************************************************** 01223000
+*                                                                       01224000
+*                     ROUTINE TO LOCATE REFTBL ENTRIES                  01225000
+*                     THRU ESID                                         01226000
+*                                                                       01227000
+*                       LH    3, WITH ESID, RH, OR PH                   01228000
+*                    VALUE BEFORE ENTERING ROUTINE                      01229000
+*                                                                       01230000
+*********************************************************************** 01231000
+*                                                                       01232000
+REFADR   L     12,TBLREF                                                01233000
+         SLL   3,1                      TIMES TWO                       01234000
+         LR    R5,R3          SAVE TABLE INDEX                          01235000
+         LH    3,ESIDTB(3)              GET INDEX OF ENTRY              01236000
+         N     R3,ESIDMASK    CLEAR OUT FLAG BITS                       01237000
+         MH    R3,=H'20'      MULTIPLY BY 20                            01238000
+         SR    12,3                     SIZE-(ESID X 16)                01239000
+         C     12,TBLREF                SEE IF ESD EXISTS               01240000
+         BCR   7,14                     YES - BACK TO CALLER            01241000
+         L    R7,LOCCT        ASSUME LOCATION                           01242000
+         LA   R7,7(0,R7)      ROUND TO DBL WD BOUNDARY                  01243000
+         N    R7,DBLBND                                                 01244000
+         ST   R7,LOCCT                                                  01245000
+         CLC   SPEC(4),ESD    ESD CARD ?                                01246000
+         BNE   4(0,R14)       NO, RETURN +4                             01247000
+         DMSFREE DWORDS=3,TYPCALL=BALR GET WAITING BLK                  01248000
+         LR    R7,R5          SET R7 TO ID TABLE INDEX                  01249000
+         LA    R2,MEMBOUND    POINT TO WAITING CHAIN                    01250000
+BACK     L     R3,0(R2)       1ST (NEXT) BLOCK                          01251000
+         LTR   R3,R3          EXIST                                     01252000
+         BZ    ENDCHAIN       NO, ADD NEW BLOCK                         01253000
+         LR    R2,R3          YES, LOOK FOR NEXT                        01254000
+         B     BACK                                                     01255000
+ENDCHAIN ST    R1,0(R2)       CHAIN NEW BLOCK                           01256000
+         MVC   4(16,R1),SPEC+16 SAVE ESD DATA ITEM FOR LD               01257000
+         XC    0(4,R1),0(R1)  ZERO LASR POINTER                         01258000
+         LA    R1,ESIDTB(R7)  GET TO ESIDTB FOR SD                      01259000
+         OI    0(R1),ESIDLATE INDICATE WAITING LD'S                     01260000
+         B     ESD00          PROCESS NEXT ESD DATA ITEM                01261000
+SDDEF    LH    R7,SPEC+14     ID OF SD                                  01262000
+         LA    R2,MEMBOUND    POINT TO WAITING CHAIN                    01263000
+LDLOOK   L     R3,0(R2)       R3 = NEXT (1ST) BLOCK                     01264000
+         LTR   R3,R3          EXIST                                     01265000
+         BZ    ESD00          NO, DO NEXT ESD DATA ITEM                 01266000
+         CH    R7,18(R3)      LD AND SD ID'S MATCH                      01267000
+         BE    LDFND          YES, THIS LD IS WAITING                   01268000
+         LR    R2,R3          UPDATE BASE PTR                           01269000
+         B     LDLOOK         LOOK AT NEXT BLOCK                        01270000
+LDFND    STM   R0,R15,PLISTSAV     PROTECT REGISTERS                    01271000
+         MVC   SPEC+16(16),4(R3)   RESTORE ESD DATA ITEM TO SPEC BUFFER 01272000
+         BAL   R10,LATESD     PROCESS LD ITEM                           01273000
+         LM    R0,R15,PLISTSAV     RESTORE REGISTERS                    01274000
+         L     R5,0(R3)       PTR TO NEXT BLOCK                         01275000
+         LR    R1,R3          SET FREE LOCATION                         01276000
+         DMSFRET DWORDS=3,LOC=(1),TYPCALL=BALR                          01277000
+         ST    R5,0(R2)       ELIMINATE FREED BLOCK FROM CHAIN          01278000
+         B    LDLOOK          LOOK FOR MORE WAITING BLOCKS              01279000
+         EJECT                                                          01280000
+*********************************************************************** 01281000
+*                                                                       01282000
+*                     ROUTINE TO SEARCH REFERENCE TABLE                 01283000
+*                     FOR A GIVEN NAME                                  01284000
+*                                                                       01285000
+*********************************************************************** 01286000
+*                                                                       01287000
+*                     CALLING SEQUENCE--                                01288000
+*                      L(LA)  2,NOT FOUND RETURN                        01289000
+*                      BAL    3,ENTRY FOUND RETURN                      01290000
+*      REG 12 = ADDR OF ENTRY IN REFTBL.REG 11=1,REG 1= NAME OF PROG    01291000
+*        REG. 3 = REFTBL NUMBER (E.G. 1,2,3,...)                        01292000
+*      THIS ROUTINE COMPARES EACH REFERENCE TABLE ENTRY                 01293000
+*      WITH THE GIVEN NAME,DETERMINING FIRST WHETHER THERE              01294000
+*            IS AN ENTRY FOR THAT NAME AND 2ND WHAT THE                 01295000
+*            STORAGE ADDRESS OF THAT ENTRY IS.                          01296000
+*                                                                       01297000
+*********************************************************************** 01298000
+*                                                                       01299000
+PRSERCH  LA    1,SPEC+16                ADDR OF NAME IN CARD            01300000
+PRSERCH1 LA    R15,X'80'                  PR MASK FOR CHKTYPE           01301000
+         B     SERCH2                   SKIP OVER SERCH INITIALIZATION  01302000
+SERCH    LA    1,SPEC+16                ADDR OF NAME IN CARD            01303000
+SERCH1   LA    R15,X'70'                  NON-PR MASK FOR CHKTYPE       01304000
+SERCH2   LH    0,TBLCT                  NO OF ENTRIES IN REFTBL         01305000
+         SR    4,4                                                      01306000
+         LA    R5,20          LDR TBL ENTRY SIZE                        01307000
+         L     12,TBLREF                LARGEST ADDR IN STORAGE+1       01308000
+         LA    R12,0(0,R12)   CLEAR COUNT BYTE                          01309000
+         STM   R6,R7,SAV67    SAVE 6 + 7                                01310000
+         LTR   0,0                                                      01311000
+         BC    8,NOT                                                    01312000
+         LM    6,7,0(1)                 LOAD WORD FOR SEARCH            01313000
+CMP      SR    12,5                                                     01314000
+         AH    R4,=H'1'       TO ACCUMULATE ENTRY POSITION              01315000
+         CL    7,4(0,12)                SECOND HALF OF ENTRY MATCH?     01316000
+         BNE   CMPEND                   NO - TRY ANOTHER                01317000
+         CL    6,0(0,12)                FIRST HALF OF ENTRY MATCH?      01318000
+         BE    CHKTYPE                  YES - CHECK FOR TYPE MATCH      01319000
+CMPEND   BCT   0,CMP                    BACK TO LOOK AGAIN              01320000
+NOT      SR    12,5                                                     01321000
+         AH    R4,=H'1'       ADD TO TOTAL ENTRIES                      01322000
+         SR    R0,R0          GET NUMBER OF PAGES OF LOADER-TABLES   JS 01323000
+         IC    R0,TBLREF      FROM LEFT-MOST BYTE OF "LDRTBL",       JS 01324000
+         MH    R0,=H'204'     X 204 (204 ENTRIES PER PAGE)              01325000
+         CR    4,0                                                      01326000
+         BC    10,ERREF                 REFERENCE TABLE OVERFLOW        01327000
+         STH   4,TBLCT                  NO. FO ENTRIES IN TBLREF        01328000
+         MVC   0(8,12),0(1)             PLACE NAME IN REFTBL            01329000
+         XC    8(12,12),8(12)           ZERO OTHER PART OF ENTRY        01330000
+         LM    R6,R7,SAV67    RESTORE 6 + 7                             01331000
+         BCR   15,2                                                     01332000
+ERREF    LA    5,ERRORR                 GO TO ERPRNT WITH COMMENT OF RE 01333000
+         BC    15,FATERR                                                01334000
+         SPACE                                                          01335000
+CHKTYPE  CLI   8(R12),X'83'   IS THIS A WEAK EXTRN                      01336000
+         BE    NMFND          YES, OMIT CHECK                           01337000
+         TM    8(R12),X'0D'   DON'T CHECK FOR COMMON BIT                01338000
+NMFND    EX    R15,TYPECHK    PR BC 8; NON-PR BC 7             @V1D1705 01339000
+         LM    R6,R7,SAV67    RESTORE REGS                     @V1D1705 01340000
+         BR    3                        BACK TO FOUND RETURN            01341000
+         SPACE                                                          01342000
+TYPECHK  BC    0,CMPEND                                                 01343000
+         EJECT                                                          01344000
+*********************************************************************** 01345000
+*                                                                       01346000
+*        ERROR ROUTINES                                                 01347000
+*                                                                       01348000
+*********************************************************************** 01349000
+DMSLDRD  EQU   *                                                        01350000
+FATERR   L     R11,ADMSLIO    GET LINKAGE TO IO ROUTINE        @V305614 01351000
+         BALR  14,11                    GO DO SOMETHING                 01352000
+         B     N03                      GO TO TERMINATE LOADING         01353000
+         SPACE                                                          01354000
+FATERR1  EQU   *                                                        01355000
+         LA    5,ERRORC       CORE SIZE EXCEEDED                        01356000
+         B     FATERR         GIVE UP                                   01357000
+         SPACE 2                                                        01358000
+DMSLDRC  EQU   *                                                        01359000
+BADCRD   LA    R14,RD         RETURN FROM LIO                  @VA01260 01360000
+         B     BADCRD3        GO SET ERROR CODE                @VA01260 01361000
+BADCRD2  LA    R14,NXTRLDCD   RETURN FROM LIO                  @VA01260 01362000
+BADCRD3  LA    R5,ERRORA      ERROR CODE FOR LIO               @VA01260 01363000
+         MVC   OUTBUF+15(80),SPEC       MOVE CRD IMJ TO BUFF            01364000
+         L     R11,ADMSLIO    GET LINKAGE TO IO ROUTINE        @V305614 01365000
+         BR    11                       GO PRINT INV CARD               01366000
+         EJECT                                                          01367000
+*********************************************************************** 01368000
+*                         CONSTANTS AREA                                01369000
+*********************************************************************** 01370000
+         SPACE 2                                                        01371000
+ALIBE    DC    V(DMSLIB)      LIBRARY SEARCH ROUTINE                    01372000
+AADDEF   DC    A(DMSLSBC)     LINKAGE DEFINITION ROUTINE                01373000
+APPNT    DC    A(DMSLSBB)     LINKAGE WAITING ROUTINE                   01374000
+HEXBB    DC    A(DMSLSBA)     HEX TO BINARY CONVERSION                  01375000
+         SPACE 1                                                        01376000
+SLC      DC    X'02'                    ***                             01377000
+         DC    C'SLC'                                                   01378000
+ICS      DC    X'02'                    ***                             01379000
+         DC    C'ICS'                                                   01380000
+ESD      DC    X'02'                    ***                             01381000
+         DC    C'ESD'                                                   01382000
+TXT      DC    X'02'                    ***                             01383000
+         DC    C'TXT'                                                   01384000
+REP      DC    X'02'                    ***                             01385000
+         DC    C'REP'                                                   01386000
+RLD      DC    X'02'                    ***                             01387000
+         DC    C'RLD'                                                   01388000
+END      DC    X'02'                    ***                             01389000
+         DC    C'END'                                                   01390000
+LDT      DC    X'02'                    ***                             01391000
+         DC    C'LDT'                                                   01392000
+         SPACE 1                                                        01393000
+         SPACE 1                                                        01394000
+OUTR     EQU   2                     TYPE OUT MSG BUFFER                01395000
+LDRSET   EQU   4                        IO INDEX                        01396000
+LDRFIN   EQU   6                        IO INDEX                        01397000
+PRDEF    EQU   8                        IO INDEX                        01398000
+CMDEF    EQU   12                       IO INDEX                        01399000
+PRVAL    EQU   16                       IO INDEX                        01400000
+CMVAL    EQU   20                       IO INDEX                        01401000
+ERRORU   EQU   28             203W - SLCNAME UNDEFINED                  01402000
+ERROR30  EQU   30             209E - ENTRY POINT NOT FOUND              01403000
+ERRORA   EQU   32                  - INVALID CARD TO LOAD MAP           01404000
+PROVER   EQU   38             168S - PR TABLE OVERFLOW                  01405000
+ERRORR   EQU   44             716S - LOADER TABLE OVERFLOW              01406000
+WRERR46  EQU   46             705S - WRITE ERROR                        01407000
+ERRORM   EQU   48             202W - DUPLICATE IDENTIFIER               01408000
+ERRORI   EQU   50             455E - ENTRY POINT NOT DEFINED            01409000
+ERRORS   EQU   52             201W - THE FOLLOWING NAMES ARE UNDEFINED  01410000
+ERRORB   EQU   54             - FILE CONTAINS INVALID RECORDS  @VA06291 01411000
+ESDOVER  EQU   56             169S - ESDID TBL OVERFLOW                 01412000
+CRDIMJ   EQU   60                  - CARD IMAGE TO LOAD MAP             01413000
+RDERR62  EQU   62             704S - READ ERROR                         01414000
+PRERR    EQU   70             206W - PR ALIGNMENT ERROR                 01415000
+CTLCRD   EQU   78                  - CONTROL CARD TO LOAD MAP           01416000
+ERRORC   EQU   82             709S - STORAGE EXCEEDED                   01417000
+         EJECT                                                          01418000
+         SPACE 1                                                        01419000
+RDISK    DC    CL8'RDBUF'               ROUTINE                         01420000
+         DS    8C                       FILE                            01421000
+         DC    CL8'TEXT'                TYPE                            01422000
+         DC    CL2' '                   MODE                            01423000
+         DC    H'0'                     ITEM NO.                        01424000
+         DS    4C                                                       01425000
+SETBYTE  DC    AL4(800)                 BUFF SIZE (10 CARDS             01426000
+         DS    2C                                                       01427000
+         DC    H'10'                    GET 10 80-BYTE ITEMS            01428000
+         DC    AL4(0)                                                   01429000
+FDISK    DC    CL8'FINIS'               ROUTINE                         01430000
+         DS    8C                       FIEL                            01431000
+         DC    CL8'TEXT'                TYPE                            01432000
+         DC    AL2(0)                                                   01433000
+WORKSET  DC    CL8'ERASE'                                               01434000
+         DC    CL8'DMSLDR'                                              01435000
+         DC    CL8'SYSUT1'                                              01436000
+         DC    CL2'A5'                                                  01437000
+         DC    H'0'                                                     01438000
+         DS    4X                                                       01439000
+         DC    AL4(80)                                                  01440000
+         DC    CL2'F'                                                   01441000
+         DC    H'1'                                                     01442000
+         DS    4X                                                       01443000
+         DC    AL2(0)                   MODE                            01444000
+         SPACE 1                                                        01445000
+         SPACE 2                                                        01446000
+         DS    0F                                                       01447000
+*        FORMAT OF ESIDTB ENTRY IS --                                   01448000
+*        BIT   0              DUPLICATE SD FLAG                         01449000
+*        BIT   1              SD-TYPE ESID FLAG                         01450000
+*        BIT   2              WAITING LD'S EXIST                        01451000
+*        BIT   3              UNUSED                                    01452000
+*        BIT   4-15           REFTBL ENTRY NUMBER (E.G. 1,2,3,...)      01453000
+ESIDMASK DC    X'00001FFF'    MASK OUT ESIDTB FLAGS                     01454000
+ESIDDUPF DC    X'00008000'    DUPLICATE SD FLAG                         01455000
+ESIDSDF  DC    X'0000',AL1(ESIDSDFB),X'00'   SD-TYPE ESID FLAG          01456000
+ESIDSDFB EQU   X'40'          SD-TYPE ESID BIT                          01457000
+ESIDLATE EQU   X'20'          WAITNG LABEL DEFINITIONS EXIST            01458000
+         SPACE                                                          01459000
+DBLBND   DC    X'00FFFFF8'              MASK FOR DBL WD ALIGN           01460000
+ALAST    DC    X'00010000'        END OF TRANSIENT AREA        @V305665 01461000
+ADTRANS  DC    X'0000E000'        START OF TRANSIENT AREA      @V305665 01462000
+         EJECT                                                          01463000
+         DROP  R8                                              @V305665 01464000
+         USING RELDR,0                  GET HALF-WORD DISP FROM RELDR   01465000
+         USING RELDR+4096,1                                    @VA02616 01466000
+         DS    0H                                                       01467000
+XTRATBL  EQU   *                                               @VA05785 01468000
+         DC    S(XBYTE)                                        @VA05785 01469000
+         DC    S(XHALF)                                        @VA05785 01470000
+         DC    S(XCOMSET)                                      @VA05785 01471000
+         DC    S(XFULL)                                        @VA05785 01472000
+         DC    S(XCXD)                                         @VA05785 01473000
+         DC    S(XUNDEF)                                       @VA05785 01474000
+         DC    S(XUNDEF)                                       @VA05785 01475000
+         DC    S(XDBL)                                         @VA05785 01476000
+ESDANAL  EQU   *                        FOR ESD ANALYSIS                01477000
+         DC    S(C3AA3)                                                 01478000
+         DC    S(ENTESD)                                                01479000
+         DC    S(C3AH1)                                                 01480000
+         DC    S(BADCRD)                                                01481000
+         DC    S(C3AA3)                 TREAT PC AS CSECT               01482000
+         DC    S(COMESD)                                                01483000
+         DC    S(PRVESD)                                                01484000
+         DC    S(BADCRD)                                                01485000
+         DROP  0,R1                                            @VA02616 01486000
+         USING DMSOLD,R8                                       @V305665 01487000
+         SPACE 1                                                        01488000
+         DS    0F                                                       01489000
+FAKECXD  DC    X'FF'                                                    01490000
+         DC    CL7'CXD'                                                 01491000
+BLANKS   EQU   FAKECXD+4                FIELD OF BLANKS                 01492000
+         SPACE 1                                                        01493000
+         SPACE 2                                                        01494000
+         LTORG                                                          01495000
+         SPACE                                                          01496000
+PRTRAN   DC    X'7C7D827E8180807F'                                      01497000
+         DC    X'000103070504020500000000000000000000000006'            01498000
+TRANPR   EQU   *-X'90'-1                                                01499000
+PCTYPE   EQU   X'04'              PRIVATE CODE INDICATOR       @VA04910 01500000
+WKEXT    EQU   X'03'          WEAK EXTERN INDICATOR                     01501000
+         EJECT                                                          01502000
+**********************************************************************  01503000
+*                                                                       01504000
+*                             CONTROL CARD PROCESSOR                    01505000
+*                                                                       01506000
+**********************************************************************  01507000
+         DS    F                                                        01508000
+CTLCRD1  EQU   *                                                        01509000
+         SPACE                                                          01510000
+         LA    1,SPEC         SET P-LIST FOR 'SCAN'                     01511000
+         STM   R2,R15,APSV+8  SAVE REGS                        @VA02089 01512000
+         LA    R0,80          SET COUNT TO 80 BYTES                     01513000
+         USING NUCON,R0                                                 01514000
+         MVC   PLISTSAV(256),CMNDLIST   SAVE SCAN WORK AREA             01515000
+         MVC   PLISTSAV+256(256),CMNDLIST+256                           01516000
+         L     R15,ASCANN     GET ADDRESS OF SCAN                       01517000
+         BALR  14,15          AND AWAY WE GO ...                        01518000
+         LM    R2,R15,APSV+8  RESTORE REGS                     @VA02089 01519000
+         CLC   0(8,1),=CL8'ENTRY'  IS IT ENTRY                          01520000
+         BE    CTLENT         YES                                       01521000
+         CLC   0(8,1),=CL8'LIBRARY'     IS IT LIBRARY                   01522000
+         BE    CTLLIB         YES                                       01523000
+    MVC  CMNDLIST(256),PLISTSAV   RESTORE PLIST                         01524000
+    MVC  CMNDLIST+256(256),PLISTSAV+256                                 01525000
+         TM    FLAG2,NOINV    DO WE PRINT ILLEGAL CARDS ?               01526000
+         BC    8,BADCRD       YES                                       01527000
+    B    RD   GET NEXT CARD                                             01528000
+         SPACE 2                                                        01529000
+CTLENT   EQU   *                                                        01530000
+         LA    R6,CTLRET      RETURN FROM TABLE SEARCHING               01531000
+         MVC   ENTNAME,8(R1)  SAVE ENTRY NAME                           01532000
+CTLENT1  EQU   *              COME HERE IF RESET WAS SPECIFIED          01533000
+         LA    1,ENTNAME      SET ADDRESS OF ENTRY NAME                 01534000
+         LA    2,ENTNO        SET 'NOT FOUND' ADDRESS                   01535000
+         BAL   3,SERCH1       SEARCH LOADER TABLES                      01536000
+CTLENT2  TM    FLAGS,RESET    RESET 'NAME' IN EFFECT              P3093 01537000
+         BCR   1,R6           YES, IGNORE ENTRY FUNCTION          P3093 01538000
+         ST    12,ENTADR      SAVE ADDRESS OF LOADER TABLE ENTRY        01539000
+         BR    R6             RETURN TO CALLER                          01540000
+ENTNO    EQU   *                                                        01541000
+         OI    8(12),X'80'    INDICATE ENTRY UNDEFINED                  01542000
+         OI    FLAGS,LUNDEF   NOTE THAT THERE ARE UNDEFINES             01543000
+         B     CTLENT2                                            P3093 01544000
+CTLRET   EQU   *                                                        01545000
+         LA    5,CTLCRD       SET I/O MESSAGE NUMBER                    01546000
+         MVC   OUTBUF+15(80),SPEC  CARD IMAGE                           01547000
+         L     R11,ADMSLIO    GET LINKAGE TO IO ROUTINE        @V305614 01548000
+         BALR  R14,R11        PRINT CONTROL CARD                        01549000
+CTRESTR  MVC   CMNDLIST(256),PLISTSAV   RESTORE SCAN WORK AREA          01550000
+         MVC   CMNDLIST+256(256),PLISTSAV+256                           01551000
+         B     RD             PROCESS NEXT CARD                         01552000
+         SPACE 2                                                        01553000
+CTLLIB   EQU   *                                                        01554000
+         CLI   8(1),C'*'      IS IT NON-OBLIGATOEY REFERENCE            01555000
+         BE    NONREF         YES                                       01556000
+         CLI   8(1),C'('      IS IT NON-OBLIGATORY REFERENCE            01557000
+         BNE   BADCRD         NO, CONDIDER IT INVALID                   01558000
+NONREF   EQU   *                                                        01559000
+         LA    11,1           SET A 1 INTO REG. 11                      01560000
+         LA    6,SPEC         SCAN FOR (                                01561000
+     LA   R5,SPEC+79     POINT TO END OF CARD                     P3072 01562000
+NONREF1  EQU   *                                                        01563000
+         AR    6,11           INCREMENT                                 01564000
+     CR   R6,R5     AT END OF CARD                                P3072 01565000
+     BH   BADCRD    YES, SOMETHING WRONG                          P3072 01566000
+         CLI   0(6),C'('      IS IT (                                   01567000
+         BNE   NONREF1        NO                                        01568000
+NONREF2  EQU   *                                                        01569000
+         MVC   OUTBUF,=CL8' ' SPACE TO FORM NAME                        01570000
+         LA    7,OUTBUF-1     INITIALIZE POINTER                        01571000
+NONREF3  LA    R5,SPEC+79     SET R5 TO END OF CARD               P3089 01572000
+         AR    6,11           INCREMENT                                 01573000
+     CR   R6,R5     AT END OF CARD                                P3072 01574000
+     BH   BADCRD    YES, SOMETHING WRONG                          P3072 01575000
+         AR    7,11           INCREMENT                                 01576000
+         CLI   0(6),C','      END OF NAME?                              01577000
+         BE    NONREFM        YES                                       01578000
+         CLI   0(6),C')'      END OF CONTROL CARD?                      01579000
+         BE    NONREFN        YES                                       01580000
+         MVC   0(1,7),0(6)    MOVE CHARACTER                            01581000
+         B     NONREF3        GET NEXT CHARACTER                        01582000
+         SPACE                                                          01583000
+NONREFM  EQU   *                                                        01584000
+         BAL   7,NONREFX      MARK ENTRY                                01585000
+         B     NONREF2        GET NEXT ENTRY                            01586000
+         SPACE                                                          01587000
+NONREFN  EQU   *                                                        01588000
+         BAL   7,NONREFX      MARK LAST ENTRY                           01589000
+         B     CTLRET         PRINT CONTROL CARD                        01590000
+         SPACE                                                          01591000
+NONREFX  EQU   *                                                        01592000
+         LA    1,OUTBUF       SET ADDR. OF ENTRY NAME                   01593000
+         LA    2,NONREFNT     SET 'NOT FOUND' RETURN                    01594000
+         BAL   3,SERCH1       SEARCH LOADER TABLE                       01595000
+         TM    8(12),X'80'    IS IT DEFINED ALREADY                     01596000
+         BZ    0(0,7)         YES, TOO LATE TO BOTHER                   01597000
+         TM    REFLG2(R12),REFCMD  DEFND BY CMD?               @VA01699 01598000
+         BCR   7,R7                OVERRIDE LIBE CARD          @VA01699 01599000
+         OI    REFLG1(R12),REFLIB  NOTE SKIP LIBE SEARCH       @VA01699 01600000
+         BCR   15,7           RETURN TO CALLER                          01601000
+NONREFNT EQU   *                                                        01602000
+         OI    REFLG1(R12),REFLIB+REFUND 'UNDEFINED' ALSO      @VA01699 01603000
+         BCR   15,7           BACK TO CALLER                            01604000
+         SPACE                                                          01605000
+         LTORG                                                          01606000
+*                                                                       01607000
+         EJECT                                                          01608000
+XPRTAB   DSECT                                                          01609000
+         SPACE                                                          01610000
+FULLAD   DS    64D                                                      01611000
+DBLAD    DS    32D                                                      01612000
+HALFAD   DS    16D                                                      01613000
+BYTEAD   DS    8D                                                       01614000
+COMMON   DS    1F                                                       01615000
+CXDAD    DS    1F                                                       01616000
+         EJECT                                                          01617000
+         LDRST                                                          01618000
+*                                                                       01619000
+*********************************************************************** 01620000
+*                                                                       01621000
+*      NUCLEUS CONSTANT AREA                                            01622000
+*                                                                       01623000
+*********************************************************************** 01624000
+*                                                                       01625000
+         NUCON                                                          01626000
+         SVCSAVE                                                        01627000
+         REGEQU                                                @V305665 01628000
+         END                                                            01629000

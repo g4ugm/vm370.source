@@ -1,0 +1,954 @@
+WRM      TITLE 'DMKWRM     (CP)        VM/370 - RELEASE 6'              00001000
+         ISEQ  73,80          VALIDATE SEQUENCING OF INPUT              00002000
+*.                                                                      00003000
+*                                                                       00004000
+* MODULE NAME -                                                         00005000
+*                                                                       00006000
+*        DMKWRM                                                         00007000
+*                                                                       00008000
+* FUNCTION -                                                            00009000
+*                                                                       00010000
+*        DMKWRM CALLED BY DMKCPINT TO RETRIEVE THE SYSTEM               00011000
+*        LOG MESSAGES, ACCOUNTING CARDS, SPOOL FILE BLOCKS              00012000
+*        AND SPOOLING ALLOCATION RECORDS FROM THE WARMSTART             00013000
+*        CYLINDER ON THE I.P.L. PACK.                                   00014000
+*                                                                       00015000
+* ATTRIBUTES -                                                          00016000
+*                                                                       00017000
+*        NON-REENTRANT, NON-RESIDENT, AND CALLED BY DMKCPINT            00018000
+*                                                                       00019000
+* ENTRY POINTS -                                                        00020000
+*                                                                       00021000
+*        DMKWRMST - WARM START                                          00022000
+*                                                                       00023000
+* ENTRY CONDITIONS -                                                    00024000
+*                                                                       00025000
+*        GPR2  = COLD, WARM AND/OR DRAIN START CODE (1,2 OR 4)          00026000
+*                ALSO CKPT AND FORCE (20 OR 40)                         00027000
+*        GPR8  = ADDRESS OF RDEVBLOK FOR WARMSTART DASD VOLUME          00028000
+*        GPR12 = BASE REGISTER                                          00029000
+*        GPR13 = ADDRESS OF STANDARD SAVEAREA                           00030000
+*                                                                       00031000
+* EXIT CONDITIONS -                                                     00032000
+*                                                                       00033000
+*        NORMAL -                                                       00034000
+*                                                                       00035000
+*              GPR2 = 0                                                 00036000
+*                                                                       00039000
+*        ERROR -                                                        00040000
+*                                                                       00041000
+*              GPR2 = 4 WARM START DATA INVALID; COLD START ASSUMED     00042000
+*                                                                       00044000
+*                                                                       00045000
+* CALLS TO OTHER ROUTINES -                                             00046000
+*                                                                       00047000
+*        DMKSCNRU - TO LOCATE THE RDEVBLOK FOR A SPOOLING DEVICE        00048000
+*        DMKFREE  - TO GET FREE STORAGE                                 00049000
+*        DMKPGTVG - TO GET VIRTUAL PAGE FOR A BUFFER.                   00050000
+*        DMKRPAGT - TO READ PAGE FROM DASD.                             00051000
+*        DMKPGTVR - TO RELEASE A VIRTUAL PAGE.                          00052000
+*        DMKERMSG - TO SEND ERROR MESSAGES TO THE OPERATOR.             00053000
+*        DMKRPAPT - TO WRITE A PAGE TO DASD.                            00054000
+*        DMKQCNWT - WRITE RESPONSE                                      00055000
+*        DMKCKSIN - INITIALIZE THE CHECKPOINT CYLINDER                  00056000
+*        DMKCKSWM - PERFORM THE DYNAMIC CHECKPOINT START                00057000
+*        DMKPTRAN - GET THE PAGE OF 3800 NAMED SYSTEMS                  00057500
+*                                                                       00058000
+         EJECT                                                          00059000
+* EXTERNAL REFERENCES -                                                 00060000
+*                                                                       00061000
+*        DMKRSPAC - ACCOUNTING CHAIN ANCHOR                             00062000
+*        DMKRSPHQ - SPOOL HOLD QUEUE CHAIN ANCHOR                       00063000
+*        DMKRSPRD - READER FILE CHAIN ANCHOR                            00064000
+*        DMKRSPPR - PRINTER FILE CHAIN ANCHOR                           00065000
+*        DMKRSPPU - PUNCH FILE CHAIN ANCHOR                             00066000
+*        DMKRSPID - SYSTEM SPOOLID COUNTER                              00067000
+*        DMKRSPDL - SYSTEM DELETE CHAIN ANCHOR                          00068000
+*        DMKRSPCV - TIME DAY CLOCK VALUE USED IN CHECKPOINT             00069000
+*        DMKQNTBL - ANCHOR FOR 3800 NAMED SYSTEMS                       00069500
+*                                                                       00070000
+* TABLES / WORKAREAS -                                                  00071000
+*                                                                       00072000
+*                                                                       00073000
+* REGISTER USAGE -                                                      00074000
+*                                                                       00075000
+*        GPRS 0,1 AND 2 = PARAMETER PASSING REGISTERS                   00076000
+*        GPRS 3,4,5,6 AND 7 = SCRATCH                                   00077000
+*        GPR9 = ADDRESS OF NEXT LOGICAL CHECKPOINT RECORD               00078000
+*                                                                       00079000
+*                                                                       00080000
+*              FLAG BYTE SAVEWRK1+3                                     00081000
+*                X'80' - ONE SPOOL FILE PROCESSED                       00082000
+*                X'40' - WARM START DATA PRESENT                        00083000
+*                X'01' - EE RCORD NEXT                                  00084000
+*                                                                       00085000
+* NOTES -                                                               00086000
+*                                                                       00087000
+*        NONE                                                           00088000
+*                                                                       00089000
+* OPERATION -                                                           00090000
+*                                                                       00091000
+*        1.  IF COLD START REQUESTED; GO TO STEP 12.                    00092000
+*            LOCATE THE WARMSTART AREA, STARTING AND ENDING CYLINDER    00093000
+*            ADDRESSES LOCATED AT DMKSYSWM. THE WARM START AREA MAY     00094000
+*            RANGE FROM 1 TO 9 CYLINDERS IN SIZE. READ THE FIRST DISK   00095000
+*            AND IF THE FIRST 8 BYTES ARE NOT X'FF'S; GIVE              00096000
+*            MESSAGE DMKWRM920I AND EXIT GIVING RETURN CODE             00097000
+*            EQUAL TO 4. (NO WARM START DATA; COLD START ASSUMED)       00098000
+*        2.  READ ACCOUNTING INFORMATION FROM WARMSTART CYLINDER        00099000
+*        3.  CHAIN ACCOUNTING CARDS TO DMKRSPAC                         00100000
+*        4.  READ SYSTEM LOG MESSAGES FROM WARMSTART CYLINDER           00101000
+*        5.  CHAIN LOG MESSAGES TO DMKSYSLG                             00102000
+*        6.  READ SPOOL FILE CONTROL BLOCKS FROM WARMSTART CYLINDER     00103000
+*        7.  CHAIN SPOOL FILE CONTROL BLOCKS TO DMKRSPRD,DMKRSPPR       00104000
+*            DMKRSPPU AND DMKRSPDL. MOVE THE SPOOLID COUNTER CONTAINED  00105000
+*            IN THE DELIMITER RECORD FOR SPOOL FILES TO DMKRSPID        00106000
+*            SAVE THE STATE OF ALL UNIT RECORD DEVICES AND FOR          00106150
+*            A 3800 PRINTER, RESTORE THE IMAGE LIBRARY AND              00106300
+*            CONTROL FILES FOR THE SEPARATOR PAGE AND UPDATE THE        00106450
+*            ACTIVITY COUNT FOR THE NAMED IMAGE LIBRARY IF THE          00106600
+*            3800 IS NOT DRAINED.                                       00106750
+*        8.  READ RECORD ALLOCATION BLOCKS FROM WARMSTART CYLINDER      00107000
+*        9.  CHAIN RECORD ALLOCATION BLOCK TO THE READ DEVICE BLOKS     00108000
+*            AND UPDATE CYLINDER ALLOCATION RECORD SET UP BY DMKCPI.    00109000
+*            IF SPOOL VOLUME NOT MOUNTED; GIVE MESSAGE                  00110000
+*            DMKWRM909W AND GO TO STEP 14.                              00111000
+*            IF TRYING TO ALLOCATE ON A NON-TEMPORARY CYLINDER;         00112000
+*            GIVE MESSAGE DMKWRM903W AND GO TO STEP 14.                 00113000
+*        10. READ SYSTEM HOLD QUEUE BLOKS FROM WARMSTART CYLINDER       00114000
+*        11. CHAIN SYSTEM HOLD QUEUE BLOCKS TO DMKRSPHQ.                00115000
+*        12. IF NO ERRORS; SET THE FIRST 8 BYTES TO BINARY ZEROES,      00116000
+*            AND MOVE IN 8 BYTE START TIME VALUE (STARTIME PSA) TO      00117000
+*            X'18' OF FIRST WARMSTART CYLINDER RECORD,                  00118000
+*            AND EXIT TO DMKCPI. IF I/O ERRORS; GIVE ERROR MESSAGE      00119000
+*            DMKWRM902W AND GO TO STEP 14.                              00120000
+*        13. IF HASH AND RECORD COUNT IN WARMSTART RECORDS ARE          00121000
+*            INCORRECT; GIVE MESSAGE DMKWRM904W                         00122000
+*        14. ENTER DISABLE WAIT STATE. (WAIT STATE CODE 009)            00123000
+*                                                                       00124000
+*                                                                       00125000
+* RESPONSE -                                                            00126000
+*                                                                       00127000
+*        DMKWRM920I NO WARM START DATA; CKPT START FOR RETRY            00128000
+*                                                                       00129000
+*                                                                       00130000
+* ERROR MESSAGES -                                                      00131000
+*                                                                       00132000
+*        DMKWRM921W SYSTEM RECOVERY FAILURE; UNRECOVERABLE I/O ERROR    00133000
+*        DMKWRM903W SYSTEM RECOVERY FAILURE; VOLID "VOLID" ALLOCATION   00134000
+*                   ERROR CYLINDER "CYLINDER"                           00135000
+*        DMKWRM904W SYSTEM RECOVERY FAILURE; INVALID WARM START DATA    00136000
+*        DMKWRM912W SYSTEM RECOVERY FAILURE; VOLID 'VOLID' NOT MOUNTED  00137000
+*                                                                       00138000
+*        DISABLE WAIT START CODE 009                                    00139000
+*                                                                       00140000
+*                                                                       00141000
+*                                                                       00142000
+*.                                                                      00143000
+         EJECT                                                          00144000
+         COPY  OPTIONS                                                  00145000
+         COPY  LOCAL               OPTIONS                              00146000
+         SPACE 3                                                        00147000
+         SPACE                                                          00148000
+         EJECT                                                          00149000
+DMKWRM   CSECT                                                          00150000
+         SPACE 3                                                        00151000
+         EXTRN DMKSYSOW,DMKSYSWM                                        00152000
+         EXTRN DMKRSPAC,DMKSYSLG,DMKRSPDL,DMKRSPPU,DMKRSPRD             00153000
+         EXTRN DMKCKSIN,DMKCKSWM,DMKCKSPL                      @V304298 00154000
+         EXTRN DMKERMSG,DMKPGTVR                                        00155000
+         EXTRN DMKSCNRU,DMKRSPID,DMKRSPPR                               00156000
+         EXTRN DMKRSPHQ,DMKSYSDT                                        00157000
+         EXTRN DMKRPAGT,DMKRPAPT,DMKPGTVG                               00158000
+         EXTRN DMKRSPCV                                                 00159000
+         EXTRN DMKCVTBD                                        @V2A2029 00160000
+         EXTRN DMKQNTBL            3800 IMAGE LIBRARY ANCHOR   @V60B9BA 00160500
+         SPACE 3                                                        00161000
+         USING PSA,R0                                                   00162000
+         USING RDEVBLOK,R8                                              00163000
+         USING SAVEAREA,R13                                             00164000
+         USING *,R12                                                    00165000
+         SPACE                                                          00166000
+ID       DC    CL8'DMKWRM'         MODULE NAME                          00167000
+         SPACE 3                                                        00168000
+DMKWRMST RELOC                                                          00169000
+         XC    SAVEWRK1(4),SAVEWRK1 CLEAR WORK AREA                     00170000
+         STC   R2,SAVEWRK1         SAVE START TYPE CODE                 00171000
+*                                                                       00172000
+*              X'01' = COLD START OR CLEAR WARMSTART CYL RECORD 1       00173000
+*              X'02' = WARM START REQUESTED                             00174000
+*              X'04' = DRAIN OPTION SPECIFIED                           00175000
+         SPACE                                                          00176000
+         MVI   WRECSIZE+1,X'50'    SET LOGICAL RECORD SIZE TO 80        00177000
+         MVI   WRMP,X'01'          RESET PAGE NUMBER                    00178000
+         L     R1,=A(DMKSYSWM)     GET POINTER TO WARM START CYLINDER   00179000
+         MVC   WARMCYL(2),0(R1)    AND SAVE IN SEEK ADDRESS FIELD       00180000
+         MVC   WRMCC(2),0(R1)      MOVE CYLINDER TO WORK AREA           00181000
+         LH    R1,SYSIPLDV         ADDRESS OF IPL DEVICE                00182000
+         CALL  DMKSCNRU            LOCATE RDEVBLOK                      00183000
+         MVI   PAGECYL,24     24 PAGES/CYL 2305 AND 3340       @V2A2029 00184000
+         TM    RDEVTYPE,TYP2305+TYP3340 IS IT 2305 OR 3340 ?   @V2A2029 00185000
+         BNZ   MVCTYPE        YES - BRANCH                     @V2A2029 00186000
+         MVI   PAGECYL,57     57 PAGES/CYL 3330                @V2A2029 00187000
+         TM    RDEVTYPE,TYP3330 IS IT A 3330 ?                 @V2A2029 00188000
+         BO    MVCTYPE        YES -                            @V2A2029 00189000
+         MVI   PAGECYL,120    120 PAGES/CYL 3350               @V304498 00190000
+         TM    RDEVTYPE,TYP3350 IS DEVICE A 3350 ?             @V304498 00191000
+         BO    MVCTYPE        YES -                            @V304498 00192000
+         MVI   PAGECYL,32     32 PAGES/CYL 2314/2319           @V2A2029 00193000
+MVCTYPE  MVC   TYPE(1),RDEVTYPE GET DEVICE TYPE                @V2A2029 00194000
+         MVC   WRMD(1),RDEVCODE+1  MOVE IN DEVICE CODE                  00195000
+         SPACE                                                          00196000
+         CALL  DMKPGTVG            GET VIRTUAL ADDRESS                  00197000
+         ST    R1,VPAGE            SAVE ADDRESS                         00198000
+         TRANS 2,1,OPT=(BRING,DEFER,LOCK,SYSTEM)                        00199000
+         SPACE                                                          00200000
+         ST    R2,BUFFER           SAVE REAL ADDRESS OF BUFFER          00201000
+         LA    R2,4                INDICATE COLD START (RETURN CODE)    00202000
+         TM    SAVEWRK1,X'01'      COLD START ??                        00203000
+         BO    SETCPID        YES, CLEAR WRM CYL AND RETURN    @VA05227 00204100
+         TM    SAVEWRK1,CKPT+FORCE CKPT OR FORCE SPECIFIED?    @V304298 00205000
+         BNZ   SETCPID        XFER IF SO                       @VA05227 00206100
+         BAL   R10,GETDISK         GO READ FIRST DISK RECORD            00207000
+         SPACE 2                                                        00208000
+*                                                                       00209000
+*        UPON RETURN FROM GETDISK, R9 WILL POINT TO THE NEXT            00210000
+*        LOGICAL RECORD                                                 00211000
+*                                                                       00212000
+*********************************                                       00213000
+*                                                                       00214000
+*        FIRST DELIMITER RECORD                                         00215000
+*                                                                       00216000
+*********************************                                       00217000
+         SPACE                                                          00218000
+*                                                                       00219000
+*        +--------+--------+--------+--------+--------+--------+        00220000
+*        | 4X'FF' | 4X'FF' |  HASH  | REC NO | 4X'FF' | FFS....|        00221000
+*        +--------+--------+--------+--------+--------+--------+        00222000
+*                                                                       00223000
+         CLC   0(8,R9),FFS         IS THE FIRST RECORD A DELIMITER ??   00224000
+         BNE   MSG920I             NO - NO WARM START DATA - COLD START 00225000
+*                             ASSUMED                                   00226000
+         EJECT                                                          00227000
+*                                                                       00228000
+*        GET LINE ADDRESSES TO BE ENABLED                               00229000
+*                                                                       00230000
+         SPACE                                                          00231000
+ENABLERT BAL   R10,GETDISK    GET NEXT RECORD OF LINE ADDRESSES@V200829 00232000
+         CLC   0(8,R9),FFS    IS IT DELIMITER FOR LINE         @V200829 00233000
+*                             ADDRESS RECORD                            00234000
+         BE    ACNTRT         YES -- PROCESS ACCOUNTING CARDS  @V200829 00235000
+         CLC   =C'WRM ',CPID  RESTART CONDITION                @V200829 00236000
+         BNE   ENABLERT       NO -- SKIP ENABLE RECORDS        @V200829 00237000
+         LA    R5,40          NUMBER OF LINE ADDRESSES PER     @V200829 00238000
+*                             RECORD                                    00239000
+ENABLOOP LH    R1,0(R9)       GET LINE DEVICE ADDRESS          @V200829 00240000
+         LTR   R1,R1          VALID ADDRESS                    @V200829 00241000
+         BM    ENABLERT       NO -- GET NEXT RECORD            @V200829 00242000
+         CALL  DMKSCNRU       LOCATE RDEVBLOK                  @V200829 00243000
+         BNZ   ENABCNT        NOT FOUND - TRY NEXT ADDRSS      @V200829 00244000
+         TM    RDEVSTAT,RDEVDISA LINE OFFLINE                  @V200829 00245000
+         BO    ENABCNT        YES -- DO NOT ENABLE             @V200829 00246000
+         TM    RDEVTYPC,CLASSPEC SPECIAL CLASS                 @V200829 00247000
+         BO    EN3705         YES --                           @V200829 00248000
+         OI    RDEVFLAG,RDEVENAB FORCE DMKCPVAE TO ENABLE      @V200829 00249000
+         TM    RDEVTYPC,CLASTERM IS THIS A TERMINAL CLASS      @V2D3931 00250000
+         BZ    ENABCNT        NO, CONTINUE                     @V2D3931 00251000
+         OI    RDEVFLAG,RDEVENAB DMKCPVAE & DMKNETAE TO ENABLE @V2D3931 00252000
+         TM    RDEVTYPE,TYPBSC IS THIS A BISYNC LINE ?         @V2D3931 00253000
+         BO    ENR3270        YES, ENABLE STATIONS ON THE LINE @V2D3931 00254000
+ENABCNT  LA    R9,2(R9)       POINT TO NEXT LINE ADDRESS       @V200829 00255000
+         BCT   R5,ENABLOOP    PROCESS NEXT ADDRESS             @V200829 00256000
+         B     ENABLERT       READ NEXT RECORD                 @V200829 00257000
+         SPACE                                                          00258000
+EN3705   CLI   RDEVTYPE,TYP3705 3705 OR 3704                   @V200829 00259000
+         BNE   ENABCNT        NO -- GET NEXT ADDRESS           @V200829 00260000
+*                                                                       00261000
+*        RECORD FORMAT FOR 3705 TYPE DEVICE                             00262000
+*        REAL DEVICE ADDDRESS = 2 BYTES                                 00263000
+*        NUMBER OF NICBLOKS   = 2 BYTES                                 00264000
+*        NCP LOAD NAME        = 8 BYTES                                 00265000
+*        BIT MAP              = 1 BIT FOR EACH NICBLOK                  00266000
+*                               8 NICBLOKS EACH BYTE                    00267000
+*                               4096 NICBLOKS MAX.                      00268000
+*                                                                       00269000
+*        RECORD FORMAT FOR CKPBLOK                                      00270000
+*        CKPBLOK LENGTH       = 2 BYTES (DOUBLE WORDS)                  00271000
+*        NUMBER OF NICBLOKS   = 2 BYTES                                 00272000
+*        SPARE                = 4 BYTES                                 00273000
+*        NCP LOAD NAME        = 8 BYTES                                 00274000
+*        BIT MAP              = 1 BIT FOR EACH NICBLOK                  00275000
+*                               8 NICBLOKS EACH BYTE                    00276000
+*                               4096 NICBLOKS MAX.                      00277000
+*                                                                       00278000
+         BAL   R4,GET2        UPDATE BUFFER ADDRESS BY TWO     @V200829 00279000
+         LH    R4,0(R9)       GET NUMBER OF NICBLOKS           @V200829 00280000
+         LA    R6,7(R4)       ROUND TO NEXT BYTE               @V200829 00281000
+         SRL   R6,3           NUMBER OF BYTES FOR BIT MASK     @V200829 00282000
+         LA    R7,23(R6)      ADD HEADER COUNT AND ROUND       @V200829 00283000
+         SRL   R7,3           LENGTH OF CKPBLOK IN DOUBLE WORDS@V200829 00284000
+         LR    R0,R7          GET STORAGE FOR CKPBLOK          @V200829 00285000
+         CALL  DMKFREE        ..                               @V200829 00286000
+         ST    R1,RDEVCKPT    SAVE ADDRESS OF CKPBLOK          @V200829 00287000
+         LR    R3,R1          ..                               @V200829 00288000
+         USING CKPBLOK,R3                                      @V200829 00289000
+         LR    R0,R1          SET UP TO CLEAR CKPBLOK          @V200829 00290000
+         LR    R1,R7          ..                               @V200829 00291000
+         SLL   R1,3           LENGTH OF CKPBLOK (BYTES)        @V200829 00292000
+         SLR   R14,R14        ..                               @V200829 00293000
+         SLR   R15,R15        ..                               @V200829 00294000
+         MVCL  R0,R14         CLEAR CKPBLOK                    @V200829 00295000
+         LA    R6,9(R6)       MAP COUNT PLUS NAME COUNT        @V200829 00296000
+         SRL   R6,1           NUMBER OF PAIRS TO MOVE          @V200829 00297000
+         STH   R7,CKPSIZE     SAVE SIZE OF CKPBLOK             @V200829 00299000
+         STH   R4,CKPRMAX     NUMBER OF RESOURCES CHECKPOINTED @V200829 00300000
+         LA    R3,8(,R3)      POINT TO NAME FIELD IN CKPBLOK   @V200829 00301000
+CKPLP    BAL   R4,GET2        UPDATE BUFFER ADDRESS BY TWO     @V200829 00302000
+         MVC   0(2,R3),0(R9)  MOVE NAME AND MASK BYTES         @V200829 00303000
+         LA    R3,2(R3)       UPDATE CKPBLOK ADDRESS BY 2      @V200829 00304000
+         BCT   R6,CKPLP       BRANCH IF NOT LAST BYTE          @V200829 00305000
+         L     R3,RDEVCKPT    RESTORE ADDRESS OF CKPBLOK       @V200829 00306000
+         TM    RDEVFLAG,RDEVAUTO AUTOLOAD GENERATED ?          @VA06451 00306100
+         BNO   NOTAUTO        NO , DON'T PERFORM IT            @VA06451 00306200
+         MVC   RDEVNCP(8),CKPNAME  MOVE NCPNAME TO RDEVBLOK    @V200820 00307000
+NOTAUTO  LA    R4,ENABLOOP    PROCESS NEXT DEVICE              @VA06451 00309100
+         SPACE                                                          00310000
+GET2     LA    R9,2(R9)       UPDATE BUFFER ADDRESS BY TWO     @V200829 00311000
+         BCT   R5,GETRET      BUFFER BYTE COUNT -1             @V200829 00312000
+         BAL   R10,GETDISK    GET NEXT WARMSTART BUFFER        @V200829 00313000
+         LA    R5,40          NUMBER OF PAIRS PER BUFFER       @V200829 00314000
+GETRET   BR    R4             RETURN TO CALLER                 @V200829 00315000
+         SPACE 1                                                        00316000
+         USING NICBLOK,R9     SET UP ADDRESSABILITY FOR NICBLOK@V2D3931 00317000
+ENR3270  EQU   *              HANDLE RESOURCES ON BISYNC LINE  @V2D3931 00318000
+         BAL   R4,GET2        GET POINTER TO NEXT LOCATION     @V2D3931 00319000
+         XC    SAVEWRK3(6*4),SAVEWRK3 CLEAR WORK AREA          @V2D3931 00320000
+         LH    R7,0(R9)       GET NUMBER OF NICBLOKS           @V2D3931 00321000
+         LA    R6,15(,R7)     ROUND TO FULL BYTE AND HALF WORD @VA04088 00322000
+         SRL   R6,4           NUMBER OF HALF WORDS IN MASK     @VA04088 00323000
+         STH   R6,SAVEWRK3    SAVE NUMBER OF HALF WORDS (MASK) @VA04088 00324000
+         LA    R6,4           GET LOOP COUNT                   @V2D3931 00326000
+         LA    R3,RDEVNCP     GET ADDRESS OF POLLDLAY INTERVAL @V2D3931 00327000
+         BAL   R4,GET2        UPDATE BUFFER ADDRESS BY TWO              00328000
+CKPPA    EQU   *              BYPASS NO. OF NICBLOKS & DATA    @V2D3931 00329000
+         MVC   0(2,R3),0(R9)  GET THE POLLDLAY INTERVAL        @VM01087 00330000
+         BAL   R4,GET2        UPDATE BUFFER ADDRESS BY TWO     @VM01087 00331000
+         LA    R3,2(R3)       GET NEXT TO BYTES                @V2D3931 00332000
+         BCT   R6,CKPPA       GO UPDATE BUFFER ADDRESS         @V2D3931 00333000
+         SR    R3,R3          CLEAR REGISTER 3                 @V2D3931 00334000
+         ST    R3,RDEVNCP     CLEAR TIMER REQUEST BLOCK ADDRESS@V2D3931 00335000
+         LH    R6,RDEVMAX     GET MAXIMUN NUMBER OF NICBLOKS   @V2D3931 00336000
+         LA    R6,1(R6)       UPDATE COUNT BY ONE              @V2D3931 00337000
+         CR    R6,R7          IS ORIGINAL LOWER THAN CHKPT NO. @V2D3931 00338000
+         BNL   *+6            NO, BYPASS CHANGING COUNT        @V2D3931 00339000
+         LR    R7,R6          GET THE SMALLEST COUNT           @V2D3931 00340000
+         MH    R7,=AL2(NICSIZE*8) GET THE ENDING NICBLOK       @V2D3931 00341000
+         A     R7,RDEVNICL    ADDRESS ....                     @V2D3931 00342000
+         LA    R6,NICSIZE*8   GET SIZE OF NICBLOK              @V2D3931 00343000
+         STM   R5,R9,SAVEWRK4 SAVE REGISTERS                   @V2D3931 00344000
+         LR    R10,R9                                          @V2D3931 00345000
+         L     R9,RDEVNICL    GET THE FIRST NICBLOK ADDRESS    @V2D3931 00346000
+         LA    R3,1(0,0)      SET UP THE INDEX VALUE           @V2D3931 00347000
+         LR    R4,R3          ....                             @V2D3931 00348000
+         LA    R5,8           8 BITS PER BYTE                  @VA04088 00349500
+CHECKEM  EQU   *                                               @V2D3931 00350000
+         L     R1,F256                                         @V2D3931 00351000
+         SRL   R1,0(R3)       SET UP TO TEST FOR ENABLE FLAG   @V2D3931 00352000
+         EX    R1,TESTBIT     TEST ENABLE FLAG IN BIT MAP      @V2D3931 00353000
+         BZ    CHECKNX        NO, GET NEXT NICBLOK ADDRESS     @V2D3931 00354000
+         TM    NICTYPE,NICLGRP IS THIS A CONTROL UNIT NICBLOK  @V2D3931 00355000
+         BZ    CHECKDV        NO, TEST FOR GRAPHIC OR PRINTER  @V2D3931 00356000
+         NI    NICSTAT,X'FF'-NICDISA CLEAR THE OFFLINE FLAG    @V2D3931 00357000
+         B     CHECKNX        GO GET NEXT NICBLOK              @V2D3931 00358000
+CHECKDV  EQU   *              HANDLE REMOTE DISPLAY & PRINTER  @V2D3931 00359000
+         TM    NICTYPE,NICTERM IS THIS A DISPLAY OR PRINTER    @V2D3931 00360000
+         BZ    CHECKNX        NO, GET NEXT NICBLOK             @V2D3931 00361000
+         OI    NICFLAG,NICENAB SET ENABLE FLAG IN NICBLOK      @V2D3931 00362000
+         NI    NICSTAT,X'FF'-NICDISA CLEAR OFFLINE FLAG        @V2D3931 00363000
+CHECKNX  EQU   *              PROCESS NEXT NICBLOK             @V2D3931 00364000
+         BXLE  R3,R4,CHECKNC  GET NEXT BIT IN BIT MAP          @VA04088 00365500
+         CL    R10,SAVEWRK8   FIRST BYTE OF THE TWO ?          @VA04088 00366000
+         BNE   NXTPAIR        NO, GET NEXT PAIR                @VA04088 00366500
+         LA    R10,1(,R10)    UPDATE MASK ADDRESS TO ODD BYTE  @VA04088 00367000
+         B     CHCKINIT       AND SET COUNTERS                 @VA04088 00367500
+NXTPAIR  ST    R9,SAVEWRK2    SAVE ADDRESS OF CURRENT NICBLOK  @VA04088 00368000
+         LM    R5,R9,SAVEWRK4 RESTORE REGISTERS                @VA04088 00368500
+         BAL   R4,GET2        UPDATE BUFFER ADDRESS            @VA04088 00369000
+         LH    R4,SAVEWRK3    GET NUMBER OF MASK HALF WORDS    @VA04088 00369500
+         BCTR  R4,0           REDUCE BY ONE                    @VA04088 00370000
+         STH   R4,SAVEWRK3    AND SAVE                         @VA04088 00370500
+         STM   R5,R9,SAVEWRK4 SAVE REGISTERS                   @VA04088 00371000
+         LR    R10,R9         GET CURRENT MASK ADDRESS         @VA04088 00371500
+         L     R9,SAVEWRK2    RESTORE CURRENT NICBLOK ADDRESS  @VA04088 00372000
+CHCKINIT LA    R4,1           SET BXLE REGISTERS               @VA04088 00372500
+         LR    R3,R4          ...                              @VA04088 00373000
+         LA    R5,8           LOOP VALUE - 8 BITS PER BYTE     @VA04088 00373500
+CHECKNC  EQU   *              PROCESS  NEXT NICBLOK POINTER    @VA04088 00374000
+         BXLE  R9,R6,CHECKEM  GET NEXT NICBLOK POINTER         @VA04088 00374500
+         LM    R5,R9,SAVEWRK4 RESTORE REGISTERS                @VA04088 00375000
+         LH    R6,SAVEWRK3    GET NUMBER OF HALF WORDS LEFT    @VA04088 00375500
+         LTR   R6,R6          ANY LEFT ?                       @VA04088 00376000
+         BNP   ENABLOOP       NO, PROCESS NEXT DEVICE          @VA04088 00376500
+NEXTSP   EQU   *                                               @VA04088 00377000
+         BAL   R4,GET2        UPDATE THE BUFFER ADDRESS        @VA04088 00377500
+         BCT   R6,NEXTSP      BYPASS BIT MAP                   @VA04088 00378000
+         B     ENABLOOP       PROCESS NEXT DEVICE              @VA04088 00378500
+TESTBIT  TM    0(R10),*-*     TEST BIT MAP                     @V2D3931 00394000
+         SPACE                                                          00395000
+         EJECT                                                          00396000
+*********************************                                       00397000
+*                                                                       00398000
+*        READ ACCOUNTING CARDS                                          00399000
+*                                                                       00400000
+*********************************                                       00401000
+         SPACE                                                          00402000
+ACNTRT   L     R5,=A(DMKRSPAC)     POINT TO ACCOUNT CARD CHAIN ANCHOR   00403000
+         LR    R6,R5                                                    00404000
+         S     R5,F8               ADJUST ADDRESS FOR FORWARD POINTER   00405000
+GETACNT  BAL   R10,GETDISK         GET NEXT ACCOUNT CARD RECORD         00406000
+         OI    SAVEWRK1+3,X'40' INDICATE WARMSTART DATA PRESENT@V2A2029 00407000
+         CLC   0(8,R9),FFS         IS IT DELIMITER FOR ACNT BLOKS       00408000
+         BE    WARMLOG             YES -- GO RETRIEVE LOGMSG            00409000
+         SPACE                                                          00410000
+         LA    R0,ACNTSIZE         SIZE OF ACNTBLOK                     00411000
+         CALL  DMKFREE             GET CORE FOR AN ACNTBLOK             00412000
+         USING ACNTBLOK,R1         TEMPORARY ADDRESSABILITY             00413000
+         ST    R1,8(,R5)           CHAIN THE BUFFER TO PREVIOUS BUFFERS 00414000
+         XC    ACNTBLOK(ACNTSIZE*8),ACNTBLOK CLEAR ACNTBLOK             00415000
+         MVI   8(R5),8             SET TIC OPCODE IN CHAIN              00416000
+         MVC   ACNTDATA,0(R9)      MOVE ACCOUNT CARD DATA TO ACNTBLOK   00417000
+         LM    R3,R4,PUNCHCCW      GET MODEL PUNCH CCW                  00418000
+         AR    R3,R1               ADJUST DATA ADDRESS IN CCW           00419000
+         STM   R3,R4,ACNTCCW       AND STORE IN ACNTBLOK                00420000
+         LR    R2,R1               SET NEW BACKCHAIN POINTER            00421000
+         SR    R3,R3               CLEAR FORWARD POINTER                00422000
+         ST    R3,ACNTNEXT         IN CURRENT BUFFER                    00423000
+         LR    R5,R1               SAVE ADDRESS OF CURRENT ACNTBLOK     00424000
+         MVI   0(R6),0             CLEAR HIGH ORDER BYTE IN  POINTER    00425000
+         B     GETACNT             AND GO GET NEXT RECORD               00426000
+         EJECT                                                          00427000
+         SPACE 3                                                        00428000
+*********************************                                       00429000
+*                                                                       00430000
+*        READ LOG MESSAGES                                              00431000
+*                                                                       00432000
+*********************************                                       00433000
+         SPACE                                                          00434000
+WARMLOG  EQU   *  HERE TO RESTORE LOGMESSAGES                           00435000
+         L     R5,=A(DMKSYSLG)     GET POINTER TO LOGMSG ANCHOR         00436000
+GETLOG   BAL   R10,GETDISK         GET NEXT LOGMSG RECORD               00437000
+         CLC   0(8,R9),FFS         IS IT DELIMITER FOR THE LOGMSG ?     00438000
+         BE    LOGEND              YES - GO RETRIEVE DATE,TIME AND DAY  00439000
+         SPACE                                                          00440000
+         LA    R0,11               SIZE OF LOGMSG BUFFER                00441000
+         CALL  DMKFREE             GET CORE FOR THE LOGMSG BUFFER       00442000
+         ST    R1,0(,R5)           CHAIN THE NEW BUFFER TO THE          00443000
+*                                  PREVIOUS ONE                         00444000
+         MVC   4(80,R1),0(R9)      MOVE LOGMSG DATA TO BUFFER           00445000
+         LR    R5,R1               SAVE POINTER TO NEW BUFFER           00446000
+         SR    R1,R1               CLEAR FORWARD POINTER                00447000
+         ST    R1,0(,R5)           FROM NEW BUFFER                      00448000
+         B     GETLOG              AND GO GET NEXT MESSAGE SEGMENT      00449000
+         SPACE                                                          00450000
+LOGEND   EQU   * HERE TO RETRIEVE DATE, TIME AND DAY                    00451000
+         L     R15,=A(DMKSYSDT)    ADDRESS OF DATA                      00452000
+         MVC   0(28,R15),16(R9)    DATA IS IN DELIMITER RECORD          00453000
+         EJECT                                                          00454000
+*********************************                                       00455000
+*                                                                       00456000
+*        READ SPOOL FILE BLOCKS                                         00457000
+*                                                                       00458000
+*********************************                                       00459000
+         SPACE                                                          00460000
+WARMSPL  EQU   *              HERE TO PROCESS SPOOL FILES      @V2A2029 00461000
+         LA    R5,ANCHRTBL         INITIALIZE SPOOL ANCHOR TABLE INDEX  00462000
+         L     R6,0(R5)            GET ADDRESS OF PRINTER CHAIN ANCHOR  00463000
+GETSPOOL BAL   R10,GETDISK         GET NEXT LOGICAL RECORD              00464000
+         MVI   WRECSIZE+1,SFBSIZE*8 SET NEW LOGICAL RECORD LENGTH       00465000
+         CLC   0(8,R9),FFS         IS IT A DELIMITER ??                 00466000
+         BNE   NEXTBLOK            NO -- GO CHAIN SFBLOK                00467000
+         LA    R5,4(,R5)           POINT TO NEXT CHAIN ANCHOR ADDRESS   00468000
+         L     R6,0(,R5)           GET ADDRESS OF ANCHOR                00469000
+         LTR   R6,R6               END OF LIST ??                       00470000
+         BNZ   GETSPOOL            NO -- CONTINUAL                      00471000
+         L     R15,=A(DMKRSPID)    ADDRESS OF SYSTEM SPOOL ID COUNTER   00472000
+         LH    R14,16(R9)          GET SPOOL ID COUNTER                 00473000
+         TM    SAVEWRK1+3,X'80'    ANY SPOOL FILES PRESENT ??           00474000
+         BO    STOREID             YES -- STORE SPOOL ID                00475000
+         CH    R14,=H'1000'        SPOOL ID OVER 1000 ??                00476000
+         BNL   WARMRECA            YES -- DEFAULT TO 0001               00477000
+STOREID  CLC   SPOOLID(2),=H'1999' SPOOLID < 2000 ?            @VM01054 00478000
+         BH    WARMRECA       N0, --DEFAULT TO 0001            @VM01054 00479000
+         STH   R14,0(R15)          STORE SPOOLID IN DMKRSPID            00480000
+         B     WARMRECA            END OF LIST--DO ALLOCATION RECORDS   00481000
+         SPACE 2                                                        00482000
+         USING SFBLOK,R9           ADDRESSABILITY FOR SFBLOK            00483000
+NEXTBLOK L     R3,SFBRECS          GET DEVICE CLASSES                   00484000
+         LTR   R3,R3               IS THERE ANY ??                      00485000
+         BNZ   ACTSFB1        YES - ACTIVE OR DUMMY            @V304298 00486000
+         CLC   SFBDATE(8),=C'DUMMY BK' IS THIS A DUMMY SFBLOK BLOK      00487000
+         BNE   CHAINSPL            NO -- GO CHAIN BLOK                  00488000
+ACTSFB1  LH    R1,SFBPNT+2    GET DEVICE ADDRESS OF            @V304298 00489000
+*                                  PRINTER/PUNCH FOR                    00490000
+*                                  WHICH THE CLASSES WERE SAVED         00491000
+         LR    R2,R6               SAVE POINTER IN R6                   00492000
+         CALL  DMKSCNRU            AND LOCATE ITS RDEVBLOK              00493000
+         LR    R6,R2               RESTORE POINTER                      00494000
+         BZ    STCLAS              DEVICE FOUND -                       00495000
+         CLC   SFBDATE(8),=C'DUMMY BK' DUMMY BLOK  ?           @V2A2029 00496000
+         BE    GETSPOOL       GET NEXT SPOOL FILE              @V2A2029 00497000
+         B     CHAINSPL       CHAIN FILE - DEVICE NOT FOUND    @V2A2029 00498000
+STCLAS   TM    SFBPNT+1,X'10'  SPECIAL 3800 DUMMY BLOCK ?      @V60B9BA 00498250
+         BZ    STCLAS2         XFER IF NOT                     @V60B9BA 00498500
+         MVC   RDEVIMAG,SFBFNAME  MOVE IN THE IMAGE LIBR NAME  @V60B9BA 00498750
+         MVC   RDEVXSEP,SFBFTYPE  AND THE CHAR ARR TBL FOR SEP @V60B9BA 00499000
+         MVC   RDEVFSEP,SFBFLAG   AND THE FCB FOR SEP PAGE     @V60B9BA 00499250
+         B     GETSPOOL           GET NEXT 3800 RECORD         @V60B9BA 00499500
+STCLAS2  ST    R3,RDEVCLAS   SAVE SPOOLING CLASSES IN RDEVBLOK @V60B9BA 00499750
+         TM    SFBPNT+1,X'20'      PUNCH OR PRINT SEPARATOR ??          00500000
+         BO    *+8                 YES -- (SAVED BY DMKCKP)             00501000
+*        DEFAULT IS SEP - DMKRIO                                        00502000
+         NI    RDEVFLAG,X'FF'-RDEVSEP INDICATE NOSEP                    00503000
+         TM    SFBPNT+1,X'80'      DEVICE OFFLINE ? (SAVED BY DMKCKP)   00504000
+         BZ    *+12                NO --                                00505000
+         OI    RDEVSTAT,RDEVDISA   MARK DEVICE OFFLINE                  00506000
+         B     TSTDMY              AND LEAVE DEVICE DRAINED             00507000
+         TM    SAVEWRK1,X'04'      DRAIN REQUIRED BY OPERATOR ??        00508000
+         BO    TSTDMY              YES -- TEST FOR DUMMY BK             00509000
+*        DEFAULT IS DRAIN -- DMKRIO                                     00510000
+         TM    SFBPNT+1,X'40'      DEVICE DRAINED ? (SAVED BY DMKCKP)   00511000
+         BO    TSTDMY              XFER IF SO                  @V60B9BA 00512000
+         NI    RDEVFLAG,X'FF'-RDEVDRAN RESET DRAIN FLAG                 00513000
+         CLI   RDEVTYPE,TYP3800    IS IT A 3800?               @VMI0069 00513040
+         BNE   TSTDMY              NO                          @VMI0069 00513080
+         L     R1,=A(DMKQNTBL)     START OF 3800 IMAGE LIBS    @V60B9BA 00513120
+         LTR   R1,R1               ANY IMAGE LIBRARIES ?       @V60B9BA 00513160
+         BZ    ST38A2              DRAIN THE DEVICE IF NOT     @V60B9BA 00513200
+         TRANS 2,1,OPT=(BRING,DEFER,SYSTEM)  GET IT IN         @V60B9BA 00513240
+         LR    R14,R2              POINT TO EACH SYSTEM ENTRY  @V60B9BA 00513280
+         USING NPRTBL,R14          ADDRESSIBILITY              @V60B9BA 00513320
+ST38A0   CLC   RDEVIMAG,NPRNAME    IS THIS THE ONE ?           @V60B9BA 00513360
+         BNE   ST38A1              XFER IF NOT                 @V60B9BA 00513400
+         LTR   R15,R15             ZERO IT                     @V60B9BA 00513440
+         IC    R15,NPRCNT          CURRENT COUNT               @V60B9BA 00513480
+         LA    R15,1(R15)          PLUS ONE                    @V60B9BA 00513520
+         STC   R15,NPRCNT          SAVE THE NEW COUNT          @V60B9BA 00513560
+         B     TSTDMY              CONTINUE ONWARD             @V60B9BA 00513600
+ST38A1   AL    R14,NPRPNT          NEXT ONE                    @V60B9BA 00513640
+         CLC   NPRPNT,ZEROES       IS THIS DUMMY LAST ENTRY ?  @V60B9BA 00513680
+         BNE   ST38A0              XFER IF NOT                 @V60B9BA 00513720
+ST38A2   OI    RDEVFLAG,RDEVDRAN   MARK DEVICE DRAINED SINCE   @V60B9BA 00513760
+*                                  WE CAN'T FIND THE IMG LIB   @V60B9BA 00513800
+         DROP  R14                 NO LONGER NEEDED            @V60B9BA 00513840
+         SPACE                                                          00513880
+TSTDMY   CLC   SFBDATE(8),=C'DUMMY BK' IS IT A DUMMY SFBLOK ??          00514000
+         BE    GETSPOOL            YES -- GO GET NEXT BLOK              00515000
+         OI    SAVEWRK1+3,X'80'    INDICATE ONE SFBLOK                  00516000
+         OI    SFBFLAG-SFBLOK(R9),SFBRECER INDICATE ALLOC INCOMPLETE    00517000
+         OI    SFBFLAG2-SFBLOK(R9),SFBRSTRT INDICATE RESTARTED          00518000
+         TM    RDEVSTAT,RDEVDISA   IS THIS DEVICE OFFLINE  ??           00519000
+         BO    CHAINSPL            YES - BETTER CHAIN IT                00520000
+         TM    RDEVFLAG,RDEVDRAN   IS THE DEVICE BEING DRAINED ??       00521000
+         BO    CHAINSPL            YES - BETTER CHAIN IT                00522000
+         LA    R0,SFBSIZE          SIZE OF SFBLOK                       00523000
+         CALL  DMKFREE                                                  00524000
+         MVC   0(SFBSIZE*8,R1),0(R9) MOVE SFBLOK TO NEW AREA            00525000
+         ST    R1,RDEVSPL          STORE THE ADDRESS IN RDEV            00526000
+         MVI   0(R1),X'FF'         INDICATE THAT THIS IS SFBLOK         00527000
+CLRREC   SR    R14,R14                                                  00528000
+         ST    R14,SFBRECS-SFBLOK(,R1) CLEAR ALLOCATION FIELD           00529000
+         CLC   SFBFILID(2),SPOOLID      IS THIS THE LOWEST SO FAR ?     00530000
+         BNL   *+10                NO -                                 00531000
+         MVC   SPOOLID(2),SFBFILID YES - SAVE IT                        00532000
+         B     GETSPOOL            GET NEXT BLOK                        00533000
+         SPACE 2                                                        00534000
+CHAINSPL NI    SFBFLAG,X'FF'-(SFBINUSE+SFBEOF+SFBOPEN)                  00535000
+*                             RESET FILE STATUS                         00536000
+         TM    SAVEWRK1+3,X'80'    ANY FILES PRESENT OTHER THAN DELETE  00537000
+         BO    SETFILE             YES --                               00538000
+         CLC   4(4,R5),ZEROES      PROCESSING DELETE CHAIN ??           00539000
+         BE    GETSPOOL            YES -- SKIP DELETE FILES             00540000
+SETFILE  OI    SAVEWRK1+3,X'80'    INDICATE SPOOL FILES PRESENT         00541000
+         LA    R0,SFBSIZE          SIZE OF SFBLOK                       00542000
+         CALL  DMKFREE             GET CORE FOR THE SFBLOK              00543000
+         MVC   0(SFBSIZE*8,R1),0(R9) MOVE SFBLOK TO STORAGE             00544000
+         ST    R1,0(,R6)           CHAIN NEW BLOK TO PREVIOUS           00545000
+         LR    R6,R1               SAVE ADDRESS OF NEW BLOK             00546000
+         SR    R14,R14             CLEAR FORWARD POINTER                00547000
+         ST    R14,0(,R6)          IN NEW BLOK                          00548000
+         B     CLRREC              AND GO GET NEXT BLOK                 00549000
+         SPACE 2                                                        00550000
+         EJECT                                                          00551000
+*********************************                                       00552000
+*                                                                       00553000
+*        READ SPOOL ALLOCATION BLOCKS                                   00554000
+*                                                                       00555000
+*********************************                                       00556000
+         SPACE                                                          00557000
+WARMRECA EQU   *              PROCESS SPOOL ALLOCATION BLOCKS  @V2A2029 00558000
+GETREC   BAL   R10,GETDISK         GET NEXT LOGICAL RECORD              00559000
+         MVI   WRECSIZE+1,RECSIZE*8 SET NEW RECORD LENGTH FOR RECBLOKS  00560000
+         CLC   0(8,R9),FFS         IS IT END OF ALLOCATION BLOKS ??     00561000
+         BE    WARMHOLD            YES -- FINISHED RETRIEVING RECORDS   00562000
+         SPACE                                                          00563000
+         TM    SAVEWRK1+3,X'80'    ANY SPOOL FILES PRESENT ????         00564000
+         BZ    GETREC              NO -- FORGET ALLOCATION RECORDS      00565000
+         SPACE                                                          00566000
+         USING RECBLOK,R9          TEMPORARY ADDRESSABILITY             00567000
+         L     R5,RECPNT           GET DISPLACEMENT TO OWNDLIST ENTRY   00568000
+         A     R5,=A(DMKSYSOW)     POINT TO ENTRY IN OWNED LIST         00569000
+         USING OWNDLIST,R5         ADDRESSABILITY FOR OWNED LIST ENTRY  00570000
+         LH    R8,OWNDRDEV         GET POINTER TO RDEVBLOK              00571000
+         LTR   R8,R8               VOLUME MOUNTED ?????                 00572000
+         BM    MSG912W                                         @V305435 00573000
+         SLL   R8,3(0)        CONVERT TO BYTE INDEX            @V200820 00574000
+         A     R8,ARIODV           ADDRESS OF RDEVBLOK                  00575000
+         SPACE                                                          00576000
+         L     R4,RDEVALLN         ADDRESS OF SPOOL ALLOCATION RECORD   00577000
+         LTR   R4,R4               IS THERE ONE ??                      00578000
+         BZ    MSG912W        NOT MOUNTED OR NO ALLLOCATION.   @V305435 00579000
+*              RECORD                                                   00580000
+*                                                                       00581000
+*        GPR4 = ADDRESS OF ALLOCATION RECORD CREATED BY DMKCPI          00582000
+*        +----+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+   00583000
+*        |CYLS|00|01|02|03|04|05|06|07|08|09|10|11|12|13|14|- |- |FF|   00584000
+*        +----+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+   00585000
+*                                                                       00586000
+         LH    R2,RECCYL           GET CYLINDER NUMBER OF FIRST         00587000
+*                                  CYLINDER                             00588000
+         LA    R1,2(R2,R4)         POINT TO CORRECT CYLINDER BYTE       00589000
+         CLI   0(R1),0             IS ALLOCATED CYLINDER TEMPORARY      00590000
+*                                  SPACE ??                             00591000
+         BE    TMPALLOC      IF NOT IN USE, TEMP ALLOC         @VM00019 00592000
+         CLI   0(R1),TEMP     IS  IT ALREADY ALLOCATED?        @VM00019 00592200
+         BNE   MSG903W        ALLOCATED                        @VM00019 00592400
+*                                                                       00592600
+TMPALLOC CLI   RECUSED,0      ANY RECORDS IN USE?                       00592800
+         BE    GETREC         NO-CYL NOT REALLY IN USE         @VA05007 00593200
+         MVI   0(R1),ALLOC    MARK TEMP CYL IN USE             @VM00019 00594000
+         LA    R0,RECSIZE          SIZE OF RECBLOK                      00595000
+         CALL  DMKFREE                                                  00596000
+         MVC   0(RECSIZE*8,R1),0(R9) MOVE DATA TO NEW BLOK     @VA03516 00597000
+         XC    RECPNT-RECBLOK(4,R1),0(R1) CLEAR FORWARD POINTER@VA03516 00598000
+         LR    R9,R1          GET ADDRESSABILITY               @VA03516 00599000
+CHAINIT  L     R1,RDEVALLN    GET ALOCBLOC                     @VA03516 00600000
+         LH    R0,0(,R1)      NUMBER OF CYLINDERS              @VA03516 00601000
+         SRL   R0,1           GET MIDDLE CYLINDER              @VA03516 00602000
+         STH   R0,MIDCYL      SAVE IT                          @VA03516 00603000
+         SH    R0,RECCYL      GET CURRENT DISPLACEMENT         @VA03516 00604000
+         LPR   R0,R0          MAKE IT POSITIVE                 @VA03516 00605000
+         STH   R0,CURDISP     SAVE IT                          @VA03516 00606000
+         LA    R1,RDEVRECS    PREVIOUS RECBLOK                 @VA03516 00607000
+         L     R15,RDEVRECS   POINT TO FIRST RECBLOK           @VA03516 00608000
+         B     LOOPIT6        MAKE THE TEST                    @VA03516 00609000
+LOOPIT5  LH    R0,RECCYL-RECBLOK(,R15) GET DISPLACEMENT THIS   @VA03516 00610000
+*                             RECBLOK                                   00611000
+         SH    R0,MIDCYL      SUBTRACT MIDDLE CYLINDER         @VA03516 00612000
+         LPR   R0,R0          MAKE IT POSITIVE                 @VA03516 00613000
+         CH    R0,CURDISP     IS IT BIGGER THAN OURS?          @VA03516 00614000
+         BH    CHAINT         IF SO, GO CHAIN IT               @VA03516 00615000
+         LR    R1,R15         NEW PREVIOUS RECBLOK             @VA03516 00616000
+         L     R15,RECPNT-RECBLOK(,R15) NEXT RECBLOK ON CHAIN  @VA03516 00617000
+LOOPIT6  LTR   R15,R15        ARE WE AT THE END YET?           @VA03516 00618000
+         BNZ   LOOPIT5        XFER IF NOT                      @VA03516 00619000
+CHAINT   ST    R15,RECPNT     POINT TO NEXT RECBLOK            @VA03516 00620000
+         ST    R9,RECPNT-RECBLOK(,R1) PREVIOUS POINTS TO US    @VA03516 00621000
+         B     GETREC                                          @VA03516 00622000
+         SPACE 2                                                        00623000
+         EJECT                                                          00624000
+*********************************                                       00625000
+*                                                                       00626000
+*        READ SPOOL HOLD QUEUE BLOCKS                                   00627000
+*                                                                       00628000
+*********************************                                       00629000
+         SPACE                                                          00630000
+WARMHOLD EQU   *              PROCESS HOLD QUEUE BLOCKS        @V2A2029 00631000
+         L     R6,=A(DMKRSPHQ)     ADDRESS OF HOLD QUEUE CHAIN          00632000
+         SPACE                                                          00633000
+GETHQ    BAL   R10,GETDISK         GET NEXT LOGICAL RECORD              00634000
+         MVI   WRECSIZE+1,SHQBSIZE*8 SET NEW RECORD SIZE                00635000
+         CLC   0(8,R9),FFS         IS IT END OF RECORD ??               00636000
+         BE    DONE                YES -- DONE                          00637000
+         USING SHQBLOK,R9                                               00638000
+         LA    R0,SHQBSIZE         SIZE OF BLOK                         00639000
+         CALL  DMKFREE                                                  00640000
+         MVC   0(SHQBSIZE*8,R1),0(R9) MOVE DATA TO NEW AREA             00641000
+         ST    R1,0(R6)            CHAIN TO PREVIOUS BLOCK              00642000
+         LR    R6,R1               UPDATE PREVIOUS REG POINTER          00643000
+         SR    R14,R14                                                  00644000
+         ST    R14,0(R1)           CLEAR FORWARD POINTER                00645000
+         B     GETHQ               GET NEXT BLOK                        00646000
+         SPACE                                                          00647000
+********************************************                            00648000
+*                                                                       00649000
+*        CLEAR WARMSTART CYLINDER RECORD ONE                            00650000
+*                                                                       00651000
+********************************************                            00652000
+         SPACE                                                          00653000
+DONE     EQU   *              HERE WHEN ALL IS DONE            @V2A2029 00654000
+         SR    R2,R2               ZERO RETURN CODE (WARM START)        00655000
+SETCPID  EQU   *                                               @VA05227 00656100
+         ST    R2,SAVER2           STORE RETURN CODE                    00658000
+         MVC   WRMCC(2),WARMCYL    RESET WARMSTART CYL AND              00659000
+         MVI   WRMP,X'01'          SET PAGE NUMBER TO ONE               00660000
+         LM    R0,R1,CCPDVPG       RESTORE CCPD AND VIRTUAL PAGE        00661000
+*                                  ADDRESS                              00662000
+         L     R3,BUFFER           GET REAL ADDRESS OF BUFFER           00663000
+         TM    SAVEWRK1,CKPT+FORCE WERE THESE SPECIFIED?       @VA05227 00664100
+         BZ    ENDER2         XFER IF NOT                      @VA05227 00664200
+ENDER1   SR    R2,R2          GET THE PARM REG SET             @VA05227 00664300
+         ST    R2,SAVER2      ZERO RTN CODE (WARM START)       @VA05227 00664400
+         IC    R2,SAVEWRK1    FOR CALL TO CKSWM                @VA05227 00664500
+         CALL  DMKCKSWM       GO TO IT                         @VA05227 00664600
+         B     WARMCLR        GET OUT OF HERE                  @VA05227 00664700
+ENDER2   EQU   *                                               @VA05227 00664800
+         CALL  DMKCKSIN       INITIALIZE CKPT CYLINDER         @VA05227 00664900
+         L     R1,=A(DMKRSPHQ) CKPT THE SHQBLOKS               @VA05227 00665000
+EN2LOOP  L     R1,0(,R1)      NEXT SHQBLOK                     @VA05227 00665100
+         LTR   R1,R1          ANY MORE?                        @VA05227 00665200
+         BZ    ENDER3         NOW CHECKPOINT SFBLOKS           @VA05227 00665300
+         CALL  DMKCKSPL,PARM=ADDSFB+CHGSHQ                     @VA05227 00665400
+         B     EN2LOOP                                         @VA05227 00665500
+ENDER3   SR    R2,R2          CLEAR PARM REG                   @VA05227 00665600
+         LA    R3,ANCHRCKS    POINT TO SPOOL FILE CHAIN TBL    @VA05227 00665700
+         B     CKSLOOP2       CONTINUE                         @VA05227 00665800
+CKSLOOP1 LA    R3,4(,R3)      GET NEXT TABLE ENTRY             @VA05227 00665900
+CKSLOOP2 CLC   0(4,R3),F0     END OF TABLE ?                   @VA05227 00666000
+         BE    WARMCLR        IF SO, EXIT ....                 @VA05227 00666100
+         L     R7,0(,R3)      POINT TO NEW CHAIN               @VA05227 00666200
+         LA    R7,0(,R7)      STRIP OFF ALL FLAG BYTES         @VA05227 00666300
+         IC    R2,0(R3)       GET CORRECT CKSPL PARM           @VA05227 00666400
+CKSLOOP3 L     R7,0(,R7)      END OF CHAIN ?                   @VA05227 00666500
+         LTR   R7,R7          IF SO, GET NEXT CHAIN ADDRESS    @VA05227 00666600
+         BZ    CKSLOOP1       ...........                      @VA05227 00666700
+         CALL  DMKCKSPL       CHECKPOINT THIS SFBLOK           @VA05227 00666800
+         B     CKSLOOP3       AND CONTINUE ....                @VA05227 00666900
+WARMCLR  EQU   *              HERE TO ZERO THE FIRST 8 BYTES OF@VA05227 00667000
+         MVC   WRMCC(2),WARMCYL RESET WARMSTART CYL AND        @VA05227 00667100
+         MVI   WRMP,X'01'     SET PAGE NUMBER TO ONE           @VA05227 00667200
+         LM    R0,R1,CCPDVPG  RESTORE CCPD AND VIRTUAL PAGE    @VA05227 00667300
+*                                  ADDRESS                              00667400
+         L     R3,BUFFER      GET REAL ADDRESS OF BUFFER       @VA05227 00667500
+         XC    0(8,R3),0(R3)  ZERO FIRST 8 BYTES OF BUFFER     @VA05227 00667600
+         L     R15,=A(DMKRSPCV) ADDRESS OF AREA TO SAVE        @VA05227 00667700
+         MVC   24(8,R3),STARTIME STORE START TIME VALUE IN     @VA05227 00667800
+*                             FIRST REC                                 00667900
+         MVC   0(8,R15),24(R3) AND INTO DMKRSPCV -             @VA05227 00668000
+*        DMKCKP WILL COMPARE THESE TWO FIELDS TO VALIDATE THAT          00668100
+*        CORRECT VOLUME IS MOUNTED FOR CHECK POINTING THE SYSTEM        00668200
+         LA    R4,5           RETRY COUNT OF 5                 @VA05227 00668300
+WRPAGE1  CALL  DMKRPAPT,PARM=(SYSTEM) WRITE OUT FIRST PAGE     @VA05227 00668400
+         BZ    ALLDONE        BRANCH IF COMPLETE               @VA05227 00668500
+         BCT   R4,WRPAGE1     ERROR- RETRY                     @VA05227 00668600
+         B     MSG921W        I/O ERROR - NUCLEUS CYLINDER     @VA05227 00668700
+ALLDONE  DS    0H                                              @V304298 00694000
+         SR    R0,R0          CLEAR PARM REG                   @VA05227 00694100
+         CALL  DMKRPAGT,PARM=SYSTEM RELEASE STORAGE PAGE       @VA05227 00694200
+         CALL  DMKPGTVR       RELEASE VIRTUAL PAGE             @VA05227 00694300
+         EXIT                                                           00695000
+         EJECT                                                          00696000
+*********************************************                           00697000
+*                                                                       00698000
+GETDISK  EQU   *  HERE TO LOCATE THE NEXT LOGICAL WARMSTART RECORD      00699000
+*                 AND PASS ITS ADDRESS TO THE CALLER IN GPR9            00700000
+*                                                                       00701000
+*********************************************                           00702000
+         SPACE                                                          00703000
+         L     R9,POINTER          GET POINTER TO LAST RECORD PASSED    00704000
+         LTR   R9,R9               1ST TIME THRU                        00705000
+         BZ    FIRSTBUF            YES -                                00706000
+         AH    R9,WRECSIZE         AND ADD LENGTH OF RECORD             00707000
+         CLC   0(8,R9),=8X'FE'     LAST RECORD IN BUFFER ??             00708000
+         BNE   VALIDATE            NO - GO VALIDATE RECORD              00709000
+         SPACE                                                          00710000
+         LH    R1,RECCNT           GET RECORD COUNT                     00711000
+         LA    R1,1(R1)            UPDATE BY ONE                        00712000
+         STH   R1,RECCNT           AND STORE                            00713000
+         OI    SAVEWRK1+3,X'01'    INDICATE EE RECORD NEXT              00714000
+         SPACE                                                          00715000
+         SPACE                                                          00716000
+FIRSTBUF LM    R0,R1,CCPDVPG       GET CCPD AND VIRTUAL ADDRESS         00717000
+         CALL  DMKRPAGT,PARM=(BRING+SYSTEM+LOCK)                        00718000
+         BNZ   MSG921W        I/O ERROR - NUCLEUS CYLINDER     @V305435 00719000
+         ST    R2,POINTER          SAVE REAL ADDRESS                    00720000
+         ST    R2,BUFFER                                                00721000
+         LR    R9,R2                                                    00722000
+         IC    R1,WRMP             GET PAGE NUMBER                      00723000
+         CLM   R1,B'0001',PAGECYL REACH END OF CYLINDER ?      @V2A2029 00724000
+         BL    SAMECYL        NO - SAME CYLINDER               @V2A2029 00725000
+         LH    R14,WRMCC      GET CURRENT CYLINDER             @V2A2029 00726000
+         LA    R14,1(,R14)    UPDATE TO NEXT CYLINDER          @V2A2029 00727000
+         STH   R14,WRMCC      AND STORE IN CCPD                @V2A2029 00728000
+         SR    R1,R1          RESET PAGE COUNT                 @V2A2029 00729000
+SAMECYL  LA    R1,1(,R1)      UPDATE PAGE NUMBER               @V2A2029 00730000
+         STC   R1,WRMP             ONE AND SAVE                         00731000
+         SPACE                                                          00732000
+VALIDATE EQU   *  HERE TO VALIDATE HASH NUMBER AND RECORD NUMBER        00733000
+         ST    R9,POINTER          SAVE ADDRESS OF CURRENT RECORD       00734000
+         LH    R1,RECCNT           GET WARMSTART RECORD COUNT           00735000
+         LA    R1,1(R1)            UPDATE BY ONE                        00736000
+         STH   R1,RECCNT           AND SAVE                             00737000
+         CLC   0(8,R9),=8X'EE'     FIRST RECORD OF A BUFFER             00738000
+         BE    EEREC               YES - VERIFY HASH AND COUNT          00739000
+         TM    SAVEWRK1+3,X'01'    SHOULD THIS BE A EE RECORD ??        00740000
+         BO    ERRTYPE             YES -- DMKWRM920I OR DMKWRM904I      00741000
+         CLC   0(8,R9),FFS         DELIMITER RECORD ??                  00742000
+         BCR   7,R10               NO - MUST BE DATA RECORD             00743000
+EEREC    NI    SAVEWRK1+3,X'FE'    RESET EE RECORD SWITCH               00744000
+         CLC   HASH(6),ZEROES      HASH NUMBER FILLED IN ??             00745000
+         BNE   CMPHASH             YES -                                00746000
+         MVC   HASH(6),8(R9)       MOVE HASH NUMBER TO SAVE AREA        00747000
+         BR    R10                 RETURN TO CALLER                     00748000
+         SPACE                                                          00749000
+CMPHASH  CLC   8(8,R9),HASH        HASH NUMBER AND RECORD NUMBER        00750000
+*                                  CORRECT ??                           00751000
+         BE    HASHOK              YES -- VALID DATA                    00752000
+ERRTYPE  TM    SAVEWRK1+3,X'40' STARTED PROCESSING DATA ??     @V2A2029 00753000
+         BZ    MSG920I        NO--NO WARM START DATA - COLD    @V2A2029 00754000
+*                                  START ASSUMED                        00755000
+         B     MSG904W        YES -- PROCESSING STARTED --     @V2A2029 00756000
+*                                  INVALID WARMSTART DATA               00757000
+HASHOK   CLC   0(8,R9),=8X'EE'     FIRST RECORD OF A BUFFER             00758000
+         BE    GETDISK             YES - GET NEXT RECORD                00759000
+         BR    R10                 RECORD GOOD - RETURN TO CALLER       00760000
+         SPACE                                                          00761000
+         EJECT                                                          00762000
+*******************************************                             00763000
+*                                                                       00764000
+*        ERROR MESSAGES                                                 00765000
+*                                                                       00766000
+*******************************************                             00767000
+         SPACE                                                          00768000
+MSG921W  EQU   *              UNCOVERABLE I/O ERROR ON WARM    @V305435 00769000
+*                             START CYLINDER.                           00770000
+         LA    R2,921         ERROR MESSAGE DMKWRM921W         @V305435 00771000
+         B     PUTMSG              WRITE MESSAGE                        00772000
+         SPACE                                                          00773000
+MSG903W  EQU   *              HERE IF ALLOCATION ERROR         @V2A2029 00774000
+         XC    SAVEWRK6(10),SAVEWRK6 CLEAR MSG PARM AREA       @V2A2029 00775000
+         MVC   SAVEWRK6(6),RDEVSER SET UP VOLID FOR MSG        @V2A2029 00776000
+         LR    R1,R2          GET CYLINDER ADDRESS             @V2A2029 00777000
+         CALL  DMKCVTBD       AND CONVERT FOR MSG              @V2A2029 00778000
+         STCM  R1,B'0111',SAVEWRK7+3 STORE IN PARM AREA        @V2A2029 00779000
+         LA    R2,903         ERROR MESSAGE DMKWRM903W         @V2A2029 00780000
+         LA    R0,10          LENGTH OF PARM AREA              @V2A2029 00781000
+         LA    R1,SAVEWRK6    ADDRESS OF PARM AREA             @V2A2029 00782000
+         B     PUTMSG1        GO WRITE ERROR MESSAGE           @V2A2029 00783000
+         SPACE                                                          00784000
+MSG904W  EQU   *              HERE FOR INVALID WARM START DATA @V2A2029 00785000
+         LA    R2,904         ERROR MESSAGE DMKWRM904W         @V2A2029 00786000
+         B     PUTMSG              WRITE ERROR MSG                      00787000
+         SPACE                                                          00788000
+MSG912W  EQU   *              HERE IF VOLUME NOT MOUNTED       @V305435 00789000
+         LA    R2,912         MESSAGE DMKWRM912W               @V305435 00790000
+         LA    R0,6                LENGTH OF LABEL                      00791000
+         LR    R1,R5               ADDRESS OF VOLUME LABEL              00792000
+         B     PUTMSG1        GO WRITE ERROR MESSAGE           @V2A2029 00793000
+         SPACE                                                          00794000
+MSG920I  EQU   *              HERE IF NO WARM START DATA       @V304298 00795000
+         LA    R0,MSG920L          GET LENGTH OF MESSAGE                00796000
+         LA    R1,MSG920           ADDRESS OF MESSAGE                   00797000
+         CALL  DMKQCNWT,PARM=OPERATOR+ALARM WRITE MESSAGE      @V304298 00798000
+         LPSW  WAIT9          LOAD DIS WAIT PSW CODE 9         @V304298 00799000
+         SPACE                                                          00800000
+PUTMSG   EQU   *              HERE TO CALL DMKERMSG TO         @V2A2029 00801000
+*                             DISPLAY ERROR MSG                         00802000
+         SR    R0,R0          CLEAR PARM REGS                  @V2A2029 00803000
+         SR    R1,R1          ..                               @V2A2029 00804000
+PUTMSG1  ICM   R0,B'1110',ID+3 INSERT MODULE ID (WRM)          @V2A2029 00805000
+         O     R2,=X'A8E60000' INDICATE RETURN, W MSG AND      @V2A2029 00806000
+*                             OPERATOR                                  00807000
+         CALL  DMKERMSG       CALL ERROR MESSAGE MOUDLE        @V2A2029 00808000
+         LA    R0,1           WRITE BLANK TO INSURE PREVIOUS   @V2A2029 00809000
+*                             MESSAGE                                   00810000
+         LA    R1,BLK         IS DISPLAYED                     @V2A2029 00811000
+         CALL  DMKQCNWT,PARM=(ALARM+OPERATOR)                  @V2A2029 00812000
+         SPACE                                                          00813000
+         LPSW  WAIT9          LOAD DISABLE WAIT STATE PSW      @V2A2029 00814000
+*              WAIT STATE CODE 009                                      00815000
+         EJECT                                                          00816000
+*******************************************                             00817000
+*                                                                       00818000
+*        CONSTANTS                                                      00819000
+*                                                                       00820000
+*******************************************                             00821000
+*                                                                       00822000
+PUNCHCCW CCW   X'41',12,CC+SILI,80 MODEL PUNCH CCW                      00823000
+         SPACE                                                          00824000
+WAIT9    DC    X'000A000000000009' WAIT STATE CODE 009                  00825000
+         SPACE                                                          00826000
+HASH     DC    F'0'                HASH NUMBER SAVE AREA                00827000
+         DC    H'0'                                                     00828000
+         SPACE                                                          00829000
+RECCNT   DC    H'0'                WARMSTART RECORD COUNTER             00830000
+         SPACE                                                          00831000
+         SPACE                                                          00832000
+TYPE     DC    X'00'                                                    00833000
+         SPACE                                                          00834000
+SPOOLID  DC    H'2000'        RE-CYCLE POINT                   @V2A2029 00835000
+         SPACE                                                          00836000
+         DS    0F                                                       00837000
+CCPDVPG  EQU   *                                                        00838000
+WRMCCPD  EQU   *                                                        00839000
+WRMCC    DC    H'0'                CC  CYLINDER NUMBER                  00840000
+WRMP     DC    X'01'               P   PAGE NUMBER                      00841000
+WRMD     DC    X'00'               D   DEVICE CODE                      00842000
+VPAGE    DC    F'0'                ADDRESS OF VIRTUAL BUFFER            00843000
+POINTER  DC    F'0'                ADDRESS OF CURRENT LOGICAL RECORD    00844000
+BUFFER   DC    F'0'                START OF THE CURRENT BUFFER          00845000
+WRECSIZE DC    H'80'               LOGICAL RECORD LENGTH FOR ACCOUNTING 00846000
+WARMCYL  DC    H'0'                CYLINDER ADDRESS OF WARM START CYL   00847000
+PAGECYL  DC    X'00'          NUMBER OF PAGES PER CYLINDER     @V2A2029 00848000
+BLK      DC    C' '           BLANK                            @V2A2029 00849000
+CURDISP  DC    H'0'           SAVE DURRENT DIST FOR ALOCIT     @VA03516 00850000
+MIDCYL   DC    H'0'           SAVE MIDDLE CYLINDER             @VA03516 00851000
+         SPACE 2                                                        00852000
+* FLAGS FOR PARAMETER FROM DMKCPI                                       00853000
+COLD     EQU   X'01'                                           @V304298 00854000
+WARM     EQU   X'02'                                           @V304298 00855000
+DRAIN    EQU   X'04'                                           @V304298 00856000
+SHUTDOWN EQU   X'08'                                           @V304298 00857000
+WARMAUTO EQU   X'10'                                           @V304298 00858000
+CKPT     EQU   X'20'                                           @V304298 00859000
+FORCE    EQU   X'40'                                           @V304298 00860000
+ALLOC    EQU   X'80'          IN-USE INDICATOR                 @VM00019 00860350
+TEMP     EQU   X'08'          TEMP SPACE INDICATOR             @VM00019 00860700
+         EJECT                                                          00861100
+         DS    0F                                              @VA04443 00861200
+ANCHRCKS EQU   *  POINTER TABLE FOR CHECKPOINTING SPOOL FILES  @VA04443 00861300
+         DC    AL1(PRTCHN+ADDSFB),AL3(DMKRSPPR)                @VA04443 00861400
+         DC    AL1(PCHCHN+ADDSFB),AL3(DMKRSPPU)                @VA04443 00861500
+         DC    AL1(RDRCHN+ADDSFB),AL3(DMKRSPRD)                @VA04443 00861600
+         DC    A(0)                END OF LIST                 @VA04443 00861700
+         SPACE 2                                                        00861800
+ANCHRTBL EQU   *  POINTER TABLE FOR RESTORING SPOOL FILE CHAINS         00863000
+         DC    A(DMKRSPPR)                                              00864000
+         DC    A(DMKRSPPU)                                              00865000
+         DC    A(DMKRSPRD)                                              00866000
+         DC    A(DMKRSPDL)                                              00867000
+         DC    A(0)                END OF LIST                          00868000
+         SPACE 2                                                        00869000
+         SPACE 2                                                        00870000
+MSG920   DC    X'1515'             TWO CARRIAGE RETURNS                 00871000
+         DC    C'DMKWRM920I NO WARM START DATA; '              @V304298 00872000
+         DC    C'CKPT START FOR RETRY'                         @V304298 00873000
+         DC    X'1515'                                                  00874000
+MSG920L  EQU   *-MSG920            LENGTH OF MESSAGE                    00875000
+         DS    0F                                                       00876000
+         EJECT                                                          00877000
+         LTORG                                                          00878000
+         EJECT                                                          00879000
+         COPY  EQU                                                      00880000
+         COPY  ALLOC                                                    00881000
+         COPY  ACCOUNT                                                  00882000
+         COPY  RBLOKS                                                   00883000
+         COPY  SAVE                                                     00884000
+         COPY  VMBLOK                                                   00885000
+         PSA                                                            00886000
+         COPY  IOBLOKS                                                  00887000
+         COPY  DEVTYPES                                                 00888000
+         COPY  SPOOL                                                    00889000
+         COPY  NPRTBL                                          @V60B9BA 00889500
+         COPY  VBLOKS                                                   00890000
+         COPY  NETWORK                                         @V200829 00891000
+         END                                                            00892000

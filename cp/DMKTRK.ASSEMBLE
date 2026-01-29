@@ -1,0 +1,864 @@
+TRK      TITLE 'DMKTRK     (CP)        VM/370 - RELEASE 6'              00001000
+         ISEQ  73,80          VALIDATE INPUT SERIALIZATION     @V56BDA8 00002000
+*.                                                                      00003000
+*                                                                       00004000
+* MODULE NAME :                                                         00005000
+*                                                                       00006000
+*        DMKTRK                                                         00007000
+*                                                                       00008000
+* CONTENTS :                                                            00009000
+*                                                                       00010000
+*        DMKTRKIN - TREAT INTERRUPTS CAUSED BY ALTERNATE TRACKS         00011000
+*        DMKTRKFP - EXAMINE COMMAND REJECTS FOR VIRTUAL SIO IO          00012000
+*        DMKTRKVA - VERIFY ALTERNATE TRACK ADDRESS FOR DMKCCW           00013000
+*                                                                       00014000
+* OPERATION :                                                           00015000
+*                                                                       00016000
+*        SEE INDIVIDUAL SECTIONS                                        00017000
+*                                                                       00018000
+* ERROR MESSAGES:                                                       00019000
+*                                                                       00020000
+*        NONE                                                           00021000
+*.                                                                      00022000
+         COPY  OPTIONS                                         @V56BDA8 00023000
+DMKTRK   CSECT                                                 @V56BDA8 00024000
+         SPACE                                                          00025000
+         EXTRN DMKIOSQR,DMKIOSQV                               @V56BDA8 00026000
+         EXTRN DMKCCWSB       TO COPY CONTROL INFORMATION      @V56BDA8 00027000
+         EXTRN DMKUNTRN                                        @V56BDA8 00028000
+         USING SAVEAREA,R13                                    @V56BDA8 00029000
+         USING PSA,R0                                          @V56BDA8 00030000
+         USING IOERBLOK,R7    ADDRESSABILITY FOR IOERBLOK      @V56BDA8 00031000
+         USING RDEVBLOK,R8                                     @V56BDA8 00032000
+         USING IOBLOK,R10                                      @V56BDA8 00033000
+         USING VMBLOK,R11                                      @V56BDA8 00034000
+         USING DMKTRK,R12     COMMON ADDRESSABILITY            @V56BDA8 00035000
+         EJECT                                                          00036000
+*.                                                                      00037000
+*                                                                       00038000
+* ENTRY POINT : DMKTRKIN                                                00039000
+*                                                                       00040000
+*                                                                       00041000
+*                                                                       00042000
+* FUNCTION : TO HANDLE TRACK CONDITION CHECKS FOR CP AND DIAGNOSE       00043000
+*                INITIATED IO.                                          00044000
+*                                                                       00045000
+*                                                                       00046000
+* ATTRIBUTES : REENTRANT,RESIDENT,CALLED VIA SVC.                       00047000
+*                                                                       00048000
+*                                                                       00049000
+* ENTRY CONDITIONS : GPR3=ADDRESS OF SECOND IOERBLOK (OR 0)             00050000
+*                    GPR7=ADDRESS OF PRIMARY IOERBLOK                   00051000
+*                    GPR8=ADDRESS OF RDEVBLOK                           00052000
+*                    GPR10=ADDRESS OF IOBLOK                            00053000
+*                    GPR12=BASE ADDRESS                                 00054000
+*                    GPR13=ADDRESS OF SAVE AREA                         00055000
+*                                                                       00056000
+*                                                                       00057000
+* EXIT CONDITIONS :                                                     00058000
+*                                                                       00059000
+*              R1 SPECIFIES RETURN VECTOR FOR DMKDASER (SEE BELOW)      00060000
+*                                                                       00061000
+*                                                                       00062000
+* CALLS TO OTHER ROUTINES :                                             00063000
+*                     1. DMKFREE - TO OBTAIN STORAGE FOR RECOVERY       00064000
+*                                  WORKAREAS.                           00065000
+*                     2. DMKFRET - TO RETURN STORAGE OBTAINED BY        00066000
+*                                  DMKFRET.                             00067000
+*                     3. DMKCCWSB - TO COPY CONTROL INFORMATION         00068000
+*                     4. DMKUNTRN - TO LOCATE ADDRESS OF FAILING CCW    00069000
+*                                                                       00070000
+*                                                                       00071000
+* EXTERNAL REFERENCES :  NONE                                           00072000
+*                                                                       00073000
+*                                                                       00074000
+* TABLES AND WORKAREAS :                                                00075000
+*                 IOBLOK                                                00076000
+*                 IOERBLOK                                              00077000
+*                 RCWTASK                                               00078000
+*                                                                       00079000
+* REGISTER USAGE :                                                      00080000
+*                 GPR  3=USED FOR TESTING RE-OCCURRING ERROR'S          00081000
+*                 GPR  4=SCRATCH                                        00082000
+*                 GPR  5=GENERAL USAGE IS FOR BAL REGISTER              00083000
+*                 GPR  6=SCRATCH                                        00084000
+*                 GPR  7=IOERBLOK ADDRESS                               00085000
+*                 GPR  8=RDEVBLOK ADDRESS.                              00086000
+*                 GPR  9=RECOVERY WORKAREA                              00087000
+*                 GPR 10=IOBLOK ADDRESS.                                00088000
+*                 GPR 11=VMBLOK ADDRESS.                                00089000
+*                 GPR 12=BASE ADDRESS.                                  00090000
+*                 GPR 13=SAVE AREA ADDRESS.                             00091000
+*                 GPR 14=EXTERNAL LINKAGE REGISTER.                     00092000
+*                 GPR 15=EXTERNAL LINKAGE REGISTER.                     00093000
+*                                                                       00094000
+*                                                                       00095000
+* NOTES : NONE.                                                         00096000
+*                                                                       00097000
+*                                                                       00098000
+*                                                                       00099000
+* OPERATION : A. IF FIRST TIME IN, GET FILE MASK AND CHANGE SEEK        00100000
+*                HEADS TO X'FF'S, THEN GOTO STEP C.                     00101000
+*             B. IF GOOD COMPLETION, CLEAN UP AND EXIT.                 00102000
+*             C. IF ERROR OCCURRED (POSSIBLY DURING RETRY):             00103000
+*                1. IF IN OUR CCWS, EXIT WITH RECOVERY ERROR.           00104000
+*                2. IF NOT TRACK CONDITION CHECK OR COMMAND REJECT      00105000
+*                   ON A MODIFIED SEEK HEAD, EXIT TO DMKDASER.          00106000
+*             D. TEST FOR THE SPECIFIC TYPE OF ERROR.                   00107000
+*                1. COMMAND REJECT ON MODIFIED SEEK HEAD:               00108000
+*                    I) IF USER FILEMASK WILL NOT ALLOW A HEAD SWITCH   00109000
+*                       REFLECT A FILE PROTECT EXCEPTION.               00110000
+*                   II) READ HOME ADDRESS AND RECORD 0                  00111000
+*                  III) IF USER CCW WILL NOT BE THE LAST, DO A FULL     00112000
+*                       SEEK, SFM, AND TIC TO THE NEXT USER CCW.        00113000
+*                   IV) IF USER CCW WILL TERMINATE THE CHAIN, RESTORE   00114000
+*                       THE SEEK HEAD OPCODE,THEN DO A FULL SEEK,       00115000
+*                       SFM , AND TIC TO THE USER CCW.                  00116000
+*                2. TRACK CONDITION CHECK:                              00117000
+*                    I) READ HOME ADDRESS AND RECORD 0.                 00118000
+*                   II) IF CURRENT TRACK IS PRIMARY, SET SEEK TO        00119000
+*                       ALTERNATE TRACK (FROM R0). GO TO STEP V.        00120000
+*                  III) IF USER FILEMASK WILL NOT ALLOW A HEAD SWITCH   00121000
+*                       REFLECT A FILE PROTECT EXCEPTION.               00122000
+*                   IV) IF CURRENT TRACK IS ALTERNATE, SET SEEK TO      00123000
+*                       DEFECTIVE TRACK + 1 (FROM R0). IF NEW TRACK     00124000
+*                       WOULD BE ON NEXT CYLINDER, SIMULATE AN END      00125000
+*                       OF CYLINDER CONDITION AND EXIT. IF USER FILE    00126000
+*                       MASK DOES NOT ALLOW HEAD SWITCHING, SIMULATE    00127000
+*                       FILE PROTECT CONDITION AND EXIT.                00128000
+*                    V) FINISH SETTING UP RETRY CCWS:                   00129000
+*                             SEEK                                      00130000
+*                             SFM    USER MASK                          00131000
+*                             SET SECTOR 0                              00132000
+*                             READ   HOME ADDRESS (SKIP DATA TRANSER)   00133000
+*                             TIC    (CSW-8)                            00134000
+*                    VI) RETURN TO DMKDASER WITH RETRY CODE.            00135000
+*                                                                       00136000
+*.                                                                      00137000
+         SPACE 1                                                        00138000
+         ENTRY DMKTRKIN                                        @V56BDA8 00139000
+DMKTRKIN ENTER ,              HANDLE ALTERNATE TRACK INTERRUPTS@V56BDA8 00140000
+         SPACE 1                                                        00141000
+         L     R11,IOBUSER    ENSURE VMBLOK POINTER            @V56BDA8 00142000
+         TM    IOERFLG3,IOERALTR+IOERRDR0 ALREADY GOING?       @V56BDA8 00143000
+         BZ    VERFMSK        NO, MUST BE FRESH TRACK CONDITION@V56BDA8 00144000
+         TM    IOERFLG3,IOERRDR0 READ R0 IN PROGRESS?          @V56BDA8 00145000
+         BO    ALTHAR0        YES, CHECK OUT ENDING STATUS     @V56BDA8 00146000
+         NI    IOERFLG3,255-IOERALTR UNFLAG ALT RETRY          @V56BDA8 00147000
+         LTR   R3,R3          DO WE HAVE A SECOND ERROR?       @V56BDA8 00148000
+         BNZ   ALT2ERRS       YES, MAKE SURE NOT IN OUR CCWS   @V56BDA8 00149000
+* ****** BAL   R5,FRETWORK    FREE RETRY CCWS (NO, LET DMKDAS).         00150000
+FINIS    OI    IOERFLG2,IOERCEMD SUPPRESS ERROR RECORDING.     @V56BDA8 00151000
+         LA    R2,FINISALT    SET RETURN VECTOR                @V56BDA8 00152000
+RETDASER MVI   IOBMISC2,0     RESET IOBMISC2 FOR USER          @V56BDA8 00153000
+ALTREXIT ST    R2,SAVER1      PUT IN CALLER'S GPR1             @V56BDA8 00154000
+         EXIT                 AND EXIT GRACEFULLY              @V56BDA8 00155000
+         SPACE 1                                                        00156000
+ALT2ERRS LH    R0,IOERDW      DBLEWRDS IN CCW AREA             @V56BDA8 00157000
+         SLL   R0,3           NUMBER OF BYTES                  @V56BDA8 00158000
+         L     R1,IOERLOC     START OF AREA                    @V56BDA8 00159000
+         AR    R0,R1          JUST PAST END                    @V56BDA8 00160000
+         CLM   R1,7,IOERCSW+1-IOERBLOK(R3) BELOW AREA?         @V56BDA8 00161000
+         BNL   NOALTERR       YES, NOT OUR CCW.                @V56BDA8 00162000
+         CLM   R0,7,IOERCSW+1-IOERBLOK(R3) ABOVE IT?           @V56BDA8 00163000
+         BL    NOALTERR       YES, NOT OUR CCW .               @V56BDA8 00164000
+RCVRYERR LA    R2,RECFAIL     SET RETURN VECTOR                @V56BDA8 00165000
+         B     RETDASER       TREAT AS RECOVERY FAILURE        @V56BDA8 00166000
+         SPACE 1                                                        00167000
+NOALTERR BAL   R5,FRETWORK    FREE WORK AREA                   @V56BDA8 00168000
+         LR    R1,R7          ADDRESS FOR FRETIOER             @V56BDA8 00169000
+         LR    R7,R3          POINT TO CURRENT IOERBLOK        @V56BDA8 00170000
+         SWITCH ,             USE I/O CPU TO MODIFY RDEVBLOK.  @V56BDA8 00171000
+         ST    R7,RDEVIOER    NEW BECOMES THE ORIGINAL         @V56BDA8 00172000
+         ST    R7,SAVER7      FOR DMKDASER ALSO                @V56BDA8 00173000
+         MVC   IOERPNT-IOERBLOK(L4,R7),IOERPNT-IOERBLOK(R1)    @V56BDA8 00174000
+*                             KEEPS PTR TO POSSIBLE CHAIN OF SDR BLOCKS 00175000
+         BAL   R5,FRETIOEZ    FRET IT.                         @V56BDA8 00176000
+         NI    IOBFLAG,255-IOBRSTRT JUST IN CASE               @V56BDA8 00177000
+         LH    R0,IOBRCNT     ERROR COUNT                      @V56BDA8 00178000
+         BCTR  R0,0           SUCCESSFUL RECOVERY MEANS        @V56BDA8 00179000
+         STH   R0,IOBRCNT     ONE LESS ERROR                   @V56BDA8 00180000
+         TM    IOERCSW+5,255-PCI-IL ANY BADDIES?               @V56BDA8 00181000
+         BNZ   RECURERR       YES, DONT PROCESS IT             @V56BDA8 00182000
+         TM    IOERCSW+4,UC   UNIT CHECK CONDITION?            @V56BDA8 00183000
+         BZ    FINIS          ALL DONE (MAYBE UNIT EXCEPTION)  @V56BDA8 00184000
+CHECKIT  TM    IOERDATA,X'02' TRACK CONDITION CHECK?           @V56BDA8 00185000
+         BO    TRKCHK         YES, GO DO IT                    @V56BDA8 00186000
+         TM    IOERDATA,X'80' COMMAND REJECT?                  @V56BDA8 00187000
+         BO    MAYBSKHD       YES, MAYBE A MODIFIED SEEK HEAD. @V56BDA8 00188000
+         B     RECURERR       ELSE, LET DMKDASER HANDLE IT     @V56BDA8 00189000
+         SPACE 2                                                        00190000
+TRKCHK   BAL   R5,ISITALT     IS IT PRIMARY OR ALTERNATE?      @V56BDA8 00191000
+         NOP   0              NO RETURN HERE FROM ISITALT      @V56BDA8 00192000
+         B     TRKCHKA        ALTERNATE                        @V56BDA8 00193000
+         B     TRKCHKP        PRIMARY                          @V56BDA8 00194000
+TRKCHKA  TM    IOBMISC2,X'18' DOES USER ALLOW HEAD SWITCHING?  @V56BDA8 00195000
+         BO    VFILPROT       NO, FILE PROTECT CONDITION       @V56BDA8 00196000
+TRKCHKP  TM    IOERDATA+1,X'01' WEED OUT OPERATION INCOMPLETE. @V56BDA8 00197000
+         BO    BDTRK          KEEP OUT OF TROUBLE              @V56BDA8 00198000
+         SPACE 1                                                        00199000
+GETHAR0  LA    R0,ALT1SIZE    SIZE OF CCW WORKAREA.            @V56BDA8 00200000
+         BAL   R5,GETWORK     GET A RECOVERY WORKAREA          @V56BDA8 00201000
+         MVC   0(READHARZ-READHAR0,R1),READHAR0 CCWS READ HA,R0@V56BDA8 00202000
+         BAL   R5,SETUPSK     SET UP THE SEEK ADDRESS          @V56BDA8 00203000
+         USING ALT1SECT,R1                                     @VMG0005 00204000
+         LA    R0,ALT1HA      PUT FCCHH THERE                  @VMG0005 00205000
+         STCM  R0,7,READHA+1-READHAR0(R1)  ADDR IN READ HA CCW @VMG0005 00206000
+         LA    R0,ALT1R0      PUT CCHH (R0) THERE              @VMG0005 00207000
+         STCM  R0,7,READR0+1-READHAR0(R1)  ADDR IN READ RO CCW @VMG0005 00208000
+         NI    ALT1FLAG,255-ALT1PASS  READING HA & R0 1ST TIME.@VMG0005 00209000
+         DROP  R1                                              @V56BDA8 00210000
+         ST    R1,IOBRCAW     RESTART CAW TO BE USED           @V56BDA8 00211000
+GOREADR0 OI    IOERFLG3,IOERRDR0  FLAG RO READ IN PROGRESS.    @VMG0005 00212000
+RETRY    LA    R2,RETRYALT    RETRY RETURN VECTOR              @V56BDA8 00213000
+         B     ALTREXIT       GO DO IT                         @V56BDA8 00214000
+         SPACE 2                                                        00215000
+ALTHAR0  NI    IOERFLG3,255-IOERRDR0 CLEAR OUR FLAG            @V56BDA8 00216000
+         LTR   R3,R3          ERROR IN OUR CCWS?               @V56BDA8 00217000
+         BNZ   RCVRYERR       YES, ABANDON RECOVERY EFFORTS    @V56BDA8 00218000
+         L     R9,IOERLOC     POINT TO OUR WORKAREA            @V56BDA8 00219000
+         USING ALT1SECT,R9                                     @V56BDA8 00220000
+         TM    ALT1FLAG,ALT1PASS  1ST READ OF HA & R0 OR 2ND?  @VMG0005 00221000
+         BNZ   ALTHAR02       BRANCH IF JUST NOW DID 2ND READ. @VMG0005 00222000
+         MVC   IOERWRK(L'IOERWRK+L'IOERADR),ALT1HA SAVE HA & R0@VMG0005 00223000
+         DC    0S(ALT1R0)     XREFS HIDDEN REFERENCE TO ALT1R0 @VMG0005 00224000
+*                             IN THE ABOVE MVC.                         00225000
+         TM    IOERDATA,X'80' WAS THIS COMMAND REJECT?         @V56BDA8 00226000
+         BO    RESEEKHD       YES, MUST BE SEEK HEAD PATH      @V56BDA8 00227000
+*                             AND WE MUST BE ON AN ALTERNATE,           00228000
+*                             OTHERWISE FOR SEEK HEAD WE WOULD          00229000
+*                             NOT BE READING R0.  NO NEED TO            00230000
+*                             CHECK R0 POINTERS NOW, THAT WOULD         00231000
+*                             HAVE BEEN DONE EARLIER WHEN WE            00232000
+*                             GOT ONTO THE ALTERNATE.                   00233000
+         TM    ALT1HA,DEFTRK+ALTTRK CHECK FLAGS IN HA FLAG BYTE@VMG0005 00234000
+         BNM   RCVRYERR       ONE OR THE OTHER OF THE FLAGS    @VMG0005 00235000
+*                             SHOULD BE ON.  ERROR IF NOT.              00236000
+         CLC   ALT1R0(L4),ALT1SKAD+2  R0 SHOULD NOT POINT SELF.@VMG0005 00237000
+         BE    RCVRYERR       BRANCH IF R0 POINTS TO ITSELF.   @VMG0005 00238000
+         TM    IOBFLAG,IOBCP  CP CHANNEL PROGRAM?              @VMG0005 00239000
+         BO    ENDR0CHK       DON'T BOTHER CHECKING R0 POINTERS@VMG0005 00240000
+*                             BOTH WAYS, DISK WAS CHECKED WHEN          00241000
+*                             IT WAS FORMATTED.                         00242000
+         TM    ALT1HA,ALTTRK  ALREADY POSITIONED ON THE ALT?   @VMG0005 00243000
+         BO    ENDR0CHK       NO NEED TO CHECK POINTERS AGAIN, @VMG0005 00244000
+*                             IT WAS DONE BEFORE COMING TO ALT.         00245000
+*        USE CHANNEL PROGRAM STILL IN WORK AREA TO READ HA & R0 FROM    00246000
+*        OPPOSITE TRACK OF THE PAIR.  HAVE TO CHANGE SEEK ADDR THOUGH.  00247000
+         MVC   ALT1SKSV(L4),ALT1SKAD+2 SAVE CCHH OF PRESENT TRK@VMG0005 00248000
+         MVC   ALT1SKAD+2(L4),ALT1R0  NEW SEEK ADDR IS FROM    @VMG0005 00249000
+*                                     R0 OF PRESENT TRACK.              00250000
+         OI    ALT1FLAG,ALT1PASS  FLAG MEANS STARTING 2ND READ.@VMG0005 00251000
+         B     GOREADR0       GO READ HA & R0 OF OPPOSITE TRK. @VMG0005 00252000
+         SPACE                                                          00253000
+ALTHAR02 DS    0H             CHECK RESULT OF 2ND READ OF HA,R0@VMG0005 00254000
+         XC    ALT1HA(L1),IOERWRK  COMBINE 1ST TRK HA FLAGS    @VMG0005 00255000
+*                                  WITH 2ND TRK HA FLAGS.               00256000
+         TM    ALT1HA,DEFTRK+ALTTRK  NOW BOTH BITS SHOULD BE 1.@VMG0005 00257000
+         BNO   RCVRYERR       BRANCH IF IMPROPER FLAGS IN HA.  @VMG0005 00258000
+         CLC   ALT1R0(L4),ALT1SKSV  R0 POINTS BACK TO 1ST TRK? @VMG0005 00259000
+         BNE   RCVRYERR       TRKS DO NOT POINT TO EACH OTHER. @VMG0005 00260000
+ENDR0CHK DS    0H                                              @VMG0005 00261000
+         BAL   R5,SETUPALT    SET UP CCWS                      @V56BDA8 00262000
+         L     R1,IOERADR+4   LOGICAL CCHH (FROM R0)           @V56BDA8 00263000
+         TM    IOERWRK,ALTTRK ON ALTERNATE TRACK?              @V56BDA8 00264000
+         BZ    SETSEEK        NO, MUST BE A DEFECTIVE PRIMARY  @V56BDA8 00265000
+         A     R1,F1          SKIP TO NEXT HEAD                @V56BDA8 00266000
+         CLM   R1,3,=H'11'    PAST LAST HEAD?                  @V56BDA8 00267000
+         BNH   SETSEEK        NO, RESTART USER                 @V56BDA8 00268000
+         OI    IOERDATA+1,X'20' FAKE END OF CYLINDER           @V56BDA8 00269000
+         LA    R2,EOCERR      SET RETURN VECTOR                @V56BDA8 00270000
+SIMULERR NI    IOERDATA,255-X'02' TURN OFF TRACK CONDITION     @V56BDA8 00271000
+*                             CHECK                                     00272000
+         BAL   R5,UPALTSNS    RELOCATE CCHH IN SENSE           @V56BDA8 00273000
+         B     RETDASER       TREAT AS EOC OR AS FILE PROTECT. @V56BDA8 00274000
+         SPACE 1                                                        00275000
+VFILPROT OI    IOERDATA+1,X'04' SET FILE PROTECT               @V56BDA8 00276000
+         LA    R2,FILPROT     SET RETURN VECTOR                @V56BDA8 00277000
+         B     SIMULERR       SIMULATE THE ERROR               @V56BDA8 00278000
+         SPACE 1                                                        00279000
+SETSEEK  STCM  R1,15,ALT1SKAD+2 SET SEEK ADDRESS               @V56BDA8 00280000
+         LA    R1,ALT1SEEK    ->START OF CHANNEL PROGRAM       @V56BDA8 00281000
+         ST    R1,IOBRCAW     PUT IN RESTART CAW               @V56BDA8 00282000
+         MVC   IOBRCAW(L1),IOBCAW SET PROTECT KEY.             @V56BDA8 00283000
+ALTRSTRT OI    IOERFLG3,IOERALTR FLAG ALTERNATE RETRY          @V56BDA8 00284000
+         B     RETRY          RETRY THE OPERATION              @V56BDA8 00285000
+         DROP  R9                                              @V56BDA8 00286000
+         SPACE 2                                                        00287000
+MAYBSKHD BAL   R5,CHKSKHD     SEE IF USERS FAULT               @V56BDA8 00288000
+         B     CRJCT          COMMAND REJECT - USER ERROR      @V56BDA8 00289000
+         B     SKHDALT        SEEK HD OCCURRED WHILE ON ALT TRK@V56BDA8 00290000
+         LA    R0,ALT2SIZE    GET A SHORT RESTART AREA         @V56BDA8 00291000
+         BAL   R5,GETWORK     GET A RECOVERY WORKAREA          @V56BDA8 00292000
+JOINSKHD BAL   R5,SETUSKHD    SET IT UP                        @V56BDA8 00293000
+         B     ALTRSTRT       RESTART HIS IO                   @V56BDA8 00294000
+         SPACE 1                                                        00295000
+RESEEKHD LH    R6,IOERADR+4   POSITION TO PRIMARY CYLINDER     @V56BDA8 00296000
+         MVN   IOERDATA+6(L1),IOERADR+7 SET PRIMARY HEAD (OLD) @V56BDA8 00297000
+         B     JOINSKHD       JOIN NORMAL RESTART CASE         @V56BDA8 00298000
+         SPACE 1                                                        00299000
+*        A SEEK HEAD OCCURRED WHILE WE WERE POSITIONED ON AN ALTERNATE. 00300000
+*        THE QUESTION NOW IS WHETHER OR NOT THE USER KNOWS HE IS ON     00301000
+*        AN ALTERNATE.  HE KNOWS HE IS THERE IF HE SEEKED DIRECTLY      00302000
+*        TO IT.  HE DOESN'T KNOW ABOUT IT IF WE TOOK HIM HERE AS        00303000
+*        PART OF ERROR RECOVERY.  IF HE IS UNAWARE OF IT, THEN HE       00304000
+*        INTENDS THE SEEK HEAD TO OPERATE IN THE ASSOCIATED PRIMARY     00305000
+*        CYLINDER.  BUT IF HE IS AWARE OF BEING IN THE ALTERNATE        00306000
+*        CYLINDER, THEN THE INTENT OF HIS SEEK HEAD IS UNCLEAR, BUT     00307000
+*        COULD BE INTENDED TO GET TO SOMEONE ELSES ALTERNATE TRACK;     00308000
+*        SO WE GIVE HIM COMMAND REJECT.  NOTE THAT WE ARE STILL NOT     00309000
+*        CERTAIN THAT IT WAS HIS SEEK AND NOT OUR ERROR RECOVERY THAT   00310000
+*        GOT US TO THIS PARTICULAR ALTERNATE TRACK, BUT THE IOBALTSK    00311000
+*        FLAG SAYS THERE WAS A POSSIBILITY THAT IT WAS HIM; FURTHER     00312000
+*        CHECKING MIGHT SHOW WHO WAS RESPONSIBLE IN SOME CASES, BUT     00313000
+*        NOT IN EVERY CASE SINCE THE ORDER OF EXECUTION OF CHANNEL      00314000
+*        COMMANDS CANNOT IN GENERAL BE DETERMINED.  HOWEVER, WE WILL    00315000
+*        ASSERT THAT HIS MIXING OF SEEK HEADS WITH A DIRECT SEEK TO     00316000
+*        AN ALTERNATE IS A SUFFICIENT REASON FOR KICKING HIM OUT.  BUT  00317000
+*        SOMETIMES WE LET HIM GET AWAY WITH SUCH CHANNEL PROGRAMS: WHEN 00318000
+*        THE SEEK HEADS ALL HAPPEN TO OCCUR IN PRIMARY CYLINDERS.       00319000
+SKHDALT  TM    IOBSTAT,IOBALTSK  HIS CHNL PRG HAS SEEK TO ALT? @V56BDA8 00320000
+         BZ    GETHAR0        NO.  ERROR RECOVERY PUT HIM ON   @V56BDA8 00321000
+*                             ALT TRK, SO NOW ERROR RECOVERY MUST       00322000
+*                             TAKE HIM BACK TO HIS PRIMARY CYLINDER.    00323000
+CRJCT    LA    R2,COMRJCT     COMMAND REJECT VECTOR            @V56BDA8 00324000
+         B     RETDASER       RETURN TO DMKDASER               @V56BDA8 00325000
+         SPACE 1                                                        00326000
+BDTRK    LA    R2,BADTRACK    TRACK CONDITION CHECK            @V56BDA8 00327000
+         B     RETDASER                                        @V56BDA8 00328000
+         SPACE 1                                                        00329000
+RECURERR LA    R2,RECURALT    RECURSIVE ERROR VECTOR           @V56BDA8 00330000
+         B     RETDASER       RETURN TO DMKDASER               @V56BDA8 00331000
+         SPACE 2                                                        00332000
+VERFMSK  MVI   IOBMISC2,0     CLEAR FILE MASK                  @V56BDA8 00333000
+         TM    IOBFLAG,IOBCP  CP OPERATION?                    @V56BDA8 00334000
+         BO    TRKCHK         YES, MASK IS ZERO AND NO SEEK    @V56BDA8 00335000
+*                             HEADS                                     00336000
+         BAL   R5,FINDMASK    FIND FILEMASK AND FIX SEEK HEADS @V56BDA8 00337000
+         B     CHECKIT        GO PROCESS THE ERROR             @V56BDA8 00338000
+         SPACE 2                                                        00339000
+FINDMASK SR    R14,R14        CLEAR R14                        @V56BDA8 00340000
+         ICM   R14,7,IOBCAW+1 -->RCWCCW                        @V56BDA8 00341000
+         LA    R15,RCWCCW-RCWTASK LENGTH OF RCWTASK HEADER.    @V56BDA8 00342000
+         SR    R14,R15        BACK UP OVER HEADER TO BEGINNING.@V56BDA8 00343000
+         USING RCWTASK,R14                                     @V56BDA8 00344000
+MASKLOOP LH    R0,RCWRCNT     NUMBER OF REAL CCWS IN TASK      @V56BDA8 00345000
+         LA    R15,RCWCCW     POINT TO FIRST CCW               @V56BDA8 00346000
+         USING RCWCCW,R15                                      @V56BDA8 00347000
+MASKCHK  CLI   RCWCOMND,X'1F' SFM?                             @V56BDA8 00348000
+         BE    GOTASFM        YES, FOUND ONE                   @V56BDA8 00349000
+         CLI   RCWCOMND,X'1B' SEEK HEAD?                       @V56BDA8 00350000
+         BNE   MASKCONT       NO, LOOK AT NEXT CCW             @V56BDA8 00351000
+         MVI   RCWCOMND,X'FF' FORCE COMMAND REJECT             @V56BDA8 00352000
+MASKCONT LA    R15,8(,R15)    NEXT CCW                         @V56BDA8 00353000
+         BCT   R0,MASKCHK     CHECK IT OUT                     @V56BDA8 00354000
+         ICM   R14,7,RCWPNT+1 GET NEXT RCWTASK                 @V56BDA8 00355000
+         BNZ   MASKLOOP       SCAN CCWS                        @V56BDA8 00356000
+         BR    R5             SFM COPIED IF FOUND, SEEKS ZAPPED@V56BDA8 00357000
+         SPACE 1                                                        00358000
+GOTASFM  ST    R15,SAVEWRK1   PRESERVE R15 FOR A MOMENT.       @V56BDA8 00359000
+         L     R15,RCWADDR    GET FILE MASK POINTER.           @V56BDA8 00360000
+         MVC   IOBMISC2(L1),0(R15) COPY INTO IOBLOK.           @V56BDA8 00361000
+         L     R15,SAVEWRK1   RESTORE R15.                     @V56BDA8 00362000
+         B     MASKCONT       CONTINUE SCAN                    @V56BDA8 00363000
+         DROP  R14,R15                                         @V56BDA8 00364000
+         SPACE 2                                                        00365000
+         USING ALT1SECT,R9                                     @V56BDA8 00366000
+SETUPSK  MVC   ALT1SKAD,ZEROES CLEAR OUT SEEK ADDRESS          @V56BDA8 00367000
+         IC    R0,IOERDATA+6  GET HIGH CYLINDER BYTE           @V56BDA8 00368000
+         SRL   R0,5           SHIFT RIGHT 5                    @V56BDA8 00369000
+         STC   R0,ALT1SKAD+2  STORE HIGH CYL SEEK DATA         @V56BDA8 00370000
+         NI    ALT1SKAD+2,X'03' CLEAR BITS 0 - 5               @V56BDA8 00371000
+         MVC   ALT1SKAD+3(1),IOERDATA+5 MOVE LOW CYL SEEK DATA @V56BDA8 00372000
+         MVN   ALT1SKAD+5(1),IOERDATA+6 MOVE HEAD ADDRESS      @V56BDA8 00373000
+         LA    R0,ALT1SKAD    ->SEEK ARGUMENT                  @V56BDA8 00374000
+         STCM  R0,7,ALT1SEEK+1 STORE INTO CCW                  @V56BDA8 00375000
+         BR    R5             RETURN TO CALLER                 @V56BDA8 00376000
+         SPACE 2                                                        00377000
+SETUPALT MVC   ALT1SECT(ALT1CLEN),ALT1CCWS INITIALIZE          @V56BDA8 00378000
+         MVC   ALT1SKAD,ZEROES CLEAR SEEK ADDRESS              @V56BDA8 00379000
+         LA    R1,ALT1SKAD    ->SEEK ADDRESS                   @V56BDA8 00380000
+         STCM  R1,7,ALT1SEEK+1 STORE IN SEEK CCW               @V56BDA8 00381000
+         LA    R1,ALT1FMSK    ->FILEMASK                       @V56BDA8 00382000
+         STCM  R1,7,ALT1SFM+1 STORE IN CCW                     @V56BDA8 00383000
+         MVC   ALT1FMSK,IOBMISC2 SET USERS FILE MASK           @V56BDA8 00384000
+         L     R1,IOERCSW     FAILING CCW + 8                  @V56BDA8 00385000
+         S     R1,F8          BACK UP TO FAILING CCW           @V56BDA8 00386000
+         STCM  R1,7,ALT1TICA+1 PROBABLE RESTART ADDRESS        @V56BDA8 00387000
+         BR    R5             RETURN TO CALLER                 @V56BDA8 00388000
+         DROP  R9                                              @V56BDA8 00389000
+         SPACE 2                                                        00390000
+UPALTSNS MVC   IOERDATA+5(1),IOERADR+5 LOW ORDER CC            @V56BDA8 00391000
+         IC    R1,IOERADR+4   HIGH ORDER CC                    @V56BDA8 00392000
+         N     R1,F3          LEAVE C512 AND C256 BITS         @V56BDA8 00393000
+         SLL   R1,5           GET 0CC00000 BIT PATTERN         @V56BDA8 00394000
+         STC   R1,IOERDATA+6  STORE INTO 0CCXHHHH BYTE IN SENSE@V56BDA8 00395000
+         MVN   IOERDATA+6(1),IOERADR+7 COPY LOW ORDER HEAD     @V56BDA8 00396000
+*                             DIGIT                                     00397000
+         BR    R5             RETURN                           @V56BDA8 00398000
+         SPACE 2                                                        00399000
+GETWORK  STH   R0,IOERDW      SAVE IN IOERBLOK                 @V56BDA8 00400000
+         CALL  DMKFREE        GET A WORKAREA                   @V56BDA8 00401000
+         ST    R1,IOERLOC     SAVE IN IOERBLOK                 @V56BDA8 00402000
+         LR    R9,R1          WORKAREA ADDRESSING              @V56BDA8 00403000
+         BR    R5             RETURN TO CALLER                 @V56BDA8 00404000
+         SPACE 1                                                        00405000
+FRETWORK LH    R0,IOERDW      LOAD REG.0 WITH CT OF DW'S       @V56BDA8 00406000
+         L     R1,IOERLOC     LOAD REG.1 OF ADDR. OF STORAGE   @V56BDA8 00407000
+*                             OBTAINED                                  00408000
+         MVC   IOERDW,ZEROES  CLEAR OLD DATA.                  @V56BDA8 00409000
+         MVC   IOERLOC,ZEROES CLEAR OLD DATA.                  @V56BDA8 00410000
+         CALL  DMKFRET        FREE CORE                        @V56BDA8 00411000
+         BR    R5             RETURN TO CALLER                 @V56BDA8 00412000
+         SPACE 1                                                        00413000
+FRETIOER L     R1,IOBIOER     GET ADDRESS OF IOERBLOK          @V56BDA8 00414000
+FRETIOEZ MVC   IOBIOER,ZEROES CLEAN OUT POINTER.               @V56BDA8 00415000
+         LA    R0,IOERSIZE    LOAD IOERBLOK SIZE.              @V56BDA8 00416000
+         AH    R0,IOEREXT-IOERBLOK(,R1) INCLUDE EXTRA SIZE     @V56BDA8 00417000
+*                             (IF ANY)                                  00418000
+         CALL  DMKFRET                                         @V56BDA8 00419000
+         BR    R5             RETURN TO CALLER.                @V56BDA8 00420000
+         SPACE 2                                                        00421000
+         USING ALT2SECT,R9                                     @V56BDA8 00422000
+SETUSKHD MVC   ALT2SEEK(LEN2CCW),ALT1CCWS SEEK, SFM            @V56BDA8 00423000
+         XC    ALT2TICA(ALT2SIZE*8-LEN2CCW),ALT2TICA ZERO THE  @V56BDA8 00424000
+*                                                     REST.             00425000
+         MVI   ALT2SEEK+5,RCWGEN+RCWREL GOOD FLAGS             @V56BDA8 00426000
+         MVI   ALT2SFM+5,RCWGEN+RCWREL FLAG SFM CP GENERATED   @V56BDA8 00427000
+         MVI   ALT2TICA+5,RCWGEN TIC TOO                       @V56BDA8 00428000
+         LA    R1,ALT2SKAD    -->BBCCHH AREA                   @V56BDA8 00429000
+         STCM  R1,7,ALT2SEEK+1 STORE ADDRESS IN SEEK           @V56BDA8 00430000
+         STH   R6,ALT2SKAD+2  SET UP CC                        @V56BDA8 00431000
+         MVN   ALT2SKAD+5(L1),IOERDATA+6 COPY HEAD ADDRESS     @V56BDA8 00432000
+         LA    R1,ALT2FMSK    PUT FILEMASK IN SAME WORD        @V56BDA8 00433000
+         STCM  R1,7,ALT2SFM+1 POINT CCW TO IT                  @V56BDA8 00434000
+         MVC   ALT2FMSK,IOBMISC2 SET UP FILE MASK              @V56BDA8 00435000
+         L     R4,IOERCSW     GET POINTER TO CCW               @V56BDA8 00436000
+         S     R4,F8          BACKUP TO FAILING CCW            @V56BDA8 00437000
+         STCM  R4,7,ALT2TICA+1 TO RESTART ON HIS CCW           @V56BDA8 00438000
+         USING RCWCCW,R4                                       @V56BDA8 00439000
+         MVI   ALT2TICA,8     MAKE IT A TIC                    @V56BDA8 00440000
+         LH    R15,RCWCNT     GET COUNT                        @V56BDA8 00441000
+CHKDATCH TM    RCWFLAG,CD     CHAIN DATA?                      @V56BDA8 00442000
+         BZ    CHKCMDCH       NO, CHECK FOR COMMAND CHAINING   @V56BDA8 00443000
+         BAL   R14,NEXTCCW    GET  NEXT CCW                    @V56BDA8 00444000
+         AH    R15,RCWCNT     ACCUMULATE COUNT                 @V56BDA8 00445000
+         B     CHKDATCH       SEE IF END OF DATA CHAINING      @V56BDA8 00446000
+CHKCMDCH TM    RCWFLAG,CC     COMMAND CHAINING?                @V56BDA8 00447000
+         BZ    USEHIS         NO, USE HIS CCW                  @V56BDA8 00448000
+         N     R15,XRIGHT16   CLEAR MEANINGLESS BITS           @V56BDA8 00449000
+         C     R15,F6         CHECK OUT THE COUNT              @V56BDA8 00450000
+         BL    USEHIS         HE WILL GET COMMAND REJECT       @V56BDA8 00451000
+         BE    FINDNXT        JUST RIGHT                       @V56BDA8 00452000
+         TM    RCWFLAG,SILI   SUPPRESS LENGTH ERROR?           @V56BDA8 00453000
+         BZ    USEHIS         WILL GET ILI                     @V56BDA8 00454000
+FINDNXT  BAL   R14,NEXTCCW    GET ADDRESS OF NEXT (NON-TIC) CCW@V56BDA8 00455000
+         L     R1,ALT2TICA    MODIFIED SEEK HEAD               @V56BDA8 00456000
+         TM    IOBFLAG,IOBCP  CP CHANNEL PROGRAM?              @V56BDA8 00457000
+         BO    CPSKHD         YES, NICE SIMPLE (REAL) CASE     @V56BDA8 00458000
+         LA    R8,SAVEWRK4-(VDEVCSW-VDEVBLOK) FAKE A VDEVBLOK  @V56BDA8 00459000
+         ST    R1,SAVEWRK4    STORE ADDRESS FOR CCWSB          @V56BDA8 00460000
+         CALL  DMKUNTRN       FIND VIRTUAL CCW ADDRESS         @V56BDA8 00461000
+         L     R8,SAVER8      RESTORE REG8                     @V56BDA8 00462000
+         L     R1,SAVEWRK4    POINT TO VIRTUAL CCW             @V56BDA8 00463000
+         LA    R1,0(,R1)      CLEAN IT UP                      @V56BDA8 00464000
+         TRANS 2,1,OPT=(BRING,DEFER) GET USERS CCW             @V56BDA8 00465000
+         MVC   SAVEWRK4(L8),0(R2)                              @V56BDA8 00466000
+         DC    0AL4(SAVEWRK5) PUT SYMB IN XREF FOR ABOVE INSTR @V56BDA8 00467000
+         LA    R1,SAVEWRK4    POINT TO USER CCW                @V56BDA8 00468000
+         LA    R0,6-1         LENGTH OF BBCCHH SEEK ADDR       @V56BDA8 00469000
+         LA    R2,SAVEWRK2    COPY BBCCHH HERE.                @V56BDA8 00470000
+         DC    0AL4(SAVEWRK3) PUT SYMB IN XREF FOR ABOVE INSTR @V56BDA8 00471000
+         CALL  DMKCCWSB       COPY CONTROL INFORMATION         @V56BDA8 00472000
+         BNZ   USEHIS                                          @V56BDA8 00473000
+CHKHDADD CLC   =H'11',SAVEWRK2+4 IS HEAD ADDRESS OK?           @V56BDA8 00474000
+         BL    USEHIS         NO, END WITH HIS CCW             @V56BDA8 00475000
+         MVC   ALT2SKAD+4(L2),SAVEWRK2+4 COPY HEAD ADDRESS     @V56BDA8 00476000
+         STCM  R4,7,ALT2TICA+1 PUT ADDRESS IN OUR TIC          @V56BDA8 00477000
+         B     USERSTRT       RESTART USER                     @V56BDA8 00478000
+USEHIS   L     R4,ALT2TICA    POINT TO USER CCW                @V56BDA8 00479000
+         MVI   0(R4),X'1B'    RECONVERT TO A SEEK              @V56BDA8 00480000
+USERSTRT TM    IOBFLAG,IOBCP+IOBHVC CP OR DIAGNOSE I/O?        @VMG0006 00481000
+         BZ    USERSIO        NO, RESTART FOR USER SIO         @VMG0006 00482000
+         ST    R9,IOBRCAW     STORE RESTART ADDRESS            @VMG0006 00483000
+         MVC   IOBRCAW(L1),IOBCAW  COPY PROTECT KEY            @V56BDA8 00484000
+         OI    IOBFLAG,IOBRSTRT    INDICATE RESTART            @V56BDA8 00485000
+         BR    R5             RETURN TO CALLER                 @V56BDA8 00486000
+USERSIO  L     R1,FFS         STORE IOBRCAW = X'FFFFFFFF'      @VMG0006 00487000
+         ST    R1,IOBRCAW     ...                              @VMG0006 00488000
+         STCM  R9,7,IOBCAW+1  RESTRT CAW BECOMES IOBCAW FOR SIO@VMG0006 00489000
+         BR    R5             RETURN TO CALLER                 @VMG0006 00490000
+         SPACE 1                                                        00491000
+CPSKHD   L     R1,0(,R1)      GET SEEK ARGUMENT ADDRESS        @V56BDA8 00492000
+         MVC   SAVEWRK2+4(L2),4(R1) COPY HEAD ADDRESS.         @V56BDA8 00493000
+         B     CHKHDADD       REJOIN VIRTUAL CASE              @V56BDA8 00494000
+         DROP  R9                                              @V56BDA8 00495000
+         SPACE 2                                                        00496000
+NEXTCCW  LA    R0,2           BCT COUNTER                      @V56BDA8 00497000
+         LA    R4,RCWCCW+8    ADVANCE TO NEXT CCW              @V56BDA8 00498000
+NEXTCCW1 TM    IOBFLAG,IOBCP  RCWTASK?                         @V56BDA8 00499000
+         BO    NEXTCCW2       NO RCWFLAG                       @V56BDA8 00500000
+         TM    RCWCTL,RCWINVL BAD CCW?                         @V56BDA8 00501000
+         BO    USEHIS         YES, USE HIS                     @V56BDA8 00502000
+NEXTCCW2 TM    RCWCOMND,X'07' IS IT A TIC?                     @V56BDA8 00503000
+         BNZR  R14            NO, RETURN NOW                   @V56BDA8 00504000
+         TM    RCWADDR+3,X'07' IS IT ON A DBLEWORD?            @V56BDA8 00505000
+         BNZ   USEHIS         NO, ERROR                        @V56BDA8 00506000
+         L     R4,RCWADDR     FOLLOW TIC                       @V56BDA8 00507000
+         BCT   R0,NEXTCCW1    VERIFY RCWINVL IF APPROPRIATE    @V56BDA8 00508000
+         B     USEHIS         TIC TO TIC ERROR                 @V56BDA8 00509000
+         SPACE 1                                                        00510000
+CHKSKHD  TM    IOERDATA,X'80' COMMAND REJECT?                  @V56BDA8 00511000
+         BZR   R5             NO, NOT OUR ERROR                @V56BDA8 00512000
+         L     R4,IOERCSW     GET FAILING CCW ADDRESS          @V56BDA8 00513000
+         S     R4,F8          -->FAILING CCW                   @V56BDA8 00514000
+         CLI   RCWCOMND,X'FF' OUR OP CODE?                     @V56BDA8 00515000
+         BNER  R5             NO, USER ERROR                   @V56BDA8 00516000
+         TM    IOBFLAG,IOBCP  IS A CP PRODUCTION?              @V56BDA8 00517000
+         BO    ISITALT        YES, NO RCWTASK AND 0 FILEMASK   @V56BDA8 00518000
+         TM    RCWCTL,RCWINVL REAL INVALID OP-CODE?            @V56BDA8 00519000
+         BOR   R5             YES, USER ERROR                  @V56BDA8 00520000
+         TM    IOBMISC2,X'18' HEAD SWITCHING PERMITTED?        @V56BDA8 00521000
+         BNO   ISITALT        YES, CAN BE RESTARTED            @V56BDA8 00522000
+         NI    IOERDATA,255-X'80' TURN OFF COMMAND REJECT      @V56BDA8 00523000
+         OI    IOERDATA+1,X'04' TURN ON FILE PROTECT           @V56BDA8 00524000
+         BR    R5             TREAT AS USER ERROR              @V56BDA8 00525000
+ISITALT  IC    R6,IOERDATA+6  HIGH ORDER CC + H                @V56BDA8 00526000
+         N     R6,=A(B'01100000') CLEAR UNUSED BITS            @V56BDA8 00527000
+         SLL   R6,3           PUT HIGH ORDER BITS IN HIGH BYTE @V56BDA8 00528000
+         IC    R6,IOERDATA+5  INSERT LOW C                     @V56BDA8 00529000
+         LA    R15,696        FIRST 70MB ALTERNATE             @V56BDA8 00530000
+         TM    IOERDATA+2,X'01' 70MB MODULE?                   @V56BDA8 00531000
+         BZ    CYLTYP         NO, MUST BE 35MB                 @V56BDA8 00532000
+         LA    R15,348        35MB ALTERNATE CYLINDER          @V56BDA8 00533000
+CYLTYP   CR    R6,R15         ALTERNATE CYLINDER?              @V56BDA8 00534000
+         BNL   4(,R5)         YES, GET OUT                     @V56BDA8 00535000
+         B     8(,R5)         NO, IT IS A PRIMARY              @V56BDA8 00536000
+         DROP  R4                                              @V56BDA8 00537000
+         EJECT                                                          00538000
+*.                                                                      00539000
+*                                                                       00540000
+* ENTRY POINT : DMKTRKFP                                                00541000
+*                                                                       00542000
+*                                                                       00543000
+*                                                                       00544000
+* FUNCTION : TO HANDLE COMMAND REJECTS FOR CHANNEL PROGRAMS             00545000
+*                INITIATED BY VIRTUAL MACHINE SIO WHICH INCLUDE         00546000
+*                SEEKS TO ALTERNATE TRACKS WHICH LIE BEYOND THE         00547000
+*                NORMAL EXTENTS OF THE MINI-DISK. THIS IS NEEDED        00548000
+*                AS IN THAT CASE ALL SEEK HEAD OP-CODES HAVE BEEN       00549000
+*                CHANGED TO INVALID OPERATION CODES.                    00550000
+*                                                                       00551000
+*                                                                       00552000
+* ATTRIBUTES : REENTRANT,RESIDENT,CALLED VIA SVC.                       00553000
+*                                                                       00554000
+*                                                                       00555000
+* ENTRY CONDITIONS : GPR8=ADDRESS OF VDEVBLOK                           00556000
+*                    GPR10=ADDRESS OF IOBLOK                            00557000
+*                    GPR11=ADDRESS OF VMBLOK                            00558000
+*                    GPR12=BASE ADDRESS                                 00559000
+*                    GPR13=ADDRESS OF SAVE AREA                         00560000
+*                                                                       00561000
+*                                                                       00562000
+* EXIT CONDITIONS :                                                     00563000
+*                                                                       00564000
+*              ON COMPLETION, EXIT TO CALLER WITH IOBALTSK REMOVED.     00565000
+*              FOR RETRY, CALL DMKIOSQV AND FREE CALLER SAVEAREA, THEN  00566000
+*              EXIT TO DISPATCHER.                                      00567000
+*                                                                       00568000
+*                                                                       00569000
+* CALLS TO OTHER ROUTINES :                                             00570000
+*                     1. DMKIOSQV - TO RESTART USER CHANNEL PROGRAM.    00571000
+*                     2. SAME AS FOR DMKTRKIN.                          00572000
+*                                                                       00573000
+*                                                                       00574000
+* EXTERNAL REFERENCES :  NONE                                           00575000
+*                                                                       00576000
+*                                                                       00577000
+* TABLES AND WORKAREAS :                                                00578000
+*                 IOBLOK                                                00579000
+*                 IOERBLOK                                              00580000
+*                 RCWTASK                                               00581000
+*                                                                       00582000
+* REGISTER USAGE :                                                      00583000
+*                 GPR  4=SCRATCH                                        00584000
+*                 GPR  5=GENERAL USAGE IS FOR BAL REGISTER              00585000
+*                 GPR  6=SCRATCH                                        00586000
+*                 GPR  7=IOERBLOK ADDRESS                               00587000
+*                 GPR  8=RDEVBLOK ADDRESS.                              00588000
+*                 GPR  9=RECOVERY WORKAREA (IN RCWTASK)                 00589000
+*                 GPR 10=IOBLOK ADDRESS.                                00590000
+*                 GPR 11=VMBLOK ADDRESS.                                00591000
+*                 GPR 12=BASE ADDRESS.                                  00592000
+*                 GPR 13=SAVE AREA ADDRESS.                             00593000
+*                 GPR 14=EXTERNAL LINKAGE REGISTER.                     00594000
+*                 GPR 15=EXTERNAL LINKAGE REGISTER.                     00595000
+*                                                                       00596000
+*                                                                       00597000
+* NOTES : NONE.                                                         00598000
+*                                                                       00599000
+*                                                                       00600000
+*                                                                       00601000
+* OPERATION : E. AS IN DMKTRKIN.D.1 ABOVE, EXCEPT:                      00602000
+*                1. AN RCWTASK IS USED TO HOLD RESTART CCWS.            00603000
+*                2. TO RESTART, IOBSIOF IS SET TO AVOID MODIFICATION    00604000
+*                   OF SIOWAIT CONDITIONS, AND DMKIOSQV IS USED.        00605000
+*                3. IOBALTSK IS REMOVED BEFORE RETURNING TO CALLER.     00606000
+*                4. RESTART IS NOT PERFORMED IF ARM IS POSITIONED AT    00607000
+*                   AN ALTERNATE TRACK (OUR RAISON D'ETRE)              00608000
+*                                                                       00609000
+*.                                                                      00610000
+DMKTRKFP RELOC ,              ANALYSE FILE PROTECT ERRORS.     @V56BDA8 00611000
+         ICM   R7,15,IOBIOER  IOERBLOK?                        @V56BDA8 00612000
+         BZ    FPEXIT         NO, ALL OK                       @V56BDA8 00613000
+         L     R9,FFS         IOBRCAW = X'FFFFFFFF' IF WE      @VMG0006 00614000
+         CL    R9,IOBRCAW     HAVE RESTARTED BEFORE            @VMG0006 00615000
+         BNE   FPFIRST        NO, FIRST ENTRY                  @VMG0006 00616000
+         TM    IOBFLAG,IOBCC3 BAD START FOR RETRY?             @V56BDA8 00617000
+         BNZ   FPERROR        YES, HIDE OUR ERROR              @V56BDA8 00618000
+         L     R9,IOBCAW      POINT TO OUR CCWS                @VMG0006 00619000
+         USING ALT2SECT,R9                                     @V56BDA8 00620000
+         CLM   R9,7,IOERCSW+1 OUR CCWS ARE ABOVE THE ERROR?    @VMG0006 00621000
+         BNL   FPCHECK        YES, ERROR NOT IN OUR CCWS.      @VMG0006 00622000
+         LA    R15,ALT2NCCW*8(,R9) POINT BEYOND LAST CCW       @V56BDA8 00623000
+         CLM   R15,7,IOERCSW+1  OUR CCWS ARE BELOW THE ERROR?  @VMG0006 00624000
+         BL    FPCHECK        YES, OUR CCWS ARE BELOW ERROR    @VMG0006 00625000
+FPERROR  NI    IOBFLAG,255-IOBCC3 TREAT AS INTERRUPT           @V56BDA8 00626000
+         MVC   IOBCSW+1(L3),ALT2TICA+1 RESTORE ORIGINAL ADDRESS@V56BDA8 00627000
+         B     FPEXIT         AND EXIT QUICKLY                 @V56BDA8 00628000
+         DROP  R9                                              @V56BDA8 00629000
+         SPACE 1                                                        00630000
+FPFIRST  TM    IOBFLAG,IOBCC3 INTERRUPT ENTRY?                 @V56BDA8 00631000
+         BNZ   FPEXIT         NO, NOT OUR PROBLEM              @V56BDA8 00632000
+         BAL   R5,FINDMASK    FIND USER FILEMASK               @V56BDA8 00633000
+FPCHECK  TM    IOERCSW+5,255-IL-PCI BAD ERROR?                 @V56BDA8 00634000
+         BNZ   FPEXIT         YES, NOT OUR PROBLEM             @V56BDA8 00635000
+         TM    IOERCSW+4,UC   IS THERE A UNIT CHECK?           @V56BDA8 00636000
+         BZ    FPEXIT         NO, NOT OUR ERROR                @V56BDA8 00637000
+         BAL   R5,CHKSKHD     SEE IF A GOOD FUDGED SEEK HEAD   @V56BDA8 00638000
+         B     FPEXIT         USER ERROR, GET OUT              @V56BDA8 00639000
+         B     FPEXIT         ALTERNATE, TREAT AS COMMAND      @V56BDA8 00640000
+*                             REJECT                                    00641000
+         SPACE 2                                                        00642000
+         BAL   R5,GETRCTSK    CHAIN IN A DUMMY RCWTASK         @V56BDA8 00643000
+         BAL   R5,SETUSKHD    SET UP SEEK HEAD RESTART         @V56BDA8 00644000
+         SPACE 1                                                        00645000
+         BAL   R5,FRETIOER    FRET IT                          @V56BDA8 00646000
+         SPACE 1                                                        00647000
+         OI    IOBSPEC,IOBSIOF PREVENT REMOVAL OF SIOWAIT      @V56BDA8 00648000
+         CALL  DMKIOSQV       REQUEUE THE IO                   @V56BDA8 00649000
+         SVC   16             RETURN DMKVIOIN SAVEAREA         @V56BDA8 00650000
+         GOTO  DMKDSPCH       EXIT GRACEFULLY                  @V56BDA8 00651000
+         SPACE 2                                                        00652000
+FPEXIT   NI    IOBSTAT,255-IOBALTSK PREVENT RECURSION          @V56BDA8 00653000
+         MVI   IOBMISC2,0     JUST TO BE SURE                  @V56BDA8 00654000
+         EXIT                 RETURN TO DMKVIOIN OR DMKUNTIS   @V56BDA8 00655000
+         SPACE 6                                                        00656000
+GETRCTSK L     R1,FFS         HAVE WE ALREADY ACQUIRED RCWTASK @VMG0006 00657000
+         CL    R1,IOBRCAW     RCWTASK??                        @VMG0006 00658000
+         BER   R5             YES, LEAVE QUICKLY               @VMG0006 00659000
+         LA    R0,(RCWCCW-RCWTASK)/8+ALT2SIZE SIZE             @V56BDA8 00660000
+         CALL  DMKFREE        GET AN RCWTASK                   @V56BDA8 00661000
+         USING RCWTASK,R1                                      @V56BDA8 00662000
+         LA    R9,RCWCCW      LET US USE ALT1SECT              @V56BDA8 00663000
+         MVC   RCWTASK(RCWCCW-RCWTASK),ZEROES CLEAR OUT RCWTASK@V56BDA8 00664000
+         MVI   RCWRCNT+1,ALT2NCCW NUMBER OF REAL CCWS          @V56BDA8 00665000
+         MVC   RCWHEAD,FFS    RCW BACKSTOP FIELD               @V56BDA8 00666000
+         MVI   RCWCCNT+1,(RCWCCW-RCWTASK)/8+ALT2SIZE # DBLWDS. @V56BDA8 00667000
+         SR    R14,R14        CLEAR R14                        @V56BDA8 00668000
+         ICM   R14,7,IOBCAW+1 -->FIRST RCWCCW                  @V56BDA8 00669000
+         LA    R15,RCWCCW-RCWTASK LENGTH OF RCWTASK HEADER.    @V56BDA8 00670000
+         SR    R14,R15        BACK UP OVER HEADER TO BEGINNING.@V56BDA8 00671000
+         STCM  R14,7,RCWPNT+1-RCWTASK(R1) MAKE OUR RCWTASK FST @VMG0006 00672000
+         BR    R5             RETURN TO CALLER                 @V56BDA8 00673000
+         DROP  R1                                              @V56BDA8 00674000
+         EJECT                                                          00675000
+*.                                                                      00676000
+*                                                                       00677000
+* ENTRY POINT : DMKTRKVA                                                00678000
+*                                                                       00679000
+*                                                                       00680000
+*                                                                       00681000
+* FUNCTION: TO RETURN ADDRESS OF DEFECTIVE TRACK FOR WHICH A GIVEN      00682000
+*           ALTERNATE TRACK IS ASSIGNED.                                00683000
+*                                                                       00684000
+*                                                                       00685000
+* ATTRIBUTES : REENTRANT,RESIDENT,CALLED VIA SVC.                       00686000
+*                                                                       00687000
+*                                                                       00688000
+* ENTRY CONDITIONS : GPR7=ADDRESS BBCCHH IN USER SEEK                   00689000
+*                    GPR8=ADDRESS OF VDEVBLOK                           00690000
+*                    GPR11=ADDRESS OF VMBLOK                            00691000
+*                    GPR12=BASE ADDRESS                                 00692000
+*                    GPR13=ADDRESS OF SAVE AREA                         00693000
+*                                                                       00694000
+*                                                                       00695000
+* EXIT CONDITIONS :                                                     00696000
+*                                                                       00697000
+*              R1 = CYLINDER ADDRESS OR -1 IF ERROR CONDITION           00698000
+*                                                                       00699000
+*                                                                       00700000
+* CALLS TO OTHER ROUTINES :                                             00701000
+*                     1. DMKFREE - TO OBTAIN IOBLOK.                    00702000
+*                     2. DMKFRET - TO RETURN IOBLOK.                    00703000
+*                     3. DMKIOSQR - INITIATE IO OPERATIONS.             00704000
+*                                                                       00705000
+*                                                                       00706000
+* EXTERNAL REFERENCES :                                                 00707000
+*              DMKIOSQR                                                 00708000
+*                                                                       00709000
+*                                                                       00710000
+* TABLES AND WORKAREAS : IOBLOK                                         00711000
+*                                                                       00712000
+*                                                                       00713000
+* REGISTER USAGE :                                                      00714000
+*                 GPR  0-2 SCRATCH                                      00715000
+*                 GPR 10=IOBLOK ADDRESS.                                00716000
+*                 GPR 11=VMBLOK ADDRESS.                                00717000
+*                 GPR 12=BASE ADDRESS.                                  00718000
+*                 GPR 13=SAVE AREA ADDRESS.                             00719000
+*                 GPR 14=EXTERNAL LINKAGE REGISTER.                     00720000
+*                 GPR 15=EXTERNAL LINKAGE REGISTER.                     00721000
+*                                                                       00722000
+*                                                                       00723000
+* NOTES : NONE.                                                         00724000
+*                                                                       00725000
+*                                                                       00726000
+*                                                                       00727000
+* OPERATION : F. IF GIVEN ADDRESS IS NOT AN ALTERNATE, EXIT.            00728000
+*             G. BUILD IOBLOK AND CALL DMKIOSQR TO READ R0.             00729000
+*             H. RETURN CYLINDER FROM R0 TO CALLER.                     00730000
+*                                                                       00731000
+*.                                                                      00732000
+         USING VDEVBLOK,R8                                     @V56BDA8 00733000
+         SPACE 1                                                        00734000
+DMKTRKVA RELOC ,              GIVEN ALT TRK, FINDS DEF CYL ADDR@V56BDA8 00735000
+         L     R8,VDEVREAL    GET RDEVBLOK ADDRESS             @V56BDA8 00736000
+         L     R2,FFS         IN CASE OF ERROR                 @V56BDA8 00737000
+         LA    R0,IOBSIZE     SIZE OF AN IOBLOK                @V56BDA8 00738000
+         CALL  DMKFREE        GET ONE                          @V56BDA8 00739000
+         XC    0(IOBSIZE*8,R1),0(R1) CLEAR IT OUT              @V56BDA8 00740000
+         LR    R10,R1         PUT IN STANDARD REGISTER         @V56BDA8 00741000
+         ST    R13,IOBMISC2   SAVE SAVEAREA POINTER            @V56BDA8 00742000
+         ST    R11,IOBUSER    PUT VMBLOK IN IOBLOK             @V56BDA8 00743000
+         MVC   SAVEWRK2(READHARZ-READHAR0),READHAR0 MOVE CCWS. @V56BDA8 00744000
+         DC    0AL4(SAVEWRK3,SAVEWRK4,SAVEWRK5,SAVEWRK6,SAVEWRK7,SAVEWR*00745000
+               K8,SAVEWRK9)   THIS XREFS SYMBOLS MVC'D TO ABOVE         00746000
+         STCM  R7,7,SAVEWRK2+1 MAKE SEEK POINT TO BBCCHH.      @V56BDA8 00747000
+         LA    R1,SAVEWRK1    PUT AS MUCH OF HA HERE AS FITS.  @V56BDA8 00748000
+         STCM  R1,7,SAVEWRK6+1 MAKE 'READ HA' POINT THERE.     @V56BDA8 00749000
+         MVI   SAVEWRK7+3,4   REDUCE HA COUNT; SAVEWRK1 = FCCH.@V56BDA8 00750000
+         LA    R1,SAVER1      PUT R0 HERE (CCHH).              @V56BDA8 00751000
+         STCM  R1,7,SAVEWRK8+1 PUT ADDRESS IN CCW              @V56BDA8 00752000
+         LA    R1,SAVEWRK2    ->CHANNEL PROGRAM                @V56BDA8 00753000
+         ST    R1,IOBCAW      SET CAW ADDRESS IN IOBLOK        @V56BDA8 00754000
+         LA    R1,HAR0RTN     GET INTERRUPT RETURN ADDRESS AND @V56BDA8 00755000
+         ST    R1,IOBIRA      STORE IT IN THE IOBLOK           @V56BDA8 00756000
+         CALL  DMKIOSQR       CALL IOS TO SCHEDULE READ        @V56BDA8 00757000
+         GOTO  DMKDSPCH       WAIT FOR I/O TO COMPLETE         @V56BDA8 00758000
+         SPACE                                                          00759000
+HAR0RTN  DS    0H             CONNECTOR                        @V56BDA8 00760000
+         USING *,R12                                           @V56BDA8 00761000
+         S     R12,=A(HAR0RTN-DMKTRK) RELOCATE R12.            @V56BDA8 00762000
+         USING DMKTRK,R12                                      @V56BDA8 00763000
+         L     R13,IOBMISC2   RESTORE ADDRESS OF SAVEAREA      @V56BDA8 00764000
+         L     R2,FFS         POSSIBLE IO ERROR CODE           @V56BDA8 00765000
+         TM    IOBSTAT,IOBFATAL+IOBCC3 WAS THERE AN ERROR      @V56BDA8 00766000
+*                             CONDITION                                 00767000
+         BNZ   EXITVA2        IF YES, EXIT WITH ERROR CODE     @V56BDA8 00768000
+         NI    SAVEWRK1,X'03' CLEAR UNWANTED BITS FROM HA FLAG.@V56BDA8 00769000
+         CLI   SAVEWRK1,1     POSSIBLE BIT VALUES: 00,01,10,11.@V56BDA8 00770000
+         BNE   EXITVA2        ALL BUT 01 INDICATE INVALID ALT. @V56BDA8 00771000
+         LH    R2,SAVER1      GET CC OF DEF TRK POINTED TO.    @V56BDA8 00772000
+EXITVA2  LA    R0,IOBSIZE                                      @V56BDA8 00773000
+         LR    R1,R10         PUT ADDRESS OF IOB IN R1         @V56BDA8 00774000
+         CALL  DMKFRET        FREE IOB                         @V56BDA8 00775000
+EXITVA   ST    R2,SAVER1      RETURN CC IN CALLERS GPR1        @V56BDA8 00776000
+         EXIT                 RETURN TO CALLER                 @V56BDA8 00777000
+         DROP  R8                                              @V56BDA8 00778000
+         EJECT                                                          00779000
+***                                                                     00780000
+* RETURN VECTORS FOR DMKDASER                                           00781000
+***                                                                     00782000
+FINISALT EQU   0              ALL FINISHED                     @V56BDA8 00783000
+RETRYALT EQU   4              RETRY FROM IOBRSTRT              @V56BDA8 00784000
+EOCERR   EQU   8              END OF CYLINDER CONDITION        @V56BDA8 00785000
+RECURALT EQU   12             SECOND ERROR - ANALYSE IT        @V56BDA8 00786000
+RECFAIL  EQU   16             RECOVERY FAILURE                 @V56BDA8 00787000
+FILPROT  EQU   20             FILE PROTECTION EXCEPTION        @V56BDA8 00788000
+BADTRACK EQU   24             VERY DEFECTIVE TRACK             @V56BDA8 00789000
+COMRJCT  EQU   28             COMMAND REJECT                   @V56BDA8 00790000
+***                                                                     00791000
+         SPACE 2                                                        00792000
+LEN2CCW  EQU   2*8            REPRESENTS LENGTH OF 2 CCWS.     @V56BDA8 00793000
+L1       EQU   1              FOR USE AS SYMBOLIC LENGTH       @V56BDA8 00794000
+L2       EQU   2              FOR USE AS SYMBOLIC LENGTH       @V56BDA8 00795000
+L3       EQU   3              FOR USE AS SYMBOLIC LENGTH       @V56BDA8 00796000
+L4       EQU   4              FOR USE AS SYMBOLIC LENGTH.      @V56BDA8 00797000
+L8       EQU   8              FOR USE AS SYMBOLIC LENGTH       @V56BDA8 00798000
+         SPACE 3                                                        00799000
+READHAR0 CCW   7,*-*,CC,6     SEEK                             @V56BDA8 00800000
+         CCW   35,ZEROES-PSA,CC+SILI,1 SET SECTOR 0            @V56BDA8 00801000
+READHA   CCW   26,*-*,CC+SILI,5 READ HA (FCCHH)                @V56BDA8 00802000
+READR0   CCW   22,*-*,SILI,4  READ R0 (CCHH)                   @V56BDA8 00803000
+READHARZ EQU   *              MARKS END OF READHAR0 CHNL PROG. @V56BDA8 00804000
+         SPACE 1                                                        00805000
+ALT1CCWS CCW   7,*-*,CC,6     SEEK                             @V56BDA8 00806000
+         CCW   31,*-*,CC+SILI,1 SET FILE MASK                  @V56BDA8 00807000
+         CCW   35,ZEROES-PSA,CC+SILI,1 SET SECTOR 0            @V56BDA8 00808000
+         CCW   26,0,CC+SKIP+SILI,5 READ HA (NO DATA TRANSFER)  @V56BDA8 00809000
+         CCW   8,*-*,0,0      TIC                              @V56BDA8 00810000
+         SPACE 2                                                        00811000
+         LTORG                                                 @V56BDA8 00812000
+         SPACE 3                                                        00813000
+ALT1SECT DSECT ,              RECOVERY WORKAREA                @V56BDA8 00814000
+ALT1SEEK CCW   7,ALT1SKAD,CC,6 SEEK                            @V56BDA8 00815000
+ALT1SFM  CCW   31,ALT1FMSK,CC+SILI,1 SET FILE MASK             @VMG0005 00816000
+ALT1SCT0 CCW   35,ZEROES,CC+SILI,1 SET SECTOR 0  OR SRCHEQ R1  @V56BDA8 00817000
+ALT1RHA  CCW   26,0,SKIP+SILI+CC,5 DUMMY RHA     OR TIC *-8    @V56BDA8 00818000
+ALT1TICA CCW   8,*-*,0,0      TIC TO USER CCW OR TO SEARCH     @V56BDA8 00819000
+ALT1CLEN EQU   *-ALT1SECT     LENGTH OF USUAL CCWS             @V56BDA8 00820000
+ALT1SKAD DS    XL6            SEEK ADDRESS                     @VMG0005 00821000
+ALT1FMSK DS    XL1            FILE MASK FOR RESTART            @VMG0005 00822000
+ALT1HA   DS    XL5            'READHA' READS HA INTO HERE.     @VMG0005 00823000
+ALT1R0   DS    XL4            'READR0' READS R0 COUNT INTO HERE@VMG0005 00824000
+ALT1SKSV DS    XL4            SAVES 1ST SEEK ADDR (CCHH) DURING@VMG0005 00825000
+*                             2ND READ HA & R0.                         00826000
+ALT1FLAG DS    XL1            FLAG BITS.  EQUATE(S) FOLLOW.    @VMG0005 00827000
+ALT1PASS EQU   X'01'          BIT INDICATES 1ST OR 2ND READ OF @VMG0005 00828000
+*                             HA & R0 WHEN CHECKING R0 POINTERS BOTH    00829000
+*                             WAYS.  0 = 1ST TIME, 1 = 2ND TIME.        00830000
+ALT1SIZE EQU   (*-ALT1SECT+7)/8 NUMBER OF DBLEWRDS             @V56BDA8 00831000
+         SPACE 1                                                        00832000
+ALT2SECT DSECT ,              RECOVERY WORKAREA                @V56BDA8 00833000
+ALT2SEEK CCW   7,ALT2SKAD,CC,6 SEEK                            @V56BDA8 00834000
+ALT2SFM  CCW   31,ALT2FMSK,CC+SILI,1 SET FILE MASK             @V56BDA8 00835000
+ALT2TICA CCW   8,*-*,0,0      TIC TO USER PROGRAM              @V56BDA8 00836000
+ALT2NCCW EQU   (*-ALT2SEEK)/8 NUMBER OF CCWS.                  @V56BDA8 00837000
+ALT2SKAD DC    XL6'0'         SEEK ADDRESS                     @V56BDA8 00838000
+ALT2RECN DC    XL1'0'         RECORD NUMBER FOR SEARCH         @V56BDA8 00839000
+ALT2FMSK DC    XL1'0'         FILE MASK FOR RESTART            @V56BDA8 00840000
+ALT2SIZE EQU   (*-ALT2SECT+7)/8 NUMBER OF DBLEWRDS             @V56BDA8 00841000
+         SPACE                                                          00842000
+ALTSZCHK EQU   ALT1SIZE-ALT2SIZE WHEN GOING THRU THE PATH FROM @VMG0005 00843000
+*                                'ALTHAR0' TO 'RESEEKHD' TO 'SETUSKHD', 00844000
+*                                ALT1SECT AND ALT2SECT BOTH USE SAME    00845000
+*                                WORK AREA (AT DIFFERENT TIMES).  THIS  00846000
+*                                EQU SIMPLY CHECKS TO SEE THAT ALT2     00847000
+*                                WILL FIT IN WORK AREA ALLOCATED FOR    00848000
+*                                ALT1 AND GIVES ASSEMBLY ERROR IF IT    00849000
+*                                DOES NOT FIT.                          00850000
+         SPACE 3                                                        00851000
+ALTTRK   EQU   X'01'          ALTERNATE TRACK                  @V56BDA8 00852000
+DEFTRK   EQU   X'02'          DEFECTIVE TRACK                  @V56BDA8 00853000
+         EJECT                                                          00854000
+         COPY  RBLOKS                                          @V56BDA8 00855000
+         COPY  VBLOKS                                          @V56BDA8 00856000
+         COPY  IOBLOKS                                         @V56BDA8 00857000
+         COPY  DEVTYPES                                        @V56BDA8 00858000
+         COPY  EQU                                             @V56BDA8 00859000
+         COPY  SAVE                                            @V56BDA8 00860000
+         COPY  IOER                                            @V56BDA8 00861000
+         COPY  VMBLOK                                          @V56BDA8 00862000
+         PSA                                                   @V56BDA8 00863000
+         END   DMKTRK                                                   00864000

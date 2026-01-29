@@ -1,0 +1,877 @@
+LFS      TITLE 'DMSLFS     (CMS)       VM/370 - RELEASE 6'              00001000
+         SPACE 2                                                        00002000
+*.                                                                      00003000
+* MODULE NAME:                                                          00004000
+*                                                                       00005000
+*        DMSLFS                                                         00006000
+*                                                                       00007000
+* SUBROUTINE NAME:                                                      00008000
+*                                                                       00009000
+*        DMSLFS (FSTLKP)                                                00010000
+*                                                                       00011000
+* FUNCTION:                                                             00012000
+*                                                                       00013000
+*        TO FIND A SPECIFIED 40-BYTE  FST ENTRY WITHIN THE FST          00014000
+*        TABLES FOR READ-ONLY OR READ-WRITE DISK(S).                    00015000
+*                                                                       00016000
+* ATTRIBUTES:                                                           00017000
+*                                                                       00018000
+*        NUCLEUS RESIDENT, REENTRANT                                    00019000
+*                                                                       00020000
+* ENTRY POINTS:                                                         00021000
+*                                                                       00022000
+*        DMSLFS                                                         00023000
+*                                                                       00024000
+* ENTRY CONDITIONS:                                                     00025000
+*                                                                       00026000
+*        L           R15,AFSTLKP     WHERE AFSTLKP=V(DMSLFS)            00027000
+*        BALR        R14,R15                                            00028000
+*                                                                       00029000
+*        1. TO  SEARCH  APPROPRIATE  DISK  TABLE(S)  FROM  THE          00030000
+*             BEGINNING:                                                00031000
+*                                                                       00032000
+*             R0 = IMMATERIAL                                           00033000
+*             R1 = POINTER TO USUAL P-LIST (WITH SIGN-BIT PLUS):        00034000
+*                                                                       00035000
+*                        DS    0F                                       00036000
+*             PLIST      DC    CL8'     '   IMMATERIAL                  00037000
+*                        DC    CL8'     '   FILENAME OR '*'             00038000
+*                        DC    CL8'     '   FILETYPE OR '*'             00039000
+*                        DC    CL2'     '   FILEMODE OR '*'             00040000
+*                                                                       00041000
+*        2. TO SEARCH  APPROPRIATE DISK  TABLE(S), PICKING  UP          00042000
+*             FROM  WHERE YOU  LEFT  OFF PREVIOUSLY,  STARTING          00043000
+*             WITH NEXT 40-BYTE FST ENTRY:                              00044000
+*                                                                       00045000
+*             R0 = POINTER TO ACTIVE DISK TABLE                         00046000
+*             R1 = POINTER TO USUAL P-LIST BUT WITH SIGN-BIT NEGATIVE   00047000
+*                                                                       00048000
+* EXIT CONDITIONS:                                                      00049000
+*                                                                       00050000
+*        FILE FOUND:                                                    00051000
+*                                                                       00052000
+*        R0 = POINTER TO ACTIVE DISK TABLE                              00053000
+*        R1 = POINTER TO (ADDRESS OF) 40-BYTE FST ENTRY FOUND           00054000
+*        R15 = 0 (AND CONDITION-CODE = 0)                               00055000
+*                                                                       00056000
+*        FILE NOT FOUND:                                                00057000
+*                                                                       00058000
+*        R0 = 0                                                         00059000
+*        R1 = 0 (WITH SIGN-BIT NEGATIVE)                                00060000
+*        R15 = 1 (AND CONDITION-CODE = 2)                               00061000
+*        R15= 80,81,82,83 ERROR ACCESSING OSFST FOR OS DISK             00061100
+*                                                                       00062000
+*        PARAMETER LIST ERROR:                                          00063000
+*                                                                       00064000
+*        R0 = 0                                                         00065000
+*        R1 = 0 (WITH SIGN-BIT NEGATIVE)                                00066000
+*        R15 = 2 (AND CONDITION-CODE = 2)                               00067000
+*                                                                       00068000
+* CALLS TO OTHER ROUTINES:                                              00069000
+*                                                                       00070000
+*        DMSLAD, DMSLADN, DMSROS                                        00071000
+*                                                                       00072000
+* EXTERNAL REFERENCES:                                                  00073000
+*                                                                       00074000
+*      ADTSECT, FVSECT                                                  00075000
+*                                                                       00076000
+* TABLES/WORKAREAS                                                      00077000
+*                                                                       00078000
+*        NONE                                                           00079000
+*                                                                       00080000
+* REGISTER USAGE:                                                       00081000
+*                                                                       00082000
+*        R13  FVSECT                                                    00083000
+*        R12  BASE                                                      00084000
+*        REST WORK                                                      00085000
+*                                                                       00086000
+* OPERATION:                                                            00087000
+*                                                                       00088000
+*        DMSLFS  CHECKS  TO ENSURE  THAT  R1  IS NOT  ZERO  (A          00089000
+*        CALLING ERROR), AND INITIALIZES                                00090000
+*        TO TEST  FOR EITHER A  READ-ONLY OR  READ-WRITE DISK.          00091000
+*        THEN THE PARAMETER LIST IS CHECKED TO ENSURE THAT THE          00092000
+*        FILENAME AND  FILETYPE ARE PRESENT (CALLING  ERROR IF          00093000
+*        NOT),  AND  CHECKS  TO  SEE  IF  THE  MODE-LETTER  IS          00094000
+*        ALPHABETIC, AND IF SO WHETHER A MODE-NUMBER IS GIVEN.          00095000
+*                                                                       00096000
+*        IF THE MODE IS ALPHABETIC,  DMSLAD IS CALLED TO CHECK          00097000
+*        FOR A DISK WHOSE MODE-LETTER                                   00098000
+*        ADTM MATCHES THE PARAMETER LIST.  IF THE MODE IS *-*           00099000
+*        OR EQUIVALENT (NOT ALPHABETIC),  DMSLADN IS CALLED TO          00100000
+*        CHECK FOR ANY  AVAILABLE DISK.  AN ERROR  RETURN FROM          00101000
+*        DMSLAD OR DMSLADN TRIGGERS A  'FILE NOT FOUND' RETURN          00102000
+*        FROM DMSLFS. ON A SUCCESSFUL RETURN, DMSLFS CHECKS TO          00103000
+*        MAKE SURE THE DISK FOUND IS LOGGED IN                          00104000
+*        (AS EITHER READ-ONLY OR READ-WRITE OR IF DMSLFS WAS            00105000
+*        CALLED BY DMSSTT, OS READ ONLY). IF NOT, THE                   00105100
+*        LOGIC CONTINUES  AS DESCRIBED BELOW, WHERE  THE GIVEN          00106000
+*        FST ENTRY WAS NOT FOUND ON THE DISK.                           00107000
+*        IF THE DISK IS AN OS DISK, DMSLFS CALLS ROSSTT IN              00107050
+*        DMSROS TO VERFIY THAT THE DATA SET EXISTS AND THAT THE         00107100
+*        ATTRIBUTES OF THE DATA SET ARE SUPPORTED. UPON RETURN          00107150
+*        FROM DMSROS, A RETURN CODE OF 88 INDICATES THAT                00107200
+*        THE DATA SET WAS NOT FOUND AND DMSLFS INITIATES THE            00107250
+*        SEARCH AGAIN USING THE NEXT DISK IN ORDER. ANY OTHER           00107300
+*        ERRORS SUCH AS RETURN CODE 80 CAUSE DMSLFS TO EXIT             00107350
+*        IMMEDIATELY.                                                   00107400
+*                                                                       00107450
+*        A RETURN CODE OF 0 FROM DMSROS INDICATES THAT THE DATA         00107500
+*        SET WAS FOUND ON THE SPECIFIED DISK AND DMSLFS CONTINUES       00107550
+*        AS IT DOES WHEN A CMS FST IS FOUND.                            00107600
+*                                                                       00108000
+*        IF THE DISK FOUND BY DMSLAD  OR DMSLADN IS LOGGED IN,          00109000
+*        DMSLFS CHECKS THROUGH THE VARIOUS                              00110000
+*        FST HYPERBLOCKS IN CORE TO  FIND A MATCHING FST ENTRY          00111000
+*        FOR THE FILENAME (IF GIVEN IN THE PARAMETER LIST) AND          00112000
+*        FILETYPE (IF  GIVEN).  NOTE -  IF R1 WAS  NEGATIVE AT          00113000
+*        ENTRY TO DMSLFS, SEARCHING FOR THE GIVEN FST RESUMES           00114000
+*        FROM THE POINT LAST SEARCHED, AS INDICATED BY                  00115000
+*        THE ADTCHBA (CURRENT HYPERBLOCK  ADDRESS) AND ADTCFST          00116000
+*        (CURRENT  FST  ENTRY  DISPLACMENT)  POINTERS  IN  THE          00117000
+*        ACTIVE DISK TABLE FOR THE GIVEN DISK.                          00118000
+*                                                                       00119000
+*        IF THE FILENAME AND FILETYPE ARE BOTH GIVEN AND MATCH          00120000
+*        EXPLICITLY, THE  FILE IS DEEMED  'FOUND' IRRESPECTIVE          00121000
+*        OF ANY MODE-NUMBER IN THE  PARAMETER LIST.  IF EITHER          00122000
+*        (OR BOTH) WAS '*' IN THE PARAMETER LIST, HOWEVER, AND          00123000
+*        THE MODE-NUMBER  WAS GIVEN,  THEN THE  MODE-NUMBER IN          00124000
+*        THE PARAMETER LIST MUST MATCH  THE MODE-NUMBER IN THE          00125000
+*        FST ENTRY.                                                     00126000
+*                                                                       00127000
+*        THUS, FOR  EXAMPLE, A CALL  TO DMSLFS FOR  "SOME FILE          00128000
+*        A5" WOULD CONSIDER "SOME FILE A1"                              00129000
+*        (ON THE A-DISK)  A MATCH EVEN THOUGH  THE MODE-NUMBER          00130000
+*        IS WRONG.  (THIS LOGIC IS PURPOSELY PROVIDED TO AVOID          00131000
+*        MISLEADING THE USER, SINCE YOU  CANNOT HAVE TWO FILES          00132000
+*        ON THE SAME DISK WITH SAME FILENAME AND FILETYPE, BUT          00133000
+*        DIFFERENT MODE NUMBERS.)   A SEARCH  FOR "* FILE A5",          00134000
+*        HOWEVER, WOULD NOT CONSIDER "SOME  FILE A1" TO MATCH,          00135000
+*        SINCE THE MODE NUMBER DIFFERS.                                 00136000
+*                                                                       00137000
+*        (NOTE - THIS LOGIC IS  NOW CONSISTENT THROUGHOUT CMS.          00138000
+*        THAT  IS,   IF  THE   FILENAME  AND   FILETYPE  MATCH          00139000
+*        EXPLICITLY, THE MODE NUMBER NEED NOT BE CORRECT FOR A          00140000
+*        MATCH; BUT IF THE FILENAME AND/OR FILETYPE IS '*' AND          00141000
+*        THE MODE-NUMBER IS GIVEN, THEN  IT MUST EQUAL THE FST          00142000
+*        MODE-NUMBER TO BE CONSIDERED A MATCH.)                         00143000
+*                                                                       00144000
+*        IF DMSLFS FINDS THE MATCHING  FILE ON THE GIVEN DISK,          00145000
+*        IT RETURNS THE ADDRESSES OF THE ACTIVE                         00146000
+*        DISK TABLE  (ADT) AND THE FST  ENTRY IN R0 AND  R1 AS          00147000
+*        SHOWN  IN EXIT  CONDITIONS,  AND  REMEMBERS WHERE  IT          00148000
+*        FOUND THE FILE IN THE ADTCHBA AND ADTCFST POINTERS IN          00149000
+*        THE ADT BLOCK.                                                 00150000
+*                                                                       00151000
+*        FST ENTRY NOT FOUND ON THE DISK                                00152000
+*                                                                       00153000
+*        IF  THE FST  ENTRY WAS  NOT  FOUND ON  THE DISK  JUST          00154000
+*        CHECKED,  DMSLFS  CHECKS  THE MODE  SUPPLIED  IN  THE          00155000
+*        P-LIST.  IF  IT WAS '*'  (OR EQUIVALENT),  DMSLADN IS          00156000
+*        CALLED AND THE NEXT                                            00157000
+*        DISK (IF  ANY) IS CHECKED  AS ABOVE FOR  THE MATCHING          00158000
+*        FILE.                                                          00159000
+*                                                                       00160000
+*        IF  THE MODE,  ON  THE  OTHER HAND,  WAS  ALPHABETIC,          00161000
+*        DMSLADN IS CALLED TO DETERMINE IF ANOTHER                      00162000
+*        DISK IS  AVAILABLE FOR  CHECKING.  IF  SO, THE  ADTMX          00163000
+*        EXTENSION-MODE-LETTER IS CHECKED TO SEE IF IT MATCHES          00164000
+*        THE MODE GIVEN IN THE PARAMETER LIST.  IF IT MATCHES,          00165000
+*        THIS  INDICATES THAT  THE  NEW  DISK IS  A  READ-ONLY          00166000
+*        EXTENSION  OF THE  ONE  PREVIOUSLY  CHECKED, AND  THE          00167000
+*        GIVEN  FILE IS  LOOKED  UP ON  THIS  DISK. IF  FOUND,          00168000
+*        SUCCESSFUL RETURN IS GIVEN POINTING  TO THIS DISK AND          00169000
+*        THE  FST  ENTRY  FOUND.   IF  NOT,  THIS  PROCESS  IF          00170000
+*        REPEATED UNTIL  A MATCH  IS FOUND,  OR UNTIL  NO MORE          00171000
+*        DISK(S) WITH A MATCHING ADTMX LETTER ARE FOUND.                00172000
+*                                                                       00173000
+*      DMSLFS    (FSTLKP)                                               00174000
+*                                                                       00175000
+* SUBROUTINE:                                                           00176000
+*                                                                       00177000
+*      DMSLFSW (FSTLKW)                                                 00178000
+*                                                                       00179000
+* FUNCTION:                                                             00180000
+*                                                                       00181000
+*        TO FIND A SPECIFIED 40-BYTE  FST ENTRY WITHIN THE FST          00182000
+*        TABLES FOR READ-WRITE                                          00183000
+*        DISK(S); ALSO, TO FIND AN EMPTY 40-BYTE ENTRY FOR USE          00184000
+*        BY DMSFNS.                                                     00185000
+*                                                                       00186000
+* ATTRIBUTES:                                                           00187000
+*                                                                       00188000
+*      NUCLEUS RESIDENT, REENTRANT                                      00189000
+*                                                                       00190000
+* ENTRY CONDITIONS:                                                     00191000
+*                                                                       00192000
+*      L     R15,AFSTLKW       WHERE AFSTLKW=V(DMSLFSW)                 00193000
+*      BALR  R14,R15                                                    00194000
+*                                                                       00195000
+*        1. TO  SEARCH  APPROPRIATE  DISK  TABLE(S)  FROM  THE          00196000
+*             BEGINNING:                                                00197000
+*                                                                       00198000
+*           R0 = IMMATERIAL                                             00199000
+*           R1 = POINTER TO USUAL P-LIST (WITH SIGN-BIT PLUS)           00200000
+*                  DS   0F                                              00201000
+*           PLIST  DC   CL8'      '  IMMATERIAL                         00202000
+*                  DC   CL8'      '  FILENAME OR '*'                    00203000
+*                  DC   CL8'      '  FILETYPE OR '*'                    00204000
+*                  DC   CL2'   '     FILEMODE OR '*'                    00205000
+*                                                                       00206000
+*        2. TO  SEARCH APPROPRIATE  DISK  TABLE(S) PICKING  UP          00207000
+*             FROM  WHERE YOU  LEFT  OFF PREVIOUSLY,  STARTING          00208000
+*             WITH NEXT 40-BYTE FST ENTRY:                              00209000
+*                                                                       00210000
+*             R0 = POINTER TO ACTIVE DISK TABLE                         00211000
+*             R1 = POINTER TO USUAL P-LIST BUT WITH SIGN-BIT NEGATIVE   00212000
+*                                                                       00213000
+*        3. TO FIND AN EMPTY 40-BYTE ENTRY FOR A COMPLETED NEW          00214000
+*             OUTPUT FILE (CALLED ONLY BY 'FINIS')                      00215000
+*                                                                       00216000
+*             R0 = POINTER TO ACTIVE DISK TABLE                         00217000
+*             R1 = 0                                                    00218000
+*                                                                       00219000
+* EXIT CONDITIONS:                                                      00220000
+*                                                                       00221000
+*        FILE FOUND:                                                    00222000
+*                                                                       00223000
+*           R0  = POINTER TO ACTIVE DISK TABLE                          00224000
+*           R1  = POINTER TO (ADDRESS OF) 40-BYTE FST ENTRY             00225000
+*                 FOUND OR PROVIDED                                     00226000
+*           R15 = 0                (AND CONDITION-CODE = 0)             00227000
+*                                                                       00228000
+*        FILE NOT FOUND:                                                00229000
+*                                                                       00230000
+*           R0  = 0                                                     00231000
+*           R1  = 0                (WITH SIGN-BIT NEGATIVE)             00232000
+*           R15 = 1                (AND CONDITION-CODE = 2)             00233000
+*                                                                       00234000
+*        PARAMETER LIST ERROR:                                          00235000
+*                                                                       00236000
+*           R0  = 0                                                     00237000
+*           R1  = 0                (WITH SIGN-BIT NEGATIVE)             00238000
+*           R15 = 2                (AND CONDITION-CODE = 2)             00239000
+*                                                                       00240000
+* CALLS TO OTHER ROUTINES:                                              00241000
+*                                                                       00242000
+*      DMSLAD, DMSLADN, DMSFREE                                         00243000
+*                                                                       00244000
+* EXTERNAL REFERENCES:                                                  00245000
+*                                                                       00246000
+*      ADTSECT, FVSECT                                                  00247000
+*                                                                       00248000
+* TABLES/WORKAREAS:                                                     00249000
+*                                                                       00250000
+*        808 BYTE HYPEBLOCK AREA                                        00251000
+*                                                                       00252000
+* REGISTER USAGE:                                                       00253000
+*                                                                       00254000
+*        R12  BASE                                                      00255000
+*        R13  FVSECT                                                    00256000
+*        REST WORK                                                      00257000
+*                                                                       00258000
+* OPERATION:                                                            00259000
+*                                                                       00260000
+*        DMSLFSW CHECKS TO SEE IF R1 = 0, INDICATING A SPECIAL          00261000
+*        ENTRY MADE BY DMSFNS TO FIND                                   00262000
+*        AN EMPTY  40-BYTE FST ENTRY,  OR THE  REGULAR ENTRIES          00263000
+*        MADE TO LOCATE A SPECIFIC FILE.                                00264000
+*                                                                       00265000
+*        IF  R1  IS  NONZERO,   DMSLFSW  CHECKS  THE  SPECIFIC          00266000
+*        READ-WRITE DISK (IF THE MODE LETTER                            00267000
+*        WAS ALPHABETIC) OR ALL READ-WRITE  DISKS (IF THE MODE          00268000
+*        LETTER WAS '*' OR EQUIVALENT)                                  00269000
+*        FOR THE GIVEN FILE.  THIS  SEARCH IS ALMOST IDENTICAL          00270000
+*        TO THAT PERFORMED BY DMSLFS,                                   00271000
+*        EXCEPT THAT ONLY READ-WRITE DISK(S) ARE EXAMINED, AND          00272000
+*        READ-ONLY EXTENSION(S) VIA THE  ADTMX MODE LETTER ARE          00273000
+*        NOT   APPLICABLE.    (SEE  FSTLKP   DESCRIPTION   FOR          00274000
+*        DETAILS.)                                                      00275000
+*                                                                       00276000
+*        IF  R1  =  0,  THE  LOCATION  OF  THE  LAST  FILE  IS          00277000
+*        DETERMINED FROM  THE ADTLHBA AND ADTLFST  POINTERS IN          00278000
+*        THE GIVEN ACTIVE DISK TABLE.  IF THE 40-BYTE ENTRY AT          00279000
+*        THIS LOCATION IS EMPTY (=0), ITS ADDRESS IS RETURNED.          00280000
+*        IF NOT,  A CHECK IS MADE  TO SEE IF THE  NEXT 40-BYTE          00281000
+*        ENTRY IN  THE SAME  IN-CORE HYPERBLOCK  IS AVAILABLE;          00282000
+*        IF  YES, ITS  ADDRESS  IS  RETURNED AND  THE  ADTLFST          00283000
+*        POINTER UPDATED BY  40.  IF NOT, THEN  A NEW 808-BYTE          00284000
+*        BLOCK IS OBTAINED FROM FREE STORAGE, CLEARED, CHAINED          00285000
+*        TO  THE   END  OF  THE   LAST  FST   HYPERBLOCK,  ALL          00286000
+*        APPROPRIATE POINTERS  AND COUNTERS  UPDATED, AND  THE          00287000
+*        ADDRESS OF THE  FIRST 40-BYTE ENTRY IN  THE NEW BLOCK          00288000
+*        RETURNED TO THE CALLER.                                        00289000
+*                                                                       00290000
+*        IN  ANY  EVENT,  THE  EMPTY  40-BYTE  ENTRY  IS  MADE          00291000
+*        AVAILABLE TO THE CALLER (DMSFNS), AND                          00292000
+*        ALL  COUNTERS   AND  POINTERS   UPDATED  INSOFAR   AS          00293000
+*        NECESSARY.                                                     00294000
+*                                                                       00295000
+*        NOTE: DMSLFSW IS INCLUDED WITH THE DMSLFS ROUTINE.             00296000
+*                                                                       00297000
+*.                                                                      00298000
+         EJECT                                                          00299000
+DMSLFS   CSECT                                                          00300000
+         USING NUCON,R0                                                 00301000
+         ENTRY TYPSRCH        QUICK FILETYPE SEARCH SUBROUTINE          00302000
+         ENTRY FSTLKP,FSTLKW           ***** REMOVE *****               00303000
+         ENTRY DMSLFSO,DMSLFSOW,DMSLFSW                                 00304000
+         SPACE                                                          00305000
+         USING *,R15                                                    00306000
+         B     LKP                                                      00307000
+         SPACE                                                          00308000
+* THE FOLLOWING IS POINTED TO BY AFSTLKP IN NUCON                       00309000
+DMSLFSO  EQU   *                                                        00310000
+FSTLKP   EQU   *                                                        00311000
+         SVCENT LKP,SVLFS                                               00312000
+         SPACE                                                          00313000
+* THE FOLLOWING IS POINTED TO BY AFSTLKW IN NUCON.                      00314000
+DMSLFSOW EQU   *                                                        00315000
+FSTLKW   EQU   *                                                        00316000
+         SVCENT LKW,SVLFS                                               00317000
+*                                                                       00318000
+         EXTRN FVS                                                      00319000
+*                                                                       00320000
+*              ENTER 'FSTLKP' HERE ...                                  00321000
+LKP EQU *                                                               00322000
+         FSENTR DISK$SEG      USE FREE STORAGE AT BEGINNING OF DISK$SEG 00323000
+         LA    R10,ADTFRO+ADTFRW   SET R10 FOR READ-ONLY OR READ-WRITE  00324000
+         LA    R12,FSTL00     SET R12 FOR COMMON ADDRESSABILITY         00325000
+         USING FSTL00,R12     ...                                       00326000
+         LTR   R2,R1          SAVE R1 IN R2 AND SET CONDITION-CODE      00327000
+         BNZ   FSTL01         OK IF R1 WAS NONZERO, JOIN FORCES.        00328000
+         B     ERROR2         PARAMETER-LIST ERROR IF R1=0 FOR FSTLKP   00329000
+         DROP  R12,R13                                                  00330000
+*                                                                       00331000
+DMSLFSW  EQU   *                                                        00332000
+LKW      EQU   *                                                        00333000
+         FSENTR DISK$SEG                                                00334000
+FSTL00   EQU   *              (COMMON ADDRESSABILITY)                   00335000
+         LA    R10,ADTFRW     SET R10 FOR JUST READ-WRITE DISK(S)       00336000
+         LTR   R2,R1          SAVE R1 IN R2 AND SET CONDITION-CODE      00337000
+         BZ    FINDZERO       IF R1 = 0, GO FIND AN EMPTY ENTRY.        00338000
+*                                                                       00339000
+FSTL01   CLI   PLTYP(R2),X'FF'     FILENAME & TYPE MUST BE THERE        00340000
+         BE    ERROR2         PARAMETER-LIST ERROR IF FENCE INSTEAD.    00341000
+         LR    R11,R0         SAVE R0 IN R11 IN CASE NEEDED LATER       00342000
+         SR    R15,R15        CLEAR R15                                 00343000
+         CLI   PLTYP(R2),C'*' ALL FILETYPES WANTED ?                    00344000
+         BE    JS1            TRF IF YES.                               00345000
+         LM    R0,R1,PLTYP(R2)     FILETYPE INTO R0-R1,                 00346000
+         LA    R15,TYPSRCH    CALL "TYPSRCH" TO SEE IF IT               00347000
+         BALR  R14,R15        IS A "POPULAR NAME BRAND"                 00348000
+         LR    R1,R2          (RESTORE R1 - NEEDED BY ACTLKP BELOW)     00349000
+JS1      ST    R15,REGSAV0    STORE 00 OR "INDEXED FLAG-BYTE".          00350000
+         LA    R9,FSTL40      SET 'SWITCH' FOR NO SPECIFIC MODE GIVEN   00351000
+         CLI   PLMOD(R2),C'A' CHECK MODE FOR A LETTER OF ALPHABET       00352000
+         BL    LESSA          CAREFUL IF LESS THAN A                    00353000
+         CLI   PLMOD(R2),C'Z' OR                                        00354000
+         BH    MOREZ          MORE THAN Z                               00355000
+         L     R15,=V(DMSLAD) SET R15 TO POINT TO ADTLKP                00356000
+         CLI   PLMOD+1(R2),C'0'    IS THERE A MODE NO. (FROM 0 UP) ?    00357000
+         BL    FSTL02              BL IF NOT (PRESUMABLY BLANK)         00358000
+         LA    R9,FSTL38    IF YES (0 UP), SET SWITCH TO CHECK MODE-NO  00359000
+*                                                                       00360000
+FSTL02   LTR   R2,R2          CHECK PARAMETER-LIST POINTER,             00361000
+         BP    FSTL04         IF PLUS, GO CALL ADTLKP                   00362000
+         USING ADTSECT,R11    REFERENCE ACTIVE DISK TABLE               00363000
+         LM    R4,R5,ADTCHBA  R4 = A(CURRENT HYPERBLOCK),               00364000
+         AR    R5,R4          R5 NOW = A(CURRENT FST-ENTRY)             00365000
+         B     FSTL06         JOIN CODE BELOW.                          00366000
+*                                                                       00367000
+FSTL03   TM    ADTFLG1,*-*   CHECK FOR READ-ONLY AND/OR READ-WRITE DISK 00368000
+*                                                                       00369000
+FSTL04   BALR  R14,R15        CALL 'ADTLKP' (OR 'ADTNXT')               00370000
+         BNZ   NOTFOUND         GIVE UP IF COULDN'T FIND DISK-TABLE     00371000
+         LR    R11,R1         IF OK, LET R11 POINT TO ACTIVE-DISK-TABLE 00372000
+FSTL04A  SR    R4,R4          R4=0 MEANS 'START AT BEGINNING'           00373000
+         EX    R10,FSTL03    CHECK FOR READ-ONLY AND/OR READ-WRITE DISK 00374000
+         BNZ   FSTL04B        BRANCH IF ONE OF THE ABOVE       @V201105 00375100
+         TM    ADTFLG2,ADTFROS IS THIS AN OS DISK?             @V201105 00375150
+         BNO   FSTL23         NO, CONTINUE SEARCH              @V201105 00375200
+         CLC   DISK$SEG+R14*4+1(3),VDMSSTTR+1 CALLED BY STT ?  @V201105 00375250
+         BNE   FSTL23         CONTINUE SEARCH                  @V201105 00375300
+FSTL04B  EQU   *                                               @V201105 00375350
+         CLI   PLMOD(R2),ALLBUT    WERE ALL DISKS BUT THIS ONE WANTED ? 00377000
+         BE    JS2                 TRF IF YES - "ALLBUT" SPECIFIED.     00378000
+         CLI   ADTM,C'S'      IS THIS THE S-DISK ?                      00379000
+         BNE   FSTL06         TRF IF NOT - WE'RE ALL SET.               00380000
+         CLI   PLMOD(R2),FIRSTUSR  IF YES, WAS "FIRSTUSR" WANTED ?      00381000
+         BE    NOTFOUND       IF YES, GIVE UP SEARCHING.                00382000
+         CLC   ALLUSERD,PLMOD(R2)  OR "ALL USER DISKS" ?                00383000
+         BNE   FSTL06         TRF IF NOT - GO SEARCH S-DISK.            00384000
+         B     NOTFOUND       GIVE UP SEARCHING IF YES.                 00385000
+*                                                                       00386000
+JS2      CLC   ADTM,PLMOD+1(R2)    FOR "ALLBUT" IS THIS THE             00387000
+         BE    FSTL23         FORBIDDEN DISK - SKIP IT IF YES.          00388000
+*                                                                       00389000
+FSTL06   TM    ADTFLG2,ADTFROS OS ADT                          @V201105 00390010
+         BNO   FSTL06A        NO                               @V201105 00390020
+         L     R15,ADMSROS    CALLL DMSROS TO SEARCH OS DISK   @V201105 00390030
+         BAL   R14,4(R15)     SECOND ENTRY POINT IN DMSROS     @V201105 00390040
+         CH    R15,=H'88'     DATA SET NOT FOUND               @V201105 00390050
+         BE    FSTL23         YES, TIME FOR ANOTHER ADT        @V201105 00390060
+         LTR   R15,R15        OTHER ERROR                      @V201105 00390070
+         BNZ   FSTL41A        YES                              @V201105 00390080
+         LR    R1,R5          OS FST ADDR TO R1                @V201105 00390090
+         B     FSTL41         FOUND                            @V201105 00390100
+FSTL06A  L     R15,REGSAV0    CHECK SPECIAL INDEX FLAG BYTE    @V201105 00390110
+         LTR   R15,R15        ...                                       00391000
+         BZ    FSTL07         IF = 0, WE'LL HAVE TO CHECK THIS DISK.    00392000
+         TM    ADTFLG2,ADTPSTM FST CHAIN MODIFIED BY AUX DIR   @VA05274 00392065
+         BO    FSTL07         YES, HAVE TO DO FRUITFUL SEARCH  @VA05274 00392130
+         N     R15,ADTFTYP-3   DOES THIS DISK HAVE A MATCHING FILETYPE? 00393000
+         BZ    FSTL20        TRF IF NOT (SAVE TIME OF FRUITLESS SEARCH) 00394000
+FSTL07   LA    R6,40          40 INTO R6 FOR GENERAL USE                00395000
+         LM    R0,R1,PLNAM(R2)     FILENAME INTO R0-R1,                 00396000
+         L     R3,ADTFDA      GET ADDRESS OF FIRST HYPERBLOCK  @V305032 00397250
+         L     R8,FOUR(,R3)   AND SIZE OF BLOCK (E.G. 800)     @V305032 00397500
+         SR    R8,R6          LESS 40 = LIMIT FOR BXLE         @V305032 00397750
+         ST    R8,REGSAV0+FOUR SAVE R8 IN LOW-LEVEL SAVE AREA  @V305032 00398000
+         CLI   PLNAM(R2),C'*' IS NAME '*' MEANING ACCEPT ANY ?          00399000
+         BE    FSTL08         YES - GO CHECK FILETYPE ALSO     @V305032 00400200
+         LA    R15,FSTL16     NO - SET R15 TO CHECK FILENAME   @V305032 00400400
+         CLI   PLTYP(R2),STAR WAS "ANY" FILETYPE ACCEPTABLE ?  @V305032 00400600
+         BE    FSTL09         YES - GO SET R14 ACCORDINGLY.    @V305032 00400800
+* FILENAME AND FILETYPE ARE BOTH SPECIFIC:                              00401000
+         LA    R14,FSTL18     SET R14 TO CHECK FILETYPE        @V305032 00401200
+         TM    ADTFLG3,ADTFSORT ARE FST'S ON THE DISK SORTED ? @V305032 00401400
+         BZ    FSTL10         NO - DO IT "THE OLD WAY"         @V305032 00401600
+         TM    ADTFLG2,ADTPSTM  FST CHAIN MODIFIED BY AUX. DIR.@VA04896 00401665
+         BO    FSTL10          YES, HAVE TO DO IT THE OLD WAY  @VA04896 00401730
+         LTR   R4,R4          STARTING AT BEGINNING ?          @V305032 00401800
+         BZ    FSTLFAST       YES - OK TO USE FAST SEARCH.     @V305032 00402000
+         B     FSTL11         NO - PICK UP WHERE WE LEFT OFF.  @V305032 00402200
+         SPACE                                                          00402400
+* FILENAME = '*' - CHECK FILETYPE:                                      00402600
+FSTL08   LA    R15,FSTL18     SET R15 TO ACCEPT ANY FILENAME   @V305032 00402800
+         CLI   PLTYP(R2),STAR IS FILETYPE ALSO '*' = "ANY" ?   @V305032 00403000
+         BNE   FSTL10         NO - R15 OK; R14 IMMATERIAL.     @V305032 00403200
+* FILENAME AND FILETYPE ARE BOTH '*':                                   00403400
+         LA    R15,FSTL36     SET R15 FOR ANY FILENAME & TYPE  @V305032 00403600
+         B     FSTL10         (R14 IS IMMATERIAL) GO CHECK R4. @V305032 00403800
+* FILENAME = SPECIFIC, BUT FILETYPE = '*':                              00404000
+FSTL09   LA    R14,FSTL36     SET R14 TO ACCEPT ANY FILETYPE   @V305032 00404200
+FSTL10   EQU   *              CONTINUE (R14 & R15 ALL SET):    @V305032 00404400
+         LTR   R4,R4          START AT BEGINNING OR WHERE WE LEFT OFF ? 00409000
+         BZ    FSTL12         BZ IF START AT BEGINNING.                 00410000
+FSTL11   LA    R7,0(R4,R8)    R4 + R8 INTO R7 FOR BXLE-LIMIT,  @V305032 00411100
+         SR    R8,R8          R8=0  (TO CHECK FOR NULL FILE)            00412000
+         LA    R3,BXLE56      SET R3 FOR BCR'S IN LOOP, AND JUMP INTO   00413000
+         BR    R3             LOOP AT BXLE56 TO START WITH 'NEXT' ENTRY 00414000
+*                                                                       00415000
+         DS    0D             (FORCE MAIN SEARCH LOOP DBL-WORD ALIGNED) 00416000
+*                                                                       00417000
+FSTL12   LA    R5,8(,R3)      START AT BEGINNING OF INFORMATION         00418000
+FSTL13   LR    R4,R5          REMEMBER BEGINNING OF CURRENT BLOCK       00419000
+         LA    R7,0(R5,R8)    R7 POINTS TO LAST ITEM.                   00420000
+         SR    R8,R8          R8=0  (TO CHECK FOR NULL FILE)            00421000
+         LA    R3,BXLE56      SET R3 FOR BCR'S IN LOOP.                 00422000
+*                                                                       00423000
+*        MAIN SEARCH-LOOP ...                                           00424000
+FSTL15   C     R8,0(,R5)      IS NAME = 0  (NULL FILE) ?                00425000
+         BCR   8,R3           'BE BXLE56' IF YES (FORGET THIS ONE).     00426000
+         BR    R15            ACCEPT NAME IF '*' WAS GIVEN, OR ...      00427000
+FSTL16   CL    R0,0(,R5)      DOES NAME (1ST HALF) MATCH ?              00428000
+         BCR   7,R3           TRF TO BXLE56 IF NOT.                     00429000
+         CL    R1,4(,R5)      IF YES, DOES 2ND HALF OF NAME MATCH ?     00430000
+         BCR   7,R3           'BNE BXLE56' IF NOT.                      00431000
+FSTL17   BR    R14            GO TO FSTL36 IF '*' WAS GIVEN, OR ...     00432000
+FSTL18   CLC   PLTYP(8,R2),8(R5)   DOES TYPE MATCH ?                    00433000
+         BE    FSTL34         IF YES, WE'VE FOUND IT.                   00434000
+BXLE56   BXLE  R5,R6,FSTL15   ITERATE THRU CURRENT HYPERBLOCK           00435000
+         LM    R3,R4,0(R5)    GET POINTER TO NEW HYPERBLOCK & NEXT WORD 00436000
+         LTR   R5,R3          (ALSO IN R5) AND CHECK ITS EXISTENCE      00437000
+         BZ    FSTL20         BZ IF NO MORE HYPERBLOCKS FOR THIS DISK.  00438000
+         L     R8,REGSAV0+4   RESTORE R8 (WE NEED IT AT FSTL13)         00439000
+         TM    ADTFLG1,ADTFFSTV    ARE THEY VARIABLE LENGTH (SSTAT) ?   00440000
+         BZ    FSTL13         IF NOT, START WITH NEXT BLOCK FORTHWITH.  00441000
+FSTL19   L     R8,FOUR(,R5)   IF YES (SSTAT), GET NEW SIZE,    @V305032 00442100
+         SR    R8,R6          (SUBTRACTING 40 FOR LAST ITEM FOR BXLE)   00443000
+         LTR   R4,R4          IS "STATEXT+4" = 0 ?                      00444000
+         BNP   FSTL12     IF YES, SEARCH SSTAT-EXTENSIONS ON THIS DISK. 00445000
+         LR    R11,R4     BUT IF > 0, RESUME SEARCH WITH GIVEN DISK!    00446000
+         B     FSTL12         LET CODE AT FSTL12 ADD 8, ETC.            00447000
+*                                                                       00448000
+*        IF MODE IS LESS THAN CHARACTER 'A' ...                         00449000
+LESSA    LA    R14,FSTL05     (FOR BCR'S TO SAVE SPACE)                 00450000
+         CLI   PLMOD(R2),00   00 IS ACCEPTABLE                          00451000
+         BCR   8,R14          'BE' IF 00                                00452000
+         CLI   PLMOD(R2),C'*'      ASTERISK ALSO OK                     00453000
+         BCR   8,R14          'BE' IF '*'                               00454000
+         CLI   PLMOD(R2),C' '      BLANK ALSO OK                        00455000
+         BCR   8,R14          'BE' IF A BLANK                           00456000
+         CLI   PLMOD(R2),ALLBUT    ALLOW "ALLBUT" CHARACTER          JS 00457000
+         BCR   8,R14               ...                                  00458000
+         CLI   PLMOD(R2),C'('     LEFT PAREN OK                      DL 00459000
+         BCR   8,R14              BE IF '('                          DL 00460000
+ERROR2   EQU   *              ANYTHING ELSE = PARAMETER-LIST ERROR      00461000
+         LA    R15,2          MAKE THAT ERROR 2, AND                    00462000
+         B     SR00           GO EXIT ON ERROR-RETURN.                  00463000
+*                                                                       00464000
+MOREZ    CLI   PLMOD(R2),X'FF'  IF MORE THAN Z, MUST BE X'FF'           00465000
+         BE    FSTL05              ...                                  00466000
+         CLI   PLMOD(R2),FIRSTUSR  OR ALLOW "FIRSTUSR" CHARACTER     JS 00467000
+         BNE   ERROR2         ERROR IF OTHERWISE.                       00468000
+*                                                                       00469000
+FSTL05   SR    R1,R1          START WITH FIRST ADT TABLE,               00470000
+         L     R15,=V(DMSLADN) SET R15 -> ADTNXT INSTEAD OF ADTLKP      00471000
+         B     FSTL02         NOW GO CHECK PARAMETER-LIST-POINTER.      00472000
+*                                                                       00473000
+*        FILE-TYPE MATCHES EXPLICITLY ...                               00474000
+FSTL34   CLI   PLNAM(R2),C'*' WAS 'ANY' FILE-NAME WANTED ?              00475000
+         BNE   FSTL40         IF NOT, MATCH OF NAME & TYPE IS ENOUGH.   00476000
+FSTL36   EQU   *     IF NAME AND/OR TYPE WAS '*', CHECK MODE IF GIVEN   00477000
+         BR    R9             ACCEPT FILE IF MODE WASN'T GIVEN, OR      00478000
+FSTL38   CLC   25(1,R5),PLMOD+1(R2)   DOES MODE-NUMBER MATCH P-LIST ?   00479000
+         BCR   7,R3           'BNE BXLE56' IF IT DOES NOT.              00480000
+*                                                                       00481000
+*              SUCCESS - WE FOUND DESIRED 40-BYTE ITEM.                 00482000
+FSTL40   LR    R1,R5          R1 = POINTER TO DESIRED 40-BYTE ITEM,     00483000
+         SR    R5,R4          DISPLACEMENT OF CURRENT ITEM,             00484000
+         STM   R4,R5,ADTCHBA  STORE INFORMATION IN CASE RE-ENTERED      00485000
+FSTL41   LR    R0,R11         R0 = POINTER TO ACTIVE DISK TABLE         00486000
+         SR    R15,R15        CLEAR RETURN CODE (& C.C.)                00487000
+FSTL41A  LM    R2,R14,GPR2    RETORE REGS 2-14                 @V201105 00488100
+         BR    R14            AND RETURN TO CALLER.                     00489000
+         EJECT                                                          00490000
+*        COMES HERE IF FILE NOT FOUND ON A LOGGED-IN DISK:              00491000
+*                                                                       00492000
+FSTL20   DS    0H             IF DESIRED 40-BYTE ITEM NOT FOUND IN CORE 00493000
+         CLI   PLMOD(R2),FIRSTUSR   WAS "FIRST USER DISK" SPECIFIED ?   00494000
+         BE    NOTFOUND       TRF IF YES - QUIT SEARCHING.              00495000
+         LR    R1,R11         START WITH PREVIOUS TABLE,                00496000
+FSTL23   L     R15,=V(DMSLADN)         CALL ADTNXT TO CHECK NEXT TABLE  00497000
+         BALR  R14,R15        ...                                       00498000
+         BNZ   NOTFOUND       GIVE UP IF NO MORE TABLES                 00499000
+         LR    R11,R1         IF OK, LET R11 POINT TO ACTIVE-DISK-TABLE 00500000
+         CLI   PLMOD(R2),C'A'      WAS MODE SPECIFIED ?                 00501000
+         BL    FSTL04A             IF NOT, TRY THIS TABLE               00502000
+         CLI   PLMOD(R2),C'Z' (ALSO CHECK FOR > Z)                      00503000
+         BH    FSTL04A             ...                                  00504000
+         CLC   PLMOD+1(1,R2),PLMOD(R2)  IS IT A "DOUBLE-LETTER" MODE ?  00505000
+         BE    NOTFOUND            TRF IF YES - QUIT SEARCHING.         00506000
+         CLC   ADTMX,PLMOD(R2)     IS IT AN EXTENSION ?                 00507000
+         BE    FSTL04A        WORTH TRYING IF YES                       00508000
+         BNE   FSTL23         IF NOT, TRY NEXT TABLE (R1 ALREADY SET).  00509000
+         SPACE 3                                                        00510000
+*  SPECIAL CONSTANTS AND EQUATES FOR DEFINING DISK-SEARCHING:           00511000
+*                                                                       00512000
+ALLUSERD DC    C'*U'          = "ALL USER DISKS" (FSTLKP)               00513000
+*                             OR "ALL READ-WRITE DISKS" (FSTLKW)        00514000
+*                                                                       00515000
+FIRSTUSR EQU   C'1'           = "FIRST USER DISK" (FSTLKP)              00516000
+*                             OR "FIRST READ-WRITE DISK" (FSTLKW)       00517000
+*                                                                       00518000
+ALLBUT   EQU   C'-'           = "ALL DISKS EXECPT THIS ONE"             00519000
+*                             E.G. "-S" MEANS ALL DISKS EXCEPT S-DISK   00520000
+         EJECT                                                          00521000
+FINDZERO LR    R11,R0         ACCESS ACTIVE DISK TABLE                  00522000
+         LA    R5,1           GET A '1',                                00523000
+         LM    R2,R3,ADTLHBA  ACCESS LAST BLOCK AND ITEM                00524000
+         AR    R3,R2          ADDRESS OF LAST ITEM                      00525000
+         CL    R1,0(,R3)      IS IT EMPTY (E.G. FROM PREVIOUS ERASE)    00526000
+         BE    LR13           BE (BZ) IF YES, WE'RE ALL SET TO EXIT.    00527000
+         LA    R4,800(,R2)    POINT R4 TO END OF BLOCK                  00528000
+         LA    R3,40(,R3)     ADVANCE 40 BYTES TO NEXT ITEM,            00529000
+         CR    R3,R4          ARE WE STILL WITHIN BLOCK ?               00530000
+         BL    LR13           BL IF YES, GOOD SHOW.                     00531000
+         DMSFREE DWORDS=101,TYPCALL=BALR,TYPE=NUCLEUS  GET 800 BYTES    00532000
+         LR    R3,R1          REFERENCE IT VIA R3,                      00533000
+         XC    0(208,R3),0(R3)  CLEAR 804 BYTES IN SAME                 00534000
+         MVC   208(200,R3),0(R3)   ...                                  00535000
+         MVC   408(200,R3),0(R3)   ...                                  00536000
+         MVC   608(196,R3),0(R3)   ...                                  00537000
+         ST    R3,800(,R2)    STORE POINTER TO THIS BLOCK IN OLD BLOCK, 00538000
+         ST    R2,804(,R3)    AND BACKPOINTER TO OLD BLOCK IN THIS ONE. 00539000
+         L     R2,ADTHBCT     ADD 1 TO FST HYPERBLOCK COUNT             00540000
+         AR    R2,R5          ...                                       00541000
+         ST    R2,ADTHBCT     AND REPLACE.                              00542000
+         LH    R2,ADTRES      ADD 1 TO                                  00543000
+         AR    R2,R5          RESERVE-COUNT                             00544000
+         STH   R2,ADTRES      AND REPLACE                               00545000
+         LR    R2,R3          R2 AND R3 POINT TO NEW BLOCK              00546000
+LR13     LR    R1,R3          POINTER TO EMPTY ITEM INTO R1,            00547000
+         SR    R3,R2          R3 A DISPLACEMENT                         00548000
+         STM   R2,R3,ADTLHBA  STORE NEW LAST-BLOCK & ITEM INFO.         00549000
+*                                                                       00550000
+*     INCREMENTING OF ADTFSTC (NO. OF FILES) REMOVED FROM HERE AND      00551000
+*     PUT INTO WRBUF.  NEEDS TO BE THERE IF ERASE IS TO DO THE RIGHT    00552000
+*     THING WITH OPEN FILES.  OTHERWISE ERASING OPEN FILES DECREMENTS   00553000
+*     THE COUNT INDEFINITELY UNTIL EVENTUALLY WRBUF COMPLAINS.          00554000
+*                                                                       00555000
+         B     FSTL41         AND GO EXIT WITH R0 & R1 ALL SET UP.      00556000
+         SPACE 3                                                        00557000
+NOTFOUND LA    R15,1          ERROR 1 = DISK-TABLE OR FILE NOT FOUND... 00558000
+SR00     SR    R0,R0          CLEAR R0                                  00559000
+         L     R1,SB          ZERO WITH SIGN-BIT ON INTO R1,            00560000
+         LM    R2,R14,GPR2    RESTORE R2 THRU R14,                      00561000
+         LTR   R15,R15     SET CONDITION-CODE FOR CONVENIENCE OF CALLER 00562000
+         BR    R14            AND RETURN TO CALLER.                     00563000
+         EJECT                                                          00566000
+*********************************************************************** 00567000
+*                                                                       00568000
+*                             "TYPSRCH"                                 00569000
+*                                                                       00570000
+*              QUICK FILETYPE SEARCH SUBROUTINE                         00571000
+*                                                                       00572000
+*              CHECKS FILETYPE TO DETERMINE IF IT IS                    00573000
+*              ONE OF UP TO EIGHT HEAVILY USED FILETYPES.               00574000
+*              IF SO, EXITS WITH INDEXED FLAG-BYTE.                     00575000
+*                                                                       00576000
+*              (CALLED BY FSTLKP, FINIS, READFST, & ALTER)              00577000
+*                                                                       00578000
+*              CALLING SEQUENCE:                                        00579000
+*                                                                       00580000
+*              R0-R1 (TOGETHER) HOLD FILETYPE                           00581000
+*              R13 = V(FVS) SAVE AREA                                   00582000
+*              R15 = V(TYPSRCH)                                         00583000
+*                                                                       00584000
+*              BALR  R14,R15                                            00585000
+*                                                                       00586000
+*              EXIT CONDITIONS:                                         00587000
+*                                                                       00588000
+*              FILETYPE NOT FOUND IN TABLE:                             00589000
+*              R15 = 0  (AND CONDITION-CODE = 0)                        00590000
+*                                                                       00591000
+*              FILETYPE WAS FOUND IN TABLE:                             00592000
+*              R15 (BITS 24-31) HOLDS INDEXER TO WHICH FILETYPE FOUND   00593000
+*              (I.E. = X'80', OR X'40', OR X'20', ETC.)                 00594000
+*                                                                       00595000
+*********************************************************************** 00596000
+*                                                                       00597000
+         USING *,R15          ADDRESSABILITY                            00598000
+         USING FVSECT,R13     (MUST BE IN EFFECT)                       00599000
+TYPSRCH  STM   R3,R5,REGSAV0+12  SAVE R3-R5 IN LOW-LEVEL SAVE-AREA      00600000
+         SR    R3,R3          INITIALIZE R3-R4-R5 FOR BXLE LOOP         00601000
+         LA    R4,8           ...                                       00602000
+         LA    R5,(AFTRLAST-8-TYPTABLE)                                 00603000
+*                                                                       00604000
+CHKTYLP  CL    R0,TYPTABLE(R3) CHECK FILETYPE AGAINST TABLE             00605000
+         BE    CHEK2ND        TRF IF AN APPARENT MATCH.                 00606000
+         BXLE  R3,R4,CHKTYLP  ITERATE LOOP                              00607000
+*                                                                       00608000
+NTFND    SR    R5,R5          RETURN-CODE WILL = 0.                     00609000
+*                                                                       00610000
+LTR155   LTR   R15,R5         RETURN-CODE (0 OR FLAG) INTO R15,         00611000
+         LM    R3,R5,REGSAV0+12  RESTORE R3-R5                          00612000
+         BR    R14            RETURN TO CALLER.                         00613000
+*                                                                       00614000
+CHEK2ND  CL    R1,TYPTABLE+4(R3) CHECK 2ND HALF                         00615000
+         BNE   NTFND          IF NO MATCH, FORGET IT.                   00616000
+         SRL   R3,3           DIVIDE TABLE-INDEXER BY 8,                00617000
+         LA    R5,X'80'      START WITH X'80'                           00618000
+         SRL   R5,0(R3)      SHIFT 0, 1, .. , 7 PLACES                  00619000
+         B     LTR155         GO PLACE R5 IN R15 AND EXIT.              00620000
+*                                                                       00621000
+TYPTABLE DS    0F    TABLE OF HEAVILY USED FILETYPES (NO MORE THAN 8 !) 00622000
+         DC    CL8'EXEC'      1ST                                       00623000
+         DC    CL8'MODULE'    2ND                                       00624000
+         DC    CL8'MACLIB'    ETC.                                      00625000
+         DC    CL8'TXTLIB'    ...                                       00626000
+         DC    CL8'TEXT'                                                00627000
+         DC    CL8'ASSEMBLE'                                            00628000
+         DC    CL8'FORTRAN'                                             00629000
+         DC    CL8'PLI'       8TH (AND LAST).                           00630000
+*                                                                       00631000
+*                                                                       00632000
+AFTRLAST EQU   *              (KEEP AFTER THE LAST ONE !!!)             00633000
+         SPACE                                                          00634100
+         DROP  R15            REVERT TO R12 ADDRESSABILITY     @V305032 00635100
+         EJECT                                                          00636100
+* FILENAME AND FILETYPE ARE BOTH SPECIFIC; DISK IS ALL "SORTED",        00637100
+* AND WE'RE "STARTING AT THE BEGINNING" (R4 = 0):                       00638100
+         SPACE                                                          00639100
+* ENTRY CONDITIONS:                                                     00640100
+*        R0-R1 HOLD FILENAME                                            00641100
+*        R2 HOLDS POINTER TO ORIGINAL P-LIST                            00642100
+*        R3 = ADDRESS OF FIRST HYPERBLOCK                               00643100
+*        R4 = 0                                                         00644100
+*        R8 = SIZE OF <FIRST> BLOCK MINUS 40                            00645100
+*        R6 = 40                                                        00646100
+         SPACE                                                          00647100
+* NOTE:  SUPPORT CODE FOR THIS SECTION = @V305032                       00648100
+         SPACE                                                          00649100
+FSTLFAST DS    0H             DO A "FAST" SEARCH:              @V305032 00650100
+         LR    R5,R8     BLOCK SIZE -40 INTO R5 WHERE NEEDED,  @V305032 00651100
+         STM   R2,R5,REGSAV0+EIGHT SAVE R2 THRU R5             @V305032 00652100
+         LA    R4,EIGHT(,R3)  LET R4 POINT TO 1ST BLOCK OF FSTS@V305032 00653100
+         LM    R2,R3,PLTYP(R2) GET FILETYPE INTO R2-R3         @V305032 00654100
+         LA    R14,FSTL51     SET R14 TO "GET THE NEXT BLOCK"  @V305032 00655100
+         LA    R15,FSTL55     SET R15 TO "IN THE RIGHT BLOCK"  @V305032 00656100
+         TM    ADTFLG1,ADTFFSTV VARIABLE LENGTH (E.G. "SSTAT") @V305032 00657100
+         BOR   R15       YES - GO TO FSTL55 TO LOOK AT 1 BLK.  @V305032 00658100
+         L     R7,ADTHBCT     NO - GET FST HYPERBLOCK COUNT    @V305032 00659100
+         BCT   R7,FSTL50 LESS ONE & BRANCH IF THERE ARE > ONE  @V305032 00660100
+         B     FSTL52    HANDLE ONE HYPERBLOCK AS IF THE LAST. @V305032 00661100
+         SPACE                                                          00662100
+         DS    0D        SEARCH ALL HYPERBLOCKS BUT THE LAST:  @V305032 00663100
+* TIGHT LOOP TO NARROW THE FST DOWN TO THE RIGHT HYPERBLOCK:            00664100
+FSTL50   CL    R0,FN1(R4,R5)  CHECK FILENAME AGAINST LAST FST  @V305032 00665100
+         BNH   FSTL60         IF NOT HIGH, CHECK FURTHER.      @V305032 00666100
+FSTL51   L     R4,FORTY(R4,R5) IF "HIGH", GET NEXT HYPERBLOCK  @V305032 00667100
+         BCT   R7,FSTL50      AND KEEP LOOKING.                @V305032 00668100
+*                                                                       00669100
+FSTL52   EQU   *         HANDLE LAST (OR ONLY) HYPERBLOCK:     @V305032 00670100
+         L     R5,ADTLFST     GET DISP. OF LAST FST IN LAST    @V305032 00671100
+*                             HYPERBLOCK.  CONTINUE ...                 00672100
+         SPACE                                                          00673100
+* WE HAVE FOUND THE RIGHT BLOCK (OR THIS IS THE LAST OR ONLY BLOCK):    00674100
+FSTL55   AR    R5,R6          TOTAL BLOCK SIZE INTO R5,        @V305032 00675100
+         BAL   R8,BINSERCH    TRY TO FIND THE FST ENTRY        @V305032 00676100
+*                             RETURNS IF NOT FOUND ...                  00677100
+         LM    R2,R5,REGSAV0+EIGHT RESTORE R2 THRU R5          @V305032 00678100
+         TM    ADTFLG1,ADTFFSTV VARIABLE LENGTH (E.G. "SSTAT")?@V305032 00679100
+         BZ    FSTL20         IF NOT, TRY NEXT DISK (IF ANY).  @V305032 00680100
+         LA    R5,FORTY8(R3,R5) POINT TO END OF <SSTAT> BLOCK, @V305032 00681100
+         LM    R3,R4,0(R5) PNTRS TO NEW HYPERBLOCK & NEXT WORD @V305032 00682100
+         LTR   R5,R3     (ALSO IN R5) AND CHECK ITS EXISTENCE  @V305032 00683100
+         BZ    FSTL20  IF 0, NO MORE HYPERBLOCKS FOR THIS DISK @V305032 00684100
+         LA    R15,FSTL16     SET R15 AND R14 AGAIN            @V305032 00685100
+         LA    R14,FSTL18     (AS NEEDED),                     @V305032 00686100
+         LA    R6,FORTY       RESTORE R6=40, AND               @V305032 00687100
+         B     FSTL19         GO CHECK EXTENSION TO "SSTAT".   @V305032 00688100
+         EJECT                                                          00689100
+* FST MAY POSSIBLY BE LOCATED IN THIS BLOCK:                            00690100
+FSTL60   BLR   R15            IF LESS, IT'S THE RIGHT BLOCK.   @V305032 00691100
+         CL    R1,FN2(R4,R5)  IF =, CHECK 2ND HALF OF FILENAME @V305032 00692100
+         BLR   R15            IF LESS, IT'S THE RIGHT BLOCK.   @V305032 00693100
+         BHR   R14            IF MORE, GET THE NEXT BLOCK.     @V305032 00694100
+         CL    R2,FT1(R4,R5)  IF =, CHECK 1ST HALF OF FILETYPE @V305032 00695100
+         BLR   R15            IF LESS, IT'S THE RIGHT BLOCK.   @V305032 00696100
+         BHR   R14            IF MORE, GET THE NEXT BLOCK.     @V305032 00697100
+         CL    R3,FT2(R4,R5)  IF =, CHECK 2ND HALF OF FILETYPE @V305032 00698100
+         BLR   R15            IF LESS, IT'S THE RIGHT BLOCK.   @V305032 00699100
+         BHR   R14            IF MORE, GET THE NEXT BLOCK.     @V305032 00700100
+         LA    R1,0(R4,R5)  IF MATCH, RETURN ADDR OF FST ENTRY @V305032 00701100
+         STM   R4,R5,ADTCHBA  STORE ADDRESS & DISP. IN CASE    @V305032 00702100
+         B     FSTL41         RE-ENTERED AND "GO EXIT".        @V305032 00703100
+         SPACE 2                                                        00704100
+* NEEDED EQUATES:                                                       00705100
+STAR     EQU   C'*'           ASTERISK MEANS 'ALL'             @V305032 00706100
+ONE      EQU   1                                               @V305032 00707100
+FOUR     EQU   4                                               @V305032 00708100
+EIGHT    EQU   8                                               @V305032 00709100
+FORTY    EQU   40             LENGTH OF ONE FST ENTRY          @V305032 00710100
+FORTY8   EQU   48             ABOVE + 8                        @V305032 00711100
+FN1      EQU   0              1ST HALF OF FILENAME             @V305032 00712100
+FN2      EQU   4              2ND HALF OF FILENAME             @V305032 00713100
+FT1      EQU   8              1ST HALF OF FILETYPE             @V305032 00714100
+FT2      EQU   12             2ND HALF OF FILETYPE             @V305032 00715100
+         EJECT                                                          00716100
+* BINSERCH = BINARY SEARCH INTERNAL SUBROUTINE                          00717100
+         SPACE                                                          00718100
+* ENTRY CONDITIONS:                                                     00719100
+*        R0-R1 HOLD FILENAME                                            00720100
+*        R2-R3 HOLD FILETYPE                                            00721100
+*        R4 = ADDRESS OF BLOCK TO BE SEARCHED                           00722100
+*        R5 = SIZE OF BLOCK TO BE SEARCHED (IN BYTES)                   00723100
+*        R8 = RETURN REGISTER                                           00724100
+         SPACE                                                          00725100
+* INTERNAL REGISTER USAGE                                               00726100
+*        R0-R1 HOLD FILENAME                                            00727100
+*        R2-R3 HOLD FILETYPE                                            00728100
+*        R4 = ADDRESS OF BEGINNING OF BLOCK                             00729100
+*        R5 = "INDEXER" FOR SEARCHING THE BLOCK                         00730100
+*        R6 = "ADJUSTER" FOR BINARY SEARCH TECHNIQUE                    00731100
+*        R7 = COUNTER FOR BINARY SEARCH LOOP                            00732100
+*        R14 & R15 USED FOR WORK REGISTERS                              00733100
+         SPACE                                                          00734100
+* EXIT CONDITIONS:                                                      00735100
+*     IF FILE WAS FOUND:                                                00736100
+*        R1 HOLDS ADDRESS OF FST ENTRY FOUND                            00737100
+*        ADDRESS & DISPLACEMENT OF FST STORED IN ADTCHBA/ADTCFST        00738100
+*        EXITS VIA CODE AT FSTL41.                                      00739100
+*     IF FILE WAS NOT FOUND:                                            00740100
+*        RETURNS VIA R8.                                                00741100
+*        R0-R4 STILL INTACT                                             00742100
+*        R5-R7 AND R14-R15 NOT PRESERVED                                00743100
+         SPACE                                                          00744100
+* NOTE:  SUPPORT CODE FOR THIS SUBROUTINE = @V305032                    00745100
+         SPACE                                                          00746100
+         DS    0D                                              @V305032 00747100
+BINSERCH C     R5,=F'800'     BLOCK SIZE PERCHANCE = 800 ?     @V305032 00748100
+         BE    BINSUB2        YES (QUITE LIKELY) - SET DEFAULTS@V305032 00749100
+         LA    R6,FORTY  NO - START WITH ADJUSTER = FST SIZE,  @V305032 00750100
+         SR    R7,R7          CLEAR "NUMBER OF TRIES" COUNTER  @V305032 00751100
+         LA    R15,ONE        NEED A "1" AVAILABLE             @V305032 00752100
+BINSUB1  AR    R6,R6          DOUBLE THE ADJUSTER              @V305032 00753100
+         AR    R7,R15    INCREMENT "NUMBER OF TRIES" COUNTER   @V305032 00754100
+         CR    R6,R5          COMPARE WITH BLOCK SIZE          @V305032 00755100
+         BNH   BINSUB1        ITERATE LOOP UNTIL IT IS GREATER.@V305032 00756100
+         SRL   R6,ONE         THEN HALVE THE ADJUSTER,         @V305032 00757100
+         SR    R5,R6     INDEXER = BLOCK SIZE MINUS ADJUSTER   @V305032 00758100
+         SRL   R6,ONE         HALVE THE ADJUSTER ONCE MORE     @V305032 00759100
+         B     BINSUB3   FINISH INITIALIZATION & START SEARCH  @V305032 00760100
+         SPACE                                                          00761100
+* SET R5/R6/R7 FOR (DEFAULT) BLOCK SIZE OF 800 BYTES:                   00762100
+         CNOP  4,8       (DBL-WORD ALIGN BINARY SEARCH LOOP)   @V305032 00763100
+BINSUB2  LA    R5,ONESIXTY    SET INDEXER = 160,,              @V305032 00764100
+         LA    R6,THREE20     ADJUSTER = 320, AND              @V305032 00765100
+         LA    R7,NUMTRIES    "NUMBER OF TRIES" COUNTER = 5;   @V305032 00766100
+*                             CONTINUE TO BINSUB3 ...                   00767100
+         EJECT                                                          00768100
+BINSUB3  LA    R14,BINSUB5    SET R14 TO TRANSFER IF "TOO LOW" @V305032 00769100
+         LA    R15,BINSUB4    SET R15 TO TRANSFER IF "TOO HIGH"@V305032 00770100
+         SPACE                                                          00771100
+* FAST "BINARY SEARCH LOOP" TO FIND DESIRED FST IN BLOCK (IF IT EXISTS) 00772100
+BINSUBLP CL    R0,FN1(R4,R5)  COMPARE FIRST HALF OF FILENAME   @V305032 00773100
+         BLR   R14            TRANSFER IF "TOO LOW" IN BLOCK   @V305032 00774100
+         BHR   R15            TRANSFER IF "TOO HIGH" IN BLOCK  @V305032 00775100
+         CL    R1,FN2(R4,R5)  IF =, COMPARE 2ND HALF OF FNAME  @V305032 00776100
+         BLR   R14            TRANSFER IF "TOO LOW" IN BLOCK   @V305032 00777100
+         BHR   R15            TRANSFER IF "TOO HIGH" IN BLOCK  @V305032 00778100
+         CL    R2,FT1(R4,R5)  IF =, COMPARE 1ST HALF OF FTYPE  @V305032 00779100
+         BLR   R14            TRANSFER IF "TOO LOW" IN BLOCK   @V305032 00780100
+         BHR   R15            TRANSFER IF "TOO HIGH" IN BLOCK  @V305032 00781100
+         CL    R3,FT2(R4,R5)  IF =, COMPARE 2ND HALF OF FTYPE  @V305032 00782100
+         BLR   R14            TRANSFER IF "TOO LOW" IN BLOCK   @V305032 00783100
+         BHR   R15            TRANSFER IF "TOO HIGH" IN BLOCK  @V305032 00784100
+         LA    R1,0(R4,R5)    IF MATCH RETURN ADDR OF FST ENTRY@V305032 00785100
+         STM   R4,R5,ADTCHBA  STORE ADDRESS & DISP. IN CASE    @V305032 00786100
+         B     FSTL41         RE-ENTERED AND "GO EXIT".        @V305032 00787100
+         SPACE                                                          00788100
+* "TOO HIGH" IN THE BLOCK - INCREMENT THE INDEXER:                      00789100
+BINSUB4  AR    R5,R6          ADD ADJUSTER TO INDEXER          @V305032 00790100
+         SRL   R6,ONE         HALVE ADJUSTER (FOR NEXT TIME)   @V305032 00791100
+         BCT   R7,BINSUBLP    AND ITERATE BINARY SEARCH LOOP.  @V305032 00792100
+         BR    R8             IF NOT FOUND, RETURN TO CALLER.  @V305032 00793100
+         SPACE                                                          00794100
+* "TOO LOW" IN THE BLOCK - DECREMENT THE INDEXER:                       00795100
+BINSUB5  SR    R5,R6          SUBTRACT ADJUSTER FROM INDEXER   @V305032 00796100
+         BM    BINSUB6 BEWARE MINUS = RUNNING OFF FRONT OF BLK @V305032 00797100
+         SRL   R6,ONE    OK - HALVE ADJUSTER (FOR NEXT TIME)   @V305032 00798100
+         BCT   R7,BINSUBLP    AND ITERATE BINARY SEARCH LOOP.  @V305032 00799100
+         BR    R8             IF NOT FOUND, RETURN TO CALLER.  @V305032 00800100
+         SPACE                                                          00801100
+* IF INDEXER GOES MINUS, DON'T "RUN OFF THE FRONT OF THE BLOCK":        00802100
+BINSUB6  SR    R5,R5          SET INDEXER = 0;                 @V305032 00803100
+         SRL   R6,ONE         HALVE ADJUSTER (FOR NEXT TIME)   @V305032 00804100
+         BCT   R7,BINSUBLP    AND ITERATE BINARY SEARCH LOOP.  @V305032 00805100
+         BR    R8             IF NOT FOUND, RETURN TO CALLER.  @V305032 00806100
+         SPACE                                                          00807100
+* ADDITIONAL NEEDED EQUATES:                                            00808100
+ONESIXTY EQU   160       INITIAL INDEXER FOR AN 800-BYTE BLOCK @V305032 00809100
+THREE20  EQU   320       INITIAL ADJUSTER FOR AN 800-BYTE BLOCK@V305032 00810100
+NUMTRIES EQU   5         INITIAL NO. OF TRIES FOR 800-BYTE BLK @V305032 00811100
+         EJECT                                                          00812100
+         LTORG                                                 @V305032 00813100
+         SPACE                                                          00814100
+*        OTHER CONSTANTS AND DEFINITIONS ...                            00815100
+         DS    0F                                              @V305032 00816100
+SB       DC    X'80000000'    ZERO WITH SIGN-BIT ON            @V305032 00817100
+VDMSSTTR DC    V(DMSSTTR)     VCON TO CHECK FOR STATE CALL     @V305032 00818100
+         SPACE                                                          00819100
+*              PARAMETER-LIST (R2) DISPLACEMENTS                        00820100
+PLNAM    EQU   8              FILENAME                         @V305032 00821100
+PLTYP    EQU   16             FILETYPE                         @V305032 00822100
+PLMOD    EQU   24             FILEMODE                         @V305032 00823100
+         EJECT                                                          00824100
+         FVS                                                 , @V305032 00825100
+GPR2     EQU   DISK$SEG+EIGHT SAVED REGISTERS FROM R2 UP       @V305032 00826100
+         EJECT                                                          00827100
+         REGEQU                                              , @V305032 00828100
+         NUCON                                               , @V305032 00829100
+         ADT                                                 , @V305032 00830100
+         SVCSECT                                             , @V305032 00831100
+         END                                                            00832100

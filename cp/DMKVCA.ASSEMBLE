@@ -1,0 +1,1677 @@
+VCA      TITLE 'DMKVCA     (CP)        VM/370 - RELEASE 6'              00001000
+         ISEQ  73,80          VALIDATE SEQUENCING OF SYSIN              00002000
+         COPY  OPTIONS                                                  00003000
+         COPY  LOCAL                                                    00004000
+         SPACE 3                                                        00005000
+*.                                                                      00006000
+* MODULE NAME -                                                         00007000
+*                                                                       00008000
+*        DMKVCA                                                         00009000
+*                                                                       00010000
+* CONTENTS -                                                            00011000
+*                                                                       00012000
+*        DMKVCAST -- START I/O SIMULATION                               00013000
+*        DMKVCATS -- TEST I/O SIMULATION                                00014000
+*        DMKVCASH -- HALT I/O SIMULATION                                00015000
+*        DMKVCARD -- DEVICE RESET (WITHOUT DE-COUPLE)                   00016000
+*        DMKVCARS -- RESET AND DROP CTCA CONNECTION                     00017000
+*.                                                                      00018000
+         SPACE                                                          00019000
+DMKVCA   START                                                          00020000
+         SPACE                                                          00021000
+         USING SAVEAREA,R13                                             00022000
+         USING DMKVCA,R12                                               00023000
+         USING VMBLOK,R11                                               00024000
+         USING IOBLOK,R10                                               00025000
+         USING CHXBLOK,R7                                               00026000
+         USING CHYBLOK,R6                                               00027000
+         USING PSA,0                                                    00028000
+         SPACE 2                                                        00029000
+         DC    CL8'DMKVCA'    PAGEABLE MODULE IDENTIFIER                00030000
+         SPACE 2                                                        00031000
+         EXTRN DMKSTKCP,DMKSTKIO                                        00032000
+         EXTRN DMKDIBSM,DMKVIOIN                               @V407510 00033100
+         EXTRN DMKCVTBH,DMKSCNVU                                        00034000
+         AIF   (NOT &TRACE(6)).NTR1                             **AIF** 00035000
+         EXTRN DMKTRDSI,DMKSYSRM                               @V4M0240 00036100
+         EXTRN DMKSCHDL                                        @VA00998 00037000
+.NTR1    ANOP                                                           00038000
+         EJECT                                                          00039000
+*.                                                                      00040000
+* SUBROUTINE NAME -                                                     00041000
+*                                                                       00042000
+*        DMKVCAST                                                       00043000
+*                                                                       00044000
+* FUNCTION -                                                            00045000
+*                                                                       00046000
+*        TO SIMULATE THE CHANNEL AND DEVICE OPERATIONS OF THE           00047000
+*        CHANNEL-TO-CHANNEL ADAPTER (CTCA) CONNECTED BETWEEN TWO        00048000
+*        VIRTUAL MACHINES UNDER VM/370                                  00049000
+*                                                                       00050000
+* ATTRIBUTES -                                                          00051000
+*                                                                       00052000
+*        REENTRANT, PAGEABLE, CALLED VIA SVC                            00053000
+*                                                                       00054000
+* ENTRY POINT -                                                         00055000
+*                                                                       00056000
+*        DMKVCAST - SIMULATE VIRTUAL START I/O INSTRUCTION              00057000
+*                                                                       00058000
+* ENTRY CONDITIONS -                                                    00059000
+*                                                                       00060000
+*        GPR 13 = ADDRESS OF STANDARD SAVE-AREA                         00061000
+*        GPR 12 = ADDRESS OF ENTRY POINT                                00062000
+*        GPR 11 = VMBLOK ADDRESS OF ACTIVE USER                         00063000
+*        GPR 10 = IOBLOK ADDRESS OF ACTIVE I/O TASK                     00064000
+*        GPR  8 = VDEVBLOK ADDRESS OF VIRTUAL CTCA                      00065000
+*                                                                       00066000
+* EXIT CONDITIONS -                                                     00067000
+*                                                                       00068000
+*        GPRS 0-15 UNCHANGED                                            00069000
+*                                                                       00070000
+* CALLS TO OTHER ROUTINES -                                             00071000
+*                                                                       00072000
+*        DMKFREE  - TO OBTAIN FREE STORAGE                              00073000
+*        DMKFRET  - TO RELEASE FREE STORAGE OBTAINED FROM DMKFREE       00074000
+*        DMKDIBSM - TO SIMULATE STATUS FOR A NOT READY DEVICE  @V407510 00075100
+*        DMKSCNVU - TO LOCATE VDEVBLOK, VCUBLOK, VCHBLOK                00076000
+*        DMKSTKCP - TO STACK CPEXBLOKS FOR DEFERRED EXECUTION           00077000
+*        DMKSTKIO - TO STACK IOBLOKS FOR THE SLIH                       00078000
+*        DMKTRDSI - TO TRACE SIO'S AND CCW STRINGS TO VIRTUAL CTCA      00079100
+*                                                                       00080000
+* EXTERNAL REFERENCES -                                                 00081000
+*                                                                       00082000
+*        DMKVIOIN - USED TO SET 'IOBIRA' FOR ATTENTION INTERRUPTS       00083000
+*                                                                       00084000
+* TABLES / WORK AREAS -                                                 00085000
+*                                                                       00086000
+*        CHXBLOK, CHYBLOK, IOBLOK                                       00087000
+*                                                                       00088000
+* REGISTER USAGE -                                                      00089000
+*                                                                       00090000
+*        GPR 13 = SAVE AREA BASE ADDRESS                                00091000
+*        GPR 12 = ADDRESS OF DMKVCA                                     00092000
+*        GPR 11 = VMBLOK OF CHANNEL X USER                              00093000
+*        GPR 10 = IOBLOK FOR X-SIDE CHANNEL PROGRAM                     00094000
+*        GPR  9 = ADDRESS OF ACTIVE CCW                                 00095000
+*        GPR  7 = CHXBLOK  ADDRESSABILITY                               00096000
+*        GPR  6 = CHYBLOK  ADDRESSABILITY                               00097000
+*        GPRS 0-5 = SCRATCH                                             00098000
+*        GPRS 14,15 = EXTERNAL LINKAGE                                  00099000
+*                                                                       00100000
+* OPERATION -                                                           00101000
+*                                                                       00102000
+*        DMKVCAST IS CALLED FROM DMKVIOEX AT THE SAME POINT WHERE       00103000
+*        DMKIOSQV IS CALLED FOR NON-SIMULATED DEVICES. AT ENTRY,        00104000
+*        DMKVCAST INITIALIZES THE IOBLOK AS DMKIOSQV WOULD, AND         00105000
+*        THEN TESTS THE VDEVBLOK TO DETERMINE IF THE VIRTUAL CTCA       00106000
+*        IS 'COUPLE'D TO ANOTHER CTCA. IF NOT, DMKDIASM IS CALLED       00107000
+*        TO INTERPRET THE CCW STRING AND SIMULATE THE CORRECT           00108000
+*        CSW AND SENSE STATUS. IF YES, START I/O SIMULATION             00109000
+*        PROCEEDS AS FOLLOWS:                                           00110000
+*                                                                       00111000
+*        1.  THE 'CHXBLOK' AND 'CHYBLOK' ARE REFERENCED THRU THE        00112000
+*            X-SIDE AND Y-SIDE VDEVBLOK'S (IN THIS DISCUSSION, THE      00113000
+*            X-SIDE IS ALWAYS THE INITIATING CHANNEL).                  00114000
+*        2.  THE FIRST REAL CCW AND THE IOBCAW ARE VALIDATED. IF        00115000
+*            ANY ERRORS ARE DETECTED, A CHANNEL PROGRAM CHECK IS        00116000
+*            GENERATED AND THE SIMULATION TERMINATES VIA STEP ??        00117000
+*        3.  THE REAL CCW STRING PRODUCED BY DMKCCWTR IS INTERPRETED    00118000
+*            ONE CCW AT A TIME BASED ON THE OPERATION TYPE:             00119000
+*                                                                       00120000
+*        TRANSFER IN CHANNEL:  X'08'                                    00121000
+*              IF 'TIC' IS FIRST CCW, GENERATE CHANNEL PROGRAM CHK      00122000
+*              IF 'TIC' POINTS TO 'TIC', CAUSE CHANNEL PROGRAM CHK      00123000
+*              OTHERWISE, RESTART WITH NEW CCW STRING.                  00124000
+*                                                                       00125000
+*        SENSE ADAPTER STATE (EXTENDED MODE ONLY):  X'14'               00126000
+*              TEST FOR A PREVIOUS Y-SIDE RESET NOT YET CLEARED         00127000
+*              AND PRESENT INTERVENTION REQUIRED IF YES.                00128000
+*              TEST FOR ATTENTION PENDING FROM Y-SIDE, PRESENT          00129000
+*              'ATTN + BUSY' IN INITIAL STATUS IF YES.                  00130000
+*              OTHERWISE, PRESENT SENSE BYTE ZERO.                      00131000
+*           IN ALL CASES, SUPPRESS DATA TRANSFER IF 'SKIP' IN CCW.      00132000
+*                                                                       00133000
+*        SENSE COMMAND BYTE:  X'04'                                     00134000
+*              EXTENDED MODE:  IF PREVIOUS X-SIDE RESET OR HALT I/O     00135000
+*                 HAS NOT BEEN CLEARED, CLEAR RESET CONDITION,          00136000
+*                 PRESENT DEVICE END TO Y-SIDE, AND STORE COMMAND       00137000
+*                 BYTE OF ZERO.                                         00138000
+*                 IF PREVIOUS Y-SIDE RESET OR HALT I/O HAS NOT BEEN     00139000
+*                 CLEARED, PRESENT UNIT CHECK IN INITIAL STATUS.        00140000
+*                 IF X-SIDE END-OF-FILE LATCH IS SET, RESET LATCH       00141000
+*                 AND STORE COMMAND BYTE OF ZERO.                       00142000
+*                 OTHERWISE, STORE COMMAND BYTE FROM Y-SIDE ADAPTER     00143000
+*                 BLOCK. IF THE Y-SIDE COMMAND WAS A CONTROL, PRESENT   00144000
+*                 DEVICE END TO THE Y-SIDE CHANNEL.                     00145000
+*              COMPATIBILITY MODE:  STORE COMMAND BYTE FROM Y-SIDE      00146000
+*                 ADAPTER BLOCK. IF THE Y-SIDE COMMAND WAS A CONTROL,   00147000
+*                 PRESENT DEVICE END TO THE Y-SIDE CHANNEL.             00148000
+*              IN ALL CASES, SUPPRESS DATA TRANSFER IF 'SKIP' IN CCW.   00149000
+*                                                                       00150000
+*        EXTENDED-MODE ONLY - WRITE, READ CONTROL:                      00151000
+*              IF A PREVIOUS X-SIDE HALT I/O OR RESET HAS NOT BEEN      00152000
+*              CLEARED, CLEAR THE CONDITION AND PRESENT DEVICE END      00153000
+*              TO THE Y-SIDE CHANNEL.                                   00154000
+*              IF A PREVIOUS Y-SIDE HALT I/O OR RESET HAS NOT BEEN      00155000
+*              CLEARED, PRESENT UNIT CHECK IN INITIAL STATUS.           00156000
+*              OTHERWISE, CONTINUE WITH COMMAND PROCESSING.             00157000
+*                                                                       00158000
+*        CONTROL IMMEDIATE:  X'07'                                      00159000
+*              RESET THE X-SIDE END-OF-FILE LATCH IF SET.               00160000
+*              IF THE Y-SIDE HAS AN ACTIVE READ, WRITE OR CONTROL       00161000
+*              COMMAND, PRESENT 'ATTN + BUSY'.                          00162000
+*              OTHERWISE, PRESENT ATTENTION TO THE Y-SIDE CHANNEL,      00163000
+*              CHANNEL END TO THE X-SIDE CHANNEL, AND WAIT FOR          00164000
+*              A 'SENSE COMMAND BYTE' FROM THE Y-SIDE.                  00165000
+*                                                                       00166000
+*        DISABLE COMPATIBILITY - MODIFIED NO-OP X'C3':                  00167000
+*              SET THE INHIBIT COMPATIBILITY LATCH IN THE X-SIDE        00168000
+*              ADAPTER BLOCK, INIDCATE THAT BOTH SIDES OF THE           00169000
+*              ADAPTER ARE IN EXTENDED MODE, ADVANCE TO NEXT CCW.       00170000
+*                                                                       00171000
+*        ENABLE COMPATIBILITY - MODIFIED NO-OP X'43':                   00172000
+*              RESET THE X-SIDE INHIBIT COMPATIBILITY LATCH.            00173000
+*              IF THE Y-SIDE INHIBIT COMPATIBILITY LATCH IS SET,        00174000
+*              LEAVE ADAPTER IN EXTENDED MODE AND ADVANCE TO NEXT       00175000
+*              CCW.  IF THE Y-SIDE LATCH IS NOT SET, FORCE THE          00176000
+*              ADAPTER INTO COMPATIBILITY MODE.                         00177000
+*                                                                       00178000
+*        WRITE: X'01'                                                   00179000
+*              RESET THE X-SIDE END-OF-FILE LATCH IF SET.               00180000
+*              IF THE Y-SIDE HAS AN ACTIVE READ COMMAND, ENTER DATA     00181000
+*              TRANSFER MODE.                                           00182000
+*              IF THE Y-SIDE HAS AN ACTIVE WRITE OR CONTROL COMMAND,    00183000
+*              PRESENT 'ATTN + BUSY'.                                   00184000
+*              IF THERE IS NO ACTIVE Y-SIDE COMMAND, PRESENT 'ATTN'     00185000
+*              TO THE Y-SIDE CHANNEL AND WAIT FOR Y-SIDE ACTIVITY.      00186000
+*                                                                       00187000
+*        WRITE END OF FILE: X'81'  (EXTENDED MODE ONLY)                 00188000
+*              RESET THE X-SIDE END-OF-FILE LATCH IF SET.               00189000
+*              IF THE Y-SIDE HAS NO ACTIVE COMMAND, SET THE Y-SIDE      00190000
+*              END-OF-FILE LATCH AND CONTINUE PROCESSING.               00191000
+*              IF THE Y-SIDE HAS AN ACTIVE READ COMMAND, PRESENT        00192000
+*              CHANNEL END, DEVICE END, UNIT EXCEPTION TO THE Y-SIDE.   00193000
+*              IF THE Y-SIDE HAS AN ACTIVE CONTROL OR WRITE COMMAND,    00194000
+*              PRESENT 'ATTN + BUSY' TO THE X-SIDE CHANNEL.             00195000
+*                                                                       00196000
+*        READ X'02' OR READ BACKWARD X'0C':                             00197000
+*              EXTENDED MODE: IF THE X-SIDE END-OF-FILE LATCH IS SET,   00198000
+*                 RESET THE LATCH AND PRESENT UNIT EXCEPTION IN         00199000
+*                 INITIAL STATUS.                                       00200000
+*              IF THE Y-SIDE HAS AN ACTIVE WRITE COMMAND, ENTER         00201000
+*              DATA TRANSFER MODE.                                      00202000
+*              IF THE Y-SIDE HAS AN ACTIVE WRITE OR CONTROL COMMAND,    00203000
+*              PRESENT 'ATTN + BUSY'.                                   00204000
+*              IF THERE IS NO ACTIVE Y-SIDE COMMAND, PRESENT 'ATTN'     00205000
+*              TO THE Y-SIDE CHANNEL AND WAIT FOR Y-SIDE ACTIVITY.      00206000
+*                                                                       00207000
+*        WHENEVER IT IS NECESSARY TO WAIT FOR ACTIVITY FROM THE         00208000
+*        Y-SIDE CHANNEL, A CPEXBLOK IS BUILT AND THE ADDRESS STORED     00209000
+*        IN THE CHXBLOK FOR LATER RE-CONNECTION VIA A CALL TO           00210000
+*        DMKSTKCP. ANOTHER CPEXBLOK IS BUILT FOR AN EXIT TO THE         00211000
+*        CALLING ROUTINE WHILE PRESERVING THE ENTRY SAVE-AREA.          00212000
+*        AT APPROPRIATE PLACES DURING COMMAND PROCESSING, A CPEXBLOK    00213000
+*        EXIT FOLLOWED BY A CPEXBLOK RESTART IS TAKEN FOR SEQUENCING    00214000
+*        CONTROL AND TIMING CONSIDERATIONS.                             00215000
+*                                                                       00216000
+*        DATA TRANSFER MODE:                                            00217000
+*                                                                       00218000
+*              UPON ENTERING DATA TRANSFER MODE, THE FOLLOWING INIT-    00219000
+*        IALIZATION STEPS ARE TAKEN:                                    00220000
+*        1.  RESET ANY PENDING ATTENTION INTERRUPTS OR FLAGS ON         00221000
+*            BOTH THE X-SIDE AND Y-SIDE ADAPTERS.                       00222000
+*        2.  BUILD A CPEXBLOK FOR THE X-SIDE SUCH THAT BOTH X AND Y     00223000
+*            ADAPTERS ARE IN A SOFTWARE 'WAIT' STATUS.                  00224000
+*        3.  PRESENT ZERO INITIAL STATUS TO THE X-SIDE CHANNEL.         00225000
+*        4.  EXCHANGE THE X-SIDE AND Y-SIDE IF NECESSARY SUCH THAT      00226000
+*            THE 'READ' OPERATION IS ALWAYS THE X-SIDE ADAPTER.         00227000
+*                                                                       00228000
+*        DATA TRANSFER WILL PROCEED UNINTERRUPTIBLY TO COMPLETION,      00229000
+*        IN THE FOLLOWING MANNER:                                       00230000
+*        1.    EXAMINE THE Y-SIDE (WRITE) CCW TO DETERMINE THE          00231000
+*              MAXIMUM SEGMENT LENGTH FOR DATA TRANSFER.                00232000
+*        2.    EXAMINE THE X-SIDE (READ) CCW TO DETERMINE ITS           00233000
+*              MAXIMUM SEGMENT LENGTH FOR DATA TRANSFER.                00234000
+*        3.    EXAMINE THE 'CAW' PROTECTION KEY FOR THE READ CCW        00235000
+*              AND SIMULATE A PROTECTION CHECK IF IT DOES NOT MATCH     00236000
+*              THE REAL STORAGE KEY OF THE READ AREA.                   00237000
+*        4.    COMPARE THE DATA SEGMENT LENGTHS FOR READ AND WRITE.     00238000
+*        5.    IF THE READ COUNT IS GREATER THAN THE WRITE COUNT,       00239000
+*              TRANSFER THE DATA SEGMENT AS SPECIFIED BY THE WRITE      00240000
+*              COUNT, AND UPDATE THE WRITE COUNT BY RESTARTING AT       00241000
+*              STEP 1. AND SKIPPING STEPS 2. AND 3.                     00242000
+*        6.    IF THE WRITE COUNT IS GREATER THAN THE READ COUNT,       00243000
+*              TRANSFER THE DATA SEGMENT AS SPECIFIED BY THE READ       00244000
+*              COUNT AND UPDATE THE READ COUNT BY RESTARTING AT STEP    00245000
+*              2.                                                       00246000
+*        7.    IF THE READ COUNT EQUALS THE WRITE COUNT, TRANSFER       00247000
+*              THE DATA SEGMENT AND RESTART AT STEP 1.                  00248000
+*        8.    WHEN EITHER THE READ OR WRITE CCW STRING HAS BEEN        00249000
+*              EXHAUSTED, DETERMINE IF INCORRECT LENGTH SHOULD BE       00250000
+*              INDICATED FOR EITHER OR BOTH CHANNELS AND RE-CONNECT     00251000
+*              BOTH SIDES VIA CALLS TO DMKSTKCP.                        00252000
+*                                                                       00253000
+*        THE MAXIMUM DATA SEGMENT LENGTH WHICH MAY BE TRANSFERRED       00254000
+*        IN A SINGLE STEP IS DETERMINED AS FOLLOWS:                     00255000
+*        1.    NO MORE THAN 2048 BYTES AT ANY TIME - FOR PROTECTION     00256000
+*              KEY CHECKING.                                            00257000
+*        2.    NO MORE THAN THE LENGTH OF BUFFER FROM THE STARTING      00258000
+*              ADDRESS TO THE NEAREST 2048-BYTE STORAGE BOUNDARY.       00259000
+*        3.    NO MORE THAN THE TOTAL OR REMAINING CCW DATA COUNT.      00260000
+*        DATA TRANSFER WILL CONTINUE SO LONG AS THERE IS REMAINING      00261000
+*        CCW DATA COUNT OR DATA CHAINED CCW'S. COMMAND CHAINING WILL    00262000
+*        STOP DATA TRANSFER IF THE PREVIOUS CCW COUNT IS EXHAUSTED.     00263000
+*                                                                       00264000
+*        READ BACKWARD DATA TRANSFER:                                   00265000
+*              THE READ BACKWARD COMMAND TO A CHANNEL-TO-CHANNEL        00266000
+*              ADAPTER RESULTS IN THE DATA BEING INVERTED ON A          00267000
+*              CHARACTER BASIS., SINCE THE WRITE-ING CHANNEL IS         00268000
+*              SENDING DATA IN FORWARD SEUENCE, BUT THE INDEPENDENT     00269000
+*              READ-ING CHANNEL IS READING IN BACKWARD SEQUENCE.        00270000
+*        DATA INVERSION IS PERFORMED IN THE FOLLOWING MANNER:           00271000
+*        1. IF THE READ BUFFER STARTS AT A 7-BYTE BOUNDARY (I.E. AT     00272000
+*           THE LOW-ORDER BYTE OF A DOUBLE WORD), SKIP TO STEP 3.       00273000
+*        2. MOVE DATA ONE BYTE AT A TIME UNTIL A 7-BYTE BOUNDARY IS     00274000
+*           REACHED, OR THE DATA COUNT IS EXHAUSTED.                    00275000
+*        3. LOAD INTO A REGISTER PAIR EIGHT BYTES OF WRITE DATA IN      00276000
+*           INVERTED ORDER, AND MOVE TO READ BUFFER VIA A DOUBLE-       00277000
+*           WORD STORE, UNTIL THE LAST DOUBLE-WORD-ALIGNED DATA HAS     00278000
+*           BEEN MOVED.                                                 00279000
+*        4. MOVE THE REMAINDER OF THE DATA SEGMENT A SINGLE CHARACTER   00280000
+*           AT A TIME UNTIL THE COUNT IS EXHAUSTED.                     00281000
+*.                                                                      00282000
+         EJECT                                                          00283000
+DMKVCAST RELOC ,    SIO TO VIRTUAL CHAN-TO-CHAN ADAPTER                 00284000
+         USING VDEVBLOK,R8    TEMPORARILY                               00285000
+         XC    SAVEWRK1(4),SAVEWRK1     CLEAR A WORD FOR FLAGS          00286000
+         SPACE                                                          00287000
+         ST    R11,IOBUSER    SET IOBLOK VMBLOK POINTER                 00288000
+         ST    R10,IOBLINK    FORCE IOBLOK TO LINK TO ITSELF            00289000
+         SLR   R0,R0          (ZERO CONSTANT)                           00290000
+         ST    R0,IOBIOER     NO IOERBLOK                               00291000
+         L     R1,VDEVIOCT    INCREMENT COUNT OF SIO'S TO THIS DEVICE   00292000
+         AL    R1,F1               ...                                  00293000
+         ST    R1,VDEVIOCT         ...                                  00294000
+         MVC   IOBCSW(8),ZEROES    ZERO OUT THE CSW                     00295000
+         MVI   IOBSTAT,X'00'  CLEAR IOBLOK STATUS                       00296000
+         TM    VDEVSTAT,VDEVNRDY   IS THE CTCA COUPLED ?                00297000
+         BZ    VCASTART       YES -- START UP THE PROCESS               00298000
+         SPACE                                                          00299000
+         SL    R8,VMDVSTRT    REDUCE VDEVBLOK ADDR. TO DISPLACEMENT     00300000
+         CALL  DMKDIBSM,PARM=TYPCTCA  SIMULATE I/O STATUS      @V407510 00301100
+         B     VCAEXIT        ...AND RETURN TO DMKVIO                   00302000
+         DROP  R8                                                       00303000
+         SPACE                                                          00304000
+*                                                                       00305000
+* INTERNAL FLAGS USED IN 'SAVEWRK1':                                    00306000
+*                                                                       00307000
+* CPWAIT   EQU   X'80'        DEFER ATTENTION UNTIL EOF LATCH RESET     00308000
+* IOBRSTRT EQU   X'40'        RESTART PROCESSING AFTER CPEXBLOK 'EXIT'  00309000
+* CPEX     EQU   X'20'        EXIT TO DMKVIO VIA CPEXBLOK               00310000
+* VDEVCCW1 EQU   X'10'        PROCESSING FIRST USER CCW                 00311000
+* VMRUN    EQU   X'08'        CPEXBLOK HAS BEEN STACKED FOR EXECUTION   00312000
+* CHBREAD  EQU   X'02'        DATATRN - UPDATE READ DATA NEXT TIME      00313000
+* CHBWRIT  EQU   X'01'        DATATRN - UPDATE WRITE DATA NEXT TIME     00314000
+*                                                                       00315000
+* 'SAVEWRK1'+1 IS USED AS A SWITCH TO PREVENT DOUBLE EXIT TO DMKVIO     00316000
+*                                                                       00317000
+         SPACE                                                          00318000
+         USING CHXBLOK,R7                                               00319000
+         USING CHYBLOK,R6                                               00320000
+VCASTART EQU   *         'SIO' INITIAL PROCESSING                       00321000
+         BAL   R5,GETCTCA     ACCESS CHXBLOK, CHYBLOK                   00322000
+         STH   R0,CHXSTAT     SET X-SIDE STATUS INITIALLY ZERO          00323000
+         L     R9,IOBCAW      ADDRESS OF FIRST REAL CCW                 00324000
+         USING RCWCCW,R9      ...                                       00325000
+         STCM  R9,B'1000',CHXPKEY  SAVE CAW PROTECTION KEY              00326000
+         LA    R9,0(0,R9)     STRIP OFF CAW KEY                         00327000
+         OI    SAVEWRK1,VDEVCCW1   WORKING ON FIRST CCW                 00328000
+         B     VCACCHK        GO VALIDATE FIRST CCW                     00329000
+         EJECT                                                          00330000
+VCACCWS  EQU   *              CCW DECODING -- MAJOR LOOP                00331000
+         IC    R1,RCWCOMND    PICK UP REAL CCW COMMAND BYTE             00332000
+         STC   R1,CHXCMDB     ...PRESERVE IN CHXBLOK                    00333000
+         SLR   R5,R5          CCW DATA COUNT CARRIED IN GR5             00334000
+         ICM   R5,B'0011',RCWCNT   'LOAD LOGICAL HALFWORD'              00335000
+         ST    R5,CHXRCNT     SAVE IT IN CHXBLOK FOR TRANSFER           00336000
+         SPACE                                                          00337000
+         CLI   RCWCOMND,X'08'      TRANSFER IN CHANNEL ?                00338000
+         BE    VCATIC              YES - VALIDATE                       00339000
+         TM    RCWCOMND,B'00001011'     SENSE-TYPE COMMAND ?            00340000
+         BZ    VCASENS                  YES --                          00341000
+         TM    CHXFLAG,CHBHIO+CHBREST   PREVIOUS X-SIDE RESET ?         00342000
+         BZ    VCADCOD                  NO -- CONTINUE PROCESSING       00343000
+         NI    CHXFLAG,255-(CHBHIO+CHBREST)  X-SIDE COMES READY AGAIN   00344000
+         OI    CHXFLAG,CHBM370               BACK TO EXTENDED MODE      00345000
+         BAL   R14,DECHANY         DEVICE END TO CHANNEL Y              00346000
+VCADCOD  EQU   *              CONTINUE CCW INTERPRETATION               00347000
+         TM    CHYFLAG,CHBREST     HAS THE Y-SIDE BEEN RESET ?          00348000
+         BO    VCAUCIR             YES - UNIT CHECK, INT. REQ'D         00349000
+         TM    CHYFLAG,CHBHIO      MAYBE A Y-SIDE HALT I/O ?            00350000
+         BO    VCASLRS             YES - UNIT CHECK, SEL. RESET         00351000
+         TM    RCWCOMND,B'00000011'     CONTROL COMMAND ?               00352000
+         BO    VCACNTL                  YES --                          00353000
+         TM    RCWCOMND,B'00000001'     WRITE-TYPE ?                    00354000
+         BO    VCAWRIT                  YES --                          00355000
+         B     VCAREAD                  READ -                          00356000
+         SPACE                                                          00357000
+VCATIC   EQU   *              TRANSFER IN CHANNEL - X'08'               00358000
+         TM    SAVEWRK1,VDEVCCW1   WORKING ON FIRST CCW ?               00359000
+         BO    VCAPRGC        YES -- CC = 1 PROGRAM CHECK               00360000
+         L     R9,RCWADDR     LOAD NEXT CCW ADDRESS                     00361000
+         CLI   RCWCOMND,X'08'      TIC POINTING TO A TIC ?              00362000
+         BE    VCAPRGC             YES - CHANNEL PROGRAM CHECK          00363000
+         B     VCACCHK        ...AND VALIDATE IT                        00364000
+         SPACE                                                          00365000
+VCANEXT  EQU   *              ADVANCE TO NEXT CCW                       00366000
+         L     R9,CHXNCCW     PICK UP ACTIVE CCW ADDRESS                00367000
+         TM    RCWFLAG,CC     COMMAND CHAINED ?                         00368000
+         BZ    VCACEDE        NO -- STORE CSW AND EXIT                  00369000
+         LA    R9,8(0,R9)     NEXT CCW FETCH                            00370000
+         BAL   R14,USRWAIT    TAKE USER OUT OF WAIT IF FIRST CCW        00371000
+         OI    SAVEWRK1,IOBRSTRT   RESTART AFTER EXIT IF NECESSARY      00372000
+         BAL   R3,VCAGOTO     LET DMKVIO CONTINUE BEFORE WE FINISH      00373000
+VCACCHK  EQU   *              VALIDATE NEXT CCW                         00374000
+         ST    R9,CHXNCCW     STORE ADDRESS IN CHXBLOK                  00375000
+         BAL   R14,CHANCHK    TEST CCW FOR VALIDITY                     00376000
+         BNZ   VCAPRGC        NO GOOD -- CHANNEL PROGRAM CHECK          00377000
+         TM    SAVEWRK1,VDEVCCW1   HAVE WE ALREADY VALIDATED THE CAW ?  00378000
+         BZ    VCACCWS             YES - GO INTERPRET CCW STRING        00379000
+         TM    CHXPKEY,X'0F'  IS THE 'CAW' VALID ?                      00380000
+         BZ    VCACCWS             YES - GO INTERPRET CCW STRING        00381000
+         B     VCAPRGC             NO -- CHANNEL PROGRAM CHECK          00382000
+         EJECT                                                          00383000
+VCAUCIR  EQU   *              SET UNIT CHECK, INTERVENTION REQUIRED     00384000
+         OI    CHXSTAT,UC     CSW STATUS = UNIT CHECK                   00385000
+         LA    R8,INTREQ      SENSE DATA = INTERVENTION REQUIRED        00386000
+         B     VCACEDE        TERMINATE CHANNEL PROGRAM                 00387000
+VCASLRS  EQU   *              SET UNIT CHECK, SELECTIVE RESET           00388000
+         OI    CHXSTAT,UC     CSW STATUS = UNIT CHECK                   00389000
+         LA    R8,INTREQ+X'01'     INTREQ + SELECTIVE RESET             00390000
+         B     VCACEDE        GO TERMINATE CHANNEL PROGRAM              00391000
+VCAPRGC  EQU   *              CHANNEL PROGRAM CHECK                     00392000
+         OI    CHXSTAT+1,PRGC      CSW STATUS = PROGRAM CHECK           00393000
+         B     VCACEDE             GO STORE CSW                         00394000
+VCAPRTC  EQU   *              CHANNEL PROTECTION CHECK                  00395000
+         OI    CHXSTAT+1,PRTC      CSW STATUS = PROTECTION CHECK        00396000
+         B     VCACEDE             GO STORE CSW                         00397000
+ATNBUSY  EQU   *              ATTENTION PLUS BUSY                       00398000
+         OI    CHXSTAT,ATTN+BUSY   CSW STATUS = ATTN + BUSY             00399000
+         B     VCASEND        GO SET CSW STATUS ALONE                   00400000
+VCACEDE  EQU   *              SET STATUS, ADD CHANNEL END, DEVICE END   00401000
+         TM    SAVEWRK1,VDEVCCW1   IF THIS IS THE FIRST CCW...          00402000
+         BO    VCASEND             ...DO NOT INCLUDE CE, DE             00403000
+         OI    CHXSTAT,DE     SET DEVICE END AT LEAST                   00404000
+         TM    CHXFLAG,CHBCENT     HAS CHANNEL END BEEN GIVEN YET ?     00405000
+         BO    VCASEND             YES - PRESENT DEVICE END ALONE       00406000
+         OI    CHXSTAT,CE     ADD CHANNEL END TO STATUS ALSO            00407000
+VCASEND  EQU   *              CLEAR COMMAND FROM X-SIDE                 00408000
+         MVI   CHXCMDB,X'00'  ...                                       00409000
+         MVI   CHXCMDT,X'00'  ...                                       00410000
+         BAL   R3,RESEOFL     RESET END-OF-FILE IF SET                  00411000
+         NI    CHXFLAG,255-CHBCENT    REMOVE CHANNEL-END-PRESENTED FLAG 00412000
+VCASCSW  EQU   *              STORE CSW IN IOBLOK, STACK IOBLOK         00413000
+         LH    R1,CHXSTAT     STATUS BITS FOR INTERRUPT                 00414000
+         STH   R1,IOBCSW+4    ...INTO IOBLOK CSW FIELD                  00415000
+         TM    SAVEWRK1,VDEVCCW1   IS THIS THE FIRST CCW ?              00416000
+         BO    VCASTAT        YES - STORE STATUS ONLY                   00417000
+         TM    IOBCSW+4,CE+BUSY    CHANNEL CLASS INTERRUPT ?   @VA02497 00418000
+         BZ    VCASIOB        YES -- DO NOT FILL IN CHANNEL DATA        00419000
+         L     R9,CHXNCCW     GET PREVIOUS CCW ADDRESS                  00420000
+         LA    R9,8(0,R9)     GR9 = CSW ADDRESS                         00421000
+         ST    R9,IOBCSW      ...                                       00422000
+         IC    R1,CHXPKEY          GET CAW PROTECTION KEY               00423000
+         STC   R1,IOBCSW           ...INTO CSW                          00424000
+         L     R5,CHXRCNT     GET RESIDUAL COUNT FROM CHXBLOK           00425000
+         STH   R5,IOBCSW+6    SET CSW RESIDUAL COUNT                    00426000
+         NI    IOBSTAT,X'FF'-IOBCC3     THIS IS AN INTERRUPT            00427000
+         B     VCASIOB        GO CLEAR STATUS + STACK IOBLOK            00428000
+         EJECT                                                          00429000
+VCASTAT  EQU   *              SET CC = 1, STORE STATUS ONLY             00430000
+         MVI   IOBSTAT,IOBCC1 CC = 1 TO SIO                             00431000
+         CH    R0,IOBCSW+4    IF WE LEFT THE STATUS ZERO...             00432000
+         BNE   VCASIOB             (NO -- JUST STACK THE IOBLOK)        00433000
+         OI    IOBCSW+4,CE+DE ...WE REALLY MEANT 'CE+DE'                00434000
+VCASIOB  EQU   *              STACK IOBLOK FOR DMKVIO                   00435000
+         STH   R0,CHXSTAT     CLEAR STATUS FROM X-SIDE                  00436000
+         TM    IOBCSW+4,UC    WAS THERE A UNIT CHECK ?                  00437000
+         BZ    CALLSTK        NO -- JUST STACK THE IOBLOK               00438000
+         LM    R4,R5,IOBCSW   GET SET TO BUILD AN IOERBLOK              00439000
+         LR    R3,R8          SENSE DATA TO GR3                         00440000
+         BAL   R14,BLDIOER    BUILD IOERBLOK FOR DMKVIO                 00441000
+         ST    R1,IOBIOER     ...AND PASS BACK WITH IOBLOK              00442000
+CALLSTK  EQU   *                                                        00443000
+         CALL  DMKSTKIO       ...                                       00444000
+         NI    SAVEWRK1,255-VDEVCCW1    NO LONGER ON FIRST CCW          00445000
+         TM    SAVEWRK1,CPEX  EXIT VIA CPEXBLOK ?                       00446000
+         BO    VCAGOTO        YES - GO MODIFY THE SAVE-AREA             00447000
+         B     VCAEXIT        NORMAL SVC EXIT                           00448000
+         SPACE                                                          00449000
+USRWAIT  EQU   *              IF FIRST CCW, TAKE USER OUT OF IOWAIT     00450000
+         TM    SAVEWRK1,VDEVCCW1   IS THIS THE FIRST CCW ?              00451000
+         BCR   8,R14               NO -- NOTHING NEEDS DOING            00452000
+         NI    SAVEWRK1,255-VDEVCCW1    NO LONGER FIRST CCW             00453000
+         NI    VMRSTAT,255-VMIOWAIT     OUT OF IOWAIT                   00454000
+         LR    R3,R14                                          @VA00998 00455000
+         AIF   (NOT &TRACE(6)).NTR2                             **AIF** 00456000
+         TM    VMTRCTL,VMTRSIO     SIO TRACING TODAY ?                  00457000
+         BZ    USRSCHDL       NO -- CHECK FOR SCHDL CALL       @VA00998 00458000
+         OI    VMRSTAT,VMIOWAIT    BACK INTO IO-WAIT                    00459000
+         LH    R1,CHYXADD    WHILE WE GET VIRTUAL ADDRESS               00460000
+         CALL  DMKTRDSI       ...AND TRACE THE SIO CC = 0      @V4M0240 00461100
+         NI    VMRSTAT,255-VMIOWAIT     OUT OF IOWAIT ONCE MORE         00462000
+.NTR2    ANOP                                                           00463000
+USRSCHDL  EQU  *                                               @VA00998 00464000
+         CL    R11,RUNUSER    WILL DISPATCH CALL DMKSCHDL?     @VA00998 00465000
+         BCR   8,R3           YES - WE DON'T HAVE TO           @VA00998 00466000
+         CALL  DMKSCHDL       ALTER USER DISPATCH STATUS       @VA00998 00467000
+         BR    R3             RETURN                           @VA00998 00468000
+         EJECT                                                          00469000
+GOCHANY  EQU   *              RE-CONNECT Y-SIDE FOR EXECUTION           00470000
+         NI    CHXFLAG,255-CHBATTN      REMOVE ATTENTION FROM X-SIDE    00471000
+         NI    CHYFLAG,255-CHBWAIT      REMOVE WAIT FLAG FROM Y-SIDE    00472000
+         L     R1,CHYCNCT          CPEXBLOK FOR RE-CONNECT              00473000
+         CALL  DMKSTKCP       STACK IT FOR EXECUTION                    00474000
+         ST    R0,CHYCNCT     CLEAR OUT CPEXBLOK POINTER                00475000
+         OI    SAVEWRK1,VMRUN CPEXBLOK HAS BEEN STACKED                 00476000
+         BR    R3             RETURN TO CALLER                          00477000
+         SPACE 2                                                        00478000
+RESEOFL  EQU   *              RESET END-OF-FILE LATCH                   00479000
+         TM    CHXFLAG,CHBEOFL     IS THE END-OF-FILE LATCH SET ?       00480000
+         BCR   8,R3                NO -- NOTHING NEEDS TO BE DONE       00481000
+         NI    CHXFLAG,255-CHBEOFL RESET END-OF-FILE LATCH              00482000
+         LR    R1,R10         SAVE CURRENT IOBLOK POINTER               00483000
+         L     R10,CHYDATN    CHECK FOR Y-SIDE DEFERRED 'ATTN'          00484000
+         LTR   R10,R10        IS THERE A DEFERRED IOBLOK ?              00485000
+         BZ    RESEOFR        NO -- JUST RETURN                         00486000
+         CALL  DMKSTKIO        STACK THE IOBLOK FOR DMKVIO              00487000
+         ST    R0,CHYDATN     CLEAR OUT THE POINTER WORD                00488000
+         OI    CHXFLAG,CHBATTN     SET ATTENTION PENDING, X-SIDE        00489000
+RESEOFR  EQU   *              RESTORE IOBLOK ADDRESS, RETURN            00490000
+         LR    R10,R1         MUST HAVE PREVIOUS IOBLOK ADDRESS         00491000
+         BR    R3                  RETURN TO CALLER                     00492000
+         EJECT                                                          00493000
+VCASENS  EQU   *              SENSE COMMAND BYTE, SENSE ADAPTER STATUS  00494000
+         TM    CHYFLAG,CHBREST     Y-SIDE SYSTEM RESET ?                00495000
+         BZ    SNSDCOD             NO -- DECODE COMMAND                 00496000
+*   'CHBREST' FOR Y-SIDE IMPLIES NON-COMPATIBILITY MODE                 00497000
+         TM    CHXCMDB,X'10'  SENSE STATUS OR SENSE COMMAND ?           00498000
+         BO    VCAUCIR        SENSE COMMAND - UNIT CHK, INTREQ          00499000
+         LA    R4,INTREQ      SENSE DATA = INTERVENTION REQUIRED        00500000
+         B     SNSTORE        GO STORE SENSE BYTE                       00501000
+SNSDCOD  EQU   *              CHECK X-SIDE STATUS                       00502000
+         TM    CHXFLAG,CHBM370     CHECK ADAPTER OPERATING MODE         00503000
+         BZ    SNSCOMD        COMPATIBILITY MODE - SENSE CMD BYTE       00504000
+         TM    CHXCMDB,X'10'  SENSE STATUS OR SENSE COMMAND             00505000
+         BZ    SNSADST        SENSE ADAPTER STATUS - X'04'              00506000
+         TM    CHXFLAG,CHBHIO+CHBREST   X-SIDE HIO OR SYSTEM RESET ?    00507000
+         BZ    SNSCRS1                  NO -- CONTINUE                  00508000
+         NI    CHXFLAG,255-(CHBHIO+CHBREST)  ADAPTER READY AGAIN        00509000
+         OI    CHXFLAG,CHBM370     BACK INTO EXTENDED MODE              00510000
+         BAL   R14,DECHANY    DEVICE END TO Y-SIDE                      00511000
+         SLR   R4,R4          CMD BYTE ZERO                             00512000
+         B     SNSTORE        ...GO STORE DATA                          00513000
+SNSCRS1  EQU   *              CONTINUE RESET CHECKING                   00514000
+         TM    CHYFLAG,CHBHIO      HALT I/O ON Y-SIDE ?                 00515000
+         BO    VCASLRS             YES - UNIT CHK, SEL. RESET           00516000
+         SLR   R4,R4                                                    00517000
+         TM    CHXFLAG,CHBEOFL     IF END-OF-FILE IS SET...             00518000
+         BZ    SNSCOMD             NO -- THAT'S NORMAL...               00519000
+         BAL   R3,RESEOFL          ...RESET LATCH FIRST                 00520000
+         B     SNSTORE        ...BUT STORE COMMAND BYTE OF ZERO         00521000
+SNSADST  EQU   *              SENSE ADAPTER STATUS                      00522000
+         TM    CHXFLAG,CHBATTN     IS THE Y-SIDE ACTIVE ?               00523000
+         BO    ATNBUSY             YES - GIVE 'ATTN + BUSY'             00524000
+         SLR   R4,R4          SENSE BYTE ZERO IF WE GOT HERE            00525000
+         B     SNSTORE        GO STORE SENSE DATA                       00526000
+         EJECT                                                          00527000
+SNSCOMD  EQU   *              RELATIVELY ORDINARY SENSE CMD BYTE        00528000
+         IC    R4,CHYCMDB     COMMAND BYTE FROM Y-SIDE                  00529000
+         TM    CHYFLAG,CHBWAIT     IS THE Y-SIDE WAITING ?              00530000
+         BZ    SNSTORE             NO -- JUST DO THE COMMAND            00531000
+         CLI   CHYCMDT,CHBCNTL     WAITING ON CONTROL COMMAND ?         00532000
+         BNE   SNSTORE             NO -- JUST DO THE COMMAND            00533000
+         BAL   R3,GOCHANY     RE-CONNECT THE Y-SIDE                     00534000
+SNSTORE  EQU   *              STORE SENSE BYTE                          00535000
+         BAL   R14,USRWAIT    FORCE ZERO INITIAL STATUS TO SENSE        00536000
+         TM    RCWFLAG,SKIP        SHOULD WE TRANSFER DATA ?            00537000
+         BO    SNSFINS        NO --                                     00538000
+         L     R2,RCWADDR     PICK UP REAL DATA ADDRESS                 00539000
+         LA    R2,0(,R2)      CLEAR OUT COMMAND CODE           @VA03162 00540000
+         TM    RCWFLAG,IDA    IS IDA SET ?                              00541000
+         BZ    *+8            NO --                                     00542000
+         L     R2,0(0,R2)     GET DATA ADDRESS FROM FIRST IDAW          00543000
+         L     R14,=A(DMKSYSRM) GET REAL MACHINE               @VA03162 00544000
+         L     R14,0(,R14)    SIZE                             @VA03162 00545000
+         CLR   R2,R14         VALID ADDRESS ?                  @VA03162 00546000
+         BNL   VCAPRGC        NO..CHANNEL PROGRAM CHECK        @VA03162 00547000
+         BAL   R14,CHKPKEY    TEST FOR PROTECTION VIOLATION             00548000
+         BNZ   VCAPRTC        OOPS...GENERATE PROTECTION CHECK          00549000
+         STC   R4,0(0,R2)     STORE THE SENSE BYTE                      00550000
+SNSFINS  EQU   *                                                        00551000
+         L     R5,CHXRCNT     PICK UP CCW DATA COUNT                    00552000
+         BCTR  R5,0           DECREMENT DATA COUNT                      00553000
+         ST    R5,CHXRCNT     SAVE RESIDUAL COUNT IN CHXBLOK            00554000
+         TM    RCWFLAG,CD     IF CHAIN DATA IS SET...                   00555000
+         BO    MARKILI        ...INCORRECT LENGTH IS AUTOMATIC          00556000
+         LTR   R5,R5          IS THE RESIDUAL COUNT ZERO ?              00557000
+         BZ    CHEKRUN        YES - CONTINUE WITHOUT IMPEDIMENT         00558000
+         TM    RCWFLAG,SILI   SUPPRESS INCORRECT LENGTH ?               00559000
+         BO    CHEKRUN        YES - JUST CONTINUE                       00560000
+MARKILI  EQU   *                                                        00561000
+         OI    CHXSTAT+1,IL   SET INCORRECT LENGTH                      00562000
+         B     VCACEDE        ...AND TERMINATE THE CHANNEL PROGRAM      00563000
+CHEKRUN  EQU   *              SEE IF DELAY IS RECOMMENDED               00564000
+         TM    SAVEWRK1,VMRUN HAS A CPEXBLOK BEEN STACKED ?             00565000
+         BZ    VCANEXT        NO -- JUST CONTINUE                       00566000
+         LA    R3,VCANEXT     CONTINUE AFTER SEQUENCE DELAY             00567000
+         OI    SAVEWRK1,IOBRSTRT                                        00568000
+         B     VCAGOTO        EXIT VIA CPEXBLOK, RETURN LATER           00569000
+         EJECT                                                          00570000
+VCACNTL  EQU   *              CONTROL OR NO-OP                          00571000
+         BAL   R3,RESEOFL     RESET END-OF-FILE LATCH IF SET            00572000
+         TM    CHXFLAG,CHBATTN     IS THE Y-SIDE ACTIVE ?               00573000
+         BO    ATNBUSY             YES - 'BUSY + ATTN'                  00574000
+         TM    CHXCMDB,B'00000111'      CONTROL OR NO-OP ?              00575000
+         BO    CTLIMED        CONTROL - X'07'                           00576000
+         TM    CHXCMDB,X'40'  IS THIS A MODIFIED NO-OP ?                00577000
+         BZ    VCANEXT        NO -- JUST GO TO NEXT CCW                 00578000
+*  MODIFIED NO-OPS: X'43' = ENABLE S/360   X'C3' = DISABLE S/360        00579000
+         TM    CHXCMDB,X'80'  DISABLE COMPATIBILITY ?                   00580000
+         BO    VCADSBL        YES - BOTH SIDES GO EXTENDED              00581000
+         NI    CHXFLAG,255-CHBMNOP FORGET THAT X-SIDE DID 'DISABLE'     00582000
+         TM    CHYFLAG,CHBMNOP     DID THE Y-SIDE DO A DISABLE ?        00583000
+         BO    VCANEXT        YES - NO CHANGE UNTIL HE DOES 'ENABLE'    00584000
+         NI    CHXFLAG,255-CHBM370      ENABLE COMPATIBILITY            00585000
+         NI    CHYFLAG,255-CHBM370      ...    ...                      00586000
+         B     VCANEXT                                                  00587000
+VCADSBL  EQU   *              SET CTCA IN S/370 EXTENDED MODE           00588000
+         OI    CHXFLAG,CHBM370+CHBMNOP  X-SIDE DID 'DISABLE'            00589000
+         OI    CHYFLAG,CHBM370     BOTH SIDES GO EXTENDED               00590000
+         B     VCANEXT                                                  00591000
+         SPACE                                                          00592000
+CTLIMED  EQU   *              CONTROL, OTHER THAN NO-OP                 00593000
+         MVI   CHXCMDT,CHBCNTL     CONTROL ACTIVE                       00594000
+         STH   R0,CHXSTAT     CLEAR X-SIDE STATUS                       00595000
+         LA    R3,CHKSTAT     RETURN AFTER SENSE                        00596000
+         BAL   R14,BLDCPEX    BUILD CPEXBLOK FOR RE-CONNECT             00597000
+         ST    R1,CHXCNCT     ...                                       00598000
+         OI    CHXFLAG,CHBWAIT     X-SIDE WAITING FOR ACTIVITY          00599000
+         BAL   R14,ATTNCHY    SET ATTENTION FOR Y-SIDE                  00600000
+         LA    R14,VCAGOTO    EXIT VIA CPEXBLOK IF CHAINED     @VA00998 00601000
+         TM    RCWFLAG,CC     MORE ON THIS SIO?                @VA00998 00602000
+         BO    USRWAIT        YES. OUT OF I/O                  @VA00998 00603000
+*   BUILD IOBLOK FOR INITIAL CHANNEL END                                00604000
+         LA    R0,IOBSIZE                                               00605000
+         CALL  DMKFREE        GET AN IOBLOK                             00606000
+         MVC   0(IOBSIZE*8,R1),IOBLOK   COPY ACTIVE IOBLOK              00607000
+         LR    R10,R1         USE THE NEW ONE NOW                       00608000
+         SLR   R0,R0          RESTORE ZERO CONSTANT                     00609000
+         OI    CHXSTAT,CE     STATUS = CHANNEL END                      00610000
+         OI    CHXFLAG,CHBCENT     REMEMBER THAT CHANNEL END IS DONE    00611000
+         OI    SAVEWRK1,CPEX  EXIT VIA CPEXBLOK                         00612000
+         B     VCASCSW        GO SET IOBLOK PENDING                     00613000
+         EJECT                                                          00614000
+VCAGOTO  EQU   *              RETURN TO CALLER VIA CPEXBLOK             00615000
+         TS    SAVEWRK1+1          HAVE WE ALREADY RETURNED ?           00616000
+         BNZ   VCAWAIT             YES -- SKIP THE CONVULSIONS          00617000
+         LA    R0,CPEXSIZE                                              00618000
+         CALL  DMKFREE        GET CPEXBLOK                              00619000
+         USING CPEXBLOK,R1                                              00620000
+         MVC   CPEXR0(R12*4),SAVER0     MOVE REGS 0-11                  00621000
+         MVC   CPEXR12(8),SAVER12       MOVE REGS 12-13                 00622000
+         L     R0,SAVERETN    RETURN ADDRESS...                         00623000
+         ST    R0,CPEXADD     ...IS EXECUTION ADDRESS                   00624000
+         MVC   CPEXFPNT(12),ZEROES CLEAR FIRST WORDS                    00625000
+         CALL  DMKSTKCP       STACK IT FOR LATER                        00626000
+         L     R15,ADSPCH     FIX OUR SAVE-AREA FOR EXIT TO DMKDSPCH    00627000
+         ST    R15,SAVERETN   ...                                       00628000
+         ST    R15,SAVER12    ...                                       00629000
+         TM    SAVEWRK1,IOBRSTRT   RESTART AFTER CPEXBLOK EXIT ?        00630000
+         BZ    VCADSPCH            NO -- JUST LET HIM GO                00631000
+VCARSTRT EQU   *              FORCE SEQUENCING DELAY VIA CPEXBLOK       00632000
+         BAL   R14,BLDCPEX    EXECUTION ADDRESS IS IN GR3               00633000
+         CALL  DMKSTKCP       RETURN AFTER UNSTACK OF EXIT BLOCK        00634000
+         B     VCADSPCH                                                 00635000
+VCAWAIT  EQU   *              NO EXIT IS REQUIRED - CHECK RESTART       00636000
+         TM    SAVEWRK1,IOBRSTRT   RESTART REQUESTED ?                  00637000
+         BZ    VCADSPCH            NO -- JUST WAIT FOR SOME ACTIVITY    00638000
+         TM    SAVEWRK1,VMRUN      ARE THERE BLOCKS ALREADY STACKED ?   00639000
+         BO    VCARSTRT            YES - FORCE THE DELAY                00640000
+         NI    SAVEWRK1,255-(IOBRSTRT+CPEX)    UNFLAG                   00641000
+         BR    R3                  RESTART - NO EXIT NECESSARY          00642000
+VCADSPCH EQU   *              WAIT FOR Y-SIDE ACTIVITY                  00643000
+         NI    SAVEWRK1,255-(CPEX+IOBRSTRT+VMRUN) RESET FLAGS           00644000
+         GOTO  DMKDSPCH       WE WILL BE BACK LATER                     00645000
+         DROP  R1                                                       00646000
+         EJECT                                                          00647000
+ATTNCHY  EQU   *              ATTENTION TO Y-SIDE                       00648000
+         OI    CHYFLAG,CHBATTN     SET ATTENTION PENDING                00649000
+         LA    R2,ATTN(,0)         CSW STATUS                           00650000
+         TM    CHYFLAG,CHBEOFL     END-OF-FILE LATCH ON Y-SIDE ?        00651000
+         BZ    UNSOLIT             NO -- JUST PRESENT THE ATTENTION     00652000
+         NI    CHYFLAG,255-CHBATTN HOLD OFF ON THAT ATTENTION           00653000
+         OI    SAVEWRK1,CPWAIT     INDICATE 'ATTN' TO BE DEFERRED       00654000
+         B     UNSOLIT        GO PRESENT INTERRUPT                      00655000
+DECHANY  EQU   *              DEVICE END TO Y-SIDE                      00656000
+         NI    CHXFLAG,255-(CHBHIO+CHBREST)  X-SIDE NOW READY AGAIN     00657000
+         LA    R2,DE(,0)           CSW STATUS                           00658000
+UNSOLIT  EQU   *              PRESENT UNSOLICITED INTERRUPT             00659000
+         LR    R3,R14         SAVE INTERNAL RETURN                      00660000
+         LA    R0,IOBSIZE     GET AN IOBLOK                             00661000
+         CALL  DMKFREE        ...                                       00662000
+         LR    R9,R10         SAVE ACTIVE IOBLOK                        00663000
+         LR    R10,R1         ...AND USE THE NEW ONE NOW                00664000
+         XC    IOBLOK(IOBSIZE*8),IOBLOK      CLEAR IT                   00665000
+         ST    R10,IOBLINK    FORCE IOBLOK TO LINK TO ITSELF            00666000
+         LH    R1,CHXYADD     VADDR OF Y-SIDE                           00667000
+         STH   R1,IOBVADD     ...                                       00668000
+         L     R1,CHXOTHR     VMBLOK FOR Y-SIDE USER                    00669000
+         ST    R1,IOBUSER     ...                                       00670000
+         L     R1,=A(DMKVIOIN)     INTERRUPT RETURN ADDRESS             00671000
+         ST    R1,IOBIRA      ...                                       00672000
+         STC   R2,IOBCSW+4    SET UNIT STATUS BYTE IN CSW               00673000
+         TM    SAVEWRK1,CPWAIT     PRESENT ATTENTION OR DEFER IT ?      00674000
+         BO    DEFERAT             OOPS -- MUST BE DEFERRED             00675000
+         CALL  DMKSTKIO       STACK IOBLOK FOR DMKVIO                   00676000
+UNSOLRET EQU   *              RESTORE REGISTERS AND RETURN              00677000
+         LR    R10,R9         RESTORE IOBLOK POINTER                    00678000
+         L     R9,CHXNCCW     ...AND GR9                                00679000
+         SLR   R0,R0          RESTORE CONVENIENT ZERO CONSTANT          00680000
+         BR    R3             RETURN...                                 00681000
+DEFERAT  EQU   *              SAVE THE IOBLOK WHILE EOF LATCH IS SET    00682000
+         NI    SAVEWRK1,255-CPWAIT      RESET INDICATOR                 00683000
+         ST    R10,CHXDATN    SAVE IOBLOK ADDRESS IN THE CHXBLOK        00684000
+         B     UNSOLRET       GO RESTORE AND RETURN                     00685000
+         EJECT                                                          00686000
+VCAWRIT  EQU   *              WRITE, WRITE END-OF-FILE                  00687000
+         BAL   R3,RESEOFL     RESET END-OF-FILE LATCH IF SET            00688000
+         TM    CHXFLAG,CHBATTN     IS THE Y-SIDE ACTIVE ?               00689000
+         BZ    WRITIDL             NO -- WILL GIVE ATTN TO Y-SIDE       00690000
+         TM    CHYCMDT,CHBREAD+CHBRDBK  IS COMMAND PAIR O.K. ?          00691000
+         BZ    ATNBUSY             NO -- SET ATTN + BUSY                00692000
+         MVI   CHXCMDT,CHBWRIT     ASSUME NORMAL WRITE CMD              00693000
+         TM    CHXFLAG,CHBM370     SHOULD WE DECODE FOR WRITE EOF ?     00694000
+         BZ    DATATRN             NO -- JUST TRANSFER DATA             00695000
+         TM    CHXCMDB,X'80'       IS THIS WRITE END-OF-FILE ?          00696000
+         BZ    DATATRN             NO -- DATA TRANSFER WRITE            00697000
+         MVI   CHXCMDT,CHBWEOF     THIS IS WRITE END-OF-FILE            00698000
+         OI    CHYSTAT,CE+DE+UE    SET ENDING STATUS FOR Y-SIDE         00699000
+         BAL   R3,GOCHANY     RE-ACTIVATE Y-SIDE                        00700000
+         LA    R3,CHKSTAT     RETURN AFTER SEQUENCE DELAY               00701000
+         OI    SAVEWRK1,IOBRSTRT   RESTART AFTER SEQUENCING DELAY       00702000
+         B     VCAGOTO        ...                                       00703000
+         SPACE 2                                                        00704000
+WRITIDL  EQU   *              X-SIDE WRITE, Y-SIDE IS IDLE              00705000
+         MVI   CHXCMDT,CHBWRIT     ASSUME NORMAL WRITE                  00706000
+         TM    CHXFLAG,CHBM370     DECODE FOR WRITE EOF ?               00707000
+         BZ    RDWRITE             NO -- GIVE ATTN TO Y-SIDE            00708000
+         TM    CHXCMDB,X'80'  IS THIS WRITE END-OF-FILE ?               00709000
+         BZ    RDWRITE        NO -- GIVE ATTN TO Y-SIDE                 00710000
+         MVI   CHXCMDT,CHBWEOF     ...                                  00711000
+         OI    CHYFLAG,CHBEOFL     SET END-OF-FILE LATCH IN Y-SIDE      00712000
+         B     VCANEXT        CONTINUE -- EFFECTIVE NO-OP               00713000
+         EJECT                                                          00714000
+RDWRITE  EQU   *              READ OR WRITE FOR DATA TRANSFER           00715000
+         BAL   R14,USRWAIT    ZERO STATUS TO X-SIDE, DO TRACING         00716000
+         L     R1,RCWADDR     GET CCW DATA OR IDAL ADDRESS              00717000
+         LA    R1,0(0,R1)     ...WITHOUT THE CCW OP-CODE                00718000
+         ST    R1,CHXIDAW     SET FOR DATA TRANSFER ROUTINE             00719000
+         LA    R3,CHKSTAT     RETURN AFTER TRANSFER IS COMPLETE         00720000
+         BAL   R14,BLDCPEX    BUILD CPEXBLOK FOR RE-CONNECT             00721000
+         ST    R1,CHXCNCT     ...                                       00722000
+         OI    CHXFLAG,CHBWAIT     INDICATE WAIT STATUS                 00723000
+         BAL   R14,ATTNCHY    ATTENTION TO Y-SIDE                       00724000
+         B     VCAGOTO        EXIT, WAIT FOR SOMETHING TO HAPPEN        00725000
+         SPACE 2                                                        00726000
+VCAREAD  EQU   *              READ, READ BACKWARD                       00727000
+         LA    R3,RDWRITE     BRANCH VECTOR FOR COMMAND DECODER         00728000
+         TM    CHXFLAG,CHBATTN+CHBEOFL  IS THE Y-SIDE ACTIVE ?          00729000
+         BZ    FWDBACK                  NO -- DECODE COMMAND TYPE       00730000
+         TM    CHXFLAG,CHBEOFL     PRESENT END-OF-FILE TO THIS READ ?   00731000
+         BO    READEOF             YES - SET IT UP                      00732000
+         TM    CHYCMDT,CHBWRIT     IS COMMAND PAIR O.K. ?               00733000
+         BZ    ATNBUSY             NO -- GIVE ATTN + BUSY               00734000
+         LA    R3,DATATRN     BRANCH VECTOR FOR COMMAND DECODER         00735000
+         SPACE                                                          00736000
+FWDBACK  EQU   *              DECIDE IF READ OR READ BACKWARD           00737000
+         MVI   CHXCMDT,CHBREAD     ASSUME FORWARD READ                  00738000
+         TM    CHXCMDB,X'02'       IS IT ?                              00739000
+         BCR   1,R3                YES - (BO)                           00740000
+         MVI   CHXCMDT,CHBRDBK     SET READ BACKWARD                    00741000
+         BR    R3             ...AND CONTINUE PROCESS                   00742000
+         SPACE 2                                                        00743000
+READEOF  EQU   *              READ, EOF LATCH IS SET                    00744000
+         BAL   R3,RESEOFL     RESET END-OF-FILE LATCH                   00745000
+         OI    CHXSTAT,UE     SET EOF, UNIT EXCEPTION                   00746000
+         B     VCACEDE        ...AND TERMINATE CHANNEL PROGRAM          00747000
+         EJECT                                                          00748000
+CHKSTAT  EQU   *              RETURN AFTER DATA TRANSFER IS COMPLETE    00749000
+         L     R10,SAVER10    ACCESS THE IOBLOK FOR A MOMENT            00750000
+         USING IOBLOK,R10          ,,,                                  00751000
+         TM    IOBFLAG,IOBRES HAS THIS IOTASK BEEN RESET ?              00752000
+         BZ    CHKYRES        NO -- CHECK FOR OTHER RESET STATUS        00753000
+         MVI   CHXFLAG,CHBREST     WE CALL THIS SYSTEM RESET            00754000
+         LR    R9,R10         SAVE IOBLOK ADDRESS IN GR9                00755000
+         TM    CHYFLAG,CHBEOFL     IS Y-SIDE EOF LATCH SET ?            00756000
+         BZ    CHKXRES             NO -- DON'T CHECK FOR 'CHXDATN'      00757000
+         L     R10,CHXDATN    THERE MIGHT BE A DEFERRED ATTENTION       00758000
+         LTR   R10,R10        ... ?                                     00759000
+         BZ    CHKXRES        NO --                                     00760000
+         BAL   R3,FRETIOB     RELEASE THE IOBLOK                        00761000
+         ST    R0,CHXDATN     CLEAR OUT THE POINTER WORD                00762000
+CHKXRES  EQU   *              CONTINUE RESET PROCESSING                 00763000
+         LR    R10,R9         MAKE SURE WE HAVE THE RIGHT IOBLOK ADDR   00764000
+         TM    CHYFLAG,CHBMNOP     DID THE Y-SIDE SAY 'DISABLE' ?       00765000
+         BO    CHKWAIT             YES - LEAVE IN EXTENDED MODE         00766000
+         NI    CHXFLAG,255-CHBM370 DROP OUT OF EXTENDED MODE            00767000
+         NI    CHYFLAG,255-CHBM370 ...                                  00768000
+CHKWAIT  EQU   *              RE-ACTIVATE Y-SIDE IF HE IS WAITING       00769000
+         TM    CHYFLAG,CHBWAIT     IS THE Y-SIDE WAITING ?              00770000
+         BZ    VCACEDE             NO -- JUST TERMINATE X-SIDE          00771000
+         BAL   R3,GOCHANY     RE-CONNECT Y-SIDE                         00772000
+         B     VCACEDE        TERMINATE X-SIDE CHANNEL PROGRAM          00773000
+CHKYRES  EQU   *              CHECK Y-SIDE RESET VIA 'HIO' OR 'HDV'     00774000
+         TM    CHYFLAG,CHBREST     HAS Y-SIDE BEEN RESET ?              00775000
+         BO    CHKXCOM             YES - CHECK ADAPTER MODE             00776000
+         TM    CHXFLAG,CHBHIO WAS THIS A HALT I/O TO X-SIDE ?           00777000
+         BO    CHKSHIO        YES - TERMINATE X-SIDE                    00778000
+         TM    CHYFLAG,CHBHIO RUNNING UNDER Y-SIDE HIO ?                00779000
+         BZ    CHKXCSW        NO -- EXAMINE CSW STATUS                  00780000
+         TM    CHXFLAG,CHBM370     COMPATIBILITY MODE ?                 00781000
+         BO    VCASLRS             NO -- UNIT CHECK, SEL. RESET         00782000
+         NI    CHYFLAG,255-CHBHIO  RESET AFTER RECOGNITION              00783000
+         B     VCACEDE        TERMINATE X-SIDE PROGRAM                  00784000
+CHKXCSW  EQU   *              EXAMINE CSW STATUS FOR ERRORS             00785000
+         L     R1,=AL1(255-(CE+DE),255-PCI,0,0)   MASK FOR ERRORS       00786000
+         N     R1,CHXSTAT     CAN WE CONTINUE ?                         00787000
+         BNZ   VCACEDE        NO -- TERMINATE CHANNEL PROGRAM           00788000
+         B     VCANEXT        CONTINUE UN-IMPEDED                       00789000
+CHKSHIO  EQU   *              RESET HALT I/O BIT IF COMPATIBILITY       00790000
+         TM    CHYFLAG,CHBM370     IS Y-SIDE STILL EXTENDED MODE ?      00791000
+         BO    VCACEDE             YES - LEAVE 'CHBHIO' SET             00792000
+         NI    CHXFLAG,255-CHBHIO  RESET AFTER RECOGNITION              00793000
+         B     VCACEDE        TERMINATE X-SIDE CHANNEL PROGRAM          00794000
+CHKXCOM  EQU   *              SEE IF WE SHOULD SET UNIT CHECK           00795000
+         TM    CHXFLAG,CHBM370     STILL IN EXTENDED MODE ?             00796000
+         BO    VCAUCIR             YES - UNIT CHECK, INT REQ            00797000
+         NI    CHYFLAG,255-CHBREST FORGET THAT THE RESET OCCURRED       00798000
+         B     VCACEDE        ...BUT TERMINATE ANYWAY                   00799000
+         EJECT                                                          00800000
+DATATRN  EQU   *              COMMON DATA TRANSFER SUBROUTINE           00801000
+         L     R1,RCWADDR     GET CCW DATA OR IDAL ADDRESS              00802000
+         LA    R1,0(0,R1)     ...WITHOUT THE CCW OP-CODE                00803000
+         ST    R1,CHXIDAW     SET FOR DATA TRANSFER ROUTINE             00804000
+         LA    R3,CHKSTAT     RETURN AFTER TRANSFER IS COMPLETE         00805000
+         BAL   R14,BLDCPEX    BUILD CPEXBLOK FOR RE-CONNECT             00806000
+         ST    R1,CHXCNCT     ...                                       00807000
+         OI    CHXFLAG,CHBWAIT     X-SIDE WAITING FOR GODOT             00808000
+         BAL   R14,USRWAIT    ZERO STATUS TO X-SIDE                     00809000
+         LA    R3,TRANSFER    RETURN HERE VIA CPEXBLOK                  00810000
+         OI    SAVEWRK1,IOBRSTRT   RESTART AFTER EXIT, IF NECESSARY     00811000
+         B     VCAGOTO        EXIT VIA CPEXBLOK, RETURN LATER           00812000
+TRANSFER EQU   *              ACTUAL TRANSFER OF DATA                   00813000
+         STM   R6,R7,SAVEWRK6      SAVE CHXBLOK, CHYBLOK ORIGINS        00814000
+         LH    R2,CHXYADD     GET DEVICE ADDRESSES FOR BOTH SIDES       00815000
+         LH    R1,CHYXADD     ...                                       00816000
+         L     R10,CHXOTHR    AND Y-SIDE VMBLOK ADDRESS                 00817000
+         CALL  DMKSCNVU       LOCATE VDEVBLOK (X-SIDE FIRST)            00818000
+         USING VDEVBLOK,R8                                              00819000
+         NI    VDEVINTS,255-ATTN   REMOVE POSSIBLE FALSE ATTENTION      00820000
+         LR    R1,R2          NOW GET THE Y-SIDE DEVICE                 00821000
+         LR    R11,R10        (SWITCH VMBLOK'S MOMENTARILY)             00822000
+         CALL  DMKSCNVU       LOCATE VDEVBLOK (Y-SIDE NEXT)             00823000
+         NI    VDEVINTS,255-ATTN   REMOVE POSSIBLE FALSE ATTENTION      00824000
+         DROP  R8                                                       00825000
+         L     R11,SAVER11    VMBLOK REGISTER BACK IN SHAPE             00826000
+         LM    R6,R7,SAVEWRK6      RE-LOAD CHXBLOK, CHYBLOK REGS        00827000
+         TM    CHXCMDT,CHBWRIT     IS THE X-SIDE THE DATA SOURCE ?      00828000
+         BZ    DATACPX             NO -- THE DIRECTION IS CORRECT       00829000
+         LR    R6,R7          MAKE THE X-SIDE THE 'READ'ING SIDE        00830000
+         L     R7,SAVEWRK6    ...WHENEVER DATA TRANSFER OCCURRS         00831000
+DATACPX  EQU   *              SET UP FOR SYMMETRICAL STATUS             00832000
+         NI    CHXFLAG,255-CHBATTN      RESET STATUS BITS               00833000
+         NI    CHYFLAG,255-CHBATTN       ...    ...                     00834000
+         SPACE                                                          00835000
+FANGORN  EQU   *      WHEN YOU CAN'T SEE THE FOREST FOR THE TREES,      00836000
+*                               WATCH OUT FOR THE ENTS !                00837000
+*        GR7  =  'CHXBLOK'  =>  DATA SINK - 'READ'ING                   00838000
+*        GR6  =  'CHYBLOK'  =>  DATA SOURCE 'WRITE'ING                  00839000
+         LR    R8,R6          CHYBLOK TO GR8 - GET WRITE DATA           00840000
+         BAL   R10,DATABLK    ...                                       00841000
+         BC    8+1,ENDTRAN    END DATA TRANSFER IF PROGRAM CHECK        00842000
+         ST    R9,BALR9       SAVE CCW ADDRESS FOR UPDATE               00843000
+         STM   R2,R5,BALRSAVE SAVE WRITE DATA FOR A MOMENT              00844000
+         LR    R8,R7          CHXBLOK TO GR8 - GET READ DATA            00845000
+         BAL   R10,DATABLK    ...                                       00846000
+         BC    8+1,ENDTRAN    END DATA TRANSFER IF PROGRAM CHECK        00847000
+         ST    R9,CHXNCCW     UPDATE X-SIDE CCW POINTER                 00848000
+         L     R9,BALR9                                                 00849000
+         ST    R9,CHYNCCW     UPDATE Y-SIDE CCW POINTER                 00850000
+         LM    R14,R1,BALRSAVE     GET WRITE DATA IN GR14-GR1           00851000
+         EJECT                                                          00852000
+* AT THIS POINT, WE HAVE THE FOLLOWING:                                 00853000
+*                             X-SIDE (READ)  Y-SIDE (WRITE)             00854000
+*        FIRST DATA ADDRESS        GR4            GR0                   00855000
+*        FIRST DATA LENGTH         GR5            GR1                   00856000
+*        NEXT DATA OR IDAW         GR2            GR14                  00857000
+*        REMAINING DATA COUNT      GR3            GR15                  00858000
+*                                                                       00859000
+* NOW, WE FIGURE OUT EXACTLY HOW MUCH DATA CAN BE MOVED AT ONCE,        00860000
+* AND WHICH SIDE HAS THE CONTROLLING COUNT.                             00861000
+*                                                                       00862000
+         LA    R10,UPDATEY    FIRST TIME, UPDATE BOTH BLOCKS            00863000
+UPDATEX  EQU   *              ADVANCE X-SIDE CHANNEL PROGRAM            00864000
+         L     R9,CHXNCCW     ADDRESS OF ACTIVE X-SIDE CCW              00865000
+         TM    RCWFLAG,SKIP   SUPPRESS DATA TRANSFER ?                  00866000
+         BO    UPDATXE        YES - SUPPRESS PROTECTION TEST ALSO       00867000
+         STM   R14,R5,FREESAVE     SAVE ALL DATA REGISTERS              00868000
+         LR    R2,R4          DATA READ ADDRESS TO GR2                  00869000
+         BAL   R14,CHKPKEY    TEST CAW PROTECTION KEY                   00870000
+         LM    R14,R5,FREESAVE     RESTORE REGISTERS IMMEDIATELY        00871000
+         BNZ   READPRTC       PROTECTION CHECK ON READ                  00872000
+UPDATXE  EQU   *              UPDATE WITHOUT TESTING PROTECTION         00873000
+         ST    R3,CHXRCNT          RESIDUAL COUNT                       00874000
+         ST    R2,CHXIDAW          NEXT DATA OR IDAW ADDRESS            00875000
+         BR    R10            GO WHERE NECESSARY                        00876000
+UPDATEY  EQU   *              ADVANCE Y-SIDE CHANNEL PROGRAM            00877000
+         ST    R15,CHYRCNT         RESIDUAL COUNT                       00878000
+         ST    R14,CHYIDAW         NEXT DATA OR IDAW ADDRESS            00879000
+         SPACE                                                          00880000
+GETBOSS  EQU   *              WHICH SIDE HAS CONTROLLING COUNT ?        00881000
+         NI    SAVEWRK1,255-(CHBREAD+CHBWRIT)     CLEAR UPDATE FLAGS    00882000
+         CR    R1,R5          WHICH COUNT CONTROLS THE TRANSFER ?       00883000
+         BL    TRANWRT             THE WRITER - Y-SIDE                  00884000
+         BH    TRANSRD             THE READER - X-SIDE                  00885000
+*              HIT IT ON THE NOSE - UNUSUAL                             00886000
+         OI    SAVEWRK1,CHBREAD+CHBWRIT UPDATE BOTH NEXT TIME           00887000
+         B     DATAFLY        GO MOVE SOME DATA                         00888000
+         SPACE                                                          00889000
+TRANWRT  EQU   *              READ COUNT .GT. WRITE COUNT               00890000
+         OI    SAVEWRK1,CHBWRIT    UPDATE WRITE ONLY NEXT TIME          00891000
+         SR    R5,R1          GET REMAINING READ COUNT (THIS BLOCK)     00892000
+         LR    R3,R5          ...INTO GR3                               00893000
+         LR    R5,R1          SET ACTUAL COUNT = WRITE COUNT            00894000
+         LR    R2,R4          GET STARTING ADDRESS IN GR2               00895000
+         AR    R2,R5          COMPUTE NEXT START ADDRESS                00896000
+         TM    CHXCMDT,CHBRDBK     DIFFERENT IF READ BACKWARD           00897000
+         BZ    DATAFLY             NO -- WE'VE GOT IT RIGHT             00898000
+         SR    R2,R5          RE-ADJUST                                 00899000
+         SR    R2,R5          ...                                       00900000
+         B     DATAFLY        GO MOVE SOME DATA                         00901000
+         EJECT                                                          00902000
+TRANSRD  EQU   *              WRITE COUNT .GT. READ COUNT               00903000
+         OI    SAVEWRK1,CHBREAD    UPDATE READ ONLY NEXT TIME           00904000
+         SR    R1,R5          GET REMAINING WRITE COUNT (THIS BLOCK)    00905000
+         LR    R15,R1         ...INTO GR15                              00906000
+         LR    R1,R5          SET ACTUAL COUNTS EQUAL                   00907000
+         LR    R14,R0         GET CURRENT START ADDRESS                 00908000
+         AR    R14,R1         COMPUTE NEXT START ADDRESS                00909000
+         STM   R14,R15,BALR14 SAVE INFO - R14,15 DESTROYED              00910000
+DATAFLY  EQU   *              TRANSFER DATA                             00911000
+         L     R9,CHXNCCW     ADDRESS OF ACTIVE READ CCW                00912000
+         TM    RCWFLAG,SKIP   SUPPRESS DATA TRANSFER ?                  00913000
+         BO    DATAUPD        YES - JUST UPDATE AND MOVE ALONG          00914000
+         TM    CHXCMDT,CHBRDBK     IS THIS FORWARD OR BACKWARD ?        00915000
+         BO    READBACK            BACKWARD - MESSYTHING                00916000
+*                                                                       00917000
+         MVCL  R4,R0          TRANSFER DATA FORWARD                     00918000
+*                                                                       00919000
+DATAUPD  EQU   *              UPDATE ADDRESSES, LENGTHS                 00920000
+         TM    SAVEWRK1,CHBREAD+CHBWRIT BOTH SIDES TO BE UPDATED ?      00921000
+         BO    FANGORN        YES -- DO IT FROM THE TOP                 00922000
+         TM    SAVEWRK1,CHBREAD    OTHERWISE, WHICH ONE ?               00923000
+         BO    UPDREAD             UPDATE READ  - X-SIDE                00924000
+*                                  UPDATE WRITE - Y-SIDE                00925000
+         STM   R2,R3,BALR2    SAVE READ DATA FOR A MOMENT               00926000
+         LR    R8,R6          ...WHILE WE UPDATE THE WRITE SIDE         00927000
+         BAL   R10,DATABLK    ...                                       00928000
+         BC    8+1,UPDWRIT    OOPS...FATAL ERROR OR NO MORE DATA        00929000
+         ST    R9,CHYNCCW     UPDATE CCW FETCH POINTER                  00930000
+         LM    R14,R1,TEMPR2  GET WRITE DATA IN GR14-GR1                00931000
+         LM    R4,R5,BALR2    GET REST OF THE READ DATA                 00932000
+         B     UPDATEY        ...AND CONTINUE FROM HERE                 00933000
+UPDWRIT  EQU   *              ERROR, ADJUST RESIDUAL COUNTS             00934000
+         L     R3,BALR3       GET READ COUNT UNUSED                     00935000
+         L     R1,CHXRCNT     OLD RESIDUAL COUNT                        00936000
+         AR    R1,R3          ADD IN UNUSED COUNT                       00937000
+         ST    R1,CHXRCNT     ...FOR ACCURATE CSW DATA                  00938000
+         ST    R5,CHYRCNT     Y-SIDE RESIDUAL COUNT                     00939000
+         B     ENDTRAN        END DATA TRANSFER                         00940000
+UPDREAD  EQU   *              UPDATE READ-SIDE DATA                     00941000
+         LR    R8,R7          GET MORE X-SIDE DATA                      00942000
+         BAL   R10,DATABLK    ...                                       00943000
+         BC    8+1,CSWREAD    OOPS...FATAL ERROR OR NO MORE DATA        00944000
+         ST    R9,CHXNCCW     UPDATE CCW FETCH POINTER                  00945000
+         LM    R0,R1,BALR14   GET SAVED WRITE DATA                      00946000
+         LA    R10,GETBOSS    UPDATE ONLY THE CHXBLOK                   00947000
+         B     UPDATEX        ...AND CONTINUE FROM HERE                 00948000
+CSWREAD  EQU   *              ERROR, ADJUST RESIDUAL COUNT              00949000
+         L     R1,BALR15      GET REMAINING WRITE COUNT                 00950000
+         L     R8,CHYRCNT     OLD RESIDUAL COUNT                        00951000
+         AR    R1,R8          UPDATE IT WITH UNUSED PORTION             00952000
+         ST    R1,CHYRCNT     ...FOR ACCURATE CSW DATA                  00953000
+         ST    R5,CHXRCNT     X-SIDE RESIDUAL COUNT                     00954000
+         B     ENDTRAN        END DATA TRANSFER                         00955000
+         EJECT                                                          00956000
+READBACK EQU   *              INVERT THE DATA AS WE MOVE IT             00957000
+         STM   R14,R9,FREESAVE     FREE UP SOME REGISTERS               00958000
+         LR    R9,R4          START ADDRESS FOR READ                    00959000
+         SR    R9,R5          GR9 = LOWER LIMIT FOR READ                00960000
+         L     R6,FFS         INCREMENT FOR MINOR LOOPS                 00961000
+         LR    R3,R0          START ADDRESS FOR WRITE                   00962000
+         L     R8,=F'-8'      INCREMENT FOR MAJOR LOOP                  00963000
+         LA    R14,7(0,0)     TEST FOR START AT 7-BYTE BOUNDARY         00964000
+         OR    R14,R4         GR14 = HIGHER SEVEN-BYTE BOUNDARY         00965000
+         CR    R14,R4         IF THESE ARE EQUAL, WE CAN MOVE DBL-WDS   00966000
+         BE    RDBACK4        YES - USE THE FAST LOOP                   00967000
+         LR    R7,R8          ...INTO GR7 FOR A MASK                    00968000
+         NR    R7,R4          GR7 = LOWER DOUBLE-WORD BOUNDARY          00969000
+         CR    R7,R9          WILL WE MOVE ALL THE DATA FIRST ?         00970000
+         BNL   RDBACK1        NO -- LET IT GO THROUGH AS IS             00971000
+         LA    R2,1(0)        BUMP GR4 BY ONE FOR TRAILER LOOP          00972000
+         B     RDBACK5        GO SET LOWER LIMIT, MOVE DATA FAST        00973000
+RDBACK1  EQU   *              ONE AT A TIME TO A BOUNDARY               00974000
+         IC    R1,0(0,R3)     ONE CHARACTER WRITTEN                     00975000
+         STC   R1,0(0,R4)     ONE CHARACTER READ                        00976000
+         LA    R3,1(0,R3)                                               00977000
+         BXH   R4,R6,RDBACK1  CONTINUE                                  00978000
+         LA    R4,1(,R4)      RE-ADJUST READ ADDRESS           @VM08637 00979000
+RDBACK2  EQU   *              MAJOR LOOP - EIGHT BYTES AT A TIME        00980000
+         LA    R2,8(0,0)      COUNT FOR INSERTION IN REGISTERS          00981000
+         BXLE  R4,R8,RDBACK5  JUMP OUT WHEN LAST DOUBLE-WORD MOVED      00982000
+RDBACK3  EQU   *              FILL UP TWO REGISTERS - INVERTED          00983000
+         SRDL  R0,8(0)        THIS IS A FAST SHIFT                      00984000
+         ICM   R0,B'1000',0(R3)    FASTEST 'ICM' IN THE WEST            00985000
+         LA    R3,1(0,R3)     NEXT CHARACTER FOR WRITE                  00986000
+         BCT   R2,RDBACK3     FILL UP TWO REGISTERS                     00987000
+         STM   R0,R1,0(R4)    FILL UP A DOUBLE-WORD                     00988000
+         B     RDBACK2        ...AND REPEAT                             00989000
+RDBACK4  EQU   *              STARTED ON 7-BYTE BOUNDARY                00990000
+         LA    R4,1(0,R4)     BUMP UP ONE FOR 'BXLE' LOOP               00991000
+         B     RDBACK2        GO MOVE DOUBLE-WORD AT A TIME             00992000
+RDBACK5  EQU   *              FILL OUT THE UNEVEN TAIL                  00993000
+         AR    R4,R2          BUMP R4 BACK TO PREVIOUS VALUE            00994000
+         LR    R7,R9          ACTUAL LIMIT FOR READING                  00995000
+RDBACK6  EQU   *              MOVE REMAINDER OF DATA                    00996000
+         BXLE  R4,R6,RDBACK7  JUMP OUT WHEN TRANSFER COMPLETE           00997000
+         IC    R1,0(0,R3)                                               00998000
+         STC   R1,0(0,R4)                                               00999000
+         LA    R3,1(0,R3)                                               01000000
+         B     RDBACK6        CONTINUE UNTIL COMPLETE                   01001000
+RDBACK7  EQU   *              TRANSFER OF THIS DATA BLOCK IS COMPLETE   01002000
+         LM    R14,R9,FREESAVE     RESTORE ALL THOSE REGISTERS          01003000
+         B     DATAUPD        ...AND GET SOME MORE DATA                 01004000
+         EJECT                                                          01005000
+READPRTC EQU   *              PROTECTION CHECK DURING READ              01006000
+         OI    CHXSTAT+1,PRTC      CHANNEL PROTECTION CHECK             01007000
+         TM    SAVEWRK1,CHBREAD+CHBWRIT ARE THE COUNTS CORRECT ?        01008000
+         BNM   ENDTRAN        YES -- BOTH SIDES ARE CORRECT             01009000
+         AR    R5,R3          FIX THE READ-SIDE COUNT                   01010000
+         B     CSWREAD        ...AND UPDATE THE CHXBLOK                 01011000
+         SPACE 2                                                        01012000
+ENDTRAN  EQU   *              END OF DATA TRANSFER                      01013000
+         L     R1,CHXRCNT     GET X-SIDE RESIDUAL COUNT                 01014000
+         L     R2,CHYRCNT     GET Y-SIDE RESIDUAL COUNT                 01015000
+         SLR   R3,R3          ZERO CONSTANT                             01016000
+         L     R9,CHXNCCW     ACTIVE CCW, X-SIDE                        01017000
+         TM    RCWFLAG,CD     IS CHAIN DATA SET ?                       01018000
+         BZ    *+8            NO --                                     01019000
+         OI    CHXSTAT+1,IL   INCORRECT LENGTH IS AUTOMATIC IF YES      01020000
+         L     R9,CHYNCCW     ACTIVE CCW, Y-SIDE                        01021000
+         TM    RCWFLAG,CD     IS CHAIN DATA SET ?                       01022000
+         BZ    *+8            NO --                                     01023000
+         OI    CHYSTAT+1,IL   INCORRECT LENGTH IS AUTOMATIC IF YES      01024000
+         CR    R1,R3          IS THE X-SIDE COUNT ZERO ?                01025000
+         BE    ZEROREAD       YES - CHECK FURTHER                       01026000
+         LA    R10,ILCHANY    INCORRECT LENGTH TO BOTH SIDES            01027000
+         B     ILCHANX        ...                                       01028000
+         SPACE 2                                                        01029000
+ZEROREAD EQU   *              X-SIDE RESIDUAL COUNT EQUAL TO ZERO       01030000
+         CR    R2,R3          Y-SIDE RESIDUAL COUNT ALSO ZERO ?         01031000
+         BE    ILCHANY        YES - INCORRECT LENGTH TO Y-SIDE ONLY     01032000
+         LA    R10,ILCHANY    PROBABLY 'IL' TO BOTH SIDES               01033000
+         C     R2,F2          Y-SIDE COUNT MORE THAN TWO .GT. X ?       01034000
+         BH    ILCHANX        YES - INCORRECT LENGTH TO BOTH            01035000
+         BL    CHKMODE        Y-SIDE COUNT = X-SIDE COUNT PLUS ONE      01036000
+         TM    CHXFLAG,CHBM370     IF WE ARE IN EXTENDED MODE...        01037000
+         BZ    ILCHANX             ...NOPE - BOTH GET IT                01038000
+         LA    R10,RECONCT         ...YES  - X-SIDE ONLY                01039000
+         B     ILCHANX                                                  01040000
+         EJECT                                                          01041000
+CHKMODE  EQU   *              O.K. IF IN COMPATIBILITY MODE             01042000
+         TM    CHXFLAG,CHBM370     ARE WE IN COMPATIBILITY MODE ?       01043000
+         BO    ILCHANX             NO -- BOTH SIDES GET INCORRECT LEN   01044000
+         LA    R10,RECONCT    ONLY THE X-SIDE SEES IT                   01045000
+         SPACE 2                                                        01046000
+ILCHANX  EQU   *              SET INCORRECT LENGTH FOR X-SIDE CHANNEL   01047000
+         L     R9,CHXNCCW     GET ACTIVE CCW                            01048000
+         TM    RCWFLAG,SILI        SUPPRESS INCORRECT LENGTH ?          01049000
+         BCR   1,R10               YES - CONTINUE WHERE DESTINED        01050000
+         OI    CHXSTAT+1,IL   SET INCORRECT LENGTH                      01051000
+         BR    R10            ...AND CONTINUE                           01052000
+ILCHANY  EQU   *              SET INCORRECT LENGTH FOR Y-SIDE CHANNEL   01053000
+         L     R9,CHYNCCW     GET ACTIVE CCW                            01054000
+         TM    RCWFLAG,SILI        SUPPRESS INCORRECT LENGTH ?          01055000
+         BO    RECONCT             YES - JUST FINISH UP                 01056000
+         OI    CHYSTAT+1,IL   SET INCORRECT LENGTH                      01057000
+         SPACE 2                                                        01058000
+RECONCT  EQU   *              RECONNECT BOTH X-SIDE AND Y-SIDE          01059000
+         L     R1,CHXCNCT                                               01060000
+         LTR   R1,R1          IS IT ZERO ??                    @VA06000 01061100
+         BZ    NOCPEX1        NO, DONE BY RESET DONT STACK     @VA06000 01061200
+         CALL  DMKSTKCP       STACK A CPEXBLOK                 @VA06000 01061300
+NOCPEX1  L     R1,CHYCNCT     GET Y-SIDE CPEX POINTER          @VA06000 01061400
+         LTR   R1,R1          IS IT ZERO ??                    @VA06000 01061500
+         BZ    NOCPEX2        NO, RESET, DONT STACK            @VA06000 01061600
+         CALL  DMKSTKCP       STACK A CPEXBLOK                 @VA06000 01061700
+NOCPEX2  EQU   *                                               @VA06000 01061800
+         ST    R3,CHXCNCT     CLEAR BOTH POINTERS                       01064000
+         ST    R3,CHYCNCT     ...                                       01065000
+         NI    CHXFLAG,255-CHBWAIT      NO LONGER WAITING               01066000
+         NI    CHYFLAG,255-CHBWAIT      ...    ...                      01067000
+         B     VCADSPCH       GET OUT OF HERE - WE'RE THROUGH           01068000
+         EJECT                                                          01069000
+*     DATABLK - CALCULATE NEXT ADDRESS AND LENGTH FOR DATA TRANSFER     01070000
+*               GR8 = ADDRESS OF CHXBLOK OR CHYBLOK ON ENTRY            01071000
+*        ON EXIT:                                                       01072000
+*               GR2 = NEXT DATA OR IDAW ADDRESS                         01073000
+*               GR3 = TOTAL REMAINING CCW DATA COUNT                    01074000
+*               GR4 = START DATA ADDRESS                                01075000
+*               GR5 = DATA SEGMENT LENGTH                               01076000
+*        CC = 0  -->  END OF DATA TRANSFER                              01077000
+*        CC = 1  -->  DATA TO BE TRANSFERRED, AS ABOVE                  01078000
+*        CC = 3  -->  SIMULATE CHANNEL PROGRAM CHECK                    01079000
+*                                                                       01080000
+         DROP  R6,R7          USE INDEPENDENT ADDRESSABILITY            01081000
+DATABLK  EQU   *      FIGURE OUT NEXT DATA SEGMENT FOR TRANSFER         01082000
+         USING CHXBLOK,R8                                               01083000
+         STM   R0,R7,TEMPR0   SAVE SOME REGISTERS                       01084000
+         L     R9,CHXNCCW     CURRENT CCW ADDRESS                       01085000
+         L     R5,CHXRCNT     REMAINING DATA COUNT                      01086000
+         LTR   R5,R5          IS THERE MORE ON THIS CCW ?               01087000
+         BZ    DATACHN        THIS CCW IS DONE - TEST DATA CHAINING     01088000
+         L     R4,CHXIDAW     DATA ADDRESS OR IDAW ADDRESS              01089000
+DATAGIN  EQU   *              RE-ENTER FOR DATA-CHAINING                01090000
+         LA    R2,2047(0)     MASK CONSTANT IN GR2                      01091000
+         LR    R3,R2          ...AND IN GR3                             01092000
+         TM    RCWFLAG,IDA    IS THERE AN IDAL ?                        01093000
+         BO    DATAIDA        YES - SEPARATE TECHNIQUE                  01094000
+DATAFWD  EQU   *              GET LENGTH OF NEXT DATA BLOCK             01095000
+         NR    R3,R4          GR3 = DISP. WITHIN 2048-BYTE BLOCK        01096000
+         TM    CHXCMDT,CHBRDBK     IS THIS CCW GOING BACKWARDS ?        01097000
+         BO    DATBACK             YES - ADDRESS IS THE LENGTH          01098000
+         SR    R2,R3          GR2 = (DISP. TO 2K BOUNDARY) - 1          01099000
+         LR    R3,R2          ...INTO GR3                               01100000
+DATBACK  EQU   *              GR3 = LENGTH-1 UP TO BOUNDARY             01101000
+         LA    R3,1(0,R3)     MAXIMUM LENGTH OF THIS MOVE               01102000
+         L     R1,=A(DMKSYSRM) GET REAL MACHINE                @VA03162 01103000
+         L     R1,0(,R1)      SIZE...                          @VA03162 01104000
+         CLR   R4,R1          VALID ADDRESS ?                  @VA03162 01105000
+         BNL   DATACC3        NO..EXIT...                      @VA03162 01106000
+         ST    R4,TEMPR4      PASS BACK DATA START ADDRESS              01107000
+         CR    R5,R3          WOULD WE HIT THE BOUNDARY ?               01108000
+         BL    DATAEND        NO -- USE CCW DATA COUNT                  01109000
+         SR    R5,R3          ADJUST COUNT FOR BYTES TO BE MOVED        01110000
+         ST    R5,TEMPR3       ...                                      01111000
+         ST    R3,TEMPR5      PASS BACK DATA SEGMENT LENGTH             01112000
+         TM    RCWFLAG,IDA    IF THE IDA FLAG IS SET...                 01113000
+         BO    DATACC1        ...'TEMPR2' HAS ALREADY BEEN UPDATED      01114000
+         ALR   R4,R3          ASSUME FORWARD CCW                        01115000
+         TM    CHXCMDT,CHBRDBK     ARE WE CORRECT ?                     01116000
+         BZ    DATAXIT        YES - UPDATE TEMPR2 AND EXIT, CC = 1      01117000
+         SLR   R4,R3          RE-ADJUST TO GET NEXT ADDRESS FOR RDBK    01118000
+         SLR   R4,R3          ...                                       01119000
+         B     DATAXIT        GO UPDATE TEMPR2, EXIT CC = 1             01120000
+DATAEND  EQU   *              END OF THIS CCW                           01121000
+         ST    R5,TEMPR5      USE FULL REMAINING COUNT THIS TIME        01122000
+         SLR   R4,R4          ...                                       01123000
+         ST    R4,TEMPR3       NO MORE ON THIS CCW                      01124000
+DATAXIT  EQU   *              UPDATE NEXT ADDRESS IN CHXBLOK, EXIT      01125000
+         ST    R4,TEMPR2     NEXT DATA OR IDAW ADDRESS                  01126000
+DATACC1  EQU   *              CC = 1 IMPLIES DATA TO BE MOVED           01127000
+         TM    *,X'FF'        SET CONDITION MIXED - CC = 1              01128000
+         LM    R0,R7,TEMPR0   RESTORE REGISTERS                         01129000
+         BR    R10            ...AND RETURN                             01130000
+         SPACE 2                                                        01131000
+DATAIDA  EQU   *              INDIRECT DATA ADDRESS LIST                01132000
+         LA    R1,4(0,R4)     UPDATE IDAW ADDRESS                       01133000
+         ST    R1,TEMPR2     ...FOR NEXT TIME THROUGH                   01134000
+         CLM   R4,B'0111',RCWADDR+1     FIRST IDAW IN IDAL ?            01135000
+         BNE   DATATWO                  NO -- GO VALIDATE IT            01136000
+         L     R4,0(0,R4)     PICK UP FIRST DATA ADDRESS                01137000
+         B     DATAFWD        ...AND CALCULATE ACTUAL LENGTH            01138000
+DATATWO  EQU   *              VALIDATE OTHER THAN FIRST IDAW            01139000
+         CLI   0(R4),X'00'    HIGH-ORDER MUST BE ZERO                   01140000
+         BNE   DATACC3        NOPE - CC = 3 IMPLIES PRGC                01141000
+         L     R4,0(0,R4)     PICK UP ACTUAL ADDRESS                    01142000
+         TM    CHXCMDT,CHBRDBK     BACKWARDS OR FORWARDS TRANSFER ?     01143000
+         BO    DATABID             BACKWARDS IDAL                       01144000
+         NR    R2,R4          TEST ALIGNMENT ON 2048-BYTE BOUNDARY      01145000
+         BNZ   DATACC3        NOT GOOD - PROGRAM CHECK                  01146000
+         B     DATBACK        GR3 = 2047 AS REQUIRED                    01147000
+DATABID  EQU   *              VALIDATE REAR-WARD MOVING IDAW            01148000
+         NR    R3,R4          GR3 STILL = 2047 IF VALID IDAW            01149000
+         XR    R2,R3          GR2 WILL BE ZERO IF VALID IDAW            01150000
+         BZ    DATBACK        O.K. - GO FIGURE ACTUAL TRANSFER LENGTH   01151000
+DATACC3  EQU   *              SET PROGRAM CHECK, CC = 3                 01152000
+         OI    CHXSTAT+1,PRGC        FATAL ERROR IN CHANNEL PROGRAM     01153000
+         ST    R9,CHXNCCW     REMEMBER WHICH CCW IS INVALID             01154000
+         TM    *+1,X'FF'      SET CONDITION ONES - CC = 3               01155000
+DATACC0  EQU   *              EXIT, CC = 0 IMPLIES END OF CCW           01156000
+         LM    R0,R7,TEMPR0   RESTORE REGISTERS                         01157000
+         BR    R10            ...AND RETURN                             01158000
+         SPACE                                                          01159000
+DATACHN  EQU   *              TEST FOR DATA CHAINED CCW STRINGS         01160000
+         ST    R5,TEMPR5      PASS BACK ZERO COUNT IF NO MORE           01161000
+         TM    RCWFLAG,CD     IS THERE CHAIN DATA ?                     01162000
+         BZ    DATACC0        NO -- EXIT WITH CC = 0                    01163000
+         LA    R9,8(0,R9)     ADVANCE TO NEXT CCW                       01164000
+DATATIC  EQU   *              (RE-ENTER HERE IN CASE OF A TIC)          01165000
+         ICM   R5,B'0011',RCWCNT   PICK UP DATA COUNT                   01166000
+         BAL   R14,CHANCHK    VALIDATE THE NEW CCW                      01167000
+         BNZ   DATACC3        OOPS -- PROGRAM CHECK ON THIS ONE         01168000
+         CLI   RCWCOMND,X'18' IT MIGHT BE A 'TIC' AFTER CHAIN DATA      01169000
+         BNE   DATANTC        NO -- THAT'S SOMEWHAT EASIER              01170000
+         L     R9,RCWADDR     TAKE THE CCW TRANSFER                     01171000
+         CLI   RCWCOMND,X'18' 'TIC' TO ANOTHER 'TIC' ?                  01172000
+         BE    DATACC3        YES - CHANNEL PROGRAM CHECK               01173000
+         B     DATATIC        ...AND RE-VALIDATE                        01174000
+DATANTC  EQU   *              CHAIN DATA, NOT A TIC - SET UP AGAIN      01175000
+         L     R4,RCWADDR     PICK UP DATA OR IDAL ADDRESS              01176000
+         LA    R4,0(0,R4)     ...WITHOUT THE OP-CODE, PLEASE            01177000
+         B     DATAGIN        GO HOME, CRASH, LOSE ONE TURN             01178000
+         DROP  R8                                                       01179000
+         USING CHXBLOK,R7                                               01180000
+         USING CHYBLOK,R6                                               01181000
+         EJECT                                                          01182000
+*.                                                                      01183000
+* SUBROUTINE NAME -                                                     01184000
+*                                                                       01185000
+*        DMKVCATS                                                       01186000
+*                                                                       01187000
+* FUNCTION -                                                            01188000
+*                                                                       01189000
+*        TO SIMULATE THE TEST I/O INSTRUCTION FOR A VIRTUAL CHANNEL-    01190000
+*        TO-CHANNEL ADAPTER WHICH HAS NO INTERRUPTS PENDING.            01191000
+*                                                                       01192000
+* ATTRIBUTES -                                                          01193000
+*                                                                       01194000
+*        RE-ENTRANT, PAGEABLE, CALLED VIA SVC                           01195000
+*                                                                       01196000
+* ENTRY CONDITIONS -                                                    01197000
+*                                                                       01198000
+*        GPR 13 = ADDRESS OF STANDARD SAVE-AREA                         01199000
+*        GPR 12 = ADDRESS OF DMKVCATS                                   01200000
+*        GPR 11 = VMBLOK ADDRESS OF ACTIVE USER                         01201000
+*        GPR  8 = VDEVBLOK ADDRESS FOR X-SIDE COUPLED CTCA              01202000
+*                                                                       01203000
+* EXIT CONDITIONS -                                                     01204000
+*                                                                       01205000
+*        CC = 0  ->  GPRS 0-15 UNCHANGED, RETURN CC = 0 TO TEST I/O     01206000
+*        CC = 1  ->  RETURN CC = 1 TO TEST I/O, GPR 5 = CSW STATUS,     01207000
+*                    GPRS 0-4, 6-15 UNCHANGED.                          01208000
+*                                                                       01209000
+* CALLS TO OTHER ROUTINES -                                             01210000
+*                                                                       01211000
+*        DMKSCNVU - TO LOCATE THE Y-SIDE VDEVBLOK                       01212000
+*        DMKSTKIO - TO STACK AN IOBLOK FOR ATTENTION IF DEFERRED        01213000
+*                                                                       01214000
+* OPERATION -                                                           01215000
+*                                                                       01216000
+*        DMKVCATS IS CALLED FROM DMKVIOEX WHEN A TEST I/O INSTRUCTION   01217000
+*        IS ISSUED TO A VIRTUAL CHANNEL-TO-CHANNEL ADAPTER, THE         01218000
+*        ADAPTER HAS NO INTERRUPTS PENDING, AND THE ADAPTER IS MARKED   01219000
+*        AS READY.  IF THE ADAPTER IS IN COMPATIBILITY MODE, THE        01220000
+*        Y-SIDE IS EXMAINED FOR AN ACTIVE READ, WRITE OR CONTROL        01221000
+*        COMMAND, AND CC = 1 WITH 'ATTN' IS PRESENTED IF YES,           01222000
+*        CC = 0 IF NO.                                                  01223000
+*        IF THE ADAPTER IS IN EXTENDED MODE, THE FOLLOWING IS DONE:     01224000
+*        1. IF A PREVIOUS X-SIDE RESET OR HALT I/O HAS NOT BEEN         01225000
+*           CLEARED, THE CONDITION IS CLEARED AND DEVICE END PRESENTED  01226000
+*           TO THE Y-SIDE CHANNEL.                                      01227000
+*        2. IF A PREVIOUS Y-SIDE RESET OR HALT I/O HAS NOT BEEN         01228000
+*           CLEARED, CC = 1 WITH UNIT CHECK IS SET.                     01229000
+*        3. IF THE Y-SIDE HAS AN ACTIVE READ, WRITE, OR CONTROL,        01230000
+*           CC = 1 WITH 'ATTN' IS SET.                                  01231000
+*        4. OTHERWISE, SET CC = 0 AND EXIT                              01232000
+*.                                                                      01233000
+         EJECT                                                          01234000
+DMKVCATS RELOC ,              SIMULATE TEST I/O TO VIRTUAL CTCA         01235000
+         BAL   R5,GETCTCA     GET CHXBLOK AND CHYBLOK REGISTERS         01236000
+         TM    CHXFLAG,CHBM370     TEST FOR EXTENDED MODE               01237000
+         BO    TIOCRES             YES - DO RESET CHECKING              01238000
+TIOCATN  EQU   *              TEST FOR ATTENTION STILL PENDING          01239000
+         TM    CHXFLAG,CHBATTN     ATTENTION PENDING FROM Y-SIDE ?      01240000
+         BZ    VCAEXC0             NO -- EXIT WITH CC = 0               01241000
+         L     R5,=AL1(0,0,ATTN,0)      CSW STATUS = ATTENTION          01242000
+         ST    R5,SAVER5      PASS STATUS BACK TO DMKVIO                01243000
+         B     VCAEXC1        EXIT, COND. CODE ONE => CSW STORED        01244000
+TIOCRES  EQU   *              CHECK FOR EXTENDED-MODE RESET SITUATION   01245000
+         TM    CHYFLAG,CHBHIO+CHBREST   Y-SIDE 'RESET' OR 'HIO' ?       01246000
+         BNZ   TIOCSUC                  YES - SET UNIT CHECK            01247000
+         TM    CHXFLAG,CHBEOFL     IS THE END-OF-FILE LATCH SET ?       01248000
+         BZ    TIOCATN             NO -- CHECK FOR PENDING 'ATTN'       01249000
+         NI    CHXFLAG,255-CHBEOFL      RESET END-FO-FILE LATCH         01250000
+         L     R10,CHYDATN    IS THERE A DEFERRED 'ATTN' IOBLOK         01251000
+         LTR   R10,R10        ...                                       01252000
+         BZ    TIOCATN        NO -- JUST CHECK PENDING 'ATTN'           01253000
+         CALL  DMKSTKIO       STACK THE IOBLOK FOR DMKVIO               01254000
+         ST    R0,CHYDATN     CLEAR THE HOLD WORD                       01255000
+         OI    CHXFLAG,CHBATTN     SET ATTENTION PENDING IN X-SIDE      01256000
+         B     VCAEXC0        ...AND EXIT WITH COND CODE ZERO           01257000
+TIOCSUC  EQU   *              SET UNIT CHECK IN CSW STATUS              01258000
+         LA    R5,UC*256      CSW STATUS = UNIT CHECK                   01259000
+         ST    R5,SAVER5      PASS BACK TO DMKVIO                       01260000
+         B     VCAEXC1        SET CONDITION CODE ONE, UNIT CHECK        01261000
+         EJECT                                                          01262000
+*.                                                                      01263000
+* SUBROUTINE NAME -                                                     01264000
+*                                                                       01265000
+*        DMKVCASH                                                       01266000
+*                                                                       01267000
+* FUNCTION -                                                            01268000
+*                                                                       01269000
+*        TO SIMULATE THE EXECUTION OF A HALT I/O OR HALT DEVICE         01270000
+*        INSTRUCTION FOR A VIRTUAL CHANNEL-TO-CHANNEL ADAPTER.          01271000
+*                                                                       01272000
+* ATTRIBUTES -                                                          01273000
+*                                                                       01274000
+*        RE-ENTRANT, PAGEABLE, CALLED VIA SVC                           01275000
+*                                                                       01276000
+* ENTRY CONDITIONS -                                                    01277000
+*                                                                       01278000
+*        GPR 13 = STANDARD SAVE-AREA ADDRESS                            01279000
+*        GPR 12 = ADDRESS OF DMKVCASH                                   01280000
+*        GPR 11 = VMBLOK ADDRESS OF ACTIVE USER                         01281000
+*        GPR  8 = VDEVBLOK ADDRESS OF X-SIDE VIRTUAL CTCA               01282000
+*                                                                       01283000
+* EXIT CONDITIONS -                                                     01284000
+*                                                                       01285000
+*        CC = 0  ->  GPRS 0-15 UNCHANGED, SET CC = 0 FOR 'HIO', 'HDV'   01286000
+*        CC = 1  ->  GPR 5 = CSW STATUS, SET CC = 1 FOR 'HIO', 'HDV'    01287000
+*                                                                       01288000
+* CALLS TO OTHER ROUTINES -                                             01289000
+*                                                                       01290000
+*        DMKSTKCP - TO RE-CONNECT X-SIDE OR Y-SIDE IF ACTIVE            01291000
+*        DMKFRET  - TO RELEASE FREE STORAGE IN DEFERRED IOBLOKS         01292000
+*        DMKSCNVU - TO LOCATE THE Y-SIDE CTCA VDEVBLOK                  01293000
+*                                                                       01294000
+* OPERATION -                                                           01295000
+*                                                                       01296000
+*        DMKVCASH IS CALLED FROM DMKVIOEX WHENEVER A HALT I/O OR        01297000
+*        HALT DEVICE IS ISSUED AGAINST A VIRTUAL CHANNEL-TO-CHANNEL     01298000
+*        ADAPTER. IF THE ADAPTER HAS NOT YET BEEN COUPLED,              01299000
+*        CC = 1 (DEVICE HALTED) WITH CSW STATUS ZERO WILL BE            01300000
+*        INDICATED.  IF THE ADAPTER IS COUPLED, THE Y-SIDE CHYBLOK      01301000
+*        IS LOCATED VIA CALLS TO DMKSCNVU AND POINTER PICK-UP.          01302000
+*        IF EITHER THE X-SIDE OR THE Y-SIDE HAS THE END-OF-FILE         01303000
+*        LATCH SET, THE LATCH IS RESET. IF THERE IS ALSO AN IOBLOK      01304000
+*        FOR A DEFERRED ATTENTION, THE IOBLOK IS RELEASED VIA A         01305000
+*        CALL TO DMKFRET. IF THE X-SIDE HAS AN ACTIVE COMMAND,          01306000
+*        THE COMMAND IS 'HALTED' BY A CALL TO DMKSTKCP FOR RE-          01307000
+*        CONNECTION OF THE DMKVCAST CODE, AND CC = 0 (INTERRUPTS        01308000
+*        PENDING) IS SET FOR THE HALT I/O.  IF THE Y-SIDE HAS AN        01309000
+*        ACTIVE COMMAND, THE COMMAND IS 'HALTED' IN THE SAME MANNER,    01310000
+*        BUT CC = 1, CSW STATUS ZERO, IS SET UNLESS THE X-SIDE WAS      01311000
+*        ALSO ACTIVE AT THE TIME OF THE HALT I/O. IF NEITHER THE        01312000
+*        X-SIDE OR THE Y-SIDE WERE ACTIVE, CC = 1, CSW STATUS ZERO      01313000
+*        IS SET, AND THE HALT I/O OCCURRENCE IS INDICATED ONLY IF       01314000
+*        THE ADAPTER WAS RUNNING IN EXTENDED MODE.                      01315000
+*.                                                                      01316000
+         EJECT                                                          01317000
+DMKVCASH RELOC ,     HALT I/O OR HALT DEVICE TO VIRTUAL CTCA            01318000
+         USING VDEVBLOK,R8    USE THE VDEVBLOK TEMPORARILY              01319000
+         SLR   R0,R0          (CONVENIENT CONSTANT)                     01320000
+         ST    R0,SAVER5      CSW STATUS USUALLY EQUALS ZERO            01321000
+         TM    VDEVSTAT,VDEVNRDY   IS THE CTCA COUPLED ?                01322000
+         BO    VCAEXC1        NO -- CC = 1, CSW STORED                  01323000
+         BAL   R5,GETCTCA     ACCESS CHXBLOK, CHYBLOK                   01324000
+         BAL   R5,RESATTN     RESET DEFERRED ATTENTION IOBLOKS          01325000
+         LA    R10,VCAEXC1    COND. CODE ONE NORMALLY                   01326000
+         SPACE                                                          01327000
+         TM    CHXFLAG,CHBWAIT     IS THE X-SIDE ACTIVE ?               01328000
+         BO    SETHIOX             YES -- INDICATE SO                   01329000
+         LR    R5,R10              SAVE RETURN ADDRESS                  01330000
+         LA    R0,IOBSIZE          SET UP IOBLOK WITH                   01331000
+         CALL  DMKFREE             CHANNEL END AND DEVICE END           01332000
+         LR    R10,R1              FOR HALT DEVICE WITH CC=1            01333000
+         XC    IOBLOK(IOBSIZE*8),IOBLOK CLEAR IOBLOK                    01334000
+         ST    R11,IOBUSER         CALLER VMBLOK ADDRESS                01335000
+         MVI   IOBCSW+4,CE+DE      INDICATE CHANNEL AND DEVICE END      01336000
+         LH    R1,SAVER1+2         GET ADDRESS OF CTCA DEVICE           01337000
+         STH   R1,IOBVADD          AND STORE IN IOBLOK                  01338000
+         L     R1,=A(DMKVIOIN)     SET INTERRUPT RETURN ADDRESS         01339000
+         ST    R1,IOBIRA           ..                                   01340000
+         ST    R10,IOBLINK         FORCE IOBLOK TO LINK TOSELF          01341000
+         CALL  DMKSTKIO            STACK IOBLOK FOR DMKVIO              01342000
+         LR    R10,R5              RESTORE RETURN ADDRESS               01343000
+         B     VCAHIOX             JUST HALT THE Y-SIDE                 01344000
+SETHIOX  OI    CHXFLAG,CHBHIO LET X-SIDE KNOW WHY IT STOPPED            01345000
+         NI    CHYFLAG,255-CHBATTN      X-SIDE WAS JUST HALTED          01346000
+         L     R1,CHXCNCT     CPEXBLOK FOR RE-CONNECT                   01347000
+         ST    R0,CHXCNCT     ...CLEAR POINTER...                       01348000
+         CALL  DMKSTKCP       STACK FOR EXECUTION                       01349000
+         NI    CHXFLAG,255-CHBWAIT      X-SIDE WAS JUST HALTED          01350000
+         LA    R10,VCAEXC0    SET COND. CODE ZERO ON EXIT               01351000
+VCAHIOX  EQU   *              HIO, X-SIDE IDLE                          01352000
+         TM    CHYFLAG,CHBWAIT     IS Y-SIDE ACTIVE ?                   01353000
+         BZ    VCAHIOY        NO -- CHECK IF 'HIO' REMEMBERED           01354000
+         OI    CHXFLAG,CHBHIO LET Y-SIDE KNOW WHY IT STOPPED            01355000
+         LR    R3,R10         HAVE 'GOCHANY' EXIT DIRECTLY              01356000
+         B     GOCHANY        RE-CONNECT THE Y-SIDE                     01357000
+VCAHIOY  EQU   *              CHECK FOR COMPATIBILITY MODE              01358000
+         TM    CHXFLAG,CHBM370     STILL IN EXTENDED MODE ?             01359000
+         BCR   8,R10               NO -- DON'T SET 'CHBHIO' IF IDLE     01360000
+         OI    CHXFLAG,CHBHIO      HALT I/O OR HALT DEVICE              01361000
+         BR    R10            EXIT WITH CONDITION CODE                  01362000
+         EJECT                                                          01363000
+*.                                                                      01364000
+* SUBROUTINE NAME -                                                     01365000
+*                                                                       01366000
+*        DMKVCARD                                                       01367000
+*                                                                       01368000
+* FUNCTION -                                                            01369000
+*                                                                       01370000
+*        TO PERFORM A SELECTIVE DEVICE RESET FOR A VIRTUAL              01371000
+*        CHANNEL-TO-CHANNEL ADAPTER WITHOUT DE-COUPLING THE             01372000
+*        CTCA FROM THE Y-SIDE ADAPTER                                   01373000
+*                                                                       01374000
+* ENTRY CONDITIONS -                                                    01375000
+*                                                                       01376000
+*        GPR 13 = ADDRESS OF STANDARD SAVE-AREA                         01377000
+*        GPR 12 = ADDRESS OF DMKVCARD                                   01378000
+*        GPR 11 = VMBLOK ADDRESS FOR ACTIVE USER                        01379000
+*        GPR  8 = VDEVBLOK ADDRESS OF VIRTUAL CTCA                      01380000
+*                                                                       01381000
+* EXIT CONDITIONS -           GPRS 0-15 UNCHANGED                       01382000
+*                                                                       01383000
+* OPERATION -                                                           01384000
+*                                                                       01385000
+*        DMKVCARD IS CALLED VIA SVC FROM DMKCFPRD TO RESET A VIRTUAL    01386000
+*        CTCA, EITHER DUE TO THE 'RESET' COMMAND OR A VIRTUAL MACHINE   01387000
+*        LOGOUT. IF THE ADAPTER HAS NOT YET BEEN COUPLED, AN EXIT IS    01388000
+*        TAKEN IMMEDIATELY. IF THE ADAPTER IS COUPLED, ANY ACTIVE       01389000
+*        COMMAND IS 'HALTED' VIA A CALL TO DMKSTKCP FOR THE X-SIDE,     01390000
+*        THE Y-SIDE, OR BOTH, AS NEEDED. IF EITHER END-OF-FILE LATCH    01391000
+*        IS SET, THE LATCH IS RESET AND ANY DEFERRED ATTENTION          01392000
+*        IOBLOKS ARE RELEASED VIA A CALL TO DMKFRET.                    01393000
+*        IF THE ADAPTER IS RUNNING IN EXTENDED MODE, CHECKS ARE MADE    01394000
+*        TO DETERMINE IF THE RESET CONDITION SHOULD BE RECORDED IN      01395000
+*        THE CHXBLOK, OR IF THE ADAPTER HAS BEEN FORCED INTO            01396000
+*        COMPATIBILITY MODE BY THE SELECTIVE RESET.                     01397000
+*.                                                                      01398000
+         EJECT                                                          01399000
+DMKVCARD RELOC ,              DEVICE RESET WITHOUT DE-COUPLE            01400000
+         SPACE                                                          01401000
+         TM    VDEVSTAT,VDEVNRDY   IS THE CTCA COUPLED ?                01402000
+         BO    VCAEXIT             NO -- JUST EXIT QUIETLY              01403000
+         BAL   R5,GETCTCA     GET THE CHXBLOK AND CHYBLOK REGISTERS     01404000
+         TM    CHYFLAG,CHBMNOP     DID Y-SIDE INHIBIT COMPATIBILITY ?   01405000
+         BO    RESMODE             YES - LEAVE IN EXTENDED MODE         01406000
+         NI    CHYFLAG,255-CHBM370 DROP INTO COMPATIBILITY MODE         01407000
+RESMODE  EQU   *                                                        01408000
+         BAL   R5,RESATTN     RESET EOF LATCHES                         01409000
+         MVI   CHXFLAG,0           ZERO X FLAG BYTE                     01410000
+         TM    CHYFLAG,CHBWAIT     IS THE Y-SIDE WAITING ?              01411000
+         BZ    VCAEXIT             NO -- ALL DONE                       01412000
+         OI    CHXFLAG,CHBREST     'SYSTEM RESET' FOR X-SIDE            01413000
+         BAL   R3,GOCHANY     RE-CONNECT THE Y-SIDE                     01414000
+         LA    R3,VCAEXIT                                      @VA01079 01415000
+         BAL   R14,BLDCPEX    GET CONTROL BACK AFTER Y-SIDE    @VA01079 01416000
+*                             RECONNECTED                               01417000
+         CALL  DMKSTKCP                                        @VA01079 01418000
+         GOTO  DMKDSPCH                                        @VA01079 01419000
+         SPACE 2                                                        01420000
+RESATTN  EQU   *              RESET EOF LATCHES, CLEAR DEFERRED 'ATTN'  01421000
+         TM    CHYFLAG,CHBEOFL     IS THE Y-SIDE EOF LATCH SET ?        01422000
+         BZ    RESCTCB             NO --                                01423000
+         NI    CHYFLAG,255-CHBEOFL FIRST, WE RESET IT...                01424000
+         L     R10,CHXDATN    THEN CHECK FOR X-SIDE DEFERRED 'ATTN'     01425000
+         LTR   R10,R10        IS THERE AN 'ATTN' IOBLOK ?               01426000
+         BZ    RESCTCB        NO --                                     01427000
+         BAL   R3,FRETIOB     FRET THE IOBLOK - CANCEL ATTENTION        01428000
+         ST    R0,CHXDATN     CLEAR OUT POINTER WORD                    01429000
+RESCTCB  EQU   *              CHECK X-SIDE END-OF-FILE LATCH            01430000
+         TM    CHXFLAG,CHBEOFL     IS THE X-SIDE EOF LATCH SET ?        01431000
+         BCR   8,R5                NO --                                01432000
+         NI    CHXFLAG,255-CHBEOFL FIRST RESET THE LATCH                01433000
+         L     R10,CHYDATN    THEN CHECK FOR Y-SIDE DEFERRED 'ATTN'     01434000
+         LTR   R10,R10        IS THERE AN 'ATTN' IOBLOK ?               01435000
+         BCR   8,R5           NO --                                     01436000
+         BAL   R3,FRETIOB     FRET THE IOBLOK - CANCEL ATTENTION        01437000
+         ST    R0,CHYDATN     CLEAR OUT POINTER WORD                    01438000
+         BR    R5             RETURN                                    01439000
+         EJECT                                                          01440000
+*.                                                                      01441000
+* SUBROUTINE NAME -                                                     01442000
+*                                                                       01443000
+*        DMKVCARS                                                       01444000
+*                                                                       01445000
+* FUNCTION -                                                            01446000
+*                                                                       01447000
+*        TO PERFORM A FINAL RESET FOR A VIRTUAL CHANNEL-TO-CHANNEL      01448000
+*        ADAPTER AND TO DISCONNECT THE ADAPTER FROM ITS COUPLE'D        01449000
+*        TWIN ON THE Y-SIDE VIRTUAL MACHINE.                            01450000
+*                                                                       01451000
+* ENTRY CONDITIONS -                                                    01452000
+*                                                                       01453000
+*        GPR 13 = ADDRESS OF STANDARD SAVE-AREA                         01454000
+*        GPR 12 = ADDRESS OF DMKVCARS                                   01455000
+*        GPR 11 = VMBLOK ADDRESS OF X-SIDE USER                         01456000
+*        GPR  8 = VDEVBLOK ADDRESS OF X-SIDE VIRTUAL CTCA               01457000
+*                                                                       01458000
+* EXIT CONDITIONS -           GPRS 0-15 UNCHANGED                       01459000
+*                                                                       01460000
+* OPERATION -                                                           01461000
+*                                                                       01462000
+*        DMKVCARS IS CALLED VIA SVC FROM DMKVDBRL WHEN THE VIRTUAL      01463000
+*        MACHINE EITHER DETACHES THE VIRTUAL CTCA OR ISSUES THE         01464000
+*        CP 'LOGOFF' COMMAND. DMKVCARD HAS BEEN CALLED PRIOR TO THE     01465000
+*        CALL TO DMKVCARS, SUCH THAT THE ADAPTER IS KNOWN TO BE IDLE.   01466000
+*        THE Y-SIDE VDEVBLOK IS LOCATED VIA A CALL TO DMKSCNVU,         01467000
+*        AND BOTH THE X-SIDE AND Y-SIDE VDEVBLOKS ARE MARKED 'NOT       01468000
+*        READY' (I.E. NOT COUPLED), AND THE CHXBLOK AND CHYBLOK         01469000
+*        POINTERS ARE CLEARED.  THE MESSAGE:                            01470000
+*                                                                       01471000
+*              CTCA XXX DROP FROM USERID XXX                            01472000
+*                                                                       01473000
+*        IS BUILT FOR THE Y-SIDE USER, FROM INFORMATION IN THE          01474000
+*        CHXBLOK, AND IS SENT TO THE USER IF HE IS NOT IN THE LOGOFF    01475000
+*        PROCESS, OR IF THE X-SIDE AND Y-SIDE VIRTUAL MACHINES ARE      01476000
+*        IN FACT A SINGLE MACHINE.  THE VIRTUAL ADDRESSES IN THE        01477000
+*        MESSAGE ARE EXCHANGED AND IT IS SENT TO THE X-SIDE USER IF     01478000
+*        HE IS NOT IN THE LOGOFF PROCESS. FINALLY, THE BASE ADDRESS     01479000
+*        OF THE CHXBLOK, CHYBLOK COMBINATION IS DETERMINED AND THE      01480000
+*        FREE STORAGE IS RELEASED VIA A CALL TO DMKFRET.                01481000
+*.                                                                      01482000
+         EJECT                                                          01483000
+         DROP  R6,R7,R9,R10     ABANDON STANDARD USAGES                 01484000
+DMKVCARS RELOC ,    INTERNAL RESET FOR CHAN-TO-CHAN ADAPTER             01485000
+         USING VDEVBLOK,R8                                              01486000
+         USING CHXBLOK,R9                                               01487000
+         USING CHYBLOK,R10                                              01488000
+         SPACE                                                          01489000
+         MVI   SAVEWRK1,X'00' CLEAR A FLAG BYTE                         01490000
+         TM    VDEVSTAT,VDEVNRDY   IS THE ADAPTER COUPLED ?             01491000
+         BO    VCAEXIT             NO -- JUST EXIT SMOOTHLY             01492000
+         OI    VDEVSTAT,VDEVNRDY   MARK NOT READY TO AVOID DOUBLE FRET  01493000
+         L     R9,VDEVREAL    ADDRESS OF CHXBLOK               @VA08419 01494500
+         SLR   R0,R0          ZERO REG0                        @VA08419 01495000
+         ST    R0,VDEVREAL    UNPLUG                           @VA08419 01495500
+         L     R11,CHXOTHR    Y-SIDE VMBLOK                    @VA08419 01496000
+         LH    R1,CHXYADD     Y-SIDE VADDR                     @VA08419 01496500
+         CALL  DMKSCNVU                                        @VA08419 01497000
+         L     R10,VDEVREAL   ADDRESS OF CHYBLOK               @VA08419 01497500
+         ST    R0,VDEVREAL    UNPLUG                           @VA08419 01498000
+         OI    VDEVSTAT,VDEVNRDY MARK NOT READY                @VA08419 01498500
+         L     R11,SAVER11    VMBLOK NOW MATCHES CPU TIMER AGAIN        01506000
+         EJECT                                                          01507000
+*                                                                       01508000
+*        SEND DROP MESSAGES TO BOTH USERS                               01509000
+*                                                                       01510000
+         MVC   SAVEWRK2(8),BLANKS  BLANK OUT SAVE-AREA BUFFER           01511000
+         MVC   SAVEWRK4(24),SAVEWRK2    ...                             01512000
+         MVC   SAVEWRK2(4),=C'CTCA'     DEVICE NAME                     01513000
+         MVC   SAVEWRK4+1(9),=C'DROP FROM'   ACTION CUE                 01514000
+         LH    R1,CHXYADD     CONVERT THE ADDRESSES                     01515000
+         CALL  DMKCVTBH                                                 01516000
+         LR    R5,R1          GR5 = Y-SIDE VADDR                        01517000
+         LH    R1,CHYXADD     ...                                       01518000
+         CALL  DMKCVTBH                                                 01519000
+         LR    R4,R1          GR4 = X-SIDE VADDR                        01520000
+         CL    R11,CHXOTHR    ARE THE CTCA'S WRAPPED ON ONE VM ?        01521000
+         BE    VCAWRAP        YES - GIVE ONLY ONE MESSAGE               01522000
+         MVC   SAVEWRK6+3(8),VMUSER     LOCAL USERID                    01523000
+         STCM  R5,B'0111',SAVEWRK3+1    REMOTE CTCA                     01524000
+         STCM  R4,B'0111',SAVEWRK9      LOCAL CTCA                      01525000
+         BAL   R2,VMYSIDE  GET Y-SIDE VMBLOK IN R11            @V407510 01526100
+         TM    VMRSTAT,VMLOGOFF    IS USER IN LOGOFF PROCESS ?          01527000
+         BO    VCAWRAP             YES - SKIP THE DROP MESSAGE          01528000
+         LA    R0,SAVEWRK9+4-SAVEWRK2   LENGTH                          01529000
+         LA    R1,SAVEWRK2              ADDRESS                         01530000
+         CALL  DMKQCNWT,PARM=NORET                                      01531000
+VCAWRAP  DS    0H             BACK TO X-SIDE                   @V407510 01532100
+         BAL   R2,VMXSIDE     BACK TO X-SIDE VMBLOK            @V407510 01532200
+         STCM  R4,B'0111',SAVEWRK3+1    LOCAL CTCA                      01534000
+         STCM  R5,B'0111',SAVEWRK9      REMOTE CTCA                     01535000
+         L     R11,CHXOTHR    MOMENTARILY GET OTHER VMBLOK              01536000
+         MVC   SAVEWRK6+3(8),VMUSER     ...FOR HIS USERID               01537000
+         L     R11,SAVER11    NOW WE'RE BACK                            01538000
+         TM    VMRSTAT,VMLOGOFF    IS USER IN LOGOOF PROCESS ?          01539000
+         BO    RELEASE             YES - SKIP THE DROP MESSAGE          01540000
+         LA    R0,SAVEWRK9+4-SAVEWRK2   LENGTH                          01541000
+         LA    R1,SAVEWRK2              ADDRESS                         01542000
+         CALL  DMKQCNWT,PARM=NORET                                      01543000
+         EJECT                                                          01544000
+RELEASE  EQU   *              RELEASE THE INTER-CONNECTOR BLOCK         01545000
+         LR    R1,R9          ADDRESS OF CHXBLOK TO GR1                 01546000
+         CLR   R9,R10         WHICH ONE IS THE REAL ONE ?               01547000
+         BL    FRETBLK        CHXBLOK - O.K. AS IS                      01548000
+         LR    R1,R10         CHYBLOK - USE IT'S ADDRESS                01549000
+FRETBLK  EQU   *              RELEASE CHX, CHY BLOCKS                   01550000
+         LA    R0,CHBSIZE                                               01551000
+         CALL  DMKFRET                                                  01552000
+         SPACE                                                          01553000
+VCAEXC0  EQU   *              SET CONDITION CODE ZERO                   01554000
+         SR    R0,R0          ...                                       01555000
+         B     VCAEXIT        ...AND EXIT WITH COND. CODE SET           01556000
+VCAEXC1  EQU   *              SET CONDITION CODE ONE => CSW STORED      01557000
+         TM    *,X'FF'        CONDITION MIXED => CC = 1                 01558000
+         SPACE                                                          01559000
+VCAEXIT  EQU   *              RETURN TO CALLER                          01560000
+         EXIT                                                           01561000
+         SPACE 4                                                        01562000
+VMXSIDE  EQU   *              SWITCH TO X-SIDE VMBLOK                   01563000
+         L     R1,SAVER11     GET CALLER'S VMBLOK              @V407510 01564100
+         SWTCHVM              SWITCH TO CALLER                 @V407510 01564200
+         BR    R2             RETURN TO CALLER                 @V407510 01564300
+         SPACE                                                          01568000
+VMYSIDE  EQU   *              SWITCH TO Y-SIDE VMBLOK                   01569000
+         L     R1,CHXOTHR     GET Y-SIDE VMBLOK                @V407510 01570100
+         SWTCHVM              SWITCH TO Y-SIDE                 @V407510 01570200
+         BR    R2             RETURN TO CALLER                 @V407510 01570300
+         DROP  R8,R9,R10                                                01574000
+         SPACE                                                          01575000
+FRETIOB  EQU   *              RELEASE PENDING 'ATTN' IOBLOK             01576000
+         LR    R1,R10         IOBLOK ADDRESS                            01577000
+         LA    R0,IOBSIZE     ...AND SIZE                               01578000
+         CALL  DMKFRET         RELEASE FREE STORAGE BLOCK               01579000
+         SLR   R0,R0          RESTORE CONVENIENT CONSTANT               01580000
+         BR    R3             ...RETURN                                 01581000
+         EJECT                                                          01582000
+         USING CHXBLOK,R7     RE-ASSERT STANDARD USAGE                  01583000
+CHANCHK  EQU   *              CCW ADDR IN GR9, RETURN IN GR14           01584000
+         USING RCWCCW,R9      VALIDATE CCW FROM CHANNEL VIEWPOINT       01585000
+         SLR   R1,R1          ZERO STATUS ACCUMULATION                  01586000
+         TM    RCWCTL,RCWINVL IS THE CCW VALID ?                        01587000
+         BCR   1,R14          NO -- RETURN WITH NON-ZERO COND. CODE     01588000
+         CLI   RCWCOMND,X'08' IS THIS A TIC COMMAND            @VM08638 01589000
+         BNE   TST18          NO -- CHECK FOR CMD X'18'        @VM08638 01590000
+TICADD   TM    RCWCOMND+3,X'07' IS THE ADDR. DBL-WORD ALIGNED ?@VM08638 01591000
+         BR    R14            IF YES, CC=ZERO AND NONZERO IF NO@VM08638 01592000
+TST18    CLI   RCWCOMND,X'18' MAYBE TIC AFTER CHAIN DATA       @VM08638 01593000
+         BE    TICADD         YES, CHECK TIC ADDRESS           @VM08638 01594000
+         CH    R1,RCWCNT      COUNT NON-ZERO FOR NON-TIC'S     @VM08638 01595000
+         BNE   CHANFLG        YES - VALIDATE IDAW, IF ANY      @VM08638 01596000
+         TM    *,X'FF'        SET COND. CODE = NONZERO         @VM08638 01597000
+         BR    R14            ...AND RETURN                    @VM08638 01598000
+CHANFLG  EQU   *              CHECK IDA FLAG, VALIDATE IDAW             01599000
+         TM    RCWFLAG,X'03'  ARE THE MUST-BE-ZERO BITS ZERO ?          01600000
+         BCR   7,R14          NO -- RETURN WITH COND. CODE NON-ZERO     01601000
+         TM    RCWFLAG,IDA    IS THE INDIRECT BIT ON ?                  01602000
+         BZ    CHANPCI        NO -- GO TEST FOR 'PCI'                   01603000
+         L     R1,RCWADDR     GET ADDRESS OF FIRST IDAW                 01604000
+         TM    0(R1),X'FF'    HIGH-ORDER MUST BE ZERO                   01605000
+         BCR   7,R14          RETURN WITH COND. CODE IF NOT VALID       01606000
+CHANPCI  EQU   *              TEST FOR PCI IN CCW                       01607000
+         TM    RCWFLAG,PCIF   SHOULD WE SET 'PCI' ?                     01608000
+         BCR   8,R14          NO -- JUST EXIT WITH CC = 0               01609000
+         OI    CHXSTAT+1,PCI  USER WILL SEE THIS SOMEWHAT LATER         01610000
+         SR    R1,R1          SET COND. CODE = ZERO                     01611000
+         BR    R14            ...AND RETURN                             01612000
+         SPACE                                                          01613000
+BLDIOER  EQU   *              CSW IN GR4-5, SENSE IN GR6                01614000
+         LR    R2,R14         SAVE RETURN ADDRESS                       01615000
+         LA    R0,IOERSIZE    GET AN IOERBLOK                           01616000
+         CALL  DMKFREE        ...                                       01617000
+         USING IOERBLOK,R1                                              01618000
+         XC    IOERBLOK(IOERSIZE*8),IOERBLOK                            01619000
+         STM   R4,R5,IOERCSW  SET ERROR CSW IN IOERBLOK                 01620000
+         LA    R0,IOERDATA    CONSTRUCT DUMMY SENSE CCW                 01621000
+         ST    R0,IOERCCW     ...FOR ESTHETIC AND PRACTICAL REASONS     01622000
+         MVI   IOERCCW,X'04'                                            01623000
+         MVI   IOERLEN+1,1    SENSE DATA LENGTH                         01624000
+         MVI   IOERCCW+4,SILI                                           01625000
+         STC   R3,IOERDATA    SET SENSE DATA                            01626000
+         BR    R2             RETURN TO CALLER                          01627000
+         SPACE                                                          01628000
+CHKPKEY  EQU   *              TEST FOR PROTECTION VIOLATIONS            01629000
+         CLI   CHXPKEY,X'00'  IF HIS CAW KEY IS ZERO...                 01630000
+         BCR   8,R14          ...HE CAN STORE ANYWHERE                  01631000
+         L     R1,=X'00FFFFF0'     ALIGNMENT MASK                       01632000
+         NR    R1,R2          REAL ADDRESS IS IN GR2                    01633000
+         ISK   R1,R1          GET REAL STORAGE KEY                      01634000
+         N     R1,F240        REDUCE TO FOUR BIT KEY                    01635000
+         CLM   R1,B'0001',CHXPKEY  TEST FOR KEY MATCH                   01636000
+         BR    R14            RETURN WITH COND. CODE SET                01637000
+         DROP  R1,R7,R9                                                 01638000
+         EJECT                                                          01639000
+BLDCPEX  EQU   *              BUILD CPEXBLOK FOR DEFERRED EXECUTION     01640000
+         STM   R14,R15,SAVEWRK2    SAVE GR14, 15                        01641000
+         LA    R0,CPEXSIZE         SIZE OF CPEXBLOK                     01642000
+         CALL  DMKFREE                                                  01643000
+         USING CPEXBLOK,R1                                              01644000
+         LM    R14,R15,SAVEWRK2    RESTORE GR14, 15                     01645000
+         SLR   R0,R0               RESTORE CONVENIENT ZERO CONSTANT     01646000
+         STM   R0,R15,CPEXR0       SET CPEXBLOK REGISTERS               01647000
+         ST    R3,CPEXADD          SET EXECUTION ADDRESS                01648000
+         MVC   CPEXFPNT(12),ZEROES CLEAR FIRST THREE WORDS              01649000
+         BR    R14            RETURN TO INTERNAL CALLER                 01650000
+         DROP  R1                                                       01651000
+         SPACE 2                                                        01652000
+         USING VDEVBLOK,R8                                              01653000
+GETCTCA  EQU   *              GET ADDRESSES FOR BOTH BLOCKS             01654000
+         L     R9,VDEVREAL    ADDRESS OF CHXBLOK                        01655000
+         USING CHXBLOK,R9     TEMPORARILY                               01656000
+         L     R11,CHXOTHR    Y-SIDE VMBLOK                             01657000
+         LH    R1,CHXYADD     Y-SIDE VADDR                              01658000
+         CALL  DMKSCNVU       GET Y-SIDE VDEVBLOK                       01659000
+         L     R6,VDEVREAL   ADDRESS OF CHYBLOK                         01660000
+         L     R11,SAVER11    BACK TO CORRECT VMBLOK                    01661000
+         LR    R7,R9          ACCESS CHXBLOK VIA GR7                    01662000
+         BR    R5             RETURN INTERNAL                           01663000
+         DROP  R8,R9                                                    01664000
+         SPACE 2                                                        01665000
+         LTORG                                                          01666000
+         EJECT                                                          01667000
+         COPY  VCTCA                                                    01668000
+         COPY  IOBLOKS                                                  01669000
+         COPY  IOER                                                     01670000
+         COPY  VMBLOK                                                   01671000
+         COPY  VBLOKS                                                   01672000
+         COPY  DEVTYPES                                                 01673000
+         COPY  EQU                                                      01674000
+         COPY  SAVE                                                     01675000
+         PSA                                                            01676000
+         END   DMKVCA                                                   01677000

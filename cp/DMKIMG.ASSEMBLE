@@ -1,0 +1,707 @@
+IMG      TITLE 'DMKIMG     (CP)        VM/370 - RELEASE 6'              00001000
+         ISEQ  73,80          VALIDATE INPUT SERIALIZATION              00002000
+*.                                                                      00003000
+*                                                                       00004000
+* MODULE NAME -                                                         00005000
+*                                                                       00006000
+*        DMKIMG  (GENIMAGE)                                             00007000
+*                                                                       00008000
+* FUNCTION -                                                            00009000
+*                                                                       00010000
+*        TO PROVIDE A CMS INTERFACE FOR THE VS-BASED IEBIMAGE PROGRAM.  00011000
+*        THIS IS DONE BY HANDLING CERTAIN SVC'S ISSUED BY IEBIMAGE AND  00012000
+*        TRANSLATING THEM INTO CMS TERMS.                               00013000
+*                                                                       00014000
+* ATTRIBUTES -                                                          00015000
+*                                                                       00016000
+*        DISK RESIDENT, LOADED INTO CMS USER AREA, CALLED VIA SVC 202,  00017000
+*        SERIALLY REUSABLE                                              00018000
+*                                                                       00019000
+* ENTRY POINT -                                                         00020000
+*                                                                       00021000
+*         DMKIMGBG (GENIMAGE) - INTERFACE TO IEBIMAGE                   00022000
+*                                                                       00023000
+* ENTRY CONDITIONS -                                                    00024000
+*                                                                       00025000
+*        GPR 1 -> STANDARD CMS PLIST                                    00026000
+*        GPR 14 = RETURN ADDRESS                                        00027000
+*        GPR 15 = ADDRESS OF GENIMAGE                                   00028000
+*                                                                       00029000
+*        THE FORMAT OF THE STANDARD PLIST IS:                           00030000
+*                                                                       00031000
+*           +-------------+----------------------------------------+    00032000
+*           |             |                                        |    00033000
+*           | GENIMAGE    |  <FN> <FT> <FM>  <(<SFN> <SFT> <SFM>>  |    00034000
+*           |             |                                        |    00035000
+*           +-------------+----------------------------------------+    00036000
+*                                                                       00037000
+*        WHERE 'FN FT FM' REPRESENTS THE INPUT CONTROL FILE TO IEBIMAGE 00038000
+*              AND DEFAULTS TO THE VALUE 'SYSIN FILE *'  AND            00039000
+*                                                                       00040000
+*        WHERE 'SFN SFT SFM' IS THE FILE INTO WHICH THE IEBIMAGE        00041000
+*              LISTING GOES AND DEFAULTS TO 'SYSPRINT LISTING A1'.      00042000
+*                                                                       00043000
+* EXIT CONDITIONS -                                                     00044000
+*                                                                       00045000
+*        NORMAL                                                         00046000
+*              GPR15 < 100 - RETURN CODE FROM IEBIMAGE         @VMI0006 00047000
+*                                                                       00048000
+*        ERROR                                                          00049000
+*              GPR15 = 100 - ERROR ON INPUT PARAMETERS         @VMI0006 00050000
+*              GPR15 = 104 - FILEDEF ERROR                     @VMI0006 00051000
+*                                                                       00052000
+* CALLS TO OTHER ROUTINES -                                             00053000
+*                                                                       00054000
+*        FSSTATE   - SEE IF CONTROL FILE EXISTS                         00055000
+*        HNDSVC    - TRAP CERTAIN SVC'S ISSUED BY IEBIMAGE              00056000
+*        GETMAIN   - GET AREA FOR SIMULATING OS LOAD SVC                00057000
+*        FREEMAIN  - RELEASE OS LOAD AREA                               00058000
+*        FILEDEF   - ISSUE FILEDEF'S NEEDED BY IEBIMAGE                 00059000
+*        LOAD      - SIMULATE OS LOAD AND QSAM READ                     00060000
+*        FSWRITE   - CREATE A NEW TEXT FILE (STOW SIMULATION)           00061000
+*                                                                       00062000
+* EXTERNAL REFERENCES -                                                 00063000
+*                                                                       00064000
+*        MAINHIGH - SAVE AND RESTORE ITS VALUE BETWEEN LOADS            00065000
+*                                                                       00066000
+* TABLES / WORKAREAS -                                                  00067000
+*                                                                       00068000
+*        DCB                                                            00069000
+*        DECB                                                           00070000
+*        WORKAREA - INTERNAL WORK AREA USED BY IEBIMAGE                 00071000
+*                   SEE NOTES SECTION FOR DEPENDENCIES                  00072000
+*                                                                       00073000
+* REGISTER USAGE -                                                      00074000
+*                                                                       00075000
+*        GPR0  = SCRATCH REGISTER                                       00076000
+*        GPR1  = ADDRESS OF PLIST                                       00077000
+*        GPR2  =                                                        00078000
+*        GPR3  =                                                        00079000
+*        GPR4  = INTERNAL LINKAGE RETURN REGISTER                       00080000
+*        GPR5  =                                                        00081000
+*        GPR6  =                                                        00082000
+*        GPR7  =                                                        00083000
+*        GPR8  =                                                        00084000
+*        GPR9  =                                                        00085000
+*        GPR10 =                                                        00086000
+*        GPR11 =                                                        00087000
+*        GPR12 = MODULE ADDRESSIBILITY                                  00088000
+*        GPR13 =                                                        00089000
+*        GPR14 = BALR RETURN REGISTER                                   00090000
+*        GPR15 = BALR TARGET REGISTER AND RETURN CODES                  00091000
+*                                                                       00092000
+* NOTES -                                                               00093000
+*                                                                       00094000
+*        WITH REGARD TO THE IEBIMAGE PROGRAM AS DISTRIBUTED             00095000
+*        WITH THE VS SYSTEMS, THE FOLLOWING ASSUMPTIONS ARE MADE:       00096000
+*              1.  WITHIN IEBIMAGE, GENERAL REGISTER 8 ALWAYS           00097000
+*                  POINTS TO THE IEBIMAGE WORK AREA.                    00098000
+*                  NOTE: THE WORK AREA IS DESCRIBED BY A PLS2           00099000
+*                  DSECT CALLED 'IEBIBLKS'.                             00100000
+*              2.  THE DISPLACEMENT INTO THE WORK AREA OF THE           00101000
+*                  LOCATION 'LIBBUF' IS X'08BC'.  THIS IS THE I/O AREA  00102000
+*                  FOR WRITING OUT THE NEW MEMBER IN THE NAME CARD.     00103000
+*                  THIS AREA IS IN THE FORMAT FOR OUTPUT TO THE         00104000
+*                  SYS1.IMAGELIB DATA SET AND IS THE AREA MADE INTO     00105000
+*                  A TEXT FILE BY THE STOW SVC SIMULATION.              00106000
+*              3.  THE DISPLACEMENT INTO THE WORK AREA OF THE           00107000
+*                  LOCATION 'BLDLNTRY' IS X'003E'.  THIS IS THE BLDL    00108000
+*                  ENTRY USED BY IEBIMAGE AND CONTAINS THE NAME         00109000
+*                  OF THE MODULE BEING PROCESSED.                       00110000
+*                                                                       00111000
+*        THE LARGEST IEBIMAGE MEMBER THAT CAN BE ACCOMMODATED USING     00112000
+*        THIS SIMULATION TECHNIQUE IS 73000 BYTES FOR INPUT (ONLY THE   00113000
+*        WTC NATIONAL GRAPHICS MOD IS THIS LARGE) AND                   00114000
+*        8192 BYTES FOR OUTPUT.                                         00115000
+*                                                                       00116000
+* OPERATION -                                                           00117000
+*                                                                       00118000
+*        1.    VALIDATE THE INPUT PARAMETERS AND DETERMINE IF THE       00119000
+*              INPUT CONTROL FILE EXISTS.  IF NOT, EXIT WITH ERROR      00120000
+*              MESSAGE DMSIMG002W AND RETURN CODE 4 IN R15.             00121000
+*              OTHERWISE, CONTINUE.                                     00122000
+*                                                                       00123000
+*        2.    ISSUE A GETMAIN FOR A 73000-BYTE AREA FOR SIMULATING     00124000
+*              OS LOAD MACROS.                                          00125000
+*              ISSUE A FILEDEF COMMAND FOR A DUMMY SYS1.IMAGELIB FILE   00126000
+*              WITH THE AUXPROC OPTION FOR FIELDING ALL READ/WRITE      00127000
+*              OPERATIONS ON THAT DATASET.                              00128000
+*              ISSUE ALL OTHER REQUIRED FILEDEFS.                       00129000
+*                                                                       00130000
+*        3.    ISSUE THE HNDSVC MACRO TO HANDLE THE FOLLOWING SVC'S:    00131000
+*               SVC  8 (LOAD)                                           00132000
+*               SVC 18 (BLDL)                                           00133000
+*               SVC 21 (STOW)                                           00134000
+*                                                                       00135000
+*        4.    CALL IEBIMAGE.  THIS IMPLICITLY LOADS, IN ADDITION TO    00136000
+*              'IEBIMAGE TEXT', 'IEBIMSGS TEXT' AND 'IEBISCAN TEXT'.    00137000
+*              THIS FILES ARE THE SAME AS THOSE SUPPLIED WITH VS AND    00138000
+*              MUST BE AVAILABLE WHEN GENMOD'ING THIS MODULE.           00139000
+*                                                                       00140000
+*        5.    SAVE THE RETURN CODE FROM IEBIMAGE AND FREEMAIN THE      00141000
+*              PREVIOUSLY GOTTEN STORAGE.  CLEAR ANY FILEDEFS THAT MAY  00142000
+*              HAVE BEEN ISSUED AND RETURN TO THE CALLER WITH           00143000
+*              THE RETURN CODE PASSED BY IEBIMAGE.                      00144000
+*                                                                       00145000
+*        SVC SIMULATION ROUTINES -                                      00146000
+*                                                                       00147000
+*         BLDL SVC                                                      00148000
+*              ISSUE FSSTATE FOR TEXT FILE BEING SEARCHED FOR AND       00149000
+*              SET THE APPROPRIATE RETURN CODES IN THE SVC              00150000
+*              SAVE AREA.                                               00151000
+*                                                                       00152000
+*         OS LOAD SVC -                                                 00153000
+*              A CMS LOAD IS ISSUED TO GET THE MODULE INTO THE          00154000
+*              AREA JUST AFTER THE CURRENT MODULE LOAD.                 00155000
+*              THIS ADDRESS IS THEN PASSED BACK THE ISSUER OF           00156000
+*              THE LOAD SVC IN REGISTER 1.                              00157000
+*                                                                       00158000
+*         READ/WRITE ROUTINE -                                          00159000
+*              IF THIS IS A WRITE OPERATION, TREAT IT AS A NOP.         00160000
+*              THE ACTUAL WRITE WILL BE DONE AT STOW TIME.              00161000
+*              IF THIS IS A READ, USE CMS LOAD TO GET THE MODULE        00162000
+*              INTO THE LOAD AREA.  THEN MOVE THE DATA INTO THE         00163000
+*              USER-SUPPLIED BUFFER FOR THE READ.                       00164000
+*                                                                       00165000
+*         STOW SVC -                                                    00166000
+*              TAKING AS INPUT THE 'LIBBUF' AREA OF THE IEBIMAGE WORK   00167000
+*              AREA, CREATE A TEXT FILE FROM THAT IMAGE WITH FILENAME   00168000
+*              AS STORED IN THE 'BNAME' FIELD IN THE IEBIMAGE WORK      00169000
+*              AREA AND FILETYPE 'TEXT' AND FILEMODE 'A1'.              00170000
+*              THIS IS DONE BY USING THE 'MODCNT' FIELD IN 'LIBBUF'     00171000
+*              AND CREATING AN 'ESD' CARD, A SERIES OF 'TXT' CARDS      00172000
+*              AND AN 'END' CARD.                                       00173000
+*                                                                       00174000
+* RESPONSE -                                                            00175000
+*                                                                       00176000
+*        NONE                                                           00177000
+*                                                                       00178000
+* ERROR MESSAGES -                                                      00179000
+*                                                                       00180000
+*        NONE                                                           00181000
+*.                                                                      00182000
+         EJECT                                                          00183000
+DMKIMG   CSECT                                                          00184000
+         USING NUCON,R0                                        @V60B9BA 00185000
+         SPACE 3                                                        00186000
+         ENTRY DMKIMGBG                                        @V60B9BA 00187000
+         EXTRN IEBIMAGE                                        @V60B9BA 00188000
+DMKIMGBG DS 0H                                                 @V60B9BA 00189000
+GENIMAGE EQU   *                                               @V60B9BA 00190000
+         LR    R12,R15             OUR BASE REGISTER           @V60B9BA 00191000
+         USING DMKIMG,R12          ADDRESSIBILITY              @V60B9BA 00192000
+         ST    R14,SAVE14          SAVE OUR RETURN REGISTER    @V60B9BA 00193000
+         LA    R1,8(R1)            POINT TO FIRST PARAMETER    @V60B9BA 00194000
+         LA    R2,INFN             WHERE IT GOES               @V60B9BA 00195000
+         LA    R3,3                AT MOST 3 PARAMETERS        @V60B9BA 00196000
+LOOP1    CLI   0(R1),X'FF'         FENCE ?                     @V60B9BA 00197000
+         BE    ENDPARMS            XFER IF SO                  @V60B9BA 00198000
+         CLI   0(R1),C'('          START OF OUTPUT OPTIONS ?   @V60B9BA 00199000
+         BE    OPTIONS             XFER IF SO                  @V60B9BA 00200000
+         MVC   0(8,R2),0(R1)       MOVE IN THE SPECIFIED VALUE @V60B9BA 00201000
+         LA    R2,8(R2)            NEXT FIELD                  @V60B9BA 00202000
+         LA    R1,8(R1)            NEXT PARAMETER              @V60B9BA 00203000
+         BCT   R3,LOOP1            TRY AGAIN                   @V60B9BA 00204000
+         SPACE                                                          00205000
+*        MUST BE START OF OPTIONS OR FENCE                              00206000
+         SPACE                                                          00207000
+         CLI   0(R1),X'FF'         FENCE?                      @V60B9BA 00208000
+         BE    ENDPARMS            XFER IF SO                  @V60B9BA 00209000
+         CLI   0(R1),C'('          START OF OUTPUT OPTIONS?    @V60B9BA 00210000
+         BNE   PARMERR             ERROR IF NOT                @V60B9BA 00211000
+OPTIONS  LA    R1,8(R1)            NEXT FIELD                  @V60B9BA 00212000
+         LA    R2,LISTFN           WHERE IT WOULD GO           @V60B9BA 00213000
+         LA    R3,3                AT MOST 3 PARAMETERS        @V60B9BA 00214000
+LOOP2    CLI   0(R1),X'FF'         FENCE?                      @V60B9BA 00215000
+         BE    ENDPARMS            XFER IF SO                  @V60B9BA 00216000
+         CLI   0(R1),C'('          IS IT THE DELIMITER?        @V60B9BA 00217000
+         BE    PARMERR             ERROR IF SO                 @V60B9BA 00218000
+         CLI   0(R1),C')'          ENDING DELIMITER?           @V60B9BA 00219000
+         BE    ENDPARMS            XFER IF SO                  @V60B9BA 00220000
+         MVC   0(8,R2),0(R1)       MOVE IN THE SPECIFIED VALUE @V60B9BA 00221000
+         LA    R1,8(R1)            NEXT PARAMETER              @V60B9BA 00222000
+         LA    R2,8(R2)            NEXT PLACE TO PUT IT        @V60B9BA 00223000
+         BCT   R3,LOOP2            TRY AGAIN                   @V60B9BA 00224000
+         SPACE                                                          00225000
+*        CREATE A DUMMY IMAGELIB SUFFICIENT TO FAKE OUT 'OPEN'          00226000
+         SPACE                                                          00227000
+ENDPARMS FSWRITE FSCB=FSCB2,RECNO=1 JUST THE FIRST RECORD      @V60B9BA 00228000
+         FSWRITE FSCB=FSCB2,RECNO=2 AND THE SECOND ONE         @V60B9BA 00229000
+         FSCLOSE FSCB=FSCB2        CLOSE IT NOW                @V60B9BA 00230000
+         SPACE                                                          00231000
+*        DO THE FILEDEF FOR READS/WRITES TO IMAGELIB                    00232000
+         SPACE                                                          00233000
+         LA    R1,FILEDEF1         DO THE FILEDEF FOR IMAGELIB @V60B9BA 00234000
+         SVC   202                 ...                         @V60B9BA 00235000
+         DC    AL4(FILEBAD)        LOCATION FOR BAD FILEDEF    @V60B9BA 00236000
+         SPACE                                                          00237000
+         LA    R1,FILEDEF2         FILEDEF FOR INPUT CONTROL FI@V60B9BA 00238000
+         SVC   202                 ...                         @V60B9BA 00239000
+         DC    AL4(FILEBAD)        ERROR LOCATION              @V60B9BA 00240000
+         SPACE                                                          00241000
+         LA    R1,FILEDEF3         FOR THE OUTPUT LISTING      @V60B9BA 00242000
+         SVC   202                 ...                         @V60B9BA 00243000
+         DC    AL4(FILEBAD)        ERROR LOCATION              @V60B9BA 00244000
+         SPACE                                                          00245000
+*        FINISHED PROCESSING THE INPUT PARAMETERS                       00246000
+         SPACE                                                          00247000
+         GETMAIN R,LV=BUFSIZE      GET STORAGE FOR LOADS       @V60B9BA 00248000
+         ST    R1,LOADADDR         SAVE THE ADDRESS OF THE AREA@V60B9BA 00249000
+         LINEDIT TEXT='........',DOT=NO,COMP=NO,SUB=(HEXA,LOADADDR),   *00250000
+               DISP=NONE,BUFFA=LOADBCD  GET ADDRESS IN LOAD PLIST       00251000
+         MVC   LDWHERE,LOADBCD+1   MOVE IT TO PLIST            @V60B9BA 00252000
+         SPACE                                                          00253000
+*        SET UP TO TRAP THE SVCS ISSUED BY IEBIMAGE                     00254000
+         SPACE                                                          00255000
+         HNDSVC SET,(8,LOADRTN),(18,BLDLRTN),(21,STOWRTN)      @V60B9BA 00256000
+         SPACE                                                          00257000
+*        NOW WE CALL THE IEBIMAGE PROGRAM TO PROCESS ALL                00258000
+*        THE CARDS IN THE INPUT CONTROL FILE                            00259000
+         SPACE                                                          00260000
+         L     R15,=A(IEBIMAGE)    ROUTINE TO CALL             @V60B9BA 00261000
+         BALR  R14,R15             CALL IT                     @V60B9BA 00262000
+         LR    R6,R15              SAVE IEBIMAGE RETURN CODE   @VMI0006 00263000
+         SPACE                                                          00264000
+         LA    R1,CLEAR            CLEAR THE FILEDEFS          @V60B9BA 00265000
+         SVC   202                 ...                         @V60B9BA 00266000
+         DC    AL4(*+4)                                        @V60B9BA 00267000
+         SPACE                                                          00268000
+*        CLEAR THE SVC HANDLING                                         00269000
+         SPACE                                                          00270000
+         HNDSVC CLR,8,18,21                                    @V60B9BA 00271000
+         SPACE                                                          00272000
+         L     R1,LOADADDR         LOAD ADDRESS FOR FREEMAIN   @V60B9BA 00273000
+         FREEMAIN R,LV=BUFSIZE,A=(1)                           @V60B9BA 00274000
+         LR    R15,R6              RESTORE IEBIMAGE RETURN CODE@VMI0006 00275000
+RETURN   LR    R5,R15              SAVE RETURN CODE            @V60B9BA 00276000
+         FSERASE FSCB=FSCB2        ERASE DUMMY IMAGELIB        @V60B9BA 00277000
+         LA    R1,ERPDSTMP         ERASE $PDSTEMP CMSUT2 ALSO  @V60B9BA 00278000
+         SVC   202                 DO IT                       @V60B9BA 00279000
+         DC    AL4(*+4)            NO ERROR ROUTINE            @V60B9BA 00280000
+         LR    R15,R5              RESTORE RETURN CODE         @V60B9BA 00281000
+         L     R14,SAVE14          GET THE RETURN REGISTER     @V60B9BA 00282000
+         BR    R14                 RETURN TO CALLER            @V60B9BA 00283000
+         SPACE 4                                                        00284000
+PARMERR  LA    R15,100             PARAMETER ERROR             @VMI0006 00285000
+         B     RETURN              RETURN TO CALLER            @V60B9BA 00286000
+         SPACE                                                          00287000
+FILEBAD  LA    R15,104             FILEDEF ERROR               @VMI0006 00288000
+         B     RETURN              RETURN TO CALLER            @V60B9BA 00289000
+         EJECT                                                          00290000
+*.                                                                      00291000
+*        THIS SIMULATES THE OS BLDL MACRO.  THE SIMULATION CONSISTS     00292000
+*        OF ISSUING A CMS STATE FUNCTION.  UPON ENTRY, THE              00293000
+*        STANDARD LINKAGE WILL BE SET UP.                               00294000
+*.                                                                      00295000
+         SPACE                                                          00296000
+BLDLRTN  DS    0H                  SIMULATE BLDL MACRO         @V60B9BA 00297000
+         USING BLDLRTN,R12         ADDRESSIBILITY              @V60B9BA 00298000
+         STM   R14,R12,12(R13)     SAVE THE REGS               @V60B9BA 00299000
+         ST    R13,SAVEAR+4        BACKWARD POINTER            @V60B9BA 00300000
+         LA    R14,SAVEAR          OUR SAVE AREA               @V60B9BA 00301000
+         ST    R14,8(R13)          FORWARD POINTER             @V60B9BA 00302000
+         LR    R13,R14             ESTABLISH NEW SAVE AREA     @V60B9BA 00303000
+         LR    R2,R0               BLDL ENTRY ADDRESS          @V60B9BA 00304000
+         USING BLDNTRY,R2          ADDRESSIBILITY              @V60B9BA 00305000
+         MVC   STNAME,BLDNAME      MOVE IN FOR STATE           @V60B9BA 00306000
+         LA    R1,STPLIST          PLIST ADDRESS               @V60B9BA 00307000
+         SVC   202                 ISSUE THE STATE             @V60B9BA 00308000
+         DC    AL4(*+4)                                        @V60B9BA 00309000
+         OI    BLDATTR,BLD1REC     ONE RECD IN MEMBER          @V60B9BA 00310000
+         L     R3,CURRSAVE         GET ISSUER'S SVC REGISTERS  @V60B9BA 00311000
+         USING SSAVE,R3            ADDRESSIBILITY              @V60B9BA 00312000
+         SR    R4,R4               GET INTO SYSTEM KEY         @V60B9BA 00313000
+         SPKA  0(R4)               ...                         @V60B9BA 00314000
+         LTR   R15,R15             RETURN CODE FROM STATE      @V60B9BA 00315000
+         BNZ   BLDL2               XFER IF NOT ZERO            @V60B9BA 00316000
+         ST    R15,EGPR15          SEND USER THE 0 RC          @V60B9BA 00317000
+         B     BLDRET              AND RETURN                  @V60B9BA 00318000
+BLDL2    C     R15,=F'28'          FILE NOT FOUND?             @V60B9BA 00319000
+         BNE   BLDL3               XFER IF NOT                 @V60B9BA 00320000
+         MVC   EGPR15,=F'4'        THAT'S HIS RETURN CODE      @V60B9BA 00321000
+         B     BLDRET              AND RETURN                  @V60B9BA 00322000
+BLDL3    MVC   EGPR15,=F'12'       OTHER ERROR                 @V60B9BA 00323000
+BLDRET   LA    R4,X'E0'            BACK TO USER KEY            @V60B9BA 00324000
+         SPKA  0(R4)               ..                          @V60B9BA 00325000
+         L     R13,4(R13)          GET CALLER'S SAVE AREA      @V60B9BA 00326000
+         LM    R14,R12,12(R13)     RESTORE HIS REGS            @V60B9BA 00327000
+         BR    R14                 RETURN TO CALLER            @V60B9BA 00328000
+         DROP  R2,R3,R12           NO LONGER NEEDED            @V60B9BA 00329000
+         EJECT                                                          00330000
+*.                                                                      00331000
+*        THIS ROUTINE SIMULATES THE OS LOAD MACRO.                      00332000
+*        IT DOES THIS BY INVOKING THE CMS LOAD FUNCTION AND             00333000
+*        SETTING UP THE REGISTERS AS FOR THE OS LOAD MACRO.             00334000
+*.                                                                      00335000
+         SPACE                                                          00336000
+LOADRTN  DS    0H                  SIMULATE OS LOAD MACRO      @V60B9BA 00337000
+         USING LOADRTN,R12         ADDRESSIBILITY              @V60B9BA 00338000
+         STM   R14,R12,12(R13)     SAVE THE REGS               @V60B9BA 00339000
+         ST    R13,SAVEAR+4        BACKWARD POINTER            @V60B9BA 00340000
+         LA    R14,SAVEAR          OUR SAVE AREA               @V60B9BA 00341000
+         ST    R14,8(R13)          FORWARD POINTER             @V60B9BA 00342000
+         LR    R13,R14             OUR SAVE AREA               @V60B9BA 00343000
+         L     R3,CURRSAVE         GET THE SVC SAVE AREA       @V60B9BA 00344000
+         USING SSAVE,R3            ADDRESSIBILITY              @V60B9BA 00345000
+         L     R4,EGPR0            GET ADDR OF NAME TO LOAD    @V60B9BA 00346000
+         LPR   R4,R4               NEED IT TO BE POSITIVE      @V60B9BA 00347000
+         MVC   MAINSAVE,MAINHIGH   SAVE CURRENT MAINHIGH       @V60B9BA 00348000
+         MVC   LDNAME,0(R4)        NAME TO LOAD                @V60B9BA 00349000
+         LA    R1,LDPLIST          LOAD PLIST                  @V60B9BA 00350000
+         SVC   202                 DO IT                       @V60B9BA 00351000
+         DC    AL4(*+4)                                        @V60B9BA 00352000
+         SR    R5,R5               GET SYSTEM PROTECT KEY      @V60B9BA 00353000
+         SPKA  0(R5)               ...                         @V60B9BA 00354000
+         XC    EGPR15,EGPR15       ZERO RETURN CODE TO USER    @V60B9BA 00355000
+         MVC   EGPR0,LOADADDR      LOAD ADDRESS                @V60B9BA 00356000
+         MVC   MAINHIGH,MAINSAVE   RESTORE OLD MAINHIGH VALUE  @V60B9BA 00357000
+         LA    R5,X'E0'            BACK TO USER PROTECT KEY    @V60B9BA 00358000
+         SPKA  0(R5)               ...                         @V60B9BA 00359000
+         L     R13,4(R13)          CALLER'S SAVE AREA          @V60B9BA 00360000
+         LM    R14,R12,12(R13)     RESTORE THE REGS            @V60B9BA 00361000
+         BR    R14                 RETURN TO CALLER            @V60B9BA 00362000
+         DROP  R3,R12              NO LONGER NEEDED            @V60B9BA 00363000
+         EJECT                                                          00364000
+*.                                                                      00365000
+*        THIS ROUTINE SIMULATES THE OS READ/WRITE FUNCTIONS FOR         00366000
+*        THE IMAGELIB DATA SET.  A WRITE IS TREATED AS A NO-OP,         00367000
+*        SINCE THAT FUNCTION WILL BE SIMULATED AT STOW TIME.            00368000
+*        A READ OPERATION IS SIMULATED BY THE CMS LOAD FUNCTION         00369000
+*        FOLLOWED BY MOVING THE DATA TO THE USER'S AREA.                00370000
+*        UPON ENTRY, REGISTER 1 POINTS TO THE DECB FOR THE              00371000
+*        I/O OPERATION.                                                 00372000
+*.                                                                      00373000
+         SPACE                                                          00374000
+READRTN  DS    0H                  SIMULATE READ/WRITE FUNCTION@V60B9BA 00375000
+         USING READRTN,R15         TEMPORARY ADDRESSIBILITY    @V60B9BA 00376000
+         STM   R0,R15,READSAVE     SAVE THE REGS               @V60B9BA 00377000
+         LR    R12,R15             OUR BASE REGISTER           @V60B9BA 00378000
+         DROP  R15                                             @V60B9BA 00379000
+         USING READRTN,R12         ADDRESSIBILITY              @V60B9BA 00380000
+         LR    R3,R1               DECB POINTER                @V60B9BA 00381000
+         USING DECB,R3             ADDRESSIBILITY              @V60B9BA 00382000
+         L     R6,DECAREA          USER'S DATA AREA            @V60B9BA 00383000
+         L     R4,DECDCBAD         ADDRESS OF DCB              @V60B9BA 00384000
+         USING DCB,R4              ADDRESSIBILITY              @V60B9BA 00385000
+         TM    DCBMACR2,DCBOPWRT   WAS IT WRITE OPERATION?     @V60B9BA 00386000
+         BO    WRITERTN            XFER IF SO                  @V60B9BA 00387000
+         MVC   MAINSAVE,MAINHIGH   SAVE VALUE OF MAINHIGH      @V60B9BA 00388000
+         MVC   LDNAME,STNAME       MOVE IN WHAT TO LOAD        @V60B9BA 00389000
+         LA    R1,LDPLIST          LOAD PLIST                  @V60B9BA 00390000
+         SVC   202                 ...                         @V60B9BA 00391000
+         DC    AL4(*+4)                                        @V60B9BA 00392000
+         SR    R1,R1          GET INTO SYSTEM KEY              @V60B9BA 00393000
+         SPKA  0(R1)          GO DO IT                         @V60B9BA 00394000
+         MVC   MAINHIGH,MAINSAVE   RESTORE VALUE OF MAINHIGH   @V60B9BA 00395000
+         LA    R1,X'E0'       BACK TO USER KEY                 @V60B9BA 00396000
+         SPKA  0(R1)          GO DO IT                         @V60B9BA 00397000
+         L     R7,LOCCNT           GET MODULE SIZE             @V60B9BA 00398000
+         S     R7,STRTADDR         ...                         @V60B9BA 00399000
+         L     R0,LOADADDR         SOURCE ADDRESS              @V60B9BA 00400000
+         LR    R1,R7               SOURCE LENGTH               @V60B9BA 00401000
+         MVCL  R6,R0               MOVE DATA TO USER AREA      @V60B9BA 00402000
+         B     READEXIT            RETURN TO CALLER            @V60B9BA 00403000
+         SPACE                                                          00404000
+WRITERTN SR    R1,R1               GET INTO SYSTEM KEY         @V60B9BA 00405000
+         SPKA  0(R1)               ...                         @V60B9BA 00406000
+         L     R5,DCBDEBAD         ADDRESS OF DEB              @V60B9BA 00407000
+         USING DEB,R5              ADDRESSIBILITY              @V60B9BA 00408000
+         MVI   DEBNMEXT,0          PREVENT ERROR MSG 45        @V60B9BA 00409000
+         LA    R1,X'E0'            BACK TO USER KEY            @V60B9BA 00410000
+         SPKA  0(R1)               ...                         @V60B9BA 00411000
+         SPACE                                                          00412000
+READEXIT L     R15,=F'65536'       RETURN CODE                 @V60B9BA 00413000
+         LM    R0,R14,READSAVE     RESTORE REGS                @V60B9BA 00414000
+         BR    R14                 RETURN TO CALLER            @V60B9BA 00415000
+         DROP  R3,R4,R5,R12                                    @V60B9BA 00416000
+         EJECT                                                          00417000
+*.                                                                      00418000
+*        THIS ROUTINE SIMULATES THE OPERATION OF THE OS STOW MACRO.     00419000
+*        THIS IS DONE BY LOCATING THE MODULE DATA IN THE IEBIBLKS WORK  00420000
+*        AREA AND CREATING A TEXT DECK FROM THIS MODULE.  THE DECK      00421000
+*        CONSISTS OF AN ESD CARD, FOLLOWED BY A NUMBER OF TXT CARDS,    00422000
+*        FOLLOWED BY AN END CARD.                                       00423000
+*.                                                                      00424000
+         SPACE                                                          00425000
+STOWRTN  DS    0H                  SIMULATE STOW MACRO         @V60B9BA 00426000
+         USING STOWRTN,R12         ADDRESSIBILITY              @V60B9BA 00427000
+         STM   R14,R12,12(R13)     SAVE THE REGS               @V60B9BA 00428000
+         ST    R13,SAVEAR+4        BACKWARD POINTER            @V60B9BA 00429000
+         LA    R14,SAVEAR          OUR SAVE AREA               @V60B9BA 00430000
+         ST    R14,8(R13)          FORWARD POINTER             @V60B9BA 00431000
+         LR    R13,R14             OUR SAVE AREA               @V60B9BA 00432000
+         L     R3,CURRSAVE         GET SVC ISSUER'S REG 8      @V60B9BA 00433000
+         USING SSAVE,R3            ADDRESSIBILITY              @V60B9BA 00434000
+         L     R8,EGPR8            GET POINTER TO IEBIBLKS     @V60B9BA 00435000
+         DROP  R3                  NO LONGER NEEDED            @V60B9BA 00436000
+         USING IEBIBLKS,R8         ADDRESSIBILITY              @V60B9BA 00437000
+         MVC   RNFNAME,BNAME       GET NAME OF TEXT FILE       @V60B9BA 00438000
+         MVC   ERFNAME,BNAME       SAME HERE                   @V60B9BA 00439000
+         FSERASE FSCB=FSCB1        ERASE TEMP FILE             @V60B9BA 00440000
+         SPACE                                                          00441000
+*        CREATE THE ESD CARD                                            00442000
+         SPACE                                                          00443000
+         MVC   ESDNAME,BNAME       MODULE NAME                 @V60B9BA 00444000
+         MVC   MODNAME,BNAME+4     GET MODULE NAME IN          @V60B9BA 00445000
+         LH    R2,MODCNT           GET MODULE SIZE             @V60B9BA 00446000
+         LA    R2,8(R2)            MODULE HEADER SIZE ADDED    @V60B9BA 00447000
+         STCM  R2,B'0111',ESDMODLN PUT IT IN THE ESD CARD      @V60B9BA 00448000
+         SR    R1,R1               INITIALIZE THE CARD         @V60B9BA 00449000
+         ST    R1,SEQNO            ..SEQUENCE NUMBERING        @V60B9BA 00450000
+         BAL   R9,GETSEQ           GET FIRST NUM IN PRINTABLE  @V60B9BA 00451000
+         MVC   ESDSEQNO(4),BNAME+4 MODULE ID                   @V60B9BA 00452000
+         ST    R1,ESDSEQNO+4       SEQUENCE NUMBER             @V60B9BA 00453000
+         FSWRITE FSCB=FSCB1,BUFFER=ESDCARD WRITE IT OUT        @V60B9BA 00454000
+         SPACE                                                          00455000
+*        NOW CREATE THE TXT CARDS                                       00456000
+         SPACE                                                          00457000
+         LA    R3,LIBBUF           ADDRESS OF MODULE           @V60B9BA 00458000
+         LA    R4,56               INCREMENT                   @V60B9BA 00459000
+         LR    R5,R3               COMPARAND                   @V60B9BA 00460000
+         AH    R5,MODCNT           ... IS ON THE LAST          @V60B9BA 00461000
+         LA    R5,7(R5)            ... BYTE OF THE MODULE      @V60B9BA 00462000
+TXTLOOP  LR    R7,R3               GET STARTING ADDRESS        @V60B9BA 00463000
+         LA    R6,LIBBUF           GET INITIAL ADDRESS         @V60B9BA 00464000
+         SLR   R7,R6               GET RELATIVE ADDRESS        @V60B9BA 00465000
+         STCM  R7,B'0111',TXTRADD  STORE IT IN THE TXT CARD    @V60B9BA 00466000
+         LR    R6,R5               SEE HOW MANY BYTES TO MOVE  @V60B9BA 00467000
+         LA    R6,1(R6)            NUMBER LEFT IN THE          @V60B9BA 00468000
+         SLR   R6,R3               .. MODULE INTO R6           @V60B9BA 00469000
+         CLR   R4,R6               MORE THAN 56 LEFT?          @V60B9BA 00470000
+         BNH   *+6                 XFER IF SO                  @V60B9BA 00471000
+         LR    R4,R6               USE WHAT'S LEFT             @V60B9BA 00472000
+         STH   R4,TXTCOUNT         SAVE IT IN THE TXT CARD     @V60B9BA 00473000
+         MVC   TXTESDID,ESDID      MOVE IN THE ESD ID          @V60B9BA 00474000
+         LR    R1,R4               FOR EXECUTE MVC             @V60B9BA 00475000
+         BCTR  R1,0                ...                         @V60B9BA 00476000
+         EX    R1,MOVETXT          MOVE IT                     @V60B9BA 00477000
+         BAL   R9,GETSEQ           GET SEQUENCE NUM IN R0,R1   @V60B9BA 00478000
+         MVC   TXTSEQNO(4),BNAME+4 SEQUENCE NUMBER             @V60B9BA 00479000
+         ST    R1,TXTSEQNO+4       MODULE ID                   @V60B9BA 00480000
+         FSWRITE FSCB=FSCB1,BUFFER=TXTCARD  WRITE IT OUT       @V60B9BA 00481000
+         BXLE  R3,R4,TXTLOOP       PUT OUT ANOTHER CARD        @V60B9BA 00482000
+         SPACE                                                          00483000
+*        NOW PUT OUT THE 'END' CARD                                     00484000
+         SPACE                                                          00485000
+         MVC   ENDSEQNO(4),BNAME+4 MODULE ID                   @V60B9BA 00486000
+         BAL   R9,GETSEQ           SEQ NUM INTO R0,R1          @V60B9BA 00487000
+         ST    R1,ENDSEQNO+4       PUT IT IN THE END CARD      @V60B9BA 00488000
+         FSWRITE FSCB=FSCB1,BUFFER=ENDCARD  WRITE IT TO DISK   @V60B9BA 00489000
+         FSCLOSE FSCB=FSCB1        CLOSE THE FILE              @V60B9BA 00490000
+         SPACE                                                          00491000
+*        IT'S BEEN WRITTEN.  NOW GET RID OF THE OLD ONE AND             00492000
+*        RENAME THIS ONE TO THE PROPER NAME.                            00493000
+         SPACE                                                          00494000
+         LA    R1,ERASEF           ERASE PLIST                 @V60B9BA 00495000
+         SVC   202                 ...                         @V60B9BA 00496000
+         DC    AL4(*+4)                                        @V60B9BA 00497000
+         LA    R1,RENAME           RENAME PLIST                @V60B9BA 00498000
+         SVC   202                 ...                         @V60B9BA 00499000
+         DC    AL4(*+4)                                        @V60B9BA 00500000
+         SPACE                                                          00501000
+         L     R3,CURRSAVE         GIVE SVC ISSUER A ZERO RC   @V60B9BA 00502000
+         USING SSAVE,R3            ADDRESSIBILITY              @V60B9BA 00503000
+         SR    R1,R1               GET INTO SYSTEM KEY         @V60B9BA 00504000
+         SPKA  0(R1)               DO IT                       @V60B9BA 00505000
+         XC    EGPR15,EGPR15       MAKE RTN COD = ZERO         @V60B9BA 00506000
+         LA    R1,X'E0'            BACK TO USER KEY            @V60B9BA 00507000
+         SPKA  0(R1)               DO IT                       @V60B9BA 00508000
+         DROP  R3                  NO LONGER NEEDED            @V60B9BA 00509000
+         SPACE                                                          00510000
+         L     R13,4(R13)          CALLER'S SAVE AREA          @V60B9BA 00511000
+         LM    R14,R12,12(R13)     RESTORE THE REGS            @V60B9BA 00512000
+         BR    R14                 RETURN TO CALLER            @V60B9BA 00513000
+         DROP  R8                  NO LONGER NEEDED            @V60B9BA 00514000
+         SPACE                                                          00515000
+MOVETXT  MVC   TXTDATA(*-*),0(R3)  FOR EXECUTE INSTR           @V60B9BA 00516000
+         SPACE 4                                                        00517000
+*        GETSEQ SUBROUTINE - NOTE: R12 IS THE BASE REGISTER             00518000
+*              AND IT IS ASSUMED IT POINTS TO THE LABEL 'STOWRTN'       00519000
+*              ON EXIT, THE SEQUENCE NUMBER IS IN R0,R1                 00520000
+*              AND IS THEN INCREMENTED.                                 00521000
+         SPACE                                                          00522000
+GETSEQ   L     R0,SEQNO            GET ITS CURRENT VALUE       @V60B9BA 00523000
+         CVD   R0,PKDWORD          CONVERT TO PACKED DECIMAL   @V60B9BA 00524000
+         UNPK  UNPKAREA,PKDWORD    UNPACK IT                   @V60B9BA 00525000
+         OI    UNPKAREA+7,X'F0'    MAKE IT PRINTABLE           @V60B9BA 00526000
+         AL    R0,=F'1'            INCREMENT SEQUENCE NUMBER   @V60B9BA 00527000
+         ST    R0,SEQNO            AND STORE ITS NEW VALUE     @V60B9BA 00528000
+         LM    R0,R1,UNPKAREA      PUT IT IN THE REGS          @V60B9BA 00529000
+         BR    R9                  RETURN TO CALLER            @V60B9BA 00530000
+         DROP  R12                                             @V60B9BA 00531000
+         EJECT                                                          00532000
+* CONSTANTS AND WORK AREAS                                              00533000
+         SPACE                                                          00534000
+         DS    0D                                              @V60B9BA 00535000
+FILEDEF1 DC    CL8'FILEDEF'        IMAGELIB FILEDEF            @V60B9BA 00536000
+         DC    CL8'SYSUT1'         DDNAME                      @V60B9BA 00537000
+         DC    CL8'DISK'                                       @V60B9BA 00538000
+         DC    CL8'GENIMAGE'       DUMMY NAME                  @V60B9BA 00539000
+         DC    CL8'CMSUT2'         IT'S IN PSEUDO-PDS FORMAT   @V60B9BA 00540000
+         DC    CL8'('              START OF OPTIONS            @V60B9BA 00541000
+         DC    CL8'AUXPROC'        GET ROUTINE TO TRAP ALL     @V60B9BA 00542000
+         DC    A(READRTN)          ... READS AND WRITES        @V60B9BA 00543000
+         DC    CL4' '              FILLER                      @V60B9BA 00544000
+         DC    8X'FF'              FENCE                       @V60B9BA 00545000
+         SPACE                                                          00546000
+CLEAR    DC    CL8'FILEDEF'        FILEDEF                     @V60B9BA 00547000
+         DC    CL8'*'              ALL OF THEM                 @V60B9BA 00548000
+         DC    CL8'CLEAR'          IT'S THE CLEAR FUNCTION     @V60B9BA 00549000
+         DC    8X'FF'              FENCE                       @V60B9BA 00550000
+         SPACE                                                          00551000
+FILEDEF2 DS    0D                  INPUT CONTROL FILE          @V60B9BA 00552000
+         DC    CL8'FILEDEF'                                    @V60B9BA 00553000
+         DC    CL8'SYSIN'          DDNAME                      @V60B9BA 00554000
+         DC    CL8'DISK'                                       @V60B9BA 00555000
+INFN     DC    CL8'SYSIN'          DEFAULT FILENAME            @V60B9BA 00556000
+INFT     DC    CL8'FILE'           DEFAULT FILETYPE            @V60B9BA 00557000
+INFM     DC    CL8'*'              DEFAULT FILEMODE            @V60B9BA 00558000
+         DC    8X'FF'              FENCE                       @V60B9BA 00559000
+         SPACE                                                          00560000
+FILEDEF3 DS    0D                  OUTPUT LISTING              @V60B9BA 00561000
+         DC    CL8'FILEDEF'                                    @V60B9BA 00562000
+         DC    CL8'SYSPRINT'       DDNAME                      @V60B9BA 00563000
+         DC    CL8'DISK'                                       @V60B9BA 00564000
+LISTFN   DC    CL8'SYSPRINT'       DEFAULT FILENAME            @V60B9BA 00565000
+LISTFT   DC    CL8'LISTING'        DEFAULT FILETYPE            @V60B9BA 00566000
+LISTFM   DC    CL8'A1'             DEFAULT FILEMODE            @V60B9BA 00567000
+         DC    8X'FF'              FENCE                       @V60B9BA 00568000
+         SPACE                                                          00569000
+SAVE14   DS    F                   HOLD RETURN REGISTER HERE   @V60B9BA 00570000
+LOADADDR DS    1A                  PLACE TO DO LOADS           @V60B9BA 00571000
+BUFSIZE  EQU   73000               SIZE OF LOAD AREA           @V60B9BA 00572000
+SAVEAR   DS    16F                 SAVE AREA FOR SVC ROUTINES  @V60B9BA 00573000
+MAINSAVE DS    1A                  SAVE MAINHIGH ACROSS LOADS  @V60B9BA 00574000
+LOADBCD  DS    9X                  PLACE FOR LOAD ADDR         @V60B9BA 00575000
+         SPACE                                                          00576000
+STPLIST  DS    0D                  STATE FOR BLDL SIMULATION   @V60B9BA 00577000
+         DC    CL8'STATE'                                      @V60B9BA 00578000
+STNAME   DC    CL8' '              TEXT FILE NAME              @V60B9BA 00579000
+STTYPE   DC    CL8'TEXT'                                       @V60B9BA 00580000
+         DC    CL8'*'                                          @V60B9BA 00581000
+         DC    8X'FF'              FENCE                       @V60B9BA 00582000
+         SPACE                                                          00583000
+LDPLIST  DS    0D                  PLIST FOR CMS LOADS         @V60B9BA 00584000
+         DC    CL8'LOAD'                                       @V60B9BA 00585000
+LDNAME   DC    CL8' '              FILE TO LOAD                @V60B9BA 00586000
+         DC    CL8'('              START OF OPTIONS            @V60B9BA 00587000
+         DC    CL8'ORIGIN'         WHERE TO LOAD               @V60B9BA 00588000
+LDWHERE  DC    CL8' '              ..ADDRESS OF LOAD AREA      @V60B9BA 00589000
+         DC    CL8'NOMAP'                                      @V60B9BA 00590000
+         DC    8X'FF'              FENCE                       @V60B9BA 00591000
+         SPACE                                                          00592000
+READSAVE DS    16F                 READ/WRITE SAVE AREA        @V60B9BA 00593000
+         SPACE                                                          00594000
+RENAME   DS    0D                  RENAME FOR STOW SIMULATION  @V60B9BA 00595000
+         DC    CL8'RENAME'                                     @V60B9BA 00596000
+         DC    CL8'GENIMAGE'                                   @V60B9BA 00597000
+         DC    CL8'CMSUT1'                                     @V60B9BA 00598000
+         DC    CL8'A'                                          @V60B9BA 00599000
+RNFNAME  DC    CL8' '              NAME OF NEW FILE            @V60B9BA 00600000
+         DC    CL8'TEXT'                                       @V60B9BA 00601000
+         DC    CL8'A'                                          @V60B9BA 00602000
+         DC    8X'FF'              FENCE                       @V60B9BA 00603000
+         SPACE                                                          00604000
+ERASEF   DS    0D                  PLIST TO ERASE OLD COPY     @V60B9BA 00605000
+         DC    CL8'ERASE'                                      @V60B9BA 00606000
+ERFNAME  DC    CL8' '              NAME TO ERASE               @V60B9BA 00607000
+         DC    CL8'TEXT'                                       @V60B9BA 00608000
+         DC    CL8'A'                                          @V60B9BA 00609000
+         DC    8X'FF'              FENCE                       @V60B9BA 00610000
+         SPACE                                                          00611000
+ERPDSTMP DS    0D                  ERASE $PDSTEMP CMSUT2       @V60B9BA 00612000
+         DC    CL8'ERASE'                                      @V60B9BA 00613000
+         DC    CL8'$PDSTEMP'                                   @V60B9BA 00614000
+         DC    CL8'CMSUT2'                                     @V60B9BA 00615000
+         DC    CL8'A'                                          @V60B9BA 00616000
+         DC    8X'FF'              FENCE                       @V60B9BA 00617000
+         SPACE                                                          00618000
+ESDCARD  DS    0D                  FORMAT FOR ESD CARD         @V60B9BA 00619000
+         DC    X'02'               12-2-9 PUNCH                @V60B9BA 00620000
+         DC    CL9'ESD'            NAME OF CARD                @V60B9BA 00621000
+         DC    X'0010'             COUNT FIELD                 @V60B9BA 00622000
+         DC    CL2'  '                                         @V60B9BA 00623000
+ESDID    DC    X'0001'             ESD IDENTIFICATION          @V60B9BA 00624000
+ESDNAME  DC    CL8' '              NAME OF THE ESD             @V60B9BA 00625000
+         DC    F'0'                ESD TYPE AND ADDRESS        @V60B9BA 00626000
+         DC    C' '                BLANK                       @V60B9BA 00627000
+ESDMODLN DC    AL3(0)              MODULE LENGTH               @V60B9BA 00628000
+         DC    CL40' '             BLANK OUT REST OF CARD      @V60B9BA 00629000
+ESDSEQNO DC    CL8' '              CARD SEQUENCE NUMBER        @V60B9BA 00630000
+         SPACE                                                          00631000
+ENDCARD  DS    0D                  FORMAT FOR END CARD         @V60B9BA 00632000
+         DC    X'02'               12-2-9 PUNCH                @V60B9BA 00633000
+         DC    CL4'END '           NAME OF CARD                @V60B9BA 00634000
+         DC    XL3'000000'         ENTRY POINT ADDRESS         @V60B9BA 00635000
+         DC    CL6' '              BLANKS                      @V60B9BA 00636000
+         DC    XL2'0001'           ESD IDENTIFICATION          @V60B9BA 00637000
+         DC    CL17' '             BLANKS                      @V60B9BA 00638000
+         DC    CL10'GENIMAGE  '    UTILITY NAME                @V60B9BA 00639000
+         DC    CL2'01'             VERSION                     @V60B9BA 00640000
+         DC    CL2'00'             LEVEL                       @V60B9BA 00641000
+         DC    CL25' '             BLANKS                      @V60B9BA 00642000
+ENDSEQNO DC    CL8' '              SEQUENCE NUMBER OF CARD     @V60B9BA 00643000
+         SPACE                                                          00644000
+TXTCARD  DS    0D                  FORMAT FOR TXT CARD         @V60B9BA 00645000
+         DC    X'02'               12-2-9 PUNCH                @V60B9BA 00646000
+         DC    CL4'TXT '           NAME OF CARD                @V60B9BA 00647000
+TXTRADD  DC    AL3(0)              TXT RELATIVE ADDRESS        @V60B9BA 00648000
+         DC    CL2'  '             BLANKS                      @V60B9BA 00649000
+TXTCOUNT DC    H'0'                NUMBER OF TXT BYTES         @V60B9BA 00650000
+         DC    CL2'  '             BLANKS                      @V60B9BA 00651000
+TXTESDID DC    H'0'                ESD ID OF TEXT              @V60B9BA 00652000
+TXTDATA  DC    XL56'00'            TEXT                        @V60B9BA 00653000
+TXTSEQNO DC    CL8' '              TXT SEQUENCE NUMBER         @V60B9BA 00654000
+         SPACE                                                          00655000
+IMGCARD  DS    CL80                CARD FOR DUMMY IMAGELIB     @V60B9BA 00656000
+         ORG   IMGCARD                                         @V60B9BA 00657000
+         DC    C'DMSLIB',X'0002',X'00000010'  JUST SO OPEN     @V60B9BA 00658000
+*                                  ... WON'T FAIL              @V60B9BA 00659000
+         SPACE                                                          00660000
+PKDWORD  DS    1D                  PACKED DECIMAL SEQUENCE NUMB@V60B9BA 00661000
+UNPKAREA DS    CL8                 UNPACKED SEQUENCE NUMBER    @V60B9BA 00662000
+SEQNO    DS    1F                  BINARY SEQUENCE NUMBER      @V60B9BA 00663000
+         SPACE                                                          00664000
+FSCB1    FSCB  'GENIMAGE CMSUT1 A1',RECFM=F,BSIZE=80           @V60B9BA 00665000
+FSCB2    FSCB  'GENIMAGE CMSUT2 A1',RECFM=F,BSIZE=80,BUFFER=IMGCARD     00666000
+         EJECT                                                          00667000
+BLDNTRY  DSECT ,                   BLDL ENTRY FORMAT           @V60B9BA 00668000
+BLDLGTH  DS    1F                  ENTRY LENGTH                @V60B9BA 00669000
+BLDNAME  DS    CL8                 MEMBER NAME                 @V60B9BA 00670000
+         DS    XL14                                            @V60B9BA 00671000
+BLDATTR  DS    X                   ATTRIBUTE BYTE              @V60B9BA 00672000
+BLD1REC  EQU   X'01'               1 RECORD MEMBER             @V60B9BA 00673000
+         SPACE 2                                                        00674000
+IEBIBLKS DSECT ,                   IEBIMAGE WORK AREA          @V60B9BA 00675000
+         ORG   IEBIBLKS+X'42'      BLDL ENTRY FOR IEBIMAGE     @V60B9BA 00676000
+BNAME    DS    CL8                 BLDL NAME TO STOW           @V60B9BA 00677000
+         ORG   IEBIBLKS+X'8BC'     PLACE TO PUT THE MODULE     @V60B9BA 00678000
+LIBBUF   DS    CL8192              MODULE AREA                 @V60B9BA 00679000
+         ORG   LIBBUF                                          @V60B9BA 00680000
+MODNAME  DS    CL4                 NAME OF MODULE              @V60B9BA 00681000
+MODRSVD  DS    1H                  RESERVED                    @V60B9BA 00682000
+MODCNT   DS    1H                  BYTES IN BODY OF MODULE     @V60B9BA 00683000
+         SPACE 2                                                        00684000
+DECB     DSECT ,                   DECB FOR BSAM               @V60B9BA 00685000
+         DS    2F                  NOT USED HERE               @V60B9BA 00686000
+DECDCBAD DS    1A                  POINTER TO THE DCB          @V60B9BA 00687000
+DECAREA  DS    1A                  POINTER TO USER DATA AREA   @V60B9BA 00688000
+         SPACE 2                                                        00689000
+DEB      DSECT ,                   DATA EXTENT BLOCK           @V60B9BA 00690000
+         DS    16X                 NOT USED HERE               @V60B9BA 00691000
+DEBNMEXT DS    1X                  NUMBER OF EXTENTS           @V60B9BA 00692000
+         SPACE                                                          00693000
+DCB      DSECT ,                   DATA CONTROL BLOCK          @V60B9BA 00694000
+         DS    XL40                NOT USED HERE               @V60B9BA 00695000
+DCBDDNAM DS    CL8                 DDNAME (BEFORE OPEN)        @V60B9BA 00696000
+         ORG   DCBDDNAM                                        @V60B9BA 00697000
+         DS    CL3                 NOT USED HERE               @V60B9BA 00698000
+DCBMACR2 DS    1X                  MACRF FLAGS 2 (AFTER OPEN)  @V60B9BA 00699000
+DCBOPWRT EQU   X'20'               WRITE OPERATION             @V60B9BA 00700000
+DCBDEBAD DS    1A                  ADDRESS OF DEB(AFTER OPEN)  @V60B9BA 00701000
+         SPACE 3                                                        00702000
+         COPY  EQU                                             @V60B9BA 00703000
+         COPY  DEVTYPES                                        @V60B9BA 00704000
+         NUCON ,                                               @V60B9BA 00705000
+         SVCSAVE ,                                             @V60B9BA 00706000
+         END    DMKIMGBG                                                00707000

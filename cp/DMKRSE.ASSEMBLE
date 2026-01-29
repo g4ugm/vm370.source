@@ -1,0 +1,1498 @@
+RSE      TITLE 'DMKRSE     (CP)        VM/370 - RELEASE 6'              00001000
+         ISEQ  73,80          VALIDATE INPUT SERIALIZATION     @V200820 00002000
+*.                                                                      00003000
+*                                                                       00004000
+* MODULE NAME -                                                         00005000
+*                                                                       00006000
+*        DMKRSERR                                                       00007000
+*                                                                       00008000
+* FUNCTION -                                                            00009000
+*                                                                       00010000
+*        TO RETRY AND ATTEMPT RECOVERY FOR REAL UNIT RECORD DEVICE      00011000
+*        IO ERRORS.                                                     00012000
+*        ALSO TO RECORD HARDWARE ENVIRONMENTAL DATA FOR A 3800.         00012500
+*                                                                       00013000
+* ATTRIBUTES -                                                          00014000
+*                                                                       00015000
+*        REENTRANT, PAGEABLE, CALLED VIA SVC FROM DMKRSPER              00016000
+*                                                                       00017000
+* ENTRY POINTS -                                                        00018000
+*                                                                       00019000
+*        DMKRSERR - ENTRY POINT FOR REAL SPOOL ERROR                    00020000
+*        DMKRSESD - COLLECT 3800 ENVIRONMENTAL SENSE DATA               00020500
+*                                                                       00021000
+* ENTRY CONDITIONS -                                                    00022000
+*                                                                       00023000
+*        GPR8  = ADDRESS OF THE RDEVBLOK FOR THE FAILING DEVICE         00024000
+*        GPR10 = ADDRESS OF THE IOBLOK                                  00025000
+*        GPR11 = ADDRESS OF USER VMBLOK                                 00026000
+*        GPR12 = DMKRSERR BASE ADDRESS                                  00027000
+*        GPR13 = ADDRESS OF STANDARD SAVEAREA                           00028000
+*                                                                       00029000
+* EXIT CONDITIONS -                                                     00030000
+*                                                                       00031000
+*        THE IOBLOK IS RETURNED TO THE CALLER (DMKIOS) WITH,            00032000
+*        1. THE RESTART FLAG SET, IN WHICH CASE THE OPERATION IS        00033000
+*        RESTARTED, STARTING AT THE ADDRESS IN IOBRCAW. 2. THE FATAL    00034000
+*        FLAG SET, INDICATING AN UNRECOVERABLE CONDITION. 3. RESTART,   00035000
+*        FATAL AND ERROR ROUTINE IN CONTROL FLAGS OFF, IN WHICH CASE    00036000
+*        THE IOBLOK IS RETURN TO THE ADDRESS IN IOBIRA  VIA DMKIOS.     00037000
+*                                                                       00038000
+* CALLS TO OTHER ROUTINES -                                             00039000
+*                                                                       00040000
+*        DMKMSWR - TO WRITE ERROR MESSAGES                              00041000
+*        DMKFRET - TO RETURN STORAGE                                    00042000
+*        DMKIOEST - TO UPDATE STATISTICAL COUNTERS                      00042100
+*        DMKIOESD - FORMAT 3800 HARDWARE ENVIRONMENTAL COUNTERS         00042250
+*        DMKERMSG - SEND MESSAGES TO THE OPERATOR                       00042400
+*        DMKIOSQR - TO DO THE BUFFER UNLOAD FOR A 3800                  00042550
+*        DMKIOESD - RECORD RESULTS OF BUFFER UNLOAD FOR FE              00042700
+*        DMKCVTBH - CONVERT ERROR MESSAGE DATA TO PRINTABLE HEX         00042850
+*                                                                       00043000
+* EXTERNAL REFERENCES -                                                 00044000
+*                                                                       00045000
+*        DMKRSP83  -  3811 CONTROL UNIT RESET CCW                       00046000
+*        DMKRSPPR  -  ANCHOR FOR PRINTER FILE CHAIN                     00046500
+*                                                                       00047000
+* TABLES /WORKAREAS -                                                   00048000
+*                                                                       00049000
+*        NONE                                                           00050000
+*                                                                       00051000
+         EJECT                                                          00052000
+*                                                                       00053000
+* REGISTER USAGE -                                                      00054000
+*                                                                       00055000
+*        GPR1  = ADDRESS OF RESTART CAW                                 00056000
+*        GPR2,3,4 = WORK REGISTERS                                      00057000
+*        GPR5  = INTERNAL SUBROUTINE LINKAGE                            00058000
+*        GPR7  = ADDRESS OF IOERBLOK                                    00059000
+*        GPR8  = ADDRESS OF RDEVBLOK                                    00060000
+*        GPR10 = ADDRESS OF IOBLOK                                      00061000
+*        GPR11 = ADDRESS OF VMBLOK                                      00062000
+*        GPR12 = DMKRSE MODULE BASE ADDRESS                             00063000
+*        GPR13 = ADDRESS OF SAVEAREA                                    00064000
+*                                                                       00065000
+* NOTE -                                                                00066000
+*                                                                       00067000
+*        NONE -                                                         00068000
+*                                                                       00069000
+* OPERATION -                                                           00070000
+*                                                                       00071000
+*        1.  FIRST ERROR ENTRY - THE ADDRESS OF THE IO ERROR BLOCK      00072000
+*            (IOERBLOK) IS LOCATED IN THE IOBLOK(IOBIOER). THE          00073000
+*            ADDRESS OF THE IOERBLOK IS MOVED TO THE RDEVBLOK           00074000
+*            (RDEVIOER) AND THE IOBIOER IS ZEROED. THE IOB RESTART      00075000
+*            COUNT IS UPDATED BY ONE, AT THIS POINT THE STATISTICAL     00076000
+*            DATA COUNTERS ARE UPDATED THEN THE IOERBLOK IS CHECKED     00076100
+*            FOR THE TYPE OF ERROR.                                     00076200
+*            THE STATISTICAL COUNTERS ARE UPDATED VIA A CALL TO         00076550
+*            DMKIOEST.  FOR A 3800 PRINTER, A PARAMETER LIST WILL       00076900
+*            HAVE TO BE PASSED INDICATING WHICH COUNTERS TO UPDATE.     00077250
+*            FOR ALL OTHER SPOOLING DEVICES NO PARAMETER IS PASSED.     00077600
+*                                                                       00078000
+*        2.  RETRY ERROR ENTRY - THE ADDRESS OF THE FIRST ERROR         00079000
+*            IOERBLOK IS LOCATED IN THE RDEVBLOK (RDEVIOER), AND        00080000
+*            IN THE IOBLOK (IOBIOER), IF AN ERROR, WILL BE              00081000
+*            THE ADDRESS OF THE NEW IOERBLOK. TWO TYES OF ENTRIES -     00082000
+*                                                                       00083000
+*            (A)  DEVICE END INTERRUPT FROM OPERATOR INTERVENTION,      00084000
+*                 THE IOBLOK IS POSTED WITH THE RESTART FLAG AND        00085000
+*                 ALLOW IOS TO RESTART THE OPERATION.                   00086000
+*            (B)  CHANNEL AND DEVICE END INTERRUPT FROM ERP             00087000
+*                 INITIATED  CCW'S TO OBTAINED OBR INFORMATION.         00088000
+*                                                                       00089000
+*        3.  CONDITION CODE 3 ON SIO - MARK THE IOBLOK                  00090000
+*            AS FATAL ERROR AND ALLOW IOS TO RETURN THE IOBLOK          00091000
+*            TO THE USER.                                               00092000
+*                                                                       00093000
+*        4.  CHANNEL CONTROL AND INTERFACE CONTROL CHECK -              00094000
+*            TAKE APPROPIATE ACTION AS GROVEN BY THE TERMINATION        00095000
+*            AND/OR SEQUENCE CODE IN THE EXTENDED CHANNEL STATUS        00096000
+*            (ECSW).  THE ACTION TAKEN IS DEVICE DEPENDENT AND IS AS    00097000
+*            FOLLOWS.                                                   00098000
+*                                                                       00099000
+*           CODE                ACTION                                  00100000
+*                                                                       00101000
+*            (0)  NO RETRY - THE DEVICE IS UNABLE TO RECOVERY FROM THIS 00102000
+*                 ERROR CONDITION.  MARK THE ERROR AS FATAL AND         00103000
+*                 ALLOW IOS TO RETURN THE IOBLOK TO THE USER.           00104000
+*            (4)  RETRY ONCE - RETRY THE CCW AT WHICH THE ERROR         00105000
+*                 ACCURRED.  IF RETRY FAILS, POST THE ERROR AS          00106000
+*                 FATAL AND ALLOW IOS TO RETURN THE IOBLOK TO THE       00107000
+*                 USER.                                                 00108000
+*            (8)  IGNORE - TREAT THIS CONDITION AS COMPLETE WITHOUT     00109000
+*                 ERROR.  RESTART THE OPERATION WITH THE NEXT CCW.      00110000
+*            (12) RETRY WITH OPERATOR INTERVENTION - RETRY MAY BE       00111000
+*                 POSSIBLE WITH OPERATOR INTERVENTION. GIVE CHANNEL     00112000
+*                 ERROR ACTION MESSAGE AND RESTART THE OPERATION        00113000
+*                 WHEN OPERATOR INTERVENTION IS COMPLETE.               00114000
+*                                                                       00115000
+*        5.  CHANNEL DATA CHECK - RETRY THE OPERATION ONCE,             00116000
+*            IF RETRY FAILS, POST THE ERROR AS FATAL, AND               00117000
+*            ALLOW IOS TO RETURN THE IOBLOK TO THE USER.                00118000
+*        6.  UNITCHECK ERRORS -  RECOVERY PROCEDURES FOR UNITCHECK      00119000
+*            ERRORS ARE DEVICE DEPENDENT, BUT GENERALLY SPEAKING, THE   00120000
+*            FOLLOWING ACTIONS ARE TAKEN.-                              00121000
+*            (A)  COMMAND REJECT - THE OPERATION IS MARK FATAL ERROR IN 00122000
+*                 THE IOBLOK, ERROR MESSAGE DMKRSE500I IS ISSUED        00123000
+*                 AND ALLOW IOS TO RETURN THE IOBLOK TO THE USER.       00124000
+*                                                                       00125000
+*            (B)  INTERVENTION REQUIRED - ONE OF TWO ACTIONS IS TAKEN,  00126000
+*                 DEPENDENT ON THE DEVICE TYPE.                         00127000
+*                 (1)  OPERATOR INTERVENTION - LOCATE THE RESTART CCW   00128000
+*                      ADDRESS AND STORE IN IOBRCAW.  CALL DMKMSWR      00129000
+*                      TO GIVE ERROR MESSAGE DMKRSE501A (INT REQ),      00130000
+*                      RETURN TO IOS WITH IOBERP SET, INDICATING        00131000
+*                      DEVICE END INTERRUPT PENDING FROM DEVICE.        00132000
+*                                                                       00133000
+*                      WHEN DEVICE END INTERRUPT IS RECEIVED, THE       00134000
+*                      OPERATION IS RESTARTED AT THE CCW ADDRESS        00135000
+*                      LOCATED IN IOBRCAW.                              00136000
+*                                                                       00137000
+*                 (2)  FATAL ERROR - OPERATION FOR WHICH INTERVENTION   00138000
+*                      REQUIRED IS FATAL, SUCH AS LOADBUF COMMAND, POST 00139000
+*                      IOBLOK AS FATAL, GIVE ERROR MESSAGE DMKRSE501I   00140000
+*                      (INT REQ) AND ALLOW IOS TO RETURN THE IOBLOK TO  00141000
+*                      THE USER.                                        00142000
+*                                                                       00143000
+*                                                                       00144000
+*            (C)  BUSOUT CHECK - THE OPERATION IS RETRYED ONCE, IF THE  00145000
+*                 RETRY FAILS, GIVE ERROR MESSAGE DMKRSE502I, POST      00146000
+*                 ERROR AS FATAL AND ALLOW IOS TO RETURN THE IOBLOK     00147000
+*                 TO THE USER.                                          00148000
+*                                                                       00149000
+*            (D)  EQUIPMENT CHECK - ONE OF THREE ACTIONS WILL BE        00150000
+*                 TAKEN. (DEVICE DEPENDENT)                             00151000
+*                 (1) EQUIPMENT CHECKS REQUIRING OPERATOR INTERVENTION, 00152000
+*                     LOCATE THE RESTART CCW, STORE ITS ADDRESS         00153000
+*                     IN IOBRCAW.  GIVE ERROR MESSAGE DMKRSE503A (EQUIP 00154000
+*                     CK), RETURN TO IOS WITH IOBERP FLAG SET, TO       00155000
+*                     WAIT FOR DEVICE END INTERRUPT FROM THE            00156000
+*                     DEVICE.  WHEN DEVICE END INTERRUPT IS             00157000
+*                     RECEIVED FROM OPERATOR INTERVENTION               00158000
+*                     COMPLETE, INDICATE RESTART AND ALLOW              00159000
+*                     TO RESTART THE OPERATION.                         00160000
+*                 (2) RETRY ONCE - EQUIPMENT CHECKS NOT REQUIRING       00161000
+*                     OPERATOR INTERVENTION AND CAN BE RETRYED.         00162000
+*                     LOCATE AND SET UP THE RESTART CCW ADDRESS         00163000
+*                     FOR THE FAILING CCW, RETURN TO IOS TO             00164000
+*                     RESTART THE OPERATION.  IF RETRY FAILS,           00165000
+*                     GIVE ERROR MESSAGE DMKRSE503I (EQUIP CK),         00166000
+*                     POST THE ERROR AS FATAL AND RETURN THE            00167000
+*                     IOBLOK TO THE USER VIA IOS.                       00168000
+*                                                                       00169000
+*                 (3) FATAL EQUIPMENT CHECKS - EQUIPMENT CHECKS         00170000
+*                     WHICH CAN NOT BE RETRYED OR NEED                  00171000
+*                     OPERATOR INTERVENTION, POST THE ERROR AS          00172000
+*                     FATAL, GIVE ERROR MESSAGE DMKRSE503I AND          00173000
+*                     ALLOW IOS TO RETURN THE IOBLOK TO THE USER.       00174000
+*                                                                       00175000
+*            (E)  DATA CHECKS - DEVICE DEPENDENT - DATA CHECKS          00176000
+*                 REQUIRING OPERATOR INTERVENTION, SET UP               00177000
+*                 RESTART CCW ADDRESS, GIVE MESSAGE DMKRSE504A, AND     00178000
+*                 RETURN TO IOS TO WAIT FOR DEVICE END INTERRUPT.       00179000
+*                 WHEN DEVICE END INTERRUPT IS RECEIVED FROM            00180000
+*                 OPERATOR INTERVENTION COMPLETE, RETURN TO IOS         00181000
+*                 ALLOW IOS TO RESTART THE OPERATION.                   00182000
+*                                                                       00183000
+*                 DATA CHECKS NOT REQUIRING OPERATOR INTERVENTION,      00184000
+*                 SET UP THE RESTART CCW ADDRESS, RETRY THE             00185000
+*                 OPERATION, IF RETRY FAILS, POST THE ERROR AS          00186000
+*                 FATAL, GIVE ERROR MESSAGE DMKRSE504I (DATA CK)        00187000
+*                 AND ALLOW IOS TO RETURN THE IOBLOK TO THE USER.       00188000
+*            (F)  BUFFER PARITY CHECK - LOCATE THE RESTART CCW          00189000
+*                 ADDRESS, RETRY THE OPERATION ONCE, IF                 00190000
+*                 REQUIRED (DEVICE DEPENDENT), OTHERWISE POST           00191000
+*                 ERROR AS FATAL, GIVE ERROR MESSAGE DMKRSE529I         00192000
+*                 (PARITY CK) AND ALLOW IOS TO RETURN THE               00193000
+*                 IOBLOK TO THE USER.                                   00194000
+*                                                                       00195000
+*            (G)  PROGRAM CONTROLLED INTERRUPT AND PROTECTION CHECKS    00196000
+*                 POSTED AS FATAL ERROR, GIVE ERROR MESSAGE             00197000
+*                 DMKRSE520I (CHAN ERROR) AND ALLOW IOS                 00198000
+*                 TO RETURN THE IOBLOK TO THE USER.                     00199000
+*                                                                       00200000
+*            (H)  ERRORS NOT STATED OR EXCEPTION WILL BE GIVEN BY       00201000
+*                 DEVICE TYPE.                                          00202000
+*                                                                       00203000
+*            (I)  2501 READER -                                         00204000
+*                 OVERRUN CHECK - LOCATE THE RESTART CCW ADDRESS,       00205000
+*                 GIVE ERROR ACTION MESSAGE DMKRSE505A (OVERRUN         00206000
+*                 CK), RETURN TO IOS TO WAIT FOR OPERATOR               00207000
+*                 INTERVENTION.  WHEN OPERATOR INTERVENTION IS          00208000
+*                 COMPLETE, RETURN TO IOS TO RESTART THE DEVICE.        00209000
+*                                                                       00210000
+*            (J)  1403-1443-3211-3203 PRINTERS                          00211000
+*                 CHANNEL 9 - LOCATE THE NEXT CCW ADDRESS               00212000
+*                 AND RETURN TO IOS TO RESTART THE DEVICE.              00213000
+*                                                                       00214000
+*            (K)  2520-2540 PUNCHES                                     00215000
+*                 EQUIPMENT CHECKS - THE CCW ADDRESS IS LOCATED         00216000
+*                 TO REPUNCH THE LAST TWO CARDS ON THE FIRST            00217000
+*                 EQUIPMENT CHECK, RESTART THE OPERATION, IF RETRY      00218000
+*                 FAILS, RETRY THE FAILING CCW, AFTER 20                00219000
+*                 CONSECUTIVE RETRIES, POST ERROR AS FATAL,             00220000
+*                 GIVE ERROR MESSAGE DMKRSE503I (EQUIP CK) AND ALLOW    00221000
+*                 IOS TO RETURN THE IOBLOK TO THE USER.                 00222000
+*                                                                       00223000
+*            (L)  3505 READER                                           00224000
+*                 FORMAT CHECK - THIS ERROR SHOULD NOT                  00225000
+*                 ACCURR SINCE SPOOLING DOES NOT USE OMR OR RCE,        00226000
+*                 POST THE ERROR AS FATAL, GIVE ERROR MESSAGE           00227000
+*                 DMKRSE525I (FORMAT CK), AND ALLOW IOS TO              00228000
+*                 RETURN THE IOBLOK TO THE USER.                        00229000
+*                                                                       00230000
+*            (M)  3505 READER AND 3525 PUNCH -                          00231000
+*                 PERMANENT ERROR CHECK - THE OPERATOR HAS              00232000
+*                 PRESSED THE PERMANENT ERROR KEY AND MAKE THE          00233000
+*                 DEVICE READY.  POST THE ERROR AS FATAL,               00234000
+*                 GIVE ERROR MESSAGE DMKRSE508I (PERM CK), AND          00235000
+*                 ALLOW IOS TO RETURN THE IOBLOK TO THE USER.           00236000
+*                                                                       00237000
+*            (N)  3211 PRINTER                                          00238000
+*                 CANCEL KEY - POST THE ERROR AS FATAL, GIVE            00239000
+*                 ERROR MESSAGE DMKRSE503I (EQUIP CK), AND ALLOW        00240000
+*                 IOS TO RETURN THE IOBLOK TO THE USER.                 00241000
+*                                                                       00242000
+*                 OUTBOARD RECORDING DATA - THE STANDARD UNIT CHECK     00243000
+*                 RECORD IS RECORDED ON THE IO ERROR RECORDING          00244000
+*                 CYLINDER BY DMKIOE VIA DMKIOS.  ADDITIONAL            00245000
+*                 INFORMATION IS REQUIRED FOR CERTAIN ERROR             00246000
+*                 CONDITIONS.                                           00247000
+*                    1. THE CONTENTS OF THE FCB BUFFER.                 00248000
+*                    2. THE CONTENTS OF THE UCS BUFFER.                 00249000
+*                    3. THE CHECK DATA FOR THE PRINT LINE BUFFER.       00250000
+*                    4. THE CONTENTS OF THE PRINT LINE BUFFER.          00251000
+*                    5. THE FIRST TEN CHARACTERS IN ERROR.              00252000
+*                 THE INFORMATION IS OBTAINED AND STORED                00253000
+*                 IN THE OBR3211 EXTENTION OF THE IOERBLOK.             00254000
+*                                                                       00255000
+*             (O) 3203 PRINTER                                          00255150
+*                  CANCEL KEY - NONE EXISTS ON THIS PRINTER.            00255300
+*                                                                       00255450
+*                  OUTBOARD RECORDING DATA - SAME AS 3211               00255600
+*                  PRINTER (ABOVE)                                      00255750
+*                                                                       00256000
+*             (P) 3800 PRINTING SUBSYSTEM                               00256030
+*                  CANCEL KEY - SAME AS FOR A 3211                      00256060
+*                                                                       00256090
+*                  INTERVENTION REQD - ISSUE MESSAGE DMKRSE242I VIA     00256120
+*                        CALL TO DMKERMSG. IF 'SYSTEM RESTART' IS       00256150
+*                        ALSO INDICATED DO THAT FUNCTION AND THEN       00256180
+*                        RETURN TO IOS WITH IOBERP SET.                 00256210
+*                                                                       00256240
+*                  SYSTEM RESTART REQUIRED - THIS INDICATES THAT        00256270
+*                        THE PAGE BUFFER HAS POSSIBLY BEEN DESTROYED.   00256300
+*                        ISSUE MESSAGE DMKRSE255I SHOWING THE PAGE      00256330
+*                        BACKUP COUNT AND HOLD AND REQUEUE EACH         00256360
+*                        FILE ON THE DELAYED PURGE QUEUE ISSUING        00256390
+*                        DMKRSE252I FOR EACH ONE SO REQUEUED            00256420
+*                                                                       00256450
+*                  EQUIPMENT CHECK (INTERNAL ERROR LOG FULL) -          00256480
+*                        CALL DMKRSESD TO DO THE 'SENSE ERROR LOG'      00256510
+*                        WHICH WILL CLEAR THE EQUIPMENT CHECK AND       00256540
+*                        THEN RESTART THE CCW CHAIN.                    00256570
+*                                                                       00256600
+*                  LOAD CHECK - IF IT IS AN FCB-FORMST MISMATCH,        00256630
+*                        AND DMKTCS IS IN CONTROL, INDICATE THAT FACT   00256660
+*                        BY PLACING 'FCBM' IN IOBMISC2.  IF ANY OTHER   00256690
+*                        CHECK INDICATING BAD LOAD MODULES, PLACE       00256720
+*                        'BADM' IN IOBMISC2. OTHERWISE IGNORE LD CHK.   00256750
+*                                                                       00256780
+*                    OUTBOARD RECORDING DATA - SAME AS 3211             00256810
+*                                                                       00257000
+*            00 - INTERFACE DISCONNECT                                  00258000
+*            01 - STOP OR STACK OR NORMAL TERMINATION                   00259000
+*            10 - SELECTIVE RESET                                       00260000
+*            11 - SYSTEM RESET                                          00261000
+*                                                                       00262000
+*        8.  SEQUENCE CODE BITS 5,6 AND 7 OF BYTE 3                     00263000
+*                                                                       00264000
+*            000 - A CHANNEL DETECTED ERROR ACCURRED DURING THE         00265000
+*                  OF A TEST I/O INSTRUCTION.                           00266000
+*                                                                       00267000
+*            001 - COMMAND OUT WITH A NON-ZERO COMMAND BYTE             00268000
+*                  ON BUS OUT HAS BEEN SENT BY THE CHANNEL,             00269000
+*                  BUT DEVICE STATUS HAS NOT YET BEEN ANALYZED          00270000
+*                  BY THE CHANNEL.                                      00271000
+*                                                                       00272000
+*            010 - THE COMMAND HAS BEEN ACCEPTED BY THE DEVICE BUT NO   00273000
+*                  DATA HAS BEEN TRANSFERRED.                           00274000
+*                                                                       00275000
+*            011 - AT LEAST ONE BYTE OF DATA HAS BEEN TRANSFERRED       00276000
+*                  OVER THE INTERFACE.                                  00277000
+*                                                                       00278000
+*            100 - THE COMMAND IN THE CURRENT CCW HAS EITHER NOT YET    00279000
+*                  BEEN SENT TO THE DEVICE OR ELSE WAS SENT BUT NOT     00280000
+*                  ACCEPTED BY THE DEVICE.                              00281000
+*                                                                       00282000
+*            101 - THE COMMAND HAS BEEN ACCEPTED, BUT DATA TRANSFER IS  00283000
+*                  UNPREDICTABLE.                                       00284000
+*                                                                       00285000
+*            110 - RESERVED.                                            00286000
+*                                                                       00287000
+*            111 - RESERVED.                                            00288000
+*                                                                       00289000
+* RESPONSE -                                                            00290000
+*                                                                       00291000
+*        NONE                                                           00292000
+*                                                                       00293000
+* ERROR MESSAGES -                                                      00294000
+*                                                                       00295000
+*        DMKRSE242I PRT    (CUU) INT REQD, STATUS CODE=(SENSEBYTE4)     00295200
+*        DMKRSE255I PRT    (CUU) PAGE BUFFER DESTROYED, BACKUP          00295400
+*                            PAGE COUNT = (COUNT)                       00295600
+*        DMKRSE252I PRT    (CUU) FILE (SPLID) REQUEUED AND HELD         00295800
+*        DMKRSE500I (TYPE) (CCU) CMD REJECT CMD=(CM) SNS=(SENSE)        00296000
+*        DMKRSE501A (TYPE) (CCU) INT REQ                                00297000
+*        DMKRSE501I (TYPE) (CCU) INT REQ    CMD=(CM) SNS=(SENSE)        00298000
+*        DMKRSE502I (TYPE) (CCU) BUSOUT CK  CMD=(CM) SNS=(SENSE)        00299000
+*        DMKRSE503I (TYPE) (CCU) EQUIP CK   CMD=(CM) SNS=(SENSE)        00300000
+*        DMKRSE503A (TYPE) (CCU) EQUIP CK   CMD=(CM) SNS=(SENSE)        00301000
+*        DMKRSE504A (TYPE) (CCU) DATA CK    CMD=(CM) SNS=(SENSE)        00302000
+*        DMKRSE504I (TYPE) (CCU) DATA CK    CMD=(CM) SNS=(SENSE)        00303000
+*        DMKRSE505A (TYPE) (CCU) OVERRUN CK CMD=(CM) SNS=(SENSE)        00304000
+*        DMKRSE508I (TYPE) (CCU) PERM ERROR CMD=(CM) SNS=(SENSE)        00305000
+*        DMKRSE520I (TYPE) (CCU) CHAN ERROR CMD=(CM) SNS=(SENSE)        00306000
+*        DMKRSE520A (TYPE) (CCU) CHAN ERROR CMD=(CM) SNS=(SENSE)        00307000
+*        DMKRSE521I (TYPE) (CCU) NO DEVICE  CMD=(CM) SNS=(SENSE)        00308000
+*        DMKRSE524I (TYPE) (CCU) LOAD-CHECK CMD=(CM) SNS=(SENSE)        00309000
+*        DMKRSE525I (TYPE) (CCU) FORMAT CK  CMD=(CM) SNS=(SENSE)        00310000
+*        DMKRSE529I (TYPE) (CCU) PARITY CK  CMD=(CM) SNS=(SENSE)        00311000
+*                                                                       00312000
+*.                                                                      00313000
+         EJECT                                                          00314000
+         COPY  OPTIONS                                                  00315000
+         COPY  LOCAL               OPTIONS                              00316000
+         EJECT                                                          00317000
+DMKRSE   CSECT                                                          00318000
+         SPACE 2                                                        00319000
+ID       DC    CL8'DMKRSE'         MODULE NAME                          00320000
+         SPACE 2                                                        00321000
+         EXTRN DMKRSP83,DMKMSWR                                         00322000
+         EXTRN DMKIOEST       STATISTICAL COUNTER UPDATE       @VA03757 00322100
+         EXTRN DMKIOSQR                                        @V60B9BA 00322200
+         EXTRN DMKIOESD                                        @V60B9BA 00322300
+         EXTRN DMKERMSG                                        @V60B9BA 00322400
+         EXTRN DMKCVTBH                                        @V60B9BA 00322500
+         EXTRN DMKCVTBD                                        @V60B9BA 00322600
+         EXTRN DMKRSPPR                                        @V60B9BA 00322700
+         SPACE 3                                                        00323000
+         USING PSA,R0                                                   00324000
+         USING IOERBLOK,R7                                              00325000
+         USING RDEVBLOK,R8                                              00326000
+         USING IOBLOK,R10                                               00327000
+         USING VMBLOK,R11                                               00328000
+         USING SAVEAREA,R13                                             00329000
+         SPACE 3                                                        00330000
+DMKRSERR RELOC                                                          00331000
+         SWITCH          MAKE SURE WE ARE ON THE IO PROCESSOR  @V4075A0 00331100
+         SPACE                                                          00332000
+         SR    R0,R0               ..                                   00333000
+         L     R7,RDEVIOER         SET BASE FOR IOERBLOK                00334000
+         LTR   R7,R7               FIRST TIME FOR THIS ERROR ?          00335000
+         BZ    FIRST               YES -- IOERBLOK ON RDEVBLOK          00336000
+         BAL   R5,UPDTCSW          UPDATE IOERCSW                       00337000
+         ICM   R15,B'1111',IOBIOER DOES 2ND IOERBLOK EXIST ?   @VA01254 00338000
+         BZ    FIRST0         NO, GO TEST XOB FLAG             @VA01254 00339000
+         TM    IOERCSW+5-IOERBLOK(R15),IFCC+CCC+CDC IS CHANNEL @VA01254 00340000
+*                             ERROR INDICATED ?                         00341000
+         BNZ   FIRSTDE        YES, GO CHAIN IOERBLOK           @VA01254 00342000
+FIRST0   EQU   *                                               @VA01254 00343000
+         TM    IOERFLG1,IOERXERP   GETTING DATA FOR XOBR3211   @V386298 00343600
+*                                  OR XOBR3203 ??                       00344200
+         BO    UNITCHK             YES --                               00345000
+         TM    IOERFLG1,IOERDEPD   DEVICE END PENDING FOR THIS DEVICE   00346000
+         BZ    FIRST               NO -- TREAT AS FIRST ERROR           00347000
+         OI    IOERFLG1,IOERDERD   SET DEVICE END RECEIVED              00348000
+FIRSTDE  EQU   *                                               @VA01254 00349000
+         LTR   R15,R15        DOES 2ND IOERBLOK EXIST ?        @VA01254 00350000
+         BZ    EXITDE              NO - USE THIS DEVICE END             00351000
+         ST    R15,RDEVIOER        CHAIN NEW IOERBLOK FIRST             00352000
+         ST    R7,0(R15)           ..                                   00353000
+         LR    R7,R15              ADDRESS OF NEW IOERBLOK              00354000
+         ST    R0,IOBIOER          CLEAR POINTER                        00355000
+         BAL   R5,UPDTCSW          UPDATE IOERCSW                       00356000
+         TM    IOERCSW+5,IFCC+CCC+CDC IS CHANNEL ERROR         @VA01254 00357000
+*                             INDICATED ?                               00358000
+         BNZ   FATAL          ERROR ON ERROR RECOVERY          @VA01254 00359000
+         CLI   RDEVTYPE,TYP3211 3211 PRINTER ?                 @VA00701 00360000
+         BNE   EXITDE        NO -- BRANCH                      @VA00701 00361000
+         TM    IOERDATA+1,X'02' CANCEL KEY ? (3211)            @VA00701 00362000
+         BZ    EXITDE        NO -- BRANCH                      @VA00701 00363000
+         B     FATAL         ERROR ON ERROR RECOVERY           @VA00701 00364000
+         SPACE                                                          00365000
+FIRST    L     R7,IOBIOER          LOAD NEW IOERBLOK                    00366000
+         LTR   R7,R7               IS THERE ONE ??                      00367000
+         BZ    FATAL1              NO -- FATAL ERROR                    00368000
+         BAL   R5,UPDTCSW          UPDATE IOERCSW                       00369000
+         CLC   =C'LOADBUF',VMCOMND LOADBUF COMMAND ??                   00370000
+         BE    FIRST1              YES -- RDEVSPL MISSING FOR COMMAND   00371000
+         ICM   R9,B'1111',RDEVSPL  ACTIVE FILE ??                       00372000
+         BZ    EREXIT1             NO -- FORGET IT                      00373000
+FIRST1   LH    R1,IOBRCNT          UPDATE RESTART COUNT                 00374000
+         LA    R1,1(R1)            BY ONE                               00375000
+         STH   R1,IOBRCNT          AND STORE                            00376000
+         L     R1,RDEVIOER         CHAIN NEW IOERBLOK TO                00377000
+         ST    R7,RDEVIOER         RDEVBLOK                             00378000
+         ST    R1,IOERPNT          ..                                   00379000
+         LTR   R1,R1          REALLY FIRST TIME ??             @VA03757 00379050
+         BNZ   NOCALL         NO, FORGET UPDATING SDR COUNTERS @VA03757 00379100
+         CLI   RDEVTYPE,TYP3505 3505/3525 DEVICES ???          @VA03757 00379150
+         BE    NOCALL         YES, FORGET SDR                  @VA03757 00379200
+         NI    IOERFLG3,X'FF'-IOERREAD RESET FLAG              @VA03757 00379250
+         TM    IOERDATA,X'08' DATA CHECK PRESENT ??            @VA03757 00379300
+         BZ    SDRSTAT        NO                               @VA03757 00379350
+         BAL   R5,RDOPCK      GO CHECK FOR READ FLAG           @VA03757 00379400
+         SPACE 1                                                        00379450
+SDRSTAT  EQU   *                                               @VA03757 00379500
+         SLR   R1,R1          CLEAR PARAMETER REG              @VA03757 00379550
+         CLI   RDEVTYPE,TYP3800    IS IT A 3800 ?              @V60B9BA 00379600
+         BNE   NOPARM              XFER IF NOT                 @V60B9BA 00379650
+         LA    R0,PARMLEN          LENGTH OF AREA IN DBLWDS    @V60B9BA 00379700
+         CALL  DMKFREE             GET A STORAGE AREA          @V60B9BA 00379750
+         MVC   0(L'PARM3800,R1),PARM3800  MOVE IN PROTOTYPE    @V60B9BA 00379800
+         TM    IOERCSW+5,CDC       CHANNEL DATA CHECK          @V60B9BA 00379850
+         BZ    *+8                 XFER IF NOT                 @V60B9BA 00379900
+         MVI   2(R1),X'2F'         INCREMENT THIS COUNTER      @V60B9BA 00379950
+         TM    IOERCSW+5,CCC       CHANNEL CONTROL CHECK ?     @V60B9BA 00380000
+         BZ    *+8                 XFER IF NOT                 @V60B9BA 00380050
+         MVI   3(R1),X'2F'         INCREMENT THIS COUNTER      @V60B9BA 00380100
+         TM    IOERCSW+5,IFCC      INTERFACE CONTROL CHECK ?   @V60B9BA 00380150
+         BZ    *+8                 XFER IF NOT                 @V60B9BA 00380200
+         MVI   4(R1),X'2F'         INCREMENT COUNTER           @V60B9BA 00380250
+         CLI   IOERDATA+4,X'32'    CFS MISFOLD ?               @V60B9BA 00380300
+         BNE   *+8                 XFER IF NOT                 @V60B9BA 00380350
+         MVI   5(R1),X'2F'         INCREMENT COUNTER           @V60B9BA 00380400
+         CLI   IOERDATA+4,X'42'    BTS STACKER CHECK ?         @V60B9BA 00380450
+         BNE   *+8                 XFER IF NOT                 @V60B9BA 00380500
+         MVI   6(R1),X'2F'         INCREMENT COUNTER           @V60B9BA 00380550
+         CLI   IOERDATA+4,X'41'    NO BURST CHECK ?            @V60B9BA 00380600
+         BNE   *+8                 XFER IF NOT                 @V60B9BA 00380650
+         MVI   7(R1),X'2F'         INCREMENT COUNTER           @V60B9BA 00380700
+         SR    R0,R0               ZERO OUT R0                 @V60B9BA 00380750
+NOPARM   CALL  DMKIOEST,AFFINITY                               @V60B9BA 00380800
+NOCALL   EQU   *                                               @VA03757 00380850
+         SPACE 1                                                        00380900
+         ST    R0,IOBIOER     CLEAR IOERBLOK POINTER IN IOB             00380950
+         TM    IOBSTAT,IOBCC3      WAS IT CONDITION CODE 3 ON SIO       00381000
+         BO    FATAL1              YES -- FATAL ERROR                   00382000
+         TM    IOERCSW+5,IFCC+CCC  INTERFACE OR CHANNEL CONTROL CHECK ? 00383000
+         BNZ   CHANERR             YES -- CHECK FOR TYPE OF RESTART     00384000
+         TM    IOERCSW+5,CDC       CHANNEL DATA CHECK ??                00385000
+         BO    RETRY1              YES -- RETRY ONCE                    00386000
+         TM    IOBCSW+5,CHC        CHAINING CHECK ??                    00387000
+         BO    RETRY1              YES - RETRY ONCE                     00388000
+         TM    IOBCSW+4,ATTN+CUE+SM TEST IMPOSSIBLE CONDITIONS          00389000
+         BNZ   RETRY1              RETRY ONCE                           00390000
+         SPACE                                                          00391000
+         SPACE                                                          00392000
+         TM    RDEVFLAG,RDEVTERM+RDEVBACK+RDEVRSTR FLUSH - BACKSPACE    00393000
+*                                  OR BACKSPACE FILE ??                 00394000
+         BZ    TESTUC              NO -- CHECK FOR UNIT CHECK           00395000
+         CLC   =C'SEP ',IOBMISC2   PRINTING OR PUNCHING SEPARATOR DATA  00396000
+         BNE   EXITDE              NO -- EXIT FOR IMMEDIATE BACKSPACE   00397000
+         CLC   =C'TCS ',IOBMISC2   SETTING UP A 3800 ?         @V60B9BA 00397300
+         BNE   EXITDE              NO -- EXIT FOR IMM BACKSPAC @V60B9BA 00397600
+         TM    RDEVFLAG,RDEVTERM   FLUSH REQUESTED ?                    00398000
+         BO    FATAL1              YES --                               00399000
+TESTUC   TM    IOERCSW+4,UC        UNIT CHECK ??                        00400000
+         BZ    FATAL          NO -- FATAL ERROR ALL OTHERS     @VW01227 00401000
+         CLI   IOERDATA,X'00' ANY SENSE INFORMATION ??         @VA00701 00402000
+         BE    RETRY1        NO -- RETRY THE OPERATION ONCE    @VA00701 00403000
+         SPACE                                                          00404000
+         SPACE 2                                                        00405000
+UNITCHK  EQU   *  HERE TO TEST SENSE INFORMATION ON UNIT CHECK          00406000
+         CLI   RDEVTYPE,TYP3505    3525 PUNCH OR 3505 READER ??         00407000
+         BE    ERR35XX             YES --                               00408000
+         TM    RDEVTYPC,CLASURO    OUTPUT DEVICE ??                     00409000
+         BO    TSTURO              YES --                               00410000
+*                                                                       00411000
+*        ERROR RECOVERY FOR 2540 AND 2501 READERS                       00412000
+*                                                                       00413000
+         TM    IOERDATA,EQCHK      EQUIPMENT CHECK ??                   00414000
+         BO    DELAY2              YES -- OPERATOR INTERVENTION         00415000
+*                                  REQUIRED                             00416000
+         TM    IOERDATA,INTREQ     INTERVENTION REQUIRED ???            00417000
+         BO    DELAY               YES -- WAIT FOR IT                   00418000
+         TM    IOERDATA,BUSOUT     BUSOUT CHECK ???                     00419000
+         BO    RETRY1              YES -- RETRY ONCE                    00420000
+         TM    IOERDATA,DATACHK+4  DATA CHECK ?? OVERRUN ??             00421000
+         BNZ   DELAY2              YES -- OPERATOR INTERVENTION         00422000
+         B     FATAL1              ALL OTHERS FATAL ERROR               00423000
+         SPACE                                                          00424000
+         SPACE                                                          00425000
+TSTURO   EQU   *  OUTPUT DEVICES                                        00426000
+         TM    RDEVTYPE,TYP3211    IS IT A 3203/3211 PRINTER?? @V386298 00426700
+         BO    ERR3211             YES--BRANCH INTO EXISTING   @V386298 00427400
+*                                  3211 ERROR LOGIC                     00428100
+         CLI   RDEVTYPE,TYP3800    IS IT A 3800 PRINTER ?      @V60B9BA 00428400
+         BE    ERR3800             XFER IF SO                  @V60B9BA 00428700
+         SPACE                                                          00429000
+         TM    IOERDATA,INTREQ+EQCHK INTERVENTION AND          @VA00701 00430000
+*                            EQUIPMENT CK                               00431000
+         BNO   TESTTYPE      NO -- CHECK FOR PUNCH OR PRINTER  @VA00701 00432000
+         TM    IOBSTAT,IOBCC1 STATUS STORED ON INITIAL         @VA00701 00433000
+*                            SELECTION                                  00434000
+         BO    DELAY2        YES -- FOR OPERATOR ACTION        @VA00701 00435000
+TESTTYPE TM    RDEVTYPE,TYPPUN 2540P ?? PUNCH                  @VA00701 00436000
+         BO    TSTPUN              YES -                                00437000
+*                                                                       00438000
+*              1403 AND 1443 PRINTER ERROR ROUTINE                      00439000
+*                                                                       00440000
+         TM    IOERDATA,EQCHK      EQUIPMENT CHECK ??                   00441000
+         BO    RETRY1              YES -- RETRY ONCE                    00442000
+         CLI   RDEVTYPE,TYP1443    1443 PRINTER                         00443000
+         BE    TSTPRTNR            YES -- GO TEST FOR INTERVENTION      00444000
+         TM    IOERDATA,4          UCS GEN STOR PARITY ERROR ?? (1403)  00445000
+         BO    FATAL               YES -- FATAL ERROR                   00446000
+TSTPRTNR TM    IOERDATA,INTREQ     INTERVENTION REQUIRED ??             00447000
+         BO    DELAY               YES -- WAIT FOR IT                   00448000
+         TM    IOERDATA,BUSOUT     BUSOUT CHECK ??                      00449000
+         BO    RETRY1              YES -- RETRY ONCE                    00450000
+         TM    IOERDATA,1          CHANNEL 9 ???                        00451000
+         BO    IGNORE              YES -- IGNORE                        00452000
+         CLI   RDEVTYPE,TYP1443    1443 PRINTER ??                      00453000
+         BE    FATAL1              YES  -- FATAL ERROR                  00454000
+         TM    IOERDATA,DATACHK    DATA CHECK ??? (1403)                00455000
+         BO    NXTDELAY            YES -- GET NEXT CCW                  00456000
+         B     FATAL1              FATAL ERROR ALL OTHERS               00457000
+         SPACE                                                          00458000
+TSTPUN   EQU   *  HERE FOR 2540 AND 2520 PUNCH                          00459000
+         TM    IOERDATA,EQCHK EQUIPMENT CHECK ???                       00460000
+         BZ    TSTPUNNR            NO --                                00461000
+         BAL   R5,GETRCAW          GET RESTART CAW                      00462000
+         CLI   IOBRCNT,X'14'       20 CONTINOUS ERRORS ???              00463000
+         BH    FATAL               YES --                               00464000
+         B     RETRY               RETRY THE OPERATION                  00465000
+TSTPUNNR TM    IOERDATA,INTREQ     INTERVENTION REQUIRED ??             00466000
+         BO    DELAY               YES -- WAIT FOR IT                   00467000
+         TM    IOERDATA,BUSOUT     BUSOUT CHECK ???                     00468000
+         BO    RETRY1              YES -- RETRY ONCE                    00469000
+         B     FATAL1              COMMAND REJECT  AND ALL OTHERS       00470000
+         SPACE                                                          00471000
+         SPACE 3                                                        00472000
+NXTDELAY       EQU            *  HERE TO GET NEXT CCW AND OPERATOR      00473000
+*                                    INTERVENTION                       00474000
+         CLC   =C'SEP ',IOBMISC2   SEPARATOR ROUTINE ?                  00475000
+         BE    FATAL               YES - FATAL ERROR CONDITION          00476000
+         CLC   =C'TCS ',IOBMISC2   3800 SETUP ROUTINE ?        @V60B9BA 00476300
+         BE    FATAL               YES - FATAL ERROR           @V60B9BA 00476600
+         BAL   R5,IGNORE1          GET NEXT CCW                         00477000
+         B     DELAY3              AND GIVE INTERVENTION MESSAGE        00478000
+         SPACE 2                                                        00479000
+DELAY    EQU   *  HERE TO SET UP FOR DE FROM DEVICE AFTER OPERATOR      00480000
+*              HAS READIED IT FOLLOWING AN ERROR                        00481000
+         OI    IOERFLG1,IOERPEND   INDICATE DEVICE END AND SHORT        00482000
+*                                  MESSAGE                              00483000
+         OI    IOERFLG2,IOERCEMD   DO NOT RECORD ERROR                  00484000
+DELAY2   BAL   R5,GETRCAW          GET RESTART CAW                      00485000
+DELAY3   TM    VMOSTAT,VMCF   CONSOLE FUNCTION ?               @VW01227 00486000
+         BZ    DELAY4         NO --                            @VW01227 00487000
+         CLC   =C'LOADBUF',VMCOMND LOADBUFF COMMAND ?          @VW01227 00488000
+         BE    FATAL          YES - DON'T HANG USER            @VW01227 00489000
+DELAY4   CLI   IOBRCNT,X'14'  20 CONTINOUS ERRORS ?            @VW01227 00490000
+         BH    FATAL               YES -- FATAL ERROR                   00491000
+         ST    R1,IOBRCAW          SET UP RESTART CCW                   00492000
+         OI    IOERFLG1,IOERDEPD   SET DEVICE END PENDING               00493000
+         MVI   IOERIND3,IOERACT    INDICATE OPERATOR ACTION             00494000
+         CLI   RDEVTYPE,TYP3800    IS IT A 3800 PRINTER ?      @V60B9BA 00494300
+         BE    *+8                 MESSAGE HAS BEEN SENT       @V60B9BA 00494600
+         BAL   R5,MSGERR           INFORM OPERATOR                      00495000
+         TM    IOERFLG1,IOERDERD DEVICE END RECEIVED  ??       @VA00701 00496000
+         BO    EXITDE        YES -- WHILE PRINTING MSG         @VA00701 00497000
+         NI    IOBFLAG,X'FF'-IOBRSTRT RESET RESTART FLAG                00498000
+         NI    IOBSTAT,X'FF'-IOBFATAL RESET FATAL FLAG                  00499000
+         OI    RDEVSTAT,RDEVNRDY   INDICATE INTERVENTION REQUIRED       00500000
+         B     EREXIT              EXIT                                 00501000
+         SPACE 3                                                        00502000
+IGNORE1  EQU   * HERE TO GET NEXT CCW                                   00503000
+         SR    R1,R1               CLEAR CCW ADDRESS REG                00504000
+         ICM   R1,B'0111',IOERCSW+1 POINT TO NEXT CCW                   00505000
+         CLI   0(R1),X'08'         IS IT A TIC ??                       00506000
+         BNE   *+8                 NO - USE THIS CCW                    00507000
+         ICM   R1,B'0111',1(R1)    GET TRANSFER ADDRESS                 00508000
+         BZ    FATAL1        RESTART ADDRESS INVALID           @VA00701 00509000
+         ST    R1,IOBRCAW          STORE RESTART CAW                    00510000
+         BR    R5                  RETURN TO CALLER                     00511000
+         SPACE                                                          00512000
+IGNORE   EQU   *  HERE TO IGNORE THE ERROR                              00513000
+         OI    IOERFLG2,IOERCEMD   DO NOT RECORD IOERBLOK               00514000
+IGNORE2  BAL   R5,IGNORE1          GET NEXT CCW                         00515000
+EXITDE   NI    IOBFLAG,X'FF'-(IOBERP+IOBRSTRT) RESET FLAGS              00516000
+         NI    RDEVSTAT,X'FF'-RDEVNRDY RESET INTERVENTION REQUIRED FLAG 00517000
+         NI    IOERFLG1,X'FF'-IOERPEND RESET PENDING FLAG               00518000
+         CLC   =C'SEP ',IOBMISC2   PRINTING SEPARATOR PAGE              00519000
+         BE    RETRYDE             YES -- DO NOT FLUSH OR BACKSPACE     00520000
+         CLC   =C'TCS ',IOBMISC2   SETTING UP THE 3800 PRINTER @V60B9BA 00520300
+         BE    RETRYDE             YES - DON'T FLSH OR BACKSPAC@V60B9BA 00520600
+         TM    RDEVFLAG,RDEVTERM+RDEVBACK+RDEVRSTR FLUSH OR BACKSPACE   00521000
+         BZ    RETRYDE             NO --                                00522000
+         OI    IOBCSW+4,CE         FORCE CHANNEL END FOR DMKRSP         00523000
+         MVC   IOBCSW(4),IOBRCAW   SET CSW FOR DMKRSP BACKSPACE         00524000
+         OI    IOERFLG2,IOERCEMD   DO NOT RECORD IOERBLOK               00525000
+         B     EREXIT1                                                  00526000
+         SPACE 3                                                        00527000
+RETRY1   EQU   * HERE TO DO IMMEDIATE RETRY                             00528000
+         BAL   R5,GETRCAW          GO CALCULATE RESTART CAW             00529000
+         CLI   IOBRCNT,X'01'       RETRYED ONCE ??                      00530000
+         BH    FATAL               YES -- FATAL ERROR                   00531000
+RETRY    ST    R1,IOBRCAW          PUT RESTART CAW IN IOBLOK            00532000
+RETRYDE  OI    IOBFLAG,IOBRSTRT    REQUEST RESTART                      00533000
+         NI    IOBFLAG,X'FF'-IOBERP RESET ERP INCONTROL                 00534000
+         B     EREXIT2             AND EXIT TO IOS                      00535000
+         SPACE 2                                                        00536000
+FATAL1   LTR   R7,R7         IOERBLOK PRESENT ??               @VA00701 00537000
+         BZ    *+8           NO -                              @VA00701 00538000
+         OI    IOERFLG2,IOERCEMD DO NOT RECORD THIS ERROR      @VA00701 00539000
+         SPACE                                                          00540000
+FATAL    EQU   *  HERE TO INDICATE FATAL ERROR TO IOSUPP                00541000
+         OI    IOBSTAT,IOBFATAL    SET FATAL FLAG                       00542000
+         NI    RDEVSTAT,X'FF'-RDEVNRDY RESET NOT READY FLAG             00543000
+         LTR   R7,R7               IOERBLOK PRESENT ??                  00544000
+         BZ    EREXIT1             NO - FORGET MESSAGE                  00545000
+         NI    IOERFLG1,X'FF'-IOERPEND FORCE LONG MESSAGE FORMAT        00546000
+         MVI   IOERIND3,IOERINFO   ACTION CODE OF I                     00547000
+         BAL   R5,MSGERR           NOTIFY OPERATOR                      00548000
+EREXIT1  EQU   *                                                        00549000
+         NI    IOBFLAG,X'FF'-(IOBRSTRT+IOBERP) RESET FLAGS              00550000
+         CLI   RDEVTYPE,TYP3211    3211 PRINTER ??                      00551000
+         BNE   EREXIT2             NO --                                00552000
+         TM    IOBSTAT,IOBFATAL    FATAL I/O ERROR ??                   00553000
+         BZ    EREXIT2             NO --                                00554000
+         LTR   R7,R7               IOERBLOK PRESENT ??                  00555000
+         BZ    EREXIT2             NO - EXIT                            00556000
+         TM    IOERCSW+5,IFCC+CCC+CDC IS CHANNEL ERROR         @VA01254 00557000
+*                             INDICATED ?                               00558000
+         BNZ   EREXIT2        YES, GO EXIT                     @VA01254 00559000
+         TM    IOERDATA+1,X'80'    COMMAND RETRY ??                     00560000
+         BZ    EREXIT2             NO --                                00561000
+         CLI   RDEVTYPE,TYP3203    IS IT A 3203 PRINTER ??     @V386298 00561300
+         BE    EREXIT2             YES--DON'T DO A RESET       @V386298 00561600
+         L     R1,=A(DMKRSP83)     ADDRESS OF 3211 CONTROL UNIT         00562000
+         ST    R1,IOBRCAW          RESET CCW AND STORE IN RESTART CAW   00563000
+         OI    IOBFLAG,IOBRSTRT    INDICATE RESTART                     00564000
+EREXIT2  MVI   IOBRCNT+1,X'00'     RESET COUNT TO ZERO                  00565000
+         SPACE 3                                                        00566000
+EREXIT   EQU   * EXIT FROM RSERR                                        00567000
+         ICM   R1,B'1111',IOBIOER  ADDRESS OF IOERBLOK                  00568000
+         BZ    EXIT                NO --                                00569000
+         TM    IOERCSW+5-IOERBLOK(R1),IFCC+CCC+CDC IS CHANNEL  @VA01254 00570000
+*                             ERROR INDICATED ?                         00571000
+         BZ    CKEND          NO, GO FRET IOERBLOK             @VA01254 00572000
+         LR    R3,R1          SAVE IOERBLOK POINTER            @VA01254 00573000
+         L     R1,IOERCCRA-IOERBLOK(R3) CHANNEL REC ADDR       @V508690 00574500
+         L     R0,IOERCCRL-IOERBLOK(R3) CHANNEL REC LENGTH     @V508690 00575500
+         CALL  DMKFRET        RELEASE STORAGE                  @VA01254 00578000
+         LR    R1,R3          GET IOERBLOK POINTER             @VA01254 00579000
+CKEND    EQU   *                                               @VA01254 00580000
+         LA    R0,IOERSIZE         SIZE OF BLOK                         00581000
+         AH    R0,IOEREXT-IOERBLOK(,R1) ADD LENGTH OF EXTENSION         00582000
+         CALL  DMKFRET             FRET IOERBLOK                        00583000
+         XC    IOBIOER(4),IOBIOER  CLEAR POINTER IN IOBLOK              00584000
+EXIT     EQU   *                                                        00585000
+         LTR   R7,R7               IOERBLOK PRESENT ??                  00586000
+         BZ    *+8                 NO -                                 00587000
+         NI    IOERFLG1,X'FF'-IOERERP  RESET DMKRSERR IN CONTROL        00588000
+         SVC   16                  RETURN TO CALLER'S CALLER (DMKIOS)   00589000
+         EXIT                                                           00590000
+         EJECT                                                          00590050
+RDOPCK   EQU   *                                               @VA03757 00590100
+         TM    RDEVTYPC,CLASURI INPUT DEVICE ??                @VA03757 00590150
+         BZR   R5             NO, RETURN TO IN LINE CODE       @VA03757 00590200
+         L     R1,IOERCSW     GET FAILING CCW PLUS 8           @VA03757 00590250
+         LA    R1,0(,R1)      CLEAR HI-ORDER BYTE              @VA03757 00590300
+         S     R1,F8          GET FAILING CCW ADDRESS          @VA03757 00590350
+         BM    NOTREAD        NO CCW                           @VA03757 00590400
+         TM    0(R1),X'01'    CONTROL OP                       @VA03757 00590450
+         BO    NOTREAD        YES                              @VA03757 00590500
+         OI    IOERFLG3,IOERREAD MUST BE READ OP               @VA03757 00590550
+NOTREAD  EQU   *                                               @VA03757 00590600
+         BR    R5             RETURN TO IN LINE CODE           @VA03757 00590650
+         SPACE 2                                                        00590700
+         SPACE 3                                                        00591000
+GETRCAW  EQU   *  HERE TO CALCULATE RESTART CAW                         00592000
+         IC    R0,IOBRCNT          GET ERROR RETRY COUNT                00593000
+         AL    R0,F1               UPDATE BY ONE                        00594000
+         STC   R0,IOBRCNT          AND STORE                            00595000
+         L     R1,IOBCAW           POINT TO 1ST CCW IN BUFFER           00596000
+         TM    IOBFLAG,IOBRSTRT    IS THIS A RESTART CONDITION ??       00597000
+         BZ    *+8                 NO -  IOBRCAW NOT VALID              00598000
+         L     R1,IOBRCAW          YES - USE RESTART CAW                00599000
+         LTR   R1,R1         VALID RESTART CAW ?               @VA00701 00600000
+         BZ    FATAL1        NO - FATAL ERROR                  @VA00701 00601000
+         TM    IOBSTAT,IOBCC1      STATUS STORED ON INITIAL SELECTION?  00602000
+         BCR   1,R5                YES -- RESTART AT 1ST CCW            00603000
+         L     R1,IOERCSW          GET ADDRESS OF LAST USED CCW+8       00604000
+         LA    R1,0(R1)            CLEAR HIGH BYTE                      00605000
+         LTR   R1,R1               CCW ADDRESS PRESENT                  00606000
+         BNZ   CSWOK               YES -- OK                            00607000
+         ICM   R1,B'1111',IOBRCAW NO - USE RESTART CAW         @VA00701 00608000
+         BZ    FATAL1        INVALID IOBRCAW ADDRESS           @VA00701 00609000
+         BR    R5                  ..                                   00610000
+CSWOK    S     R1,F8               AND POINT TO CCW                     00611000
+         CL    R1,IOBRCAW          ERROR ON SAME CCW ??                 00612000
+         BE    *+8                 YES --                               00613000
+         MVI   IOBRCNT,X'01'       SET RETRY COUNT TO ONE               00614000
+         CLI   RDEVTYPC,CLASURI    INPUT DEVICE ??                      00615000
+         BCR   8,R5                YES - CAW IS CORRECT                 00616000
+         CLI   RDEVTYPE,TYP2520P   STAND ALONE 2520 PUNCH ??            00617000
+         BCR   8,R5           YES CAW IS CORRECT FOR 2520      @VA05776 00618000
+         CLI   RDEVTYPE,TYP2540P   IS IT 2540 PUNCH ??                  00619000
+         BCR   7,R5                NO -- CAW IS CORRECT                 00620000
+         TM    IOERDATA,EQCHK      WAS IT EQUIPMENT CHECK ON PUNCH?     00621000
+         BCR   8,R5                NO -- CAW IS CORRECT                 00622000
+*        IF ERROR IS ON SAME CCW   RESTART WITH THAT CCW                00623000
+         CL    R1,IOBRCAW          IS ERROR ON SAME CCW ?               00624000
+         BCR   8,R5                YES - CAW IS CORRECT                 00625000
+*        HERE ON EQUIPMENT CHECK ON WRITE TO PUNCH -- EQUIPMENT CHECK   00626000
+*        IS FOR PREVIOUS CARD PUNCHED -- MUST BACK UP AND REPUNCH       00627000
+         SPACE                                                          00628000
+         TM    RDEVFLAG,RDEVACNT   PUNCHING ACCOUNTING CARDS ??         00629000
+         BZ    TSTSEP              NO TEST FOR SEPARATOR CARD           00630000
+         L     R1,ACNTBACK-ACNTBLOK(R1)  GET ADDRESS OF PREVIOUS CCW    00631000
+         LTR   R1,R1               BACK CHAIN ADDRESS ZEROES ??         00632000
+         BNZ   *+8                 NO -- GOOD RESTART ADDRESS           00633000
+         L     R1,IOBCAW           RESTART WITH IOB CAW                 00634000
+         BR    R5                  RETURN TO CALLER                     00635000
+         SPACE                                                          00636000
+TSTSEP   CLC   IOBMISC2(4),=C'SEP ' PUNCHING SEPARATOR CARDS            00637000
+         BNE   NORMERR             NO -- NORMAL ERROR                   00638000
+         S     R1,F8               BACK UP TO PREVIOUS CCW              00639000
+         CL    R1,IOBCAW           ADDRESS BELOW IOB CAW ??             00640000
+         BNL   *+8                 NO -- GOOD RESTART ADDRESS           00641000
+         L     R1,IOBCAW           YES -  RESTART WITH IOBCAW           00642000
+         BR    R5                  RETURN TO CALLER                     00643000
+         SPACE                                                          00644000
+NORMERR  L     R1,8(R1)            PICK UP TIC ADDRESS                  00645000
+         S     R1,F4               BACK UP FOUR TO BACK POINTER         00646000
+         LA    R1,0(R1)            CLEAR TIC OP-CODE                    00647000
+         L     R1,0(R1)            ADDRESS OF -2 BUFFER CCW             00648000
+         LTR   R1,R1               VALID ADDRESS ??                     00649000
+         BZ    FATAL               NO - CAN'T RESTART                   00650000
+         SPACE 2                                                        00651000
+UPDTCSW  EQU   *  HERE TO UPDATE IOERCSW ON CONDITION CODE 1            00652000
+         TM    IOBSTAT,IOBCC1      STATUS STORED ON SIO ??              00653000
+         BCR   8,R5                NO -- FULL CSW PRESENT               00654000
+UPDTCSW1 CLC   IOERCSW+1(3),ZEROES CCW ADDRESS PRESENT IN CSW ??        00655000
+         BCR   7,R5                YES --                               00656000
+         L     R15,IOBCAW          GET CAW                              00657000
+         TM    IOBFLAG,IOBRSTRT    WAS THIS A RESTART  ??               00658000
+         BZ    *+8                 NO -- USE IOBCAW                     00659000
+         L     R15,IOBRCAW         RESTART - USE IOBRCAW                00660000
+         LTR   R15,R15             ADDRESS PRESENT ?                    00661000
+         BCR   8,R5                NO - RETURN TO CALLER                00662000
+         AL    R15,F8              UPDATE TO CCW + 8                    00663000
+         STCM  R15,B'0111',IOERCSW+1 FILL IN CSW FOR CONDITION 1        00664000
+         BR    R5                  RETURN TO CALLER                     00665000
+         SPACE 2                                                        00666000
+         SPACE 3                                                        00667000
+MSGERR   EQU   * HERE TO NOTIFY OPERATOR OF IO ERROR OR ACTION          00668000
+         NI    IOERIND3,X'FF'-(IOERIGN+IOERETRY) RESET FLAGS            00669000
+*                                                                       00670000
+*        MATCH MESSAGE NUMBER TO ERROR                                  00671000
+*                                                                       00672000
+         MVI   IOERNUM,21          NO DEVICE MESSAGE                    00673000
+         TM    IOBSTAT,IOBCC3      CONDITION CODE 3                     00674000
+         BO    IDFOUND             YES --                               00675000
+         MVI   IOERNUM,20          CHANNEL ERROR MESSAGE                00676000
+         TM    IOBCSW+5,CDC+CCC+IFCC+CHC+PRGC+PRTC+PCI CHANNEL ERRORS ? 00677000
+         BNZ   IDFOUND             YES --                               00678000
+         SR    R1,R1               CLEAR REG                            00679000
+         MVI   IOERNUM,3           EQUIPMENT CHECK MESSAGE              00680000
+         ICM   R1,B'0001',IOERDATA FIRST SENSE BYTE                     00681000
+         BZ    IDFOUND             FORCE CHANNEL CHECK MESSAGE          00682000
+         IC    R14,RDEVTYPE        DEVICE TYPE                          00683000
+         LA    R15,MSGTABLE-3      ADDRESS OF MESSAGE TABLE             00684000
+IDLOOP   A     R15,F3              POINT TO NEXT ENTRY                  00685000
+         EX    R14,TMTYPE          CORRECT DEVICE TYPE ??               00686000
+         BNO   IDLOOP              NO --                                00687000
+         EX    R1,TMERR            ERROR MATCH ??                       00688000
+         BZ    IDLOOP              NO --                                00689000
+         MVC   IOERNUM(1),2(R15)   MOVE IN MSG ID                       00690000
+IDFOUND  ICM   R0,B'1110',ID+3     INSERT MODULE ID                     00691000
+         CLI   IOERNUM,1     INTERVENTION REQ MSG ?            @VA00701 00692000
+         BE    *+8           YES - SHORT OR LONG MSG FORMAT    @VA00701 00693000
+         NI    IOERFLG1,X'FF'-IOERPEND FORCE LONG MSG FORMAT   @VA00701 00694000
+         CALL  DMKMSWR,AFFINITY                                @V4075A0 00695100
+         BR    R5                                                       00696000
+         SPACE 3                                                        00697000
+ERR35XX  EQU   *  HERE FOR 3505 AND 3525 ERROR RECOVERY                 00698000
+         TM    IOERDATA,1          PERMANENT ERROR ??                   00699000
+         BO    FATAL1              YES --                               00700000
+         SPACE                                                          00701000
+SENSE1   TM    IOERDATA+1,X'80'    PERMANENT ERROR ??                   00702000
+         BO    FATAL1              YES -- FATAL ERROR                   00703000
+         TM    IOERDATA+1,X'10'    RETRY AFTER INTERVENTION REQ ??      00704000
+         BZ    RETRY1              NO -- RETRY ONCE                     00705000
+         TM    IOERDATA,EQCHK      EQUIPMENT CHECK ?                    00706000
+         BO    DELAY2              YES --                               00707000
+         TM    IOERDATA,INTREQ     INTERVENTION REQUIRED ??             00708000
+         BO    DELAY               YES -                                00709000
+         B     DELAY2              --                                   00710000
+         SPACE 2                                                        00711000
+ERR3211  EQU   *  HERE TO GET 3211 OR 3203 PRINTER ERROR       @V386298 00712000
+*                 INFORMATION FOR ERROR RECORDING                       00713000
+         SPACE                                                          00714000
+         LA    R5,GETDATA          SET UP RETURN ADDRESS                00715000
+         CLI   IOEREXT+1,XOBREXT   OBR3211 BLOK PRESENT ??              00716000
+         BCR   8,R5                YES --                               00717000
+         XC    SAVEWRK1(4),SAVEWRK1 CLEAR SAVEWRK1 AREA                 00718000
+         TM    IOERDATA,DATACHK    DATA CHECK ERROR ??                  00719000
+         BZ    TEST1               NO --                                00720000
+*                                                                       00721000
+*        PROCESS ROUTINES RT1, RT2, RT3 AND RT5 FOR UCSB DATA           00722000
+*                                                                       00723000
+         MVI   SAVEWRK1,XOBRRT1+XOBRRT2+XOBRRT3+XOBRRT5                 00724000
+         TM    IOERDATA+1,X'10'    LINE PLACEMENT ERROR ?? FCB          00725000
+         BCR   8,R5                NO -- ALL SET UP FOR UCSB ERROR      00726000
+         MVI   SAVEWRK1,XOBRRT6    DO ROUTINE RT6 FOR FCB ERROR         00727000
+         BR    R5                  GO GET ERROR DATA                    00728000
+         SPACE                                                          00729000
+TEST1    TM    IOERDATA,X'22'      LOAD CHECK ? BUS CHECK ?             00730000
+         BZ    TEST2               NO --                                00731000
+         L     R6,IOERCSW          LOCATE CCW OP-CODE                   00732000
+         LA    R6,0(R6)            ..                                   00733000
+         SL    R6,F8               ..                                   00734000
+         BC    6,TEST2             NO ADDRESS CHECK NEXT                00735000
+         MVI   SAVEWRK1,XOBRRT6    ROUTINE FOR FCB DATA                 00736000
+         CLI   0(R6),X'63'         LOAD FCB OP-CODE ??                  00737000
+         BCR   8,R5                YES --                               00738000
+         MVI   SAVEWRK1,XOBRRT5    ROUTINE FOR UCSB DATA                00739000
+         CLI   0(R6),X'FB'         LOAD UCSB OP-CODE                    00740000
+         BCR   8,R5                YES -                                00741000
+         TM    IOERDATA+3,X'A0'    FCB OR UCSB PARITY CHECK ?           00742000
+         BNZ   TEST3               YES --                               00743000
+         MVI   SAVEWRK1,XOBRRT1+XOBRRT2+XOBRRT3  ROUTINE 1 2 3          00744000
+         BR    R5                  ..                                   00745000
+         SPACE                                                          00746000
+TEST2    TM    IOERDATA+1,X'02'    MECHANICAL MOTION ERROR ??           00747000
+         BZ    TEST3               NO --                                00748000
+*                                                                       00749000
+*        SET UP FOR ROUTINES RT1, RT2, RT3, RT4, AND RT5                00750000
+*                                                                       00751000
+         MVI   SAVEWRK1,XOBRRT1+XOBRRT2+XOBRRT3+XOBRRT4+XOBRRT5         00752000
+         BR    R5                  GET ERROR DATA                       00753000
+         SPACE                                                          00754000
+TEST3    MVI   SAVEWRK1,XOBRRT5    ROUTINE 5                            00755000
+         TM    IOERDATA+3,X'80'    UCSB PARITY ???                      00756000
+         BCR   1,R5                YES -- GET ERROR DATA                00757000
+         MVI   SAVEWRK1,XOBRRT6    ROUTINE 6                            00758000
+         TM    IOERDATA+3,X'20'    FCB PARITY ??                        00759000
+         BCR   1,R5                YES -- GET FCB DATA                  00760000
+*        ROUTINES 1, 2, AND 3.                                          00761000
+         MVI   SAVEWRK1,XOBRRT1+XOBRRT2+XOBRRT3                         00762000
+         TM    IOERDATA+3,X'58'    PLB PARITY ? COIL PROTECT ?          00763000
+*                                  HAMMER FILE CHECK ?                  00764000
+         BCR   7,R5                YES --                               00765000
+         TM    IOERDATA,X'04'      BUFFER PARITY CHECK ??               00766000
+         BZ    TEST3211            NO -- DO NORMAL RECORDING            00767000
+         MVI   SAVEWRK1,XOBRRT6    ROUTINE FOR FCB DATA                 00768000
+         TM    IOERDATA+1,X'10'    PRINT LINE PLACEMENT ??              00769000
+         BCR   1,R5                YES -- GET FCB DATA                  00770000
+         MVI   SAVEWRK1,XOBRRT5    ROUTINE FOR UCSB DATA                00771000
+          SPACE 2                                                       00772000
+GETDATA  EQU   *  HERE TO SET CCW TO GET ERROR DATA FROM PRINTER        00773000
+         SPACE                                                          00774000
+         OI    IOERFLG1,IOERXERP INDICATE ERP GETTING OBR DATA          00775000
+         CLI   IOEREXT+1,XOBREXT   XOBR3211 BLOK PRESENT ??             00776000
+         BE    RT1                 YES -- CONTINUAL                     00777000
+         LA    R0,XOBRSIZE         SIZE OF XOBR3211 BLOK                00778000
+         CALL  DMKFREE             GET STORAGE                          00779000
+         LA    R0,XOBREXT          SIZE OF XOBR3211 BLOK                00780000
+         STH   R0,IOEREXT          SAVE LENGTH                          00781000
+         LR    R9,R1               SAVE ADDRESS                         00782000
+         LR    R0,R9               CLEAR XOBR3211                       00783000
+         LA    R1,XOBRSIZE*8       ..                                   00784000
+         SR    R14,R14             ..                                   00785000
+         SR    R15,15              ..                                   00786000
+         MVCL  R0,R14              CLEAR AREA                           00787000
+         SPACE                                                          00788000
+         LR    R1,R7               OLD IOERBLOK ADDRESS                 00789000
+         LR    R7,R9               ADDRESS OF NEW IOERBLOK EXT          00790000
+         MVC   0(IOERSIZE*8,R7),0(R1)  COPY IOERBLOK                    00791000
+         ST    R7,RDEVIOER         SAVE NEW IOERBLOK ADDRESS            00792000
+         LA    R0,IOERSIZE         SIZE OF NORMAL IOERBLOK              00793000
+         CALL  DMKFRET             FRET OLD BLOCK                       00794000
+         SPACE                                                          00795000
+         MVC   XOBRSTAT(1),SAVEWRK1 SAVE ERROR ROUTINE STATUS           00796000
+         MVC   XOBRMIS2(4),IOBRCAW SAVE RESTART CAW                     00797000
+         MVC   XOBRMIS1(2),IOBFLAG SAVE IOBFLAG AND STAT                00798000
+         LA    R9,4                NUMBER OF CCWS                       00799000
+         LA    R14,CKRDCCW         ADDRESS OF FIRST CCW                 00800000
+         LA    R15,XOBRCCW1        ADDRESS OF AREA IN IOERBLOK EXT      00801000
+GETCCW   LM    R5,R6,0(R14)        GET CCW                              00802000
+         ALR   R5,R7               UPDATE DATA ADDRESS                  00803000
+         STM   R5,R6,0(R15)        STORE CCW IN XOBRCCW AREA            00804000
+         A     R14,F8              UPDATE FROM AND TO ADDRESS           00805000
+         A     R15,F8              ..                                   00806000
+         BCT   R9,GETCCW           DO FOUR CCWS                         00807000
+         SPACE 2                                                        00808000
+RT1      EQU   * HERE TO READ CHECK PRINT LINE BUFFER INFORMATION       00809000
+         ICM   R9,B'1111',IOBIOER  ERROR BLOK PRESENT ??                00810000
+         BZ    RT1A                NO --                                00811000
+         MVC   IOERPNT-IOERBLOK(4,R9),IOERPNT CHAIN NEW IOERBLOK        00812000
+         ST    R9,IOERPNT          2ND IN CHAIN                         00813000
+         SR    R5,R5               AND CLEAR                            00814000
+         ST    R5,IOBIOER          IOB POINTER TO ERROR BLOK            00815000
+         XR    R7,R9               UPDATE IOERCSW                       00816000
+         XR    R9,R7               ..                                   00817000
+         XR    R7,R9               ..                                   00818000
+         BAL   R5,UPDTCSW1         UPDATE IOERCSW NOT CC=1              00819000
+         LR    R7,R9               RESTORE ADDRESS OF IOERBLOK          00820000
+RT1A     TM    XOBRSTAT,XOBRRT1    THIS ROUTINE SCHEDULED ??            00821000
+         BZ    RT2                 NO --                                00822000
+         NI    XOBRSTAT,X'FF'-XOBRRT1   RESET ROUTINE FLAG              00823000
+         LA    R1,XOBRCCW1         ADDRESS OF CHECK READ CCW            00824000
+         B     ERROBR              AND EXIT TO IOS                      00825000
+         SPACE                                                          00826000
+RT2      EQU   *  HERE TO READ PRINT LINE BUFFER DATA                   00827000
+         TM    XOBRSTAT,XOBRRT2    THIS ROUTINE SCHEDULED ?             00828000
+         BZ    RT3                 NO -                                 00829000
+         LA    R1,XOBRCCW2         ADDRESS OF PLB READ CCW              00830000
+         NI    XOBRSTAT,X'FF'-XOBRRT2   RESET ROUTINE FLAG              00831000
+         OI    XOBRFLAG,XOBRT3     INDICATE BUFFER TYPE 3 INFORMATION   00832000
+         B     ERROBR              AND EXIT TO IOS                      00833000
+         SPACE                                                          00834000
+RT3      EQU   *  HERE TO LOCATE THE FIRST CHARACTER IN ERROR           00835000
+         TM    XOBRSTAT,XOBRRT3    THIS ROUTINE SCHEDULED ?             00836000
+         BZ    RT5                 NO --                                00837000
+         LA    R5,XOBR512          ADDRESS OF PRINT LINE BUFFER DATA    00838000
+         LA    R6,XOBR150          ADDRESS OF CHECK PLB DATA            00839000
+         LA    R0,1                CONSTANT OF 1                        00840000
+         LA    R1,150              LENGTH OF BUFFER DATA                00841000
+         CLI   RDEVTYPE,TYP3203    IS IT A 3203 PRINTER ??     @V386298 00841200
+         BNE   CHARERR             NO--CHECK 3211 PLB ERRORS   @V386298 00841400
+         LA    R1,132              3203 PLB LENGTH             @V386298 00841600
+CHARERR  EQU   *                                               @V386298 00841800
+         LA    R14,10              NUMBER OF ERROR CHARACTER NEEDED     00842000
+         LA    R15,XOBR010         AREA TO PUT ERROR CHARACTERS         00843000
+RT3LP    TM    XOBRSTAT,XOBRRT4    ROUTINE 4 SCHEDULED ??               00844000
+         BO    RT4A                YES --                               00845000
+         TM    0(R6),X'02'         PRINT ERROR CHECK FOR THIS POSITION? 00846000
+         BO    RT3AA               YES -- RECORD IT                     00847000
+         B     RT3A                CHECK NEXT                           00848000
+RT4A     EQU   *                                               @V386298 00848250
+         CLI   RDEVTYPE,TYP3203    IS IT A 3203 PRINTER ??     @V386298 00848500
+         BNE   RT4A3211            NO--CHECK 3211 PLB ERRORS   @V386298 00848750
+         TM    0(R6),PLB3203       CHECK 3203 PLB FOR ERRORS   @V3M4036 00849000
+         BO    RT3A                YES--DO NOT RECORD          @V386298 00849250
+         B     RT3AA               NO--MOVE ERROR CHAR.        @V386298 00849500
+RT4A3211 TM    0(R6),X'04'         CHECK 3211 PLB FOR ERRORS   @V386298 00849750
+         BO    RT3A                YES - DO NOT RECORD                  00850000
+RT3AA    MVC   0(1,R15),0(R5)      MOVE ERROR CHARACTER TO XOBR010      00851000
+         AR    R15,R0              ADD ONE TO XOBR010 ADDRESS REG       00852000
+         BCT   R14,*+8             DO ONLY 10 CHARACTERS                00853000
+         B     RT3B                ALL DONE -                           00854000
+         SPACE                                                          00855000
+RT3A     BCT   R1,*+8              END OF PLB DATA (150/132)?? @V386298 00856000
+         B     RT3B                YES --                               00857000
+         AR    R6,R0               UPDATE PRINT LINE DATA ADDRESS       00858000
+         AR    R5,R0               UPDATE CHECK DATA ADDRESS            00859000
+         B     RT3LP               AND CONTINUAL                        00860000
+         SPACE                                                          00861000
+RT3B     NI    XOBRSTAT,X'FF'-(XOBRRT3+XOBRRT4) RESET FLAGS             00862000
+         XC    XOBR512(150),XOBR512 CLEAR AREA FOR UCSB DATA            00863000
+         SPACE                                                          00864000
+RT5      EQU   * HERE TO READ UCSB DATA                                 00865000
+         TM    XOBRSTAT,XOBRRT5    THIS ROUTINE SCHEDULED ?             00866000
+         BZ    RT6                 NO -                                 00867000
+         NI    XOBRSTAT,X'FF'-XOBRRT5   RESET ROUTINE 5 FLAG            00868000
+         LA    R1,XOBRCCW3         ADDRESS OF READ UCSB CCW             00869000
+         OI    XOBRFLAG,XOBRT1     INDICATE BUFFER TYPE 1 INFORMATION   00870000
+         B     ERROBR              AND EXIT TO IOS                      00871000
+         SPACE                                                          00872000
+RT6      EQU   * HERE TO READ FCB INFORMATION                           00873000
+         TM    XOBRSTAT,XOBRRT6    THIS ROUTINE SCHEDULED               00874000
+         BZ    ENDOBR              NO --                                00875000
+         NI    XOBRSTAT,X'FF'-XOBRRT6 RESET FLAG                        00876000
+         LA    R1,XOBRCCW4         ADDRESS OF READ FCB CCW              00877000
+         OI    XOBRFLAG,XOBRT2     INDICATE BUFFER TYPE 2 INFORMATION   00878000
+         SPACE                                                          00879000
+ERROBR   ST    R1,IOBRCAW          SET RESTART CCW ADDRESS              00880000
+         OI    IOBFLAG,IOBRSTRT+IOBERP  SET RESTART FLAG AND ERROR      00881000
+*                                  ROUTINE IN CONTROL                   00882000
+         B     EREXIT              EXIT TO IOS                          00883000
+         SPACE                                                          00884000
+ENDOBR   EQU   *  HERE IF ALL DONE GETTING OBR DATA                     00885000
+         NI    IOERFLG1,X'FF'-IOERXERP  RESET OBR FLAG                  00886000
+         MVC   IOBRCAW(4),XOBRMIS2      RESTORE RESTART CAW             00887000
+         MVC   IOBFLAG(2),XOBRMIS1      RESTORE FLAG AND STAT           00888000
+         SPACE                                                          00889000
+TEST3211 EQU   *  HERE FOR 3211/3203 PRINTER ERROR RECOVERY             00890000
+         TM    IOERDATA,EQCHK      EQUIPMENT CHECK ??                   00891000
+         BZ    BUS32               NO --                                00892000
+         SPACE                                                          00893000
+         TM    IOERDATA+1,X'80'    COMMAND RETRY ??                     00894000
+         BO    RETRY1              YES - RETRY ONCE                     00895000
+         SPACE                                                          00896000
+         TM    IOERDATA+1,X'70'    BYTE 1 BITS 1 2 3                    00897000
+         BNZ   NXTDELAY            YES -- WAIT FOR DEVICE END           00898000
+         TM    IOERDATA+1,X'02'    BYTE 1 - BIT 6 MECHANICAL MOTION     00899000
+         BO    FATAL               YES -  FATAL ERROR                   00900000
+         B     DELAY2              WAIT FOR DEVICE END                  00901000
+         SPACE                                                          00902000
+BUS32    TM    IOERDATA,BUSOUT     BUSOUT CHECK ??                      00903000
+         BO    RETRY1              YES -- RETRY ONCE                    00904000
+         TM    IOERDATA,DATACHK    DATA CHECK ERROR ???                 00905000
+         BO    NXTDELAY            YES -- WAIT FOR DEVICE END           00906000
+         TM    IOERDATA,X'04'      BUFFER PARITY CHECK ??               00907000
+         BO    FATAL               YES --                               00908000
+         TM    IOERDATA,CMDREJ     COMMAND REJECT ??                    00909000
+         BO    FATAL1              YES -- FATAL ERROR                   00910000
+         SPACE                                                          00911000
+         TM    IOERDATA,X'02'      LOAD CHECK ??                        00912000
+         BO    RETRY1              YES -- RETRY ONCE                    00913000
+         TM    IOERDATA,X'40'      INTERVENTION REQUIRED ??             00914000
+         BO    DELAY               YES --                               00915000
+         TM    IOERDATA+1,4        COMMAND SUPPRESSED ???               00916000
+         BO    RETRY1              YES - RETRY ONCE                     00917000
+         TM    IOERDATA,X'01'      CHANNEL 9 ??                         00918000
+         BO    IGNORE         YES, IGNORE, RESTART WITH NEXT            00918050
+         B     RETRY1         ...                                       00918090
+         SPACE 3                                                        00918130
+ERR3800  EQU   *  HERE FOR 3800 PRINTER ERROR RECOVERY         @V60B9BA 00918170
+         SPACE                                                          00918210
+         TM    IOERDATA,EQCHK      EQUIPMENT CHECK ?           @V60B9BA 00918250
+         BZ    ER3800B             XFER IF NOT                 @V60B9BA 00918290
+         TM    IOERDATA+1,X'20'    ERROR LOG FULL ?            @V60B9BA 00918330
+         BZ    ER3800A1            XFER IF NOT                 @V60B9BA 00918370
+         ST    R10,SAVEWRK2        SAVE THE CURRENT IOBLOK     @V60B9BA 00918410
+         LA    R0,IOBSIZE          GET DUMMY IOB               @V60B9BA 00918450
+         CALL  DMKFREE             GET THE STORAGE             @V60B9BA 00918490
+         XC    0(IOBSIZE*8,R1),0(R1)  CLEAR THE DUMMY IOB      @V60B9BA 00918530
+         LR    R10,R1              NEED THE ADDRESSIBILITY     @V60B9BA 00918570
+         XC    RDEVIOER,RDEVIOER   CLEAR IOERBLOK              @V60B9BA 00918610
+         XC    RDEVAIOB,RDEVAIOB   CLEAR ACTIVE IO BLOCK       @V60B9BA 00918650
+         NI    RDEVSTAT,X'FF'-RDEVBUSY  RESET DEVICE BUSY      @V60B9BA 00918690
+         CALL  DMKRSESD            DO & RECORD SENSE ERROR LOG @V60B9BA 00918730
+         CALL  DMKFRET             RETURN STORAGE FOR DUM IOB  @V60B9BA 00918770
+         L     R10,SAVEWRK2        RESTORE ORIGINAL IOBLOK     @V60B9BA 00918810
+         ST    R7,RDEVIOER         RESTORE ORIG IOERBLOK       @V60B9BA 00918850
+         ST    R10,RDEVAIOB        RESTORE ACTIVE IOBLOK       @V60B9BA 00918890
+         OI    RDEVSTAT,RDEVBUSY   SET DEVICE BUSY             @V60B9BA 00918930
+         B     RETRY1              RETRY THE CCW ONCE          @V60B9BA 00918970
+         SPACE                                                          00919010
+ER3800A1 TM    IOERDATA+1,X'10'    CANCEL KEY ?                @V60B9BA 00919050
+         BO    FATAL1              XFER IF SO - FATAL ERROR    @V60B9BA 00919090
+         SPACE                                                          00919130
+*        IT MUST BE A HARDWARE OR PERMANENT ERROR                       00919170
+         SPACE                                                          00919210
+         TM    IOERDATA+2,X'08'    SYSTEM RESTART REQUIRED?    @V60B9BA 00919250
+         BO    REQUEUE             XFER IF SO                  @V60B9BA 00919290
+         SPACE                                                          00919330
+DELAY38  LH    R1,IOBRADD          GET PRINTER ADDRESS         @V60B9BA 00919370
+         CALL  DMKCVTBH            CONVERT TO PRINTABLE HEX    @V60B9BA 00919410
+         STCM  R1,B'0111',SAVEWRK2 SAVE IT IN DATA AREA        @V60B9BA 00919450
+         MVI   SAVEWRK2+3,X'00'    DELIMITER FOR DMKERMSG      @V60B9BA 00919490
+         SR    R1,R1               SET UP FOR STATUS BYTE      @V60B9BA 00919530
+         IC    R1,IOERDATA+4       STATUS CODE                 @V60B9BA 00919570
+         CALL  DMKCVTBH            CONVERT TO PRINTABLE HEX    @V60B9BA 00919610
+         STCM  R1,B'0011',SAVEWRK3 PUT IT IN DATA AREA         @V60B9BA 00919650
+         LA    R0,6                LENGTH OF DATA              @V60B9BA 00919690
+         ICM   R0,B'1110',ID+3     MODULE ID                   @V60B9BA 00919730
+         LA    R1,SAVEWRK2         ADDRESS OF THE DATA         @V60B9BA 00919770
+         LA    R2,242              BINARY MESSAGE NUMBER       @V60B9BA 00919810
+         ICM   R2,B'1100',=X'B0C9' RETURN, OPERATOR, ALARM     @V60B9BA 00919850
+*                                  AND INFORMATION MESSAGE              00919890
+         CALL  DMKERMSG            GO TYPE THE MESSAGE         @V60B9BA 00919930
+         TM    IOERDATA,EQCHK      EQUIPMENT CHECK ?           @V60B9BA 00919970
+         BO    DELAY2              RECORD ERROR IF SO          @V60B9BA 00920010
+         TM    IOERDATA+2,X'08'    SYSTEM RESTART REQUIRED ?   @V60B9BA 00920050
+         BO    DELAY2              RECORD ERROR IF SO          @V60B9BA 00920090
+         B     DELAY               WAIT FOR DE - DON'T RECORD  @V60B9BA 00920130
+         SPACE                                                          00920170
+ER3800B  TM    IOERDATA,CMDREJ     COMMAND REJECT ?            @V60B9BA 00920210
+         BO    FATAL1              YES - FATAL ERROR           @V60B9BA 00920250
+         TM    IOERDATA,BUSOUT     BUS OUT CHECK ?             @V60B9BA 00920290
+         BO    RETRY1              RETRY OPERATION ONCE        @V60B9BA 00920330
+         TM    IOERDATA,DATACHK    DATA CHECK                  @V60B9BA 00920370
+         BO    NXTDELAY            YES - GET NEXT CCW          @V60B9BA 00920410
+         TM    IOERDATA,INTREQ     INTERVENTION REQUIRED ?     @V60B9BA 00920450
+         BZ    ER3800C             XFER IF NOT                 @V60B9BA 00920490
+         TM    IOERDATA+3,X'08'    SYSTEM RESTART REQUIRED ?   @V60B9BA 00920530
+         BO    REQUEUE             REUEUE DELAY PURGE IF SO    @V60B9BA 00920570
+         B     DELAY38             SEND MESSAGE OTHERWISE      @V60B9BA 00920610
+         SPACE                                                          00920650
+ER3800C  TM    IOERDATA,X'01'      CHANNEL 9 ?                 @V60B9BA 00920690
+         BO    IGNORE              YES-IGNORE & RSTRT NEXT CCW @V60B9BA 00920730
+         TM    IOERDATA,X'02'      LOAD CHECK ?                @V60B9BA 00920770
+         BZ    FATAL               FATAL ERROR IF NOT          @V60B9BA 00920810
+         SPACE                                                          00920850
+*        LOAD CHECK - SEND INFO BACK TO DMKTCS                          00920890
+         SPACE                                                          00920930
+         CLC   =C'TCS ',IOBMISC2   3800 SETUP IN CONTROL ?     @V60B9BA 00920970
+         BNE   FATAL1              FATAL ERROR IF NOT          @V60B9BA 00921010
+         MVC   IOBMISC2(2),=C'LD'  TELL TCS IT'S A LOAD CHECK  @V60B9BA 00921050
+         MVC   IOBMISC2+2(2),IOERDATA+1  TELL HIM WHAT KIND    @V60B9BA 00921090
+         B     EREXIT1             RETURN WITH NO FATAL ERROR  @V60B9BA 00921130
+*                                  AND NO RESTART              @V60B9BA 00921170
+         SPACE                                                          00921210
+*.                                                                      00921250
+*        THE SYSTEM RESTART BIT IS ON.  THE PAGE BUFFER MUST HAVE       00921290
+*        BEEN DESTROYED.  WE MUST TAKE ALL THE FILES THAT WERE ON       00921330
+*        THE DELAY PURGE QUEUE AND REQUEUE THEM ONTO THE PRINTER        00921370
+*        OR PUNCH CHAIN.  WE SEND MESSAGES DMKRSE255I AND DMKRSE252I    00921410
+*        INFORMING THE OPERATOR OF WHAT JUST OCCURRED.                  00921450
+*.                                                                      00921490
+         SPACE                                                          00921530
+REQUEUE  LH    R1,IOBRADD          PRINTER ADDRESS FOR MESSAGE @V60B9BA 00921570
+         CALL  DMKCVTBH            CONVERT TO PRINTABLE HEX    @V60B9BA 00921610
+         STCM  R1,B'0111',SAVEWRK2 STORE PRINTER ADDRESS       @V60B9BA 00921650
+         MVI   SAVEWRK2+3,X'00'    DELIMITER FOR DMKERMSG      @V60B9BA 00921690
+         LH    R1,IOERDATA+20      PAGE BACKUP COUNT           @V60B9BA 00921730
+         CALL  DMKCVTBD            CONVERT TO DECIMAL          @V60B9BA 00921770
+         ST    R1,SAVEWRK3         SAVE IT FOR DMKERMSG        @V60B9BA 00921810
+         LA    R0,8                LENGTH OF DATA              @V60B9BA 00921850
+         ICM   R0,B'1110',ID+3     MODULE ID                   @V60B9BA 00921890
+         LA    R1,SAVEWRK2         ADDR OF DATA AREA           @V60B9BA 00921930
+         LA    R2,255              MESSAGE NUMBER              @VMI0027 00921970
+         ICM   R2,B'1100',=X'B0C9' RTN, OP, ALARM, INFO MSG    @V60B9BA 00922010
+         CALL  DMKERMSG            SEND THE MESSAGE            @V60B9BA 00922050
+         SPACE                                                          00922090
+*.                                                                      00922130
+*        WE NOW TAKE EACH SPOOL FILE THAT IS ON THE DELAYED             00922170
+*        PURGE QUEUE AND REQUEUE IT ON ITS ORIGINAL                     00922210
+*        QUEUE (PRINTER).           IN ADDITION, EACH SUCH FILE         00922250
+*        IS PLACED IN 'SYSTEM HOLD'.  FINALLY, THE OPERATOR IS          00922290
+*        SENT DMKRSE252I FOR EACH FILE INFORMING HIM OF WHAT WAS DONE.  00922330
+*.                                                                      00922370
+         SPACE                                                          00922410
+REQLOOP  L     R4,RDEVDELP         FIRST FILE ON DEL PUR Q     @V60B9BA 00922450
+         LTR   R4,R4               ANY MORE LEFT ?             @V60B9BA 00922490
+         BZ    DELAY38             WAIT FOR DE IF NOT          @V60B9BA 00922530
+         USING SFBLOK,R4           TEMPORARY ADDRESSIBILITY    @V60B9BA 00922570
+         MVC   RDEVDELP,SFBPNT     TAKE IT OFF DEL PURGE QUEUE @V60B9BA 00922610
+         L     R1,=A(DMKRSPPR)     PRINTER CHAIN START         @V60B9BA 00922650
+         OI    SFBFLAG,SFBRECER+SFBSHOLD  INDICATE ALLOCATION  @V60B9BA 00922690
+*                          INCOMPLETE AND SYSTEM HOLD          @V60B9BA 00922730
+         L     R2,0(,R1)           SAVE PTR TO FIRST ON CHAIN  @V60B9BA 00922770
+         ST    R4,0(,R1)           RECHAIN DEL PURGE FILE      @V60B9BA 00922810
+         ST    R2,SFBPNT           CHAIN OTHER FILE BEHIND IT  @V60B9BA 00922850
+         SPACE                                                          00922890
+*        TELL OPERATOR ABOUT IT.  PRINTER ADDR IS IN SAVEWRK2           00922930
+         SPACE                                                          00922970
+         LH    R1,SFBFILID         GET SPOOL FILE NUMBER       @V60B9BA 00923010
+         CALL  DMKCVTBD            CONVERT TO EBCDIC DECIMAL   @V60B9BA 00923050
+         ST    R1,SAVEWRK3         PUT IT IN DATA AREA         @V60B9BA 00923090
+         LA    R0,8                LENGTH OF DATA AREA         @V60B9BA 00923130
+         ICM   R0,B'1110',ID+3     MODULE ID                   @V60B9BA 00923170
+         LA    R1,SAVEWRK2         ADDRESS OF DATA AREA        @V60B9BA 00923210
+         LA    R2,252              MESSAGE NUMBER              @V60B9BA 00923250
+         ICM   R2,B'1100',=X'B0C9' RTN, OP, ALARM, INFO MSG    @V60B9BA 00923290
+         CALL  DMKERMSG            TYPE THE MESSAGE            @V60B9BA 00923330
+         B     REQLOOP             DO FOR NEXT FILE ON QUEUE   @V60B9BA 00923370
+         DROP  R4                  NO LONGER NEEDED            @V60B9BA 00923410
+         SPACE 3                                                        00923450
+CHANERR  EQU   *              HERE FOR INTERFACE OR CHAN CON CK         00923490
+         SPACE                                                          00923530
+*        R1 = ADDR OF FAILING CCW                                       00923570
+*        R2 = DEVICE ACTION TABLE ADDR                                  00923610
+*        R3 = TERMINATION CODE                                          00923650
+*        R4 = SEQUENCE CODE                                             00923690
+*        R15 = BRANCH INDEX OUT OF TERMINATION  SEQUENCE ROUTINE        00928000
+         SPACE                                                          00929000
+         TM    IOBSTAT,IOBCC1      CONDITION CODE 1 ON SIO ?            00930000
+         BO    RETRY1              YES -- RETRY ONCE                    00931000
+         SR    R1,R1               LOCATE FAILING CCW                   00932000
+         ICM   R1,B'0111',IOERCSW+1 CCW ADDRESS + 8                     00933000
+         BZ    FATAL               CCW ADDRESS MISSING  - FATAL         00934000
+         S     R1,F8               POINT TO FAILING CCW                 00935000
+         SPACE                                                          00936000
+         SR    R3,R3               CLEAR TERMINATION REG                00937000
+         SR    R4,R4               CLEAR SEQUENCE REG                   00938000
+         LA    R2,SENSEALL         ADDRESS OF SENSE ACTION TABLE        00939000
+         CLI   0(R1),X'04'         FAILING CCW A SENSE COMMAND ?        00940000
+         BE    TERMSEQ             YES -- LOCATE ACTION CODE            00941000
+         SPACE                                                          00942000
+*        POSSIBLE READER OP-CODES FOR SPOOLING -  02 42                 00943000
+         CLI   RDEVTYPE,TYP2501    2501 READER ?                        00944000
+         BNE   CH3505              NO --                                00945000
+         LA    R2,RD2501           POINT TO READ ACTION TABLE           00946000
+         B     TERMSEQ             GO LOCATE ACTION CODE                00947000
+         SPACE                                                          00948000
+CH3505   CLI   RDEVTYPE,TYP3505    3505 READER ?   3525 PUNCH ?         00949000
+         BNE   CH2540              NO --                                00950000
+         LA    R2,RD3505           POINT TO READ ACTION TABLE           00951000
+         TM    RDEVTYPC,CLASURI    3505 READER ?                        00952000
+         BO    *+8                 YES -                                00953000
+         LA    R2,WC3525           POINT TO PUNCH ACTION TABLE          00954000
+         B     TERMSEQ             GO LOCATE ACTION CODE                00955000
+         SPACE                                                          00956000
+CH2540   EQU   *  HERE FOR 2540 READER AND 2540 PUNCH                   00957000
+         CLI   RDEVTYPE,TYP2540R   2540 READER ?  2540 PUNCH ?          00958000
+         BNE   CH1443              NO --                                00959000
+         LA    R2,RD2540           POINT TO READ 2540  ACTION TABLE     00960000
+         B     SEQONLY             GO LOCATE ACTION CODE                00961000
+         SPACE                                                          00962000
+CH1443   CLC   =C'LOADBUF',VMCOMND LOADBUF COMMAND INPROCESS ?          00963000
+         BE    FATAL               YES - CAN NOT RESTART                00964000
+         CLI   RDEVTYPE,TYP1443    1443 PRINTER ?                       00965000
+         BNE   CH1403              NO -                                 00966000
+         LA    R2,C1443            CONTROL ACTION TABLE                 00967000
+         TM    0(R1),X'03'         CONTROL OP CODE ?                    00968000
+         BO    SEQONLY             YES --  LOCATE ACTION CODE           00969000
+         BZ    FATAL               NOT PRINT OR CONTROL                 00970000
+         LA    R2,PC1443           PRINT, PRINT AND CONTROL TABLE       00971000
+         B     SEQONLY             LOCATE ACTION CODE                   00972000
+         SPACE                                                          00973000
+CH1403   CLI   RDEVTYPE,TYP1403    1403 PRINTER ?                       00974000
+         BNE   CH3211              NO -                                 00975000
+         LA    R2,P1403            PRINT ACTION TABLE                   00976000
+         CLI   0(R1),X'01'         PRINT OP-CODE ?                      00977000
+         BE    SEQONLY             YES -- LOCATE ACTION CODE            00978000
+         LA    R2,PC1403           PRINT, PRINT AND CONTROL TABLE       00979000
+         B     SEQONLY             LOCATE ACTION CODE                   00980000
+         SPACE                                                          00981000
+CH3211   EQU   *                                                        00981700
+         TM    RDEVTYPE,TYP3211    IS IT A 3203/3211 PRINTER?? @V386298 00982400
+         BNO   CH3800              NO--CHECK 3800              @V60B9BA 00983100
+         LA    R2,P3211            PRINT ACTION TABLE                   00984000
+         CLI   0(R1),X'01'         PRINT OP-CODE ?                      00985000
+         BE    SEQONLY             YES -- LOCATE ACTION CODE            00986000
+         LA    R2,C3211            CONTROL ACTION TABLE                 00987000
+         TM    0(R1),X'03'         CONTROL OP-CODE ?                    00988000
+         BO    SEQONLY             YES - LOCATE ACTION CODE             00989000
+         LA    R2,PC3211           PRINT AND CONTROL TABLE              00990000
+         B     SEQONLY             LOCATE ACTION CODE                   00991000
+         SPACE                                                          00992000
+CH3800   CLI   RDEVTYPE,TYP3800    IS IT 3800 PRINTER ?        @V60B9BA 00992100
+         BNE   CH2520              NO, TRY 2520                @V60B9BA 00992200
+         LA    R2,L3800            SENSE CONTROL TABLE         @V60B9BA 00992300
+         IC    R4,0(R1)            SEE IF ONE OF THE SENSE     @V60B9BA 00992400
+         N     R4,F15              .. OP CODES                 @V60B9BA 00992500
+         CLM   R4,B'0001',=X'04'   IS IT ?                     @V60B9BA 00992600
+         BE    SEQONLY             LOCATE ACTION CODE IF SO    @V60B9BA 00992700
+         LA    R2,PC3800           PRINT AND CONTROL TABLE     @V60B9BA 00992800
+         B     SEQONLY             LOCATE ACTION CODE          @V60B9BA 00992900
+         SPACE                                                          00993000
+CH2520   CLI   RDEVTYPE,TYP2520P   2520 PUNCH ??                        00994000
+         BNE   FATAL               NO --UNKNOWN - FATAL ERROR           00995000
+         LA    R2,WC2520           WRITE WITH CONTROL TABLE             00996000
+         SPACE 2                                                        00997000
+TERMSEQ  EQU   *  HERE TO LOCATE CORRECT ACTION CODE                    00998000
+         SPACE                                                          00999000
+*        R1  = ADDRESS OF FAILING CCW                                   01000000
+*        R2  = ADDRESS OF ACTION TABLE                                  01001000
+*        R3  = USED FOR TERMINATION CODE                                01002000
+*        R4  = USED FOR SEQUENCE CODE                                   01003000
+*        R15 = EXIT BRANCH INDEX CODE                                   01004000
+*        IOERECSW EQU IOERCSW                                           01005000
+         SPACE                                                          01006000
+         IC    R3,IOERECSW+3       GET TERMINATION CODE  BITS 0 AND 1   01007000
+         SRL   R3,6                SHIFT TERMINATION CODE TO BITS 6 - 7 01008000
+         SLL   R3,3                TERMINATION CODE TIME TABLE          01009000
+*                                  ENTRY LENGTH  (8)                    01010000
+         AR    R2,R3               POINT TO CORRECT TABLE ENTRY         01011000
+         SPACE                                                          01012000
+SEQONLY  EQU   *  ENTRY HERE WHEN TERM CODES 00 01 10                   01013000
+*                                HAVE SAME SEQUENCE ACTION CODES        01014000
+         IC    R4,IOERECSW+3       GET SEQUENCE CODE FROM ECSW          01015000
+         N     R4,F7               SAVE ONLY SEQUENCE CODE (BITS 5,6,7) 01016000
+         SR    R15,R15             CLEAR INDEX REG                      01017000
+         IC    R15,0(R2,R4)        PICK UP ACTION INDEX CODE            01018000
+         B     *+4(R15)            BRANCH TO CORRECT ACTION FOR ERROR   01019000
+         B     FATAL               ACTION CODE 0 FATAL CHANNEL ERROR    01020000
+         B     RETRY1              ACTION CODE 4 RETRY THE OPERATION    01021000
+         B     IGNORECH            ACTION CODE 8 IGNORE THE ERROR       01022000
+         B     DELAY2              ACTION CODE 12 OPERATOR INTERVENTION 01023000
+*                                  REQUIRED                             01024000
+         SPACE                                                          01025000
+IGNORECH TM    4(R1),CC            COMMAND CHAINING ??                  01026000
+         BO    IGNORE              YES - RESTART WITH NEXT CCW          01027000
+         MVC   IOBCSW+4(2),=AL1(CE+DE,0) FORCE GOOD CSW                 01028000
+         B     EREXIT1             RETURN TO DMKRSPEX VIA IOS           01029000
+         EJECT                                                          01030000
+*.                                                                      01030010
+*                                                                       01030020
+* ENTRY POINT -                                                         01030030
+*                                                                       01030040
+*        DMKRSESD - FORMAT HARDWARE ENVIRONMENTAL COUNTERS FOR A 3800   01030050
+*                                                                       01030060
+* OPERATION -                                                           01030070
+*                                                                       01030080
+*        CALLED FROM DMKCPS, DMKCCW AND DMKRSERR TO RECORD              01030090
+*        THE HARDWARE ENVIRONMENTAL DATA PRESENT IN THE                 01030100
+*        3800 INTERNAL ERROR LOG.                                       01030110
+*        ISSUE THE 'SENSE ERROR LOG' CCW AND IF NO ERRORS OCCUR,        01030120
+*        A CALL IS MADE TO DMKIOESD TO RECORD THE DATA FOR              01030130
+*        FIELD ENGINEERING USE.                                         01030140
+*                                                                       01030150
+*.                                                                      01030160
+         SPACE                                                          01030170
+DMKRSESD RELOC ,                                               @V60B9BA 01030180
+         LR    R1,R11                CHARGE USER               @V60B9BA 01030190
+         ST    R1,IOBUSER     ..... INTO IOBLOK                @V60B9BA 01030200
+         LA    R7,136/8           NO OF EXTRA WDS IN IOERBLOK  @V60B9BA 01030210
+         LA    R0,IOERSIZE+136/8  FOR A 3800 GET EXTRA SPACE   @V60B9BA 01030220
+         CALL  DMKFREE        NOW GET EXTRA-SIZE IOERBLOK      @V60B9BA 01030230
+         DROP  R7                  DROP IT TEMPORARILY         @V60B9BA 01030240
+         USING IOERBLOK,R1    (VERY BRIEFLY)                   @V60B9BA 01030250
+         XC    IOERBLOK(IOERSIZE*8),IOERBLOK  CLEAR THE IT     @V60B9BA 01030260
+         STH   R7,IOEREXT     STORE EXTRA SIZE OF BLOCK        @V60B9BA 01030270
+         DROP  R1                                              @V60B9BA 01030280
+         LR    R7,R1          NOW NORMAL IOERBLOK ADDRESSABILIT@V60B9BA 01030290
+         USING IOERBLOK,R7    ...                              @V60B9BA 01030300
+         ST    R13,IOBMISC    PLACE TO SAVE R13 OVER TIO       @V60B9BA 01030310
+         STM   R7,R8,SAVEWRK2 SAVE PTRS TO IOERBLOK AND RDEVBLO@V60B9BA 01030320
+         LA    R1,SNSRTN      GET INTERRUPT RETURN ADDRESS AND @V60B9BA 01030330
+         ST    R1,IOBIRA      STORE IT IN THE IOBLOK           @V60B9BA 01030340
+         OI    IOBSPEC,IOBTIO TELL IOS TO DO A 'TIO'           @V60B9BA 01030350
+         CALL  DMKIOSQR       CALL IOS TO SCHEDULE SENSE       @V60B9BA 01030360
+         GOTO  DMKDSPCH       WAIT FOR I/O TO COMPLETE         @V60B9BA 01030370
+         SPACE                                                          01030380
+SNSRTN   DS    0H             CONNECTOR                        @V60B9BA 01030390
+         USING *,R12                                           @V60B9BA 01030400
+         S     R12,=A(SNSRTN-DMKRSE)  NORMAL ADDRESSIBILITY    @V60B9BA 01030410
+         USING DMKRSE,R12                                      @V60B9BA 01030420
+         L     R13,IOBMISC    RESTORE SAVE AREA ADDRESS        @V60B9BA 01030430
+         LM    R7,R8,SAVEWRK2 RESTORE ADDR OF IOERBLK & RDEVBLO@V60B9BA 01030440
+         NI    IOBSPEC,X'FF'-IOBTIO     RESET 'TIO' FLAG       @V60B9BA 01030450
+         TM    IOBSTAT,IOBFATAL+IOBCC3  WAS THERE AN ERROR     @V60B9BA 01030460
+         BNZ   FRETIOER       IF YES, EXIT                     @V60B9BA 01030470
+         XC    IOERDATA(IOERSNSZ),IOERDATA CLEAR SENSE AREA    @V60B9BA 01030480
+         TM    RDEVFTR,FTREXTSN DOES DEVICE HAVE BUFFERS ?     @V60B9BA 01030490
+         BZ    FRETIOER       IF NOT, DO NOT ISSUE BUFFER UNLOA@V60B9BA 01030500
+         LM    R0,R1,UNLD3800  GET THE RIGHT CCW TO UNLOAD BFR @V60B9BA 01030510
+         ALR   R0,R7               POINT TO IOERDATA           @V60B9BA 01030520
+         STM   R0,R1,SAVEWRK4      SAVE THE CCW                @V60B9BA 01030530
+         STH   R1,IOERLEN     SAVE SENSE LENGTH FOR ERROR RECOR@V60B9BA 01030540
+         MVC   SAVEWRK6(8),LOADSNS DUMMY SENSE CCW             @V60B9BA 01030550
+         LA    R1,READBUF     LOAD R1 W/ INTERRUPT RETURN ADDRE@V60B9BA 01030560
+         ST    R1,IOBIRA      STORE IT IN THE IOBLOK.          @V60B9BA 01030570
+         LA    R4,SAVEWRK4         BFR UNLOAD CCWS             @V60B9BA 01030580
+         ST    R4,IOBCAW      SET CAW ADDR IN IOBLOK           @V60B9BA 01030590
+         ST    R13,IOBMISC         SAVE R13 ACROSS I/O         @V60B9BA 01030600
+         STM   R7,R8,SAVEWRK2 SAVE PTR TO IOERBLOK AND RDEVBLOK@V60B9BA 01030610
+         CALL  DMKIOSQR       CALL IOS FOR BUFFER UNLOAD OPERAT@V60B9BA 01030620
+         GOTO  DMKDSPCH       WAIT FOR I/O TO COMPLETE.        @V60B9BA 01030630
+         SPACE                                                          01030640
+READBUF  DS    0H             CONNECTOR                        @V60B9BA 01030650
+         USING *,R12                                           @V60B9BA 01030660
+         S     R12,=A(READBUF-DMKRSE)  NORMAL ADDRESSIBILITY   @V60B9BA 01030670
+         USING DMKRSE,R12                                      @V60B9BA 01030680
+         L     R13,IOBMISC    RESTORE ADDRESS OF STD WORKAREA  @V60B9BA 01030690
+         LM    R7,R8,SAVEWRK2 RESTORE ADD OF IOERBLOK & RDEVBLO@V60B9BA 01030700
+         TM    IOBSTAT,IOBFATAL+IOBCC3  WAS THERE AN ERROR COND@V60B9BA 01030710
+         BNZ   FRETIOER       IF YES, EXIT                     @V60B9BA 01030720
+         ST    R7,IOBIOER     STORE ADDRESS OF IOERBLOK FOR REC@V60B9BA 01030730
+         CALL  DMKIOESD       RECORD THIS RECORD.              @V60B9BA 01030740
+         B     CKIOB          RELEASE ANY MOVE IOERBLOKS       @V60B9BA 01030750
+         SPACE                                                          01030760
+FRETIOER LA    R0,IOERSIZE    SIZE OF 1 IOERBLOK               @V60B9BA 01030770
+         AH    R0,IOEREXT     INCLUDE EXTRA SIZE (IF ANY)      @V60B9BA 01030780
+         LR    R1,R7          LOCATION OF IOERBLOK.            @V60B9BA 01030790
+         CALL  DMKFRET        FRET THIS STORAGE                @V60B9BA 01030800
+         SPACE                                                          01030810
+*  THIS ROUTINE WILL CHECK FOR A SECOND IOERBLOK . IF ONE WAS           01030820
+*  OBTAINED STORAGE WILL BE GIVEN BACK TO THE SYSTEM.                   01030830
+*                                                                       01030840
+CKIOB    L     R1,IOBIOER     GET ADDR. OF 2'ND IOERBLOK       @V60B9BA 01030850
+         LA    R1,0(R1)       CLEAR HI BYTE                    @V60B9BA 01030860
+         LTR   R1,R1          WAS BLOCK REALY OBTAINED ?       @V60B9BA 01030870
+         BZ    NOTUSED        BRANCH IF NO.                    @V60B9BA 01030880
+         TM    IOERCSW+5-IOERBLOK(R1),IFCC+CCC+CDC IS CHANNEL  @V60B9BA 01030890
+*                             ERROR                                     01030900
+*                             INDICATED ?                               01030910
+         BZ    CKEND2         NO, GO FRET IOERBLOK             @V60B9BA 01030920
+         LR    R3,R1          SAVE THE IOERBLOK POINTER        @V60B9BA 01030930
+         L     R1,IOERCCRA-IOERBLOK(R3) CHANNEL REC ADDR       @V60B9BA 01030940
+         L     R0,IOERCCRL-IOERBLOK(R3) CHANNEL REC LENGTH     @V60B9BA 01030950
+         CALL  DMKFRET        RELEASE STORAGE                  @V60B9BA 01030960
+         LR    R1,R3          GET IOERBLOK POINTER             @V60B9BA 01030970
+CKEND2   EQU   *                                               @V60B9BA 01030980
+         LA    R0,IOERSIZE    LOAD IOERBLOK SIZE.              @V60B9BA 01030990
+         AH    R0,IOEREXT-IOERBLOK(,R1) INCLUDE EXTRA SIZE (IF @V60B9BA 01031000
+         CALL  DMKFRET                                         @V60B9BA 01031010
+NOTUSED  MVC   IOBIOER,ZEROES CLEAR ADDRESS IN IOBLOK IN CASE  @V60B9BA 01031020
+         SPACE                                                          01031030
+RETNSHUT EXIT  EXIT TO CALLER.                                 @V60B9BA 01031040
+         SPACE 3                                                        01031050
+         EJECT                                                          01031060
+TMTYPE   TM    0(R15),0            EXCUTE TM                            01032000
+TMERR    TM    1(R15),0            EXCUTE TM                            01033000
+CKRDCCW  CCW   X'06',XOBR150-IOERBLOK,SILI,150 CHECK READ CCW           01034000
+PLBCCW   CCW   X'02',XOBR512-IOERBLOK,SILI,150 READ PLB                 01035000
+UCSBCCW  CCW   X'0A',XOBR512-IOERBLOK,SILI,512 READ UCSB DATA           01036000
+FCBCCW   CCW   X'12',XOBR180-IOERBLOK,SILI,180 READ FCB DATA            01037000
+         SPACE                                                          01037250
+UNLD3800 CCW   X'24',IOERDATA-IOERBLOK,CC+SILI,136 3800 UNLD   @V60B9BA 01037500
+LOADSNS  CCW   X'04',*-*,SILI+SKIP,1  DUMMY SENSE CCW          @V60B9BA 01037750
+         SPACE                                                          01038000
+MSGTABLE DC    X'FF1003'           EQUIPMENT CHECK                      01039000
+         DC    X'FF0804'           DATA CHECK                           01040000
+         DC    X'FF2002'           BUS OUT CHECK                        01041000
+         DC    X'FF8000'           COMMAND REJECT                       01042000
+         DC    X'FF4001'           INTERVENTION REQUIRED                01043000
+         DC    X'43041D'           PARITY (3211 1403 3203)     @V386298 01044000
+         DC    X'420218'           LOAD CHECK (3211 3203)      @V386298 01045000
+         DC    X'840219'           FORMAT CHECK (35XX)                  01046000
+         DC    X'840108'           PERMANENT ERROR (35XX)               01047000
+         DC    X'810405'           OVERRUN (2501)                       01048000
+         DC    X'FFFF03'           ALL OTHERS EQUIPMENT CHECK           01049000
+         DS    0H                                                       01050000
+         EJECT                                                          01051000
+*                                                                       01052000
+* SEQUENCE CODE   000,001,010,011,100,101,110,111                       01053000
+*                                                                       01054000
+SENSEALL DC    AL1(0,4,4,4,4,4,0,0)   TERM CODE 00                      01055000
+         DC    AL1(0,0,4,4,0,4,0,0)   TERM CODE 01                      01056000
+         DC    AL1(0,4,4,4,4,4,0,0)   TERM CODE 10                      01057000
+         SPACE                                                          01058000
+RD2501   DC    AL1(0,4,12,12,4,12,0,0)   TERM CODE 00                   01059000
+         DC    AL1(0,0,12,12,0,12,0,0)   TERM CODE 01                   01060000
+         DC    AL1(0,4,12,12,4,12,0,0)   TERM CODE 10                   01061000
+         SPACE                                                          01062000
+         SPACE                                                          01063000
+RD3505   DC    AL1(0,4,4,4,4,12,0,0)     TERM CODE 00                   01064000
+         DC    AL1(0,0,4,4,0,04,0,0)     TERM CODE 01                   01065000
+         DC    AL1(0,4,4,4,4,12,0,0)     TERM CODE 10                   01066000
+         SPACE                                                          01067000
+WC3525   DC    AL1(0,4,4,4,4,0,0,0)      TERM CODE 00                   01068000
+         DC    AL1(0,0,4,4,0,4,0,0)      TERM CODE 01                   01069000
+         DC    AL1(0,4,4,4,4,0,0,0)      TERM CODE 10                   01070000
+         SPACE                                                          01071000
+C3211    EQU   *    TERM 00 01 10                                       01072000
+C1443    EQU   *    TERM 00 01 10                                       01073000
+PC1403   EQU   *    TERM 00 01 10                                       01074000
+C1403    EQU   *    TERM 00 01 10                                       01075000
+RD2540   EQU   *    TERM 00 01 10                                       01076000
+WC2540   EQU   *    TERM 00 01 10                                       01077000
+PLB3203  EQU   X'10'               MASK FOR 3203 PLB           @V3M4036 01077150
+         SPACE 1                                                        01077300
+*        ALL TERM CODES WHICH APPLY TO THE 3211 PRINTER ALSO            01077450
+*        APPLY TO THE 3203 PRINTER                                      01077600
+         SPACE 1                                                        01077750
+         DC    AL1(0,0,0,0,4,0,0,0)   TERM CODE 00 01 10                01078000
+         SPACE                                                          01079000
+PC3800   EQU   *  TERM CODE 00 01 10                           @V60B9BA 01080000
+PC1443   EQU   *  TERM CODE 00 01 10                                    01080500
+P1443    DC    AL1(0,4,4,0,4,0,0,0)   TERM CODE 00 01 10                01081000
+         SPACE                                                          01082000
+L3800    EQU   *  TERM CODE 00 01 10                           @V60B9BA 01082500
+P1403    DC    AL1(0,4,4,4,4,4,0,0)   TERM CODE 00 01 10                01083000
+         SPACE                                                          01084000
+P3211    DC    AL1(0,4,4,4,4,4,0,0)   TERM CODE 00 01 10                01085000
+         SPACE                                                          01086000
+PC3211   DC    AL1(0,0,0,0,4,4,0,0)   TERM CODE 00 01 10                01087000
+         SPACE                                                          01088000
+WC2520   DC    AL1(0,4,12,12,4,12,0,0)   TERM CODE 00                   01089000
+         DC    AL1(0,0,12,12,0,12,0,0)   TERM CODE 01                   01090000
+         DC    AL1(0,4,04,04,0,04,0,0)   TERM CODE 10                   01091000
+         SPACE 3                                                        01092000
+PARMLEN  EQU   2             NUM OF DBLWDS FOR 3800 PARM FIELD @V60B9BA 01092250
+PARM3800 DC    X'04040F0F0F0F0F0FFF'  3800 COUNTERS            @V60B9BA 01092500
+         SPACE 2                                                        01092750
+         LTORG                                                          01093000
+         EJECT                                                          01094000
+         PSA                                                            01095000
+         COPY  VMBLOK                                                   01096000
+         COPY  RBLOKS                                                   01097000
+         COPY  SAVE                                                     01098000
+         COPY  EQU                                                      01099000
+         COPY  DEVTYPES                                                 01100000
+         COPY  SPOOL                                           @V60B9BA 01100500
+         COPY  IOBLOKS                                                  01101000
+         COPY  IOER                                                     01102000
+         COPY  ACCOUNT                                                  01103000
+         END                                                            01104000

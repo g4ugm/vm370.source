@@ -1,0 +1,639 @@
+REA      TITLE 'DMSREA     (CMS)       VM/370 - RELEASE 6'              00001000
+         ISEQ  73,80                                                    00002000
+*.                                                                      00003000
+* MODULE NAME - DMSREA                                                  00004000
+*                                                                       00005000
+* DESCRIPTIVE NAME - ERROR RECORD READ ROUTINE.                         00006000
+*                                                                       00007000
+* COPYRIGHT - NONE                                                      00008000
+*                                                                       00009000
+* CHANGE ACTIVITY - NOT APPLICABLE                                      00010000
+*                                                                       00011000
+* FUNCTION -                                                            00012000
+*        DMSREA IS AN INTERFACE MODULE FOR THE CMS CPEREP COMMAND.      00013000
+*        DMSREA READS A SPECIFIED LOGICAL RECORD FROM THE VM/370        00014000
+*        ERROR RECORDING CYLINDERS AND RETURNS IT TO THE CALLER.        00015000
+*        THE CALLER SPECIFIES WHICH LOGICAL RECORD HE WANTS BY          00016000
+*        PASSING A RECORD ADDRESS TO DMSREA.  THE RECORD ADDRESS        00017000
+*        FORMAT RESEMBLES THE STANDARD 5 BYTE CCHHR DISK ADDRESS        00018000
+*        FORMAT, BUT IS A LITTLE DIFFERENT.  THE FORMAT IS:             00019000
+*          CCB0R                                                        00020000
+*        WHERE:                                                         00021000
+*          CC - IS THE RELATIVE DASD CYLINDER ADDRESS (RELATIVE TO      00022000
+*               THE FIRST OF THE ERROR CYLINDERS, E.G., CC IS           00023100
+*               X'0000', X'0001', ...,X'0008').                         00024100
+*          B  - IS THE NUMBER OF THE 4K BLOCK (OR PAGE) WITHIN THE      00025000
+*               SPECIFIED DASD CYLINDER.                                00026000
+*          0  - A BYTE OF ZERO.                                         00027000
+*          R  - LOGICAL RECORD NUMBER OF A RECORD WITHIN THE            00028000
+*               SPECIFIED BLOCK.  THE BLOCK CONTAINS VARIABLE LENGTH    00029000
+*               RECORDS, EACH PRECEEDED BY THE STANDARD 4 BYTE RECORD   00030000
+*               DESCRIPTOR WORD WHICH CONTAINS THE RECORD LENGTH.       00031000
+*               SINCE RECORDS IN THE ERROR RECORDING CYLINDERS ARE      00032000
+*               NEVER LESS THAN 24 BYTES IN LENGTH, THERE CANNOT BE     00033000
+*               MORE THAN 255 RECORDS IN A BLOCK.  RECORDS WITHIN       00034000
+*               A BLOCK ARE NUMBERED 1 THRU M.                          00035000
+*        THE CCB0R ADDRESS IS NOT ONLY RECEIVED FROM THE CALLER,        00036000
+*        BUT IS RETURNED TO HIM AFTERWARDS AS WELL, FOR REASONS         00037000
+*        THAT WILL SOON BE APPARENT.  SOMETIMES THE REQUESTED RECORD    00038000
+*        DOES NOT EXIST OR CANNOT BE READ (DUE TO AN I/O ERROR).        00039000
+*        IN THESE CASES, THE NEXT LOGICAL RECORD IS RETURNED TO THE     00040000
+*        CALLER INSTEAD.  AND IN THESE CASES THE CCB0R ADDRESS          00041000
+*        RETURNED TO THE CALLER IS A CORRECTED CCB0R ADDRESS THAT       00042000
+*        SHOWS WHAT RECORD WAS ACTUALLY GOTTEN.  SOME EXAMPLES          00043000
+*        WILL CLARIFY THIS.                                             00044000
+*                                                                       00045000
+*        ASSUMPTIONS FOR EXAMPLES:                                      00046000
+*          * EACH CYLINDER CONTAINS 10 (=X'0A') OF THE 4K BLOCKS.       00047000
+*          * NO RECORDS WERE RECORDED IN THE 1ST (CC=X'0000') CYLINDER, 00048000
+*            I.E., ALL 10 BLOCKS THERE ARE FLAGGED AS EMPTY.            00049000
+*          * BLOCK 1 IN THE 2ND CYLINDER CONTAINS 7 RECORDS.            00050000
+*          * BLOCK 2 IN THE 2ND CYLINDER IS FLAGGED AS UNREADABLE OR    00051000
+*            EMPTY.                                                     00052000
+*          * BLOCK 3 IN THE 2ND CYLINDER CONTAINS 5 RECORDS.            00053000
+*          * BLOCK 4 IN THE 2ND CYLINDER CONTAINS 3 RECORDS.            00054000
+*          * THE REMAINING BLOCKS OF THE 2ND CYLINDER ARE EMPTY.        00055000
+*        EXAMPLE 1:                                                     00056000
+*          THE CALLER PASSES X'0001030005' AS THE CCB0R ADDRESS.        00057000
+*          THE REQUESTED RECORD 5 IN BLOCK 3 OF THE 2ND CYLINDER        00058000
+*          EXISTS, SO THE REQUESTED RECORD IS RETURNED.  AND THE        00059000
+*          ORIGINAL CCB0R VALUE IS RETURNED UNCHANGED.                  00060000
+*        EXAMPLE 2:                                                     00061000
+*          THE CALLER WANTS TO READ THE NEXT SEQUENTIAL RECORD AFTER    00062000
+*          THE ONE HE READ IN EXAMPLE 1.  SO HE ADDS 1 TO THE R         00063000
+*          VALUE OF THE CCB0R ADDRESS RETURNED IN EXAMPLE 1, GETTING    00064000
+*          X'0001030006', WHICH HE NOW PASSES TO DMSREA.  SINCE         00065000
+*          THERE IS NO RECORD 6 IN BLOCK 3, DMSREA RETURNS THE NEXT     00066000
+*          AVAILABLE RECORD WHICH IS RECORD 1 IN BLOCK 4.  AND THE      00067000
+*          RETURNED ADDRESS IS X'0001040001'.                           00068000
+*        EXAMPLE 3:                                                     00069000
+*          THE CALLER PASSES X'0001010008' AS THE CCB0R ADDRESS.        00070000
+*          THERE IS NO RECORD 8 IN BLOCK 1, SO DMSREA TRIES TO GET      00071000
+*          RECORD 1 FROM BLOCK 2, BUT BLOCK 2 IS FLAGGED AS             00072000
+*          UNREADABLE, SO IT ADVANCES TO BLOCK 3 AND RETURNS RECORD     00073000
+*          1 OF BLOCK 3.  THE RETURNED ADDRESS IS X'0001030001'.        00074000
+*        EXAMPLE 4:                                                     00075000
+*          THE CALLER PASSES X'0000050005', ATTEMPTING TO READ          00076000
+*          NON-EXISTENT DATA FROM THE EMPTY 1ST CYLINDER.  DMSREA       00077000
+*          SCANS THRU BLOCKS 5 THRU 10 OF THE 1ST CYLINDER, FINDING     00078000
+*          NOTHING, AND THEN SWITCHES TO THE 2ND CYLINDER.  THERE       00079000
+*          IT FINDS AND RETURNS RECORD 1 OF BLOCK 1 AND RETURNS         00080000
+*          THE ADDRESS X'0001010001'.                                   00081000
+*        EXAMPLE 5:                                                     00082000
+*          THE CALLER PASSES X'00000B0001', ATTEMPTING TO READ FROM     00083000
+*          THE 1ST CYLINDER, BUT BEYOND THE ALLOWED LIMIT OF            00084000
+*          10 (=X'0A') BLOCKS PER CYLINDER (AS ASSUMED FOR THIS         00085000
+*          EXAMPLE).  THIS IS NOT ALLOWED.  THE RESULTS ARE             00086000
+*          UNPREDICTABLE.  (NOTE: THE CALLER IS NOT EXPECTED TO         00087000
+*          KNOW HOW MANY BLOCKS ARE ALLOWED IN A CYLINDER ON A          00088000
+*          PARTICULAR DEVICE.  RATHER, IT IS EXPECTED THAT HE WILL      00089000
+*          ONLY USE ADDRESSES THAT HAVE BEEN RETURNED TO HIM FROM       00090000
+*          PRIOR CALLS TO DMSREA, WITH ONLY THE R FIELD CHANGED BY      00091000
+*          HIM.  AN EXCEPTION IS THAT HE IS PERMITTED TO MAKE UP        00092000
+*          AN ADDRESS HIMSELF TO GET STARTED AT THE FIRST BLOCK         00093000
+*          OF EITHER CYLINDER.)                                         00094000
+*        EXAMPLE 6:                                                     00095000
+*          THE CALLER PASSES X'0001040004' REQUESTING A RECORD          00096000
+*          FOLLOWING THE FINAL RECORD OF BLOCK 4, 2ND CYLINDER.         00097000
+*          BLOCKS BEYOND BLOCK 4 ARE ALL EMPTY.  DMSREA LOOKS FOR,      00098000
+*          BUT FAILS TO FIND, A NEXT AVAILABLE RECORD IN THE            00099000
+*          REMAINING BLOCKS.  SO DSMREA RETURNS AN END-OF-FILE          00100000
+*          INDICATION RATHER THAN A NEXT AVAILABLE RECORD.              00101000
+*        EXAMPLE 7:                                                     00102000
+*          FORGET THE ASSUMPTIONS OF THE EARLIER EXAMPLES.  ASSUME      00103000
+*          NOW THAT ALL CYLINDERS ARE EMPTY. THE CALLER PASSES          00104100
+*          X'0000010001' REQUESTING THE FIRST RECORD OF THE FIRST       00105000
+*          CYLINDER. DMSREA READS THRU ALL CYLS LOOKING FOR             00106100
+*          AN AVAILABLE RECORD AND FINALLY RETURNS AN END-OF-FILE       00107000
+*          INDICATION RATHER THAN A RECORD.                             00108000
+*                                                                       00109000
+* ATTRIBUTES - NON-REUSABLE, CMS USER AREA, ENTERED VIA CALL.           00110000
+*                                                                       00111000
+* ENTRY POINTS - DMSREA                                                 00112000
+*                                                                       00113000
+* ENTRY CONDITIONS -                                                    00114000
+*        R1 = ADDRESS OF THE CCB0R DASD RECORD ADDRESS.                 00115000
+*        R13 = ADDRESS OF A STANDARD 72 BYTE SAVE AREA.                 00116000
+*        R14 = RETURN ADDRESS.                                          00117000
+*                                                                       00118000
+* EXIT CONDITIONS -                                                     00119000
+*        R0 = NON-ZERO: ADDRESS OF VARIABLE LENGTH RECORD BEING         00120000
+*             RETURNED.  FIRST 4 BYTES ARE THE RECORD DESCRIPTOR WORD   00121000
+*             CONTAINING THE RECORD LENGTH.                             00122000
+*        R0 = ZERO: INDICATES END-OF-FILE; NO RECORD WAS AT OR BEYOND   00123000
+*             THE INPUTTED ADDRESS.                                     00124000
+*        R1 = ADDRESS OF THE (SOMETIMES CORRECTED) CCB0R DASD RECORD    00125000
+*             ADDRESS.  THIS IS IN A SEPARATE WORK AREA, NOT            00126000
+*             OVERLAYING THE INPUTTED CCB0R.                            00127000
+*        R13 = SAME SAVE AREA ADDRESS.                                  00128000
+*        R15 = 0; NOTHING UNUSUAL.                                      00129000
+*        R15 = 4; AN EMPTY 4K BLOCK WAS SKIPPED.                        00130000
+*        R15 = 8; INPUTTED CCB0R ADDRESS CONTAINED INVALID CC VALUE.    00131000
+*        R15 = 60; DMSIFC830E (I/O ERROR)                               00132000
+*                                                                       00133000
+* CALLS TO OTHER ROUTINES -                                             00134000
+*        DIAGNOSE CALLS TO CP AS BELOW:                                 00135000
+*             DIAGNOSE CODE X'2C' = FIND RECORDING AREA ON SYSTEM DISK. 00136000
+*             DIAGNOSE CODE X'30' = READ PAGE SIZE RECORD FROM ERROR    00137000
+*             RECORDING CYLINDERS.                                      00138000
+*        DMSERR - CALLED VIA MACRO SVC TO WRITE ERROR MESSAGE TO        00139000
+*                 THE CONSOLE.                                          00140000
+*                                                                       00141000
+* EXTERNAL REFERENCES - NONE.                                           00142000
+*                                                                       00143000
+* TABLES / WORK AREAS -                                                 00144000
+*        4K OF STORAGE BEGINNING AT ABSOLUTE LOCATION X'21000' WILL BE  00145000
+*        USED AS A BUFFER FOR THE BLOCKS OF ERROR RECORDS.              00146000
+*                                                                       00147000
+* MACROS - DMSERR, REGEQU                                               00148000
+*                                                                       00149000
+* REGISTER USAGE -                                                      00150000
+*        R0-R9   = SCRATCH                                              00151000
+*        R10-R11 = SPARES, NOT PRESENTLY USED.                          00152000
+*        R12     = BASE                                                 00153000
+*        R13     = SAVE AREA ADDRESS                                    00154000
+*        R14-R15 = SCRATCH                                              00155000
+*                                                                       00156000
+* NOTES -                                                               00157000
+*        THIS MODULE USES 4K OF (UNALLOCATED) STORAGE AT ABSOLUTE       00158000
+*        LOCATION X'21000' AS A PAGE BUFFER IN WHICH TO READ THE 4K     00159000
+*        BLOCKS OF ERROR RECORDS.                                       00160000
+*                                                                       00161000
+* SIGNIFICANT INTERNAL VARIABLES -                                      00162000
+*        STARTCYL - FULLWORD CONTAINING STARTING CYLINDER AND DEVICE    00163000
+*                   CODE OF THE VM/370 ERROR RECORDING CYLINDERS AREA.  00164000
+*                   INITIALIZED ON THE FIRST CALL, IT REMAINS           00165000
+*                   UNCHANGED THEREAFTER.  HAS 'VM/370 CONTROL PROGRAM  00166000
+*                   INTERNAL FORMAT'.                                   00167000
+*        CYLCOUNT - HALFWORD CONTAINING THE NUMBER OF ERROR             00167100
+*                   RECORDING CYLINDERS. INITIALIZED ON THE 1ST         00167200
+*                   CALL, IT REMAINS UNCHANGED THEREAFTER.              00167300
+*        AVAILBLK - FULLWORD CONTAINING ADDRESS (IN 'VM/370 CONTROL     00168000
+*                   PROGRAM INTERNAL FORMAT') OF THE LAST BLOCK READ    00169000
+*                   INTO THE 4K BUFFER.  VALUE IS RETAINED FROM ONE     00170000
+*                   CALL TO THE NEXT.  THE DATA REMAINS AVAILABLE IN    00171000
+*                   THE BUFFER.                                         00172000
+*        RECNO    - FULLWORD CONTAINING THE NUMBER OF THE LOGICAL       00173000
+*                   RECORD THAT WAS LAST REQUESTED FROM THE 4K BUFFER.  00174000
+*                   VALUE IS RETAINED FROM ONE CALL TO THE NEXT.  IT    00175000
+*                   SAVES US FROM HAVING TO COUNT UP THRU ALL THE       00176000
+*                   LOGICAL RECORDS IN THE BUFFER.  SAVING IS MAINLY    00177000
+*                   ACHIEVED WHEN SEQUENTIAL ACCESSING IS DONE.         00178000
+*        RECADDR  - FULLWORD CONTAINING THE STORAGE ADDRESS OF THE      00179000
+*                   PARTICULAR RECORD IN THE 4K BUFFER THAT IS          00180000
+*                   INDICATED BY 'RECNO' ABOVE.  VALUE IS RETAINED      00181000
+*                   FROM ONE CALL TO THE NEXT.                          00182000
+*                                                                       00183000
+* OPERATION -                                                           00184000
+*        1. SAVE REGISTERS AS NECESSARY.  SET R15 RETURN CODE TO 0.     00185000
+*        2. IF THIS IS NOT THE FIRST CALL TO DMSREA, GO TO 4.           00186000
+*        3. ISSUE DIAGNOSE X'2C' TO FIND THE START OF THE VM/370        00187000
+*           ERROR RECORDING CYLINDERS.  STORE RETURNED ADDRESS VALUE    00188000
+*           IN 'STARTCYL'.  'AVAILBLK' IS INITIALLY ZERO; NON-EXISTENT  00189000
+*           ZERO ADDRESS INSURES THAT IN CODE BELOW WE DO NOT GET       00190000
+*           FOOLED INTO THINKING 4K BUFFER CONTAINS A BLOCK.            00191000
+*           THROW 'FIRST TIME' SWITCH. STORE COUNT OF RECORD-           00192100
+*           ING CYLINDERS IN 'CYLCOUNT'.                                00192200
+*        4. CHECK CC PORTION OF INPUTTED CCB0R FOR VALID RANGE.         00193000
+*           IF INVALID, GO TO 16.                                       00194000
+*        5. CONVERT CCB PORTION OF INPUTTED CCB0R ADDRESS TO A          00195000
+*           'VM/370 CONTROL PROGRAM INTERNAL FORMAT (CPIF)' ADDRESS.    00196000
+*        6. IF COMPUTED CPIF ADDRESS MATCHES VALUE IN 'AVAILBLK',       00197000
+*           THEN DESIRED BLOCK IS ALREADY IN BUFFER, SO GO TO 11.       00198000
+*        7. SET 'RECNO' TO ZERO INDICATING WE HAVE NOT YET COUNTED UP   00199000
+*           TO ANY PARTICULAR RECORD IN THE NEW BLOCK ABOUT TO BE       00200000
+*           READ IN.  SET 'AVAILBLK' TO ZERO (WE COULD ALMOST AS WELL   00201000
+*           SET IT TO THE NEW CPIF ADDRESS SINCE WE ARE ABOUT TO        00202000
+*           READ THAT BLOCK INTO THE BUFFER; BUT THE READ COULD FAIL    00203000
+*           AND ZERO BEST INDICATES UNDEFINED STATE OF THE BUFFER).     00204000
+*           ISSUE DIAGNOSE X'30' USING COMPUTED CPIF ADDRESS TO READ    00205000
+*           THE ADDRESSED BLOCK.  TEST CONDITION CODE SET BY DIAGNOSE:  00206000
+*              CC=0: BLOCK WAS READ SUCCESSFULLY; GO TO 10.             00207000
+*              CC=1: END OF CYLINDER, ADDRESSED BLOCK IS NON-EXISTENT;  00208000
+*                    GO TO 17.                                          00209000
+*              CC=3: SPECIFIED CYLINDER IS OUTSIDE THE ERROR RECORDING  00210000
+*                    AREA; GO TO 16.                                    00211000
+*              CC=2: I/O ERROR,BLOCK COULD NOT BE READ; FALL THRU TO 8. 00212000
+*        8. ISSUE MESSAGE DMSREA830E (I/O ERROR), SET CODE 60 FOR R15.  00213000
+*           (WE CANNOT GET THE ADDRESSED RECORD, SO WE WILL TRY FOR     00214000
+*           THE NEXT AVAILABLE RECORD INSTEAD.)                         00215000
+*        9. PREPARE TO READ NEXT BLOCK AND USE FIRST RECORD IN IT:      00216000
+*           ADD ONE TO BLOCK NUMBER IN CPIF ADDRESS; SET R VALUE OF     00217000
+*           CCB0R TO RECORD 1; GO TO 7.                                 00218000
+*                                                                       00219000
+*       10. STORE CPIF ADDRESS IN 'AVAILBLK'.                           00220000
+*           IF THE BLOCK IS FLAGGED AS EMPTY, GO TO 9.                  00221000
+*       11. (COMMENT: BLOCK SPECIFIED BY CPIF ADDRESS IS NOW IN THE     00222000
+*           BUFFER AND DOES CONTAIN SOME RECORDS.  'RECNO' AND          00223000
+*           'RECADDR' EITHER POINT TO SOME RECORD IN THE BUFFER OR      00224000
+*           'RECNO' IS ZERO.  R IN CCB0R SPECIFIES THE RECORD WE        00225000
+*           WANT TO FIND IN THE BUFFER.)                                00226000
+*           IF 'RECNO' IS GREATER THAN R, SET 'RECNO' TO ZERO.          00227000
+*       12. IF 'RECNO' IS ZERO, SET IT TO ONE AND INITIALIZE            00228000
+*           'RECADDR' TO POINT TO FIRST RECORD IN BUFFER.               00229000
+*       13. (COMMENT: STEP THRU THE BUFFER INCREMENTING 'RECNO'         00230000
+*           AND 'RECADDR' UNTIL 'RECNO' MATCHES R OR UNTIL THERE        00231000
+*           ARE NO MORE RECORDS IN THE BUFFER.)                         00232000
+*           IF 'RECNO' EQUALS R, GO TO 14.                              00233000
+*           INCREMENT 'RECNO' BY ONE AND ADVANCE 'RECADDR' TO NEXT      00234000
+*           RECORD, IF ANY.                                             00235000
+*           IF 'RECADDR' IS BEYOND LAST RECORD IN BUFFER, GO TO 9.      00236000
+*           OTHERWISE, LOOP TO 13 FOR ANOTHER ITERATION.                00237000
+*                                                                       00238000
+*       14. FROM THE CURRENT R AND CPIF ADDRESS, COMPUTE A CORRECTED    00239000
+*           CCB0R VALUE TO BE RETURNED TO THE CALLER.  PUT ADDRESS      00240000
+*           OF CORRECTED CCB0R DATA IN R1.  LOAD 'RECADDR' INTO R0.     00241000
+*       15. RESTORE REGISTERS (EXCEPT OUTPUT PARAMETER REGISTERS) AND   00242000
+*           RETURN TO THE CALLER.                                       00243000
+*                                                                       00244000
+*       16. SET ERROR CODE IN R15 FOR INVALID CYLINDER.  GO TO 15.      00245000
+*                                                                       00246000
+*       17. (COMMENT: END OF CYLINDER INDICATION WAS RECEIVED.)         00247000
+*           SET R0 TO ZERO (INDICATES EOF TO CALLER IN CASE THIS        00248000
+*           CYLINDER IS THE LAST CYLINDER).                             00249000
+*           IF CC PORTION OF CPIF ADDRESS INDICATES WE WERE ALREADY     00250000
+*           ON THE FINAL CYLINDER, GO TO 15.                            00251000
+*           OTHERWISE ADVANCE TO NEXT CYLINDER: ADD 1 TO CC OF CPIF     00252000
+*           ADDRESS; SET B OF CPIF ADDRESS TO BLOCK 1; SET R OF CCB0R   00253000
+*           ADDRESS TO RECORD 1;                                        00254000
+*           GO TO 7 (TO READ FIRST AVAILABLE RECORD IN NEXT CYLINDER).  00255000
+*                                                                       00256000
+* RESPONSES - NONE                                                      00257000
+*                                                                       00258000
+* ERROR MESSAGES - DMSREA830E WITH RETURN CODE 60.                      00259000
+*.                                                                      00260000
+         EJECT                                                          00261000
+DMSREA   CSECT                                                 @V4085A8 00262000
+*********************************************************************** 00263000
+*     1. SAVE REGISTERS AS NECESSARY.  SET R15 RETURN CODE TO 0.        00264000
+*********************************************************************** 00265000
+         SR    R15,R15  INITIALIZE RETURN CODE.                @V4085A8 00266000
+         STM   R14,R12,SAVER14(R13)                            @V4085A8 00267000
+         BALR  R12,0  ESTABLISH ADDRESSABILITY.                @V4085A8 00268000
+         USING *,R12                                           @V4085A8 00269000
+         SPACE                                                          00270000
+*********************************************************************** 00271000
+*     2. IF THIS IS NOT THE FIRST CALL TO DMSREA, GO TO 4.              00272000
+*********************************************************************** 00273000
+FIRSTSW  BC    *-*,OPER4  BRANCH IF THIS IS NOT THE FIRST CALL.@V4085A8 00274000
+*                         (CONDITION CODE MASK WILL BE MODIFIED.)       00275000
+*        FALL THRU IF THIS IS THE FIRST CALL TO DMSREA.                 00276000
+         SPACE                                                          00277000
+*********************************************************************** 00278000
+*     3. ISSUE DIAGNOSE X'2C' TO FIND THE START OF THE VM/370           00279000
+*        ERROR RECORDING CYLINDERS.  STORE RETURNED ADDRESS VALUE       00280000
+*        IN 'STARTCYL'.  'AVAILBLK' IS INITIALLY ZERO; NON-EXISTENT     00281000
+*        ZERO ADDRESS INSURES THAT IN CODE BELOW WE DO NOT GET          00282000
+*        FOOLED INTO THINKING 4K BUFFER CONTAINS A BLOCK.               00283000
+*        THROW 'FIRST TIME' SWITCH.                                     00284000
+*********************************************************************** 00285000
+         OI    FIRSTSW+1,X'F0'  THROW THE SWITCH.              @V4085A8 00286000
+         LA    R2,CODE01        CODE X'01' FOR DIAGNOSE '2C'   @V5088AA 00286100
+         DC    X'8323002C'      DIAGNOSE RETURNS THE DISK      @V5088AA 00287100
+*                           ADDR (IN VM/370 CONTROL PROGRAM INTERNAL    00288000
+*                           FORMAT) OF THE START OF THE ERROR           00289000
+*                               RECORDING AREA (IN R2) AND THE          00290100
+*                               NUMBER OF ERROR RECORDING               00290200
+*                               CYLINDERS (IN R3).                      00290300
+         N     R2,BLKMASK  CLEAR THE PAGE (OR BLOCK) NUMBER    @V4085A8 00291000
+*                          BYTE TO X'00'.                               00292000
+         ST    R2,STARTCYL  SAVE CC0D PERMANENTLY FOR USE      @V4085A8 00293000
+*                           DURING THIS CALL AND ALL LATER CALLS.       00294000
+         STH   R3,CYLCOUNT      SAVE COUNT OF RECORDING CYLS   @V5088AA 00294100
+*                               FOR USE DURING THIS CALL AND            00294200
+*                               ALL LATER CALLS.                        00294300
+         SPACE                                                          00295000
+*********************************************************************** 00296000
+*     4. CHECK CC PORTION OF INPUTTED CCB0R FOR VALID RANGE.            00297000
+*        IF INVALID, GO TO 16.                                          00298000
+*********************************************************************** 00299000
+OPER4    CLC   0(LENCC,R1),CYLCOUNT  R1 (INPUT ARG) POINTS TO  @V5088AA 00300100
+*                                    CCB0R.                             00301000
+         BNL   OPER16           ERROR--CC WAS GREATER THAN     @V5088AA 00302100
+*                               NUMBER OF CYLINDERS AVAILABLE           00302200
+*                               FOR ERROR RECORDING                     00302300
+         SPACE                                                          00303000
+*********************************************************************** 00304000
+*     5. CONVERT CCB PORTION OF INPUTTED CCB0R ADDRESS TO A             00305000
+*        'VM/370 CONTROL PROGRAM INTERNAL FORMAT (CPIF)' ADDRESS.       00306000
+*********************************************************************** 00307000
+         MVC   WANT0R,DISP0R(R1)  MOVE INPUTTED 0R OF CCB0R TO @V4085A8 00308000
+*                                 HALFWORD.                             00309000
+         MVC   WANTCCBD,0(R1)  MOVE INPUTTED CCB0 OF CCBOR TO  @V4085A8 00310000
+*                              FULLWORD.                                00311000
+         CLI   WANTCCBD+DISPB,X'00'  CHECK B FIELD OF CCB0.    @V4085A8 00312000
+         BNE   *+8  IT IS NON-0 WHICH IS ACCEPTABLE.           @V4085A8 00313000
+*        BLOCK 0 WAS REQUESTED BUT THERE IS NO SUCH THING.  (THIS       00314000
+*        SHOULDN'T REALLY HAPPEN, AT LEAST NOT IF DMSIFC IS THE CALLER) 00315000
+         MVI   WANTCCBD+DISPB,X'01'  ADVANCE TO THE 1ST BLOCK. @V4085A8 00316000
+         L     R1,WANTCCBD  LOAD CCB0 (CC IS RELATIVE OFFSET). @V4085A8 00317000
+         A     R1,STARTCYL  ADD CC0D GETTING A TRUE CCBD       @V4085A8 00318000
+*                           INTERNAL FORMAT DISK ADDRESS (CC ABSOLUTE). 00319000
+         ST    R1,WANTCCBD  PUT BACK TRUE CCBD.                @V4085A8 00320000
+         SPACE                                                          00321000
+*********************************************************************** 00322000
+*     6. IF COMPUTED CPIF ADDRESS MATCHES VALUE IN 'AVAILBLK',          00323000
+*        THEN DESIRED BLOCK IS ALREADY IN BUFFER, SO GO TO 11.          00324000
+*********************************************************************** 00325000
+         C     R1,AVAILBLK  COMPARE WANTED CCBD RECORD ADDR    @V4085A8 00326000
+*                           WITH ADDR OF RECORD ALREADY IN BUFFER.      00327000
+         BE    OPER11  DESIRED BLOCK IS ALREADY IN BUFFER.     @V4085A8 00328000
+         SPACE                                                          00329000
+*********************************************************************** 00330000
+*     7. SET 'RECNO' TO ZERO INDICATING WE HAVE NOT YET COUNTED UP      00331000
+*        TO ANY PARTICULAR RECORD IN THE NEW BLOCK ABOUT TO BE          00332000
+*        READ IN.  SET 'AVAILBLK' TO ZERO (WE COULD ALMOST AS WELL      00333000
+*        SET IT TO THE NEW CPIF ADDRESS SINCE WE ARE ABOUT TO           00334000
+*        READ THAT BLOCK INTO THE BUFFER; BUT THE READ COULD FAIL       00335000
+*        AND ZERO BEST INDICATES UNDEFINED STATE OF THE BUFFER).        00336000
+*        ISSUE DIAGNOSE X'30' USING COMPUTED CPIF ADDRESS TO READ       00337000
+*        THE ADDRESSED BLOCK.  TEST CONDITION CODE SET BY DIAGNOSE:     00338000
+*           CC=0: BLOCK WAS READ SUCCESSFULLY; GO TO 10.                00339000
+*           CC=1: END OF CYLINDER, ADDRESSED BLOCK IS NON-EXISTENT;     00340000
+*                 GO TO 17.                                             00341000
+*           CC=3: SPECIFIED CYLINDER IS OUTSIDE THE ERROR RECORDING     00342000
+*                 AREA; GO TO 16.                                       00343000
+*           CC=2: I/O ERROR,BLOCK COULD NOT BE READ; FALL THRU TO 8.    00344000
+*********************************************************************** 00345000
+OPER7    SR    R1,R1                                           @V4085A8 00346000
+         ST    R1,RECNO  NO RECORDS COUNTED YET IN NEW BLOCK.  @V4085A8 00347000
+         ST    R1,AVAILBLK  INDICATES CONTENTS OF BLOCK BUFFER @V4085A8 00348000
+*                           ARE UNKNOWN.                                00349000
+         L     R1,WANTCCBD  INTERNAL DISK ADDR OF BLOCK TO READ@V4085A8 00350000
+         L     R2,PAGBUFAD  ADDR OF BUFFER TO READ BLOCK INTO. @V4085A8 00351000
+         DC    X'83120030'  DIAGNOSE READS PAGE OF ERROR RECS. @V4085A8 00352000
+         BC    8,OPER10  CC=0, BLOCK WAS READ SUCCESSFULLY.    @V4085A8 00353000
+         BC    4,OPER17  CC=1, END OF CYLINDER, BLOCK NOT READ.@V4085A8 00354000
+         BC    1,OPER16  CC=3, SPECIFIED CYLINDER IS OUTSIDE OF@V4085A8 00355000
+*                              THE ERROR RECORDING AREA.                00356000
+*        FALL THRU.      CC=2, I/O ERROR.                               00357000
+         SPACE                                                          00358000
+*********************************************************************** 00359000
+*     8. ISSUE MESSAGE DMSREA830E (I/O ERROR), SET CODE 60 FOR R15.     00360000
+*        (WE CANNOT GET THE ADDRESSED RECORD, SO WE WILL TRY FOR        00361000
+*        THE NEXT AVAILABLE RECORD INSTEAD.)                            00362000
+*********************************************************************** 00363000
+         DMSERR NUM=830,LET=E,TEXT='I/0 ERROR READING A BLOCK OF RECORDX00364000
+               S FROM THE ERROR RECORDING CYLINDERS',RENT=NO            00365000
+         MVI   SAVER15+3(R13),RC60  PUT RETURN CODE IN R15 IN  @V4085A8 00366000
+*                                   SAVE AREA.                          00367000
+         SPACE                                                          00368000
+*********************************************************************** 00369000
+*     9. PREPARE TO READ NEXT BLOCK AND USE FIRST RECORD IN IT:         00370000
+*        ADD ONE TO BLOCK NUMBER IN CPIF ADDRESS; SET R VALUE OF        00371000
+*        CCB0R TO RECORD 1; GO TO 7.                                    00372000
+*********************************************************************** 00373000
+OPER9    L     R1,WANTCCBD  PRESENT DISK ADDRESS.              @V4085A8 00374000
+         AH    R1,=Y(X'0100')  ADD 1 TO B FIELD.  (ADVANCE TO  @V4085A8 00375000
+*                              NEXT BLOCK.)                             00376000
+         ST    R1,WANTCCBD                                     @V4085A8 00377000
+         MVI   WANT0R+1,X'01'  RESET R TO RECORD 1 OF NEW BLOCK@V4085A8 00378000
+         B     OPER7  GO READ NEW BLOCK.                       @V4085A8 00379000
+         SPACE 3                                                        00380000
+*********************************************************************** 00381000
+*    10. STORE CPIF ADDRESS IN 'AVAILBLK'.                              00382000
+*        IF THE BLOCK IS FLAGGED AS EMPTY, GO TO 9.                     00383000
+*********************************************************************** 00384000
+OPER10   ST    R1,AVAILBLK  RETAIN ADDR OF BLOCK CURRENTLY IN  @V4085A8 00385000
+*                           BUFFER.                                     00386000
+         USING EBLK,R2  LAYOUT OF BLOCK IN PAGE BUFFER.        @V4085A8 00387000
+         CLI   EBEMPTY,X'00'  IS BLOCK FLAGGED AS EMPTY?       @V4085A8 00388000
+         BE    OPER10D  YES, EMPTY.  GO SET RETURN CODE, THEN  @V4085A8 00389000
+*                       TRY NEXT BLOCK.                                 00390000
+         LA    R1,EBDATA-EBLK  OFFSET TO START OF DATA AREA IN @V4085A8 00391000
+*                              BLOCK.                                   00392000
+         CH    R1,EBNXTAVL  IS NEXT AVAILABLE BYTE THE 1ST BYTE@V4085A8 00393000
+*                           OF THE DATA AREA?                           00394000
+         DROP  R2                                              @V4085A8 00395000
+         BNE   OPER10K  NO, SO BLOCK DOES CONTAIN RECORDS.     @V4085A8 00396000
+*        YES, DATA AREA OF BLOCK IS EMPTY.  SET RETURN CODE, THEN GO    00397000
+*        TRY NEXT BLOCK.                                                00398000
+OPER10D  CLI   SAVER15+3(R13),X'00'  TEST FOR EXISTING RC.     @V4085A8 00399000
+         BNE   OPER9  THERE IS AN ERROR RETURN CODE ALREADY    @V4085A8 00400000
+*                     SET.  KEEP IT.                                    00401000
+         MVI   SAVER15+3(R13),RC4  STORE CODE FOR EMPTY BLOCK. @V4085A8 00402000
+         B     OPER9  GO TRY NEXT BLOCK.                       @V4085A8 00403000
+         SPACE                                                          00404000
+OPER10K  DS    0H                                              @V4085A8 00405000
+         SPACE                                                          00406000
+*********************************************************************** 00407000
+*    11. (COMMENT: BLOCK SPECIFIED BY CPIF ADDRESS IS NOW IN THE        00408000
+*        BUFFER AND DOES CONTAIN SOME RECORDS.  'RECNO' AND             00409000
+*        'RECADDR' EITHER POINT TO SOME RECORD IN THE BUFFER OR         00410000
+*        'RECNO' IS ZERO.  R IN CCB0R SPECIFIES THE RECORD WE           00411000
+*        WANT TO FIND IN THE BUFFER.)                                   00412000
+*        IF 'RECNO' IS GREATER THAN R, SET 'RECNO' TO ZERO.             00413000
+*********************************************************************** 00414000
+OPER11   L     R1,RECNO  POSSIBLE NUMBER OF A RECORD IN THE    @V4085A8 00415000
+*                        BLOCK WHOSE ADDR IN THE BUFFER IS KNOWN FROM   00416000
+*                        A PREVIOUS ACCESS.                             00417000
+         CH    R1,WANT0R  IF RECNO IS BEYOND THE RECORD THAT WE@V4085A8 00418000
+*                         WANT, RECNO WILL BE OF NO HELP IN FINDING     00419000
+*                         THE WANTED RECORD.                            00420000
+         BNH   OPER11B                                         @V4085A8 00421000
+*        PRESENTLY RECNO IS BEYOND THE RECORD WE WANT.  RESET TO        00422000
+*        SEARCH THRU THE BUFFER FROM THE BEGINNING.                     00423000
+         SR    R1,R1                                           @V4085A8 00424000
+         ST    R1,RECNO  RESET.                                @V4085A8 00425000
+OPER11B  DS    0H                                              @V4085A8 00426000
+         SPACE                                                          00427000
+*********************************************************************** 00428000
+*    12. IF 'RECNO' IS ZERO, SET IT TO ONE AND INITIALIZE               00429000
+*        'RECADDR' TO POINT TO FIRST RECORD IN BUFFER.                  00430000
+*********************************************************************** 00431000
+         L     R2,PAGBUFAD ADDRESS OF PAGE BUFFER.             @V4085A8 00432000
+         USING EBLK,R2  BLOCK IN PAGE BUFFER.                  @V4085A8 00433000
+         LTR   R1,R1  TEST VALUE OF RECNO IN R1.               @V4085A8 00434000
+         BNZ   OPER12F                                         @V4085A8 00435000
+         LA    R1,1  SET RECNO TO 1.                           @V4085A8 00436000
+         ST    R1,RECNO                                        @V4085A8 00437000
+         LA    R3,EBDATA  ADDR OF 1ST RECORD IN BUFFER.        @V4085A8 00438000
+         ST    R3,RECADDR                                      @V4085A8 00439000
+OPER12F  L     R3,RECADDR  SET UP R3 IN CASE WE GOT HERE VIA B.@V4085A8 00440000
+         SPACE                                                          00441000
+*********************************************************************** 00442000
+*    13. (COMMENT: STEP THRU THE BUFFER INCREMENTING 'RECNO'            00443000
+*        AND 'RECADDR' UNTIL 'RECNO' MATCHES R OR UNTIL THERE           00444000
+*        ARE NO MORE RECORDS IN THE BUFFER.)                            00445000
+*        IF 'RECNO' EQUALS R, GO TO 14.                                 00446000
+*        INCREMENT 'RECNO' BY ONE AND ADVANCE 'RECADDR' TO NEXT         00447000
+*        RECORD, IF ANY.                                                00448000
+*        IF 'RECADDR' IS BEYOND LAST RECORD IN BUFFER, GO TO 9.         00449000
+*        OTHERWISE, LOOP TO 13 FOR ANOTHER ITERATION.                   00450000
+*********************************************************************** 00451000
+*        NOTE: AT THIS POINT WE HAVE THE FOLLOWING REGISTER USAGE:      00452000
+*           R1 - IS CARRYING THE VALUE OF RECNO.                        00453000
+*           R2 - HAS THE ADDRESS OF THE PAGE BUFFER AND A 'USING' OF    00454000
+*                EBLK IS STILL IN EFFECT.                               00455000
+*           R3 - IS CARRYING THE VALUE OF RECADDR (ADDR OF RECORD IN    00456000
+*                BUFFER THAT CORRESPONDS WITH RECNO).                   00457000
+*********************************************************************** 00458000
+         LA    R6,1  INCREMENT OF 1 IN BXH INCREMENT REGISTER. @V4085A8 00459000
+         LH    R7,WANT0R  R VALUE IN BXH COMPARAND REGISTER.   @V4085A8 00460000
+         LA    R4,4  INCREMENT IN BXLE INCREMENT REGISTER.     @V4085A8 00461000
+         LR    R5,R2  ADDR OF PAGE BUFFER...                   @V4085A8 00462000
+         AH    R5,EBNXTAVL  PLUS OFFSET TO 1ST UNUSED BYTE IS  @V4085A8 00463000
+*                           ADDR OF 1ST UNUSED BYTE.                    00464000
+         BCTR  R5,0  LESS ONE IS ADDR FOR BXLE COMPARAND.      @V4085A8 00465000
+         DROP R2                                               @V4085A8 00466000
+         SPACE                                                          00467000
+RECLOOP  BXH   R1,R6,OPER13H  PREMATURELY ADD ONE TO RECNO (IN @V4085A8 00468000
+*                             R1).  IF GREATER THAN R (IN R7),          00469000
+*                             THEN RECNO IS R+1 AND WE HAVE FOUND THE   00470000
+*                             RECORD WE ARE LOOKING FOR, SO BRANCH OUT  00471000
+*                             OF LOOP AND DECREMENT RECNO WHICH WAS     00472000
+*                             INCREMENTED PREMATURELY.                  00473000
+*        FALL THRU INDICATES RECNO WAS NOT UP TO RECORD R.  RECNO HAS   00474000
+*        ALREADY BEEN ADVANCED, SO NOW ADVANCE RECADDR TO KEEP UP       00475000
+*        WITH RECNO.                                                    00476000
+         AH    R3,D2(0,R3)  ADVANCE RECADDR (IN R3) BY LENGTH  @V4085A8 00477000
+*                           OF RECORD.                                  00478000
+         BXLE  R3,R4,RECLOOP  ADVANCE RECADDR (IN R3) BY 4     @V4085A8 00479000
+*                             BYTES (4 IS INCREMENT IN R4) TO ACCOUNT   00480000
+*                             FOR THE LENGTH DESCRIPTOR WORD.  IF NOT   00481000
+*                             AT OR BEYOND 'NEXT AVAILABLE BYTE'        00482000
+*                             (ADDRESS-1 IS IN R5), THEN BRANCH, THERE  00483000
+*                             ARE MORE RECORDS TO LOOK AT.              00484000
+         SPACE                                                          00485000
+*        FALL THRU IF RECNO AND RECADDR ARE BEYOND LAST RECORD.  THE    00486000
+*        RECORD NUMBER REQUESTED AS R DOES NOT EXIST.                   00487000
+         B     OPER9  GO READ NEXT BLOCK AND USE ITS 1ST RECORD@V4085A8 00488000
+         SPACE                                                          00489000
+OPER13H  BCTR  R1,0  DECREMENT RECNO WHICH WAS INCREMENTED     @V4085A8 00490000
+*                    PREMATURELY.                                       00491000
+         ST    R1,RECNO  GET RECNO VALUE FROM R1 BACK INTO FWD.@V4085A8 00492000
+         ST    R3,RECADDR  GET RECADDR VALUE BACK INTO FULLWD. @V4085A8 00493000
+         SPACE                                                          00494000
+*********************************************************************** 00495000
+*    14. FROM THE CURRENT R AND CPIF ADDRESS, COMPUTE A CORRECTED       00496000
+*        CCB0R VALUE TO BE RETURNED TO THE CALLER.  PUT ADDRESS         00497000
+*        OF CORRECTED CCB0R DATA IN R1.  LOAD 'RECADDR' INTO R0.        00498000
+*********************************************************************** 00499000
+         LR    R0,R3  GET RECADDR INTO R0 FOR RETURN.          @V4085A8 00500000
+         L     R1,WANTCCBD  LOAD CCBD WHERE CC IS ABSOLUTE.    @V4085A8 00501000
+         S     R1,STARTCYL  SUBTRACT BASE CC FROM ABSOLUTE CC, @V4085A8 00502000
+*                           0 FROM B, AND D FROM D GIVING: CCB0 WHERE   00503000
+*                           CC IS A RELATIVE CC.                        00504000
+         ST    R1,WANTCCBD  STORE CCB0.                        @V4085A8 00505000
+         IC    R1,WANT0R+1  LOAD R OF 0R...                    @V4085A8 00506000
+         STC   R1,WANT0R    AND STORE IN 0 OF 0R MAKING RR.    @V4085A8 00507000
+*        WANTCCBD AND WANT0R (ADJACENT) NOW FORM CCB0RR WHERE THE 2ND   00508000
+*        R IS SURPLUS.                                                  00509000
+         LA    R1,WANTCCBD  ADDR OF CCB0R FOR OUTPUT.          @V4085A8 00510000
+         SPACE                                                          00511000
+*********************************************************************** 00512000
+*    15. RESTORE REGISTERS (EXCEPT OUTPUT PARAMETER REGISTERS) AND      00513000
+*        RETURN TO THE CALLER.                                          00514000
+*********************************************************************** 00515000
+OPER15   LM    R14,R15,SAVER14(R13)                            @V4085A8 00516000
+         LM    R2,R12,SAVER2(R13)                              @V4085A8 00517000
+         BR    R14                                             @V4085A8 00518000
+         SPACE 3                                                        00519000
+*********************************************************************** 00520000
+*    16. SET ERROR CODE IN R15 FOR INVALID CYLINDER.  GO TO 15.         00521000
+*********************************************************************** 00522000
+OPER16   SR    R0,R0  SET EOF IN CASE USER IGNORES CATASTROPHIC@V4085A8 00523000
+*                     ERROR CODE IN R15.                                00524000
+         MVI   SAVER15+3(R13),RC8  ERR CODE IN R15 IN SAVE AREA@V4085A8 00525000
+         B     OPER15  GO EXIT.                                @V4085A8 00526000
+         SPACE 3                                                        00527000
+*********************************************************************** 00528000
+*    17. (COMMENT: END OF CYLINDER INDICATION WAS RECEIVED.)            00529000
+*        SET R0 TO ZERO (INDICATES EOF TO CALLER IN CASE THIS           00530000
+*        CYLINDER IS THE LAST CYLINDER).                                00531000
+*        IF CC PORTION OF CPIF ADDRESS INDICATES WE WERE ALREADY        00532000
+*        ON THE FINAL CYLINDER, GO TO 15.                               00533000
+*        OTHERWISE ADVANCE TO NEXT CYLINDER: ADD 1 TO CC OF CPIF        00534000
+*        ADDRESS; SET B OF CPIF ADDRESS TO BLOCK 1; SET R OF CCB0R      00535000
+*        ADDRESS TO RECORD 1;                                           00536000
+*        GO TO 7 (TO READ FIRST AVAILABLE RECORD IN NEXT CYLINDER).     00537000
+*********************************************************************** 00538000
+OPER17   SR    R0,R0  TENTATIVELY SET EOF INDICATION FOR       @V4085A8 00539000
+*                     EXIT IN CASE THIS IS FINAL CYLINDER.              00540000
+         LH    R1,STARTCYL      CC OF STARTING CYLINDER        @V5088AA 00541100
+         AH    R1,CYLCOUNT      ADD NUMBER OF CYLINDERS        @V5088AA 00541200
+         BCTR  R1,0             SUBTRACT ONE                   @V5088AA 00541300
+         CH    R1,WANTCCBD      COMPARE ENDING CC OF RECORDING @V5088AA 00541400
+*                               AREA WITH THE CC PORTION OF             00541500
+*                               CURRENT CP INTERNAL FORMAT @.           00541600
+         BNH   OPER15           IF CURRENT CC IS NOT LOWER THAN@V5088AA 00544100
+*                               END OF RECORDING AREA, WE ARE           00544200
+*                               ON THE LAST CYLINDER                    00544300
+*        FALL THRU MEANS THERE IS ANOTHER CYLINDER YET.                 00546000
+         LH    R1,WANTCCBD    GET DESIRED 'CCBD' ADDRESS       @V5088AA 00546100
+         LA    R1,1(0,R1)  ADD 1 TO CC.                        @V4085A8 00547000
+         STH   R1,WANTCCBD  CC PART OF CCBD IS UPDATED.        @V4085A8 00548000
+         MVI   WANTCCBD+DISPB,X'01'  SET B OF CCBD TO BLOCK 1. @V4085A8 00549000
+         MVI   WANT0R+1,X'01'  SET R OF 0R TO RECORD 1.        @V4085A8 00550000
+         B     OPER7  GO READ 1ST RECORD OF NEXT CYLINDER.     @V4085A8 00551000
+         SPACE                                                          00552000
+*********************************************************************** 00553000
+         DROP  R12                                             @V4085A8 00554000
+         SPACE 6                                                        00555000
+PAGBUFAD DC    A(X'21000')  ADDRESS OF PAGE I/O BUFFER.        @V4085A8 00556000
+BLKMASK  DS    0F                                              @V4085A8 00557000
+         DC    X'FFFF00FF'                                     @V4085A8 00558000
+AVAILBLK DC    F'0'  CONTAINS ADDRESS (IN 'VM/370 CONTROL      @V4085A8 00559000
+*                    PROGRAM INTERNAL FORMAT') OF THE LAST BLOCK READ   00560000
+*                    INTO THE 4K PAGE BUFFER.  VALUE IS RETAINED FROM   00561000
+*                    ONE CALL TO THE NEXT.  THE DATA REMAINS AVAILABLE  00562000
+*                    IN THE BUFFER.                                     00563000
+         SPACE 3                                                        00564000
+         LTORG                                                 @V4085A8 00565000
+         SPACE 3                                                        00566000
+RECADDR  DS    A  CONTAINS THE STORAGE ADDRESS OF THE          @V4085A8 00567000
+*                 PARTICULAR RECORD IN THE 4K PAGE BUFFER THAT IS       00568000
+*                 INDICATED BY 'RECNO' BELOW.  VALUE IS RETAINED FROM   00569000
+*                 ONE CALL TO THE NEXT.                                 00570000
+RECNO    DS    F  CONTAINS THE NUMBER OF THE LOGICAL RECORD    @V4085A8 00571000
+*                 THAT WAS LAST REQUESTED FROM THE 4K PAGE BUFFER.      00572000
+*                 VALUE IS RETAINED FROM ONE CALL TO THE NEXT.  IT      00573000
+*                 SAVES US FROM HAVING TO COUNT UP THRU ALL THE LOGICAL 00574000
+*                 RECORDS IN THE BUFFER.  SAVING IS MAINLY ACHIEVED     00575000
+*                 WHEN SEQUENTIAL ACCESSING IS DONE.                    00576000
+STARTCYL DS    F  CONTAINS STARTING CYLINDER AND DEVICE CODE   @V4085A8 00577000
+*                 OF THE VM/370 ERROR RECORDING CYLINDERS AREA.         00578000
+*                 INITIALIZED ON THE FIRST CALL, IT REMAINS UNCHANGED   00579000
+*                 THEREAFTER.  HAS 'VM/370 CONTROL PROGRAM INTERNAL     00580000
+*                 FORMAT'.                                              00581000
+CYLCOUNT DS    H  CONTAINS NUMBER OF CYLINDERS AVAILABLE FOR   @V5088AA 00581100
+*                 ERROR RECORDING. INITIALIZED ON THE FIRST             00581200
+*                 CALL, IT THEN REMAINS UNCHANGED.                      00581300
+         SPACE 3                                                        00582000
+*        THE FOLLOWING TWO FIELDS (WANTCCBD AND WANT0R) MUST BE         00583000
+*        CONTIGUOUS.                                                    00584000
+WANTCCBD DS    F  CONTAINS CCBD (I.E., INTERNAL DISK ADDRESS)  @V4085A8 00585000
+*                 OF DESIRED RECORD.  EXCEPT THAT FOR OUTPUT AT EXIT    00586000
+*                 TIME, IT IS CONVERTED TO CCB0 FORMAT.                 00587000
+WANT0R   DS    H  CONTAINS 0R OF DESIRED RECORD.  EXCEPT THAT  @V4085A8 00588000
+*                 FOR OUTPUT AT EXIT TIME THE R IS MOVED INTO THE 0     00589000
+*                 POSITION AND AS AN EXTENSION OF WANTCCBD IT           00590000
+*                 FORMS CCB0R.                                          00591000
+         SPACE 3                                                        00592000
+SAVER14  EQU   12  OFFSET TO R14 IN SAVE AREA.                 @V4085A8 00593000
+SAVER15  EQU   SAVER14+4  OFFSET TO R15 IN SAVE AREA.          @V4085A8 00594000
+SAVER0   EQU   SAVER15+4  OFFSET TO R0 IN SAVE AREA.           @V4085A8 00595000
+SAVER1   EQU   SAVER0+4   OFFSET TO R1 IN SAVE AREA.           @V4085A8 00596000
+SAVER2   EQU   SAVER1+4   OFFSET TO R2 IN SAVE AREA.           @V4085A8 00597000
+         SPACE                                                          00598000
+LENCC    EQU   2  SYMBOLIC LENGTH OF CC FIELD.                 @V4085A8 00599000
+DISP0R   EQU   3  DISPLACEMENT TO 0R IN CCB0R.                 @V4085A8 00600000
+LEN0R    EQU   2  SYMBOLIC LENGTH OF 0R FIELD.                 @V4085A8 00601000
+DISPB    EQU   2  DISPLACEMENT TO B IN CCB0R.                  @V4085A8 00602000
+D2       EQU   2  SYMBOLIC DISPLACEMENT.                       @V4085A8 00603000
+CODE01   EQU   1                CODE X'01' FOR DIAGNOSE '2C'   @V5088AA 00603100
+         SPACE                                                          00604000
+RC60     EQU   60  USED AS AN ERROR RETURN CODE.               @V4085A8 00605000
+RC4      EQU   4   USED AS AN ERROR RETURN CODE.               @V4085A8 00606000
+RC8      EQU   8   USED AS AN ERROR RETURN CODE.               @V4085A8 00607000
+         SPACE 3                                                        00608000
+EBLK     DSECT   DESCRIBES 4K BLOCK OF ERROR RECORDS IN BUFFER.@V4085A8 00609000
+         DS    F                                               @V4085A8 00610000
+EBNXTAVL DS    H  OFFSET (FROM START OF THIS BLOCK) TO THE NEXT@V4085A8 00611000
+*                 AVAILABLE SPACE, I.E., TO THE 1ST UNUSED BYTE IN BLK. 00612000
+EBEMPTY  DS    XL1  IF VALUE IS X'00' THEN PAGE IS EMPTY.      @V4085A8 00613000
+         DS    XL1                                             @V4085A8 00614000
+EBDATA   DS    0C                                              @V4085A8 00615000
+         SPACE 3                                                        00616000
+         REGEQU                                                         00617000
+         END                                                            00618000

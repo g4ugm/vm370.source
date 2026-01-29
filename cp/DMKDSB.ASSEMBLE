@@ -1,0 +1,540 @@
+DSB      TITLE 'DMKDSB     (CP)        VM/370 - RELEASE 6'              00001000
+         ISEQ  73,80          VALIDATE INPUT SERIALIZATION     @V200820 00002000
+*.                                                                      00003000
+*                                                                       00004000
+* MODULE NAME : DMKDSB                                                  00005000
+*                                                                       00006000
+*                                                                       00007000
+*                                                                       00008000
+* FUNCTION:                                                             00009000
+*                                                                       00010000
+*                                                                       00011000
+* DMKDSBSD: ISSUES BUFFER UNLOAD CCW FOR 3330/3340/3350/2305.           00012000
+*                                                                       00013000
+* DMKDSBRD: READS VOLUME LABEL WHEN AN UNSOLICITED DEVICE-END           00014000
+*        INTERRUPT OCCURS. IF THE PACK HAS BEEN CHANGED (3330/3340/     00015000
+*        3350/2305) A BUFFER UNLOAD IS ALSO PERFORMED.                  00016000
+*                                                                       00017000
+*                                                                       00018000
+* ATTRIBUTES : REENTRANT,RESIDENT,CALLED VIA SVC.                       00019000
+*                                                                       00020000
+*                                                                       00021000
+* ENTRY POINT:  DMKDSBRD - ENTRY FOR UNSOLICATED D.E. INTERRUPTS        00022000
+*               DMKDSBSD - COLLECT DASD ENVIRONMENTAL SENSE DATA        00023000
+*                                                                       00024000
+*                                                                       00025000
+* ENTRY CONDITIONS : GPR8=ADDRESS OF RDEVBLOK                           00026000
+*                    GPR10=ADDRESS OF IOBLOK                            00027000
+*                    GPR12=BASE ADDRESS                                 00028000
+*                    GPR13=ADDRESS OF SAVE AREA                         00029000
+*                                                                       00030000
+*                                                                       00031000
+* EXIT CONDITIONS : 1. RETURN TO CALLER WHEN ENTRY POINT                00032000
+*                      WAS DMKDSBSD.                                    00033000
+*                   2. EXIT TO DMKDSPCH WHEN ENTRY POINT                00034000
+*                      WAS DMKDSBRD.                                    00035000
+*                                                                       00036000
+*                                                                       00037000
+* CALLS TO OTHER ROUTINES :                                             00038000
+*                     1. DMKIOSQR - PERFORM REAL I/O.                   00039000
+*                     2. DMKFREE  - OBTAIN STORAGE FOR DASD             00040000
+*                                   IOERBLOK, WORK BUFFER AND MSG       00041000
+*                                   BUFFER.                             00042000
+*                     3. DMKFRET  - TO RET. STORAGE OBTAINED BY DMKFRE  00043000
+*                     4. DMKIOESD - RECORD DASD STATISTICAL DATA        00044000
+*                     5. DMKQCNWT - TO WRITE MSG DSB956A TO OPERATOR    00045000
+*                     6. DMKSCNRU - TO FIND THE R-BLOCK'S               00046000
+*                     7. DMKCVTBH - TO CONVERT REAL DEVICE ADDRESS      00047000
+*                     8. DMKDSPCH - EXIT AFTER DMKDSBRD PROCESSING      00048000
+*                                   OR TO WAIT FOR I/O TO COMPLETE.     00049000
+*                                                                       00050000
+*                                                                       00051000
+* EXTERNAL REFERENCES :                                                 00052000
+*              DMKIOESD                                                 00053000
+*                                                                       00054000
+*                                                                       00055000
+*        TABLES AND WORKAREAS : BUFFER TO CONTAIN CHANNEL PROGRAM       00056000
+*                               AND LABEL READ FROM DASD VOLUME.        00057000
+*                                                                       00058000
+*                                                                       00059000
+* REGISTER USAGE :                                                      00060000
+*                 GPR  0=PSA ADDRESSABILITY                             00061000
+*                 GPR  1=SCRATCH                                        00062000
+*                 GPR  2=SCRATCH                                        00063000
+*                 GPR  3=SCRATCH                                        00064000
+*                 GPR  4=SCRATCH                                        00065000
+*                 GPR  5=GENERAL USAGE IS FOR BAL REGISTER              00066000
+*                 GPR  6=SCRATCH                                        00067000
+*                 GPR  7=IOERBLOK ADDRESS                               00068000
+*                 GPR  8=RDEVBLOK ADDRESS.                              00069000
+*                 GPR  9=SCRATCH                                        00070000
+*                 GPR 10=IOBLOK ADDRESS.                                00071000
+*                 GPR 11=VMBLOK ADDRESS.                                00072000
+*                 GPR 12=BASE ADDRESS.                                  00073000
+*                 GPR 13=SAVE AREA ADDRESS.                             00074000
+*                 GPR 14=EXTERNAL LINKAGE REGISTER.                     00075000
+*                 GPR 15=EXTERNAL LINKAGE REGISTER.                     00076000
+*                                                                       00077000
+*                                                                       00078000
+* NOTES : NONE.                                                         00079000
+*                                                                       00080000
+*                                                                       00081000
+*                                                                       00082000
+* OPERATION :                                                           00083000
+*                                                                       00084000
+*                                                                       00085000
+* DMKDSBSD: IS CALLED FROM DMKCPS WHEN A 'SHUTDOWN' COMMAND IS ISSUED   00086000
+*        OR FROM DMKCCW WHEN THE VIRTUAL MACHINE ISSUES A BUFFER UNLOAD 00087000
+*        CCW.  IT DETERMINES WHAT TYPES OF DASDI DEVICES ARE            00088000
+*        ON THE SYSTEM AND ISSUES BUFFER UNLOAD TO 3330/3340/3350/2305  00089000
+*        DEVICES. IF NO ERROR'S ARE ENCOUNTED A CALL IS MADE TO         00090000
+*        DMKIOESD TO RECORD THE RECORD FOR FIELD ENGINEERING USE.       00091000
+*                                                                       00092000
+*                                                                       00093000
+* DMKDSBRD: IS CALLED FROM DMKIOS WHEN AN UNSOLICITED DEVICE END        00094000
+*        INTERRUPT OCCURS. THIS ROUTINE WILL READ THE VOLUME LABEL VIA  00095000
+*        A CALL TO DMKIOS. IF THE PACK HAS BEEN CHANGED AND THE         00096000
+*        DEVICE IS A 3330/3340/3350, A BUFFER UNLOAD COMMAND WILL BE    00097000
+*        EXECUTED.  A CALL IS THEN MADE TO DMKIOESD TO RECORD THE       00098000
+*        RECORD.  THE NEW VOLUME LABEL IS THEN MOVED INTO THE RDEVBLOK. 00099000
+*        THIS ENABLES DYNAMIC VOLUME RECOGNITION                        00100000
+*        DMKVDD (DETACH) ALSO STACKS AN UNSOLICITED DEVICE-END          00101000
+*        INTERRUPT TO DMKDSBRD TO SEE IF THE PACK WAS CHANGED.          00102000
+*        DMKCPS STACKS AN UNSOLICITED DEVICE-END INTERRUPT TO           00103000
+*        DMKDSBRD TO SEE IF 2/4 CHANSW FEATURE ON HARDWARE WHEN         00104000
+*        PERFORM A LABEL READ.                                          00105000
+*                                                                       00106000
+*                                                                       00107000
+*                                                                       00108000
+*                                                                       00109000
+* ERROR MESSAGES:                                                       00110000
+*                                                                       00111000
+*        DMKDSB956A DASD CCU VOLID VOLID NOT MOUNTED; NOW OFFLINE       00112000
+*.                                                                      00113000
+         EJECT                                                          00143000
+         COPY  OPTIONS                                                  00144000
+DMKDSB   CSECT                                                          00145000
+         ENTRY DMKDSBSD       DO BUFFER UNLOAD FOR SHUTDOWN OR DMKCCW   00146000
+         ENTRY DMKDSBRD       ENTRY TO READ VOLUME LABEL ETC.           00147000
+         SPACE                                                          00149000
+         EXTRN DMKIOESD,DMKIOSQR                                        00151000
+         EXTRN DMKCVTBH                                                 00152000
+         EXTRN DMKSCNRU                                                 00153000
+         EXTRN DMKSTKCP,DMKSSSMQ                               @V60B6B8 00153010
+         USING SAVEAREA,R13                                             00154000
+         USING PSA,R0                                                   00155000
+*        USING IOERBLOK,R7    ADDRESSABILITY FOR IOERBLOK               00156000
+         USING STATDASD,R4    ADDRESSABILITY FOR STATISICAL DATA        00157000
+         USING RDEVBLOK,R8                                              00158000
+         USING IOBLOK,R10                                               00159000
+         USING DMKDSB,R12     COMMON ADDRESSABILITY                     00160000
+* DMKDSBSD = 1ST ENTRY POINT; R12 = A(DMKDSBSD) = A(DMKDSB) ...         00181000
+         SPACE                                                          00182000
+DMKDSBSD ENTER                DO BUFFER UNLOAD FOR SHUTDOWN OR DMKCCW:  00183000
+         BAL   R5,GETSTBUF    GET BUFFER TO READ THE VOL1 LABEL         00184000
+         MVI   STATCALL,X'FF' INDICATE DMKDSBSD ENTRY          @VA02264 00185000
+         ST    R13,STATGR13   STORE POINTER TO SAVE AREA                00186000
+         B     STATMAIN       CONTINUE                                  00187000
+         SPACE                                                          00188000
+DMKDSBRD DS    0H             ENTRY FROM UNSOLICITED DE INTERRUPT       00189000
+         USING *,R12                                                    00190000
+         L     R12,=A(DMKDSB) COMMON ADDRESSABILITY                     00191000
+         USING DMKDSB,R12                                               00192000
+         TM    IOBCSW+4,DE    DOES THE UNSOL. INT INCLUDE DE?  @V407438 00192250
+         BZ    NOLABEL        NOPE, THEN DON'T READ THE LABEL  @V407438 00192500
+         TM    IOBCSW+4,UC    ENTRY WITH UC STATUS                      00193000
+         BZ    NOUCK    NO                                              00194000
+NOLABEL  BAL   R5,CKIOB       FRET ANY IOERBLOK                @V407438 00195000
+         B     FRETIOB                                                  00196000
+NOUCK    LH    R1,IOBRADD    GET THE REAL DEVICE ADDRESS                00197000
+         CALL  DMKSCNRU       AND FIND THE R-BLOCK'S                    00198000
+         BAL   R5,GETSTBUF    GET A BUFFER TO READ THE VOL1 LABEL       00199000
+STATMAIN L     R1,ASYSVM      LOAD THE ADDRESS OF SYSTEM VMBLOK         00200000
+         CLI   STATCALL,X'FF' ENTERED AT DMKDSBSD ?            @VA02264 00201000
+         BNE   *+6            NO -- CHARGE SYSTEM              @VA02264 00202000
+         LR    R1,R11         YES -- CHARGE USER               @VA02264 00203000
+         ST    R1,IOBUSER     ..... INTO IOBLOK                @VA02264 00204000
+         LA    R0,IOERSIZE    SIZE OF 1 IOERBLOK                        00205000
+         SR    R7,R7          R7=0: NO EXTRA WORDS IN IOERBLOK          00206000
+         CLI   RDEVTYPE,TYP2305 IS IT A 2305 ?                          00207000
+         BNE   CALLFREE       NOPE - REGULAR-SIZE IOERBLOK IS FINE      00208000
+         LA    R0,IOERSIZE+128/8  FOR 2305 GET SOME EXTRA SPACE         00209000
+         LA    R7,128/8           ...                                   00210000
+CALLFREE CALL  DMKFREE        NOW GET REGULAR OR EXTRA-SIZE IOERBLOK    00211000
+         USING IOERBLOK,R1    (VERY BRIEFLY)                            00212000
+         XC    IOERBLOK(IOERSIZE*8),IOERBLOK  CLEAR THE IOERBLOK,       00213000
+         STH   R7,IOEREXT     STORE 00 OR EXTRA SIZE OF BLOCK           00214000
+         DROP  R1                                                       00215000
+         LR    R7,R1          NOW NORMAL IOERBLOK ADDRESSABILITY        00216000
+         USING IOERBLOK,R7    ...                                       00217000
+         LA    R0,STATSIZE         SIZE OF WORKING STORAGE IS           00218000
+         STH   R0,IOERDW      STORED IN THE IOERBLOK.                   00219000
+         ST    R4,IOERLOC     SAVE ADDRESS OF WORKING STORAGE.          00220000
+         ST    R4,IOBCAW      SET CAW ADDRESS IN IOBLOK                 00221000
+         STM   R7,R8,STATREGS SAVE PTRS TO IOERBLOK AND RDEVBLOK        00222000
+         CLI   RDEVTYPE,TYP2314 IS IT 2314 ??                  @VA05779 00222100
+         BE    SNS2314        YES                              @VA05779 00222200
+         LA    R1,SNSRTN      GET INTERRUPT RETURN ADDRESS AND          00223000
+         ST    R1,IOBIRA      STORE IT IN THE IOBLOK                    00224000
+         OI    IOBSPEC,IOBTIO TELL IOS TO DO A 'TIO'                    00225000
+         CALL  DMKIOSQR       CALL IOS TO SCHEDULE SENSE                00226000
+         GOTO  DMKDSPCH       WAIT FOR I/O TO COMPLETE                  00227000
+         SPACE                                                          00228000
+SNSRTN   DS    0H             CONNECTOR                                 00229000
+         USING *,R12                                                    00230000
+         L     R12,=A(DMKDSB)                                           00231000
+         USING DMKDSB,R12                                               00232000
+         L     R4,IOBCAW      RESTORE ADDRESS OF WORKING STORAGE        00233000
+         LM    R7,R8,STATREGS RESTORE ADDRESS OF IOERBLOK AND RDEVBLOK  00234000
+         NI    IOBSPEC,X'FF'-IOBTIO     RESET 'TIO' FLAG                00235000
+         TM    IOBSTAT,IOBFATAL+IOBCC3  WAS THERE AN ERROR CONDITION    00236000
+         BNZ   FRETIOER       IF YES, EXIT                              00237000
+SNS2314  EQU   *                                               @VA05779 00237500
+         XC    IOERDATA(IOERSNSZ),IOERDATA CLEAR SENSE AREA    @V407438 00238000
+         CLI   STATCALL,X'FF' ENTERED AT DMKDSBSD ?            @VA02264 00243000
+         BE    SKIPVOL1       IF YES, NO NEED TO READ VOLUME LABEL.     00244000
+         CLI   RDEVTYPE,TYP2305 DO WE HAVE A 2305?             @VA07801 00245000
+         BNE   RDVOLLA        NOPE - GO READ VOL LABEL         @VA07801 00245100
+         LA    R6,STATREL     LOOKING FOR RELEASE              @VA07801 00245200
+         ST    R6,IOBCAW      STORE IT                         @VA07801 00245300
+         LA    R1,RELRET      LOAD R1 WITH IRA                 @VA07801 00245400
+         ST    R1,IOBIRA      STORE INTO IOBLOK                @VA07801 00245500
+         OI    IOBSPEC2,IOBREL IND. CH. PGM CONTAINS CP REL.   @VA07801 00245600
+         B     DSBIOS         CALL IOSQR                       @VA07801 00245700
+RDVOLLA  OI    IOBSPEC2,IOBREL IND. CH. PGM CONTAINS CP REL.   @VA07801 00245800
+RDVOLLB  LA    R1,VOL1RTN     RETURN ADDR AFTER LABEL READ     @VA07801 00245900
+         ST    R1,IOBIRA      STORE ADDRESS IN IOBLOK          @VA07801 00246000
+         ST    R4,IOBCAW      ADDRESS OF CHANNEL PROGRAM       @VA07801 00246100
+DSBIOS   CALL  DMKIOSQR       CALL IOS TO READ VOL LABEL       @VA07801 00246200
+         GOTO  DMKDSPCH       WAIT FOR I/O TO COMPLETE                  00247000
+         SPACE                                                          00248000
+RELRET   DS    0H                                              @VA07801 00248025
+         USING *,R12                                           @VA07801 00248050
+         L     R12,=A(DMKDSB)                                  @VA07801 00248075
+         USING DMKDSB,R12                                      @VA07801 00248100
+         NI    IOBSPEC2,255-IOBREL TURN OFF SPECIAL REL. FLG   @VA07801 00248125
+         CL    R10,IOBLINK    VERIFY IF THIS IS COPIED IOBLOK  @VA07801 00248150
+         BNE   FRETIOB        YES, GET RID OF IT               @VA07801 00248175
+         L     R6,IOBCAW      POINT TO IT                      @VA07801 00248200
+         LA    R1,STATREL-STATDASD DISP OF REL IN CHANNEL PGM  @VA07801 00248225
+         LR    R4,R6          ADDRESS OF RELEASE TO R4         @VA07801 00248250
+         SR    R4,R1          R4 - BEGINNING OF WORK STORAGE   @VA07801 00248275
+         LM    R7,R8,STATREGS GET IOERBLOK/RDEVBLOK ADDRESSES  @VA07801 00248300
+         LA    R6,8(,R6)      POINT PAST RELEASE CCW           @VA07801 00248325
+         L     R1,IOBCSW      GET ENDING CSW ADDR              @VA07801 00248350
+         LA    R1,0(R1)       CLEAN ANY GARBAGE                @VA07801 00248375
+         CR    R1,R6                                           @VA07801 00248400
+         BNH   SKIPFEAT       2/4 CHANSW NOT PRESENT           @VA07801 00248425
+         OI    RDEVFTR,FTRRSRL ONLY 1 CCW LEFT                 @VA07801 00248450
+SKIPFEAT TM    IOBSTAT,IOBFATAL+IOBCC3 FATAL I/O?              @VA07801 00248475
+         BZ    *+8            NO                               @VA07801 00248500
+         BAL   R5,CKIOB       FRET POSSIBLE IOERBLOK           @VA07801 00248525
+         NI    STATSCCW+4,X'FF'-CC NO MORE CMD CHAINING        @VA07801 00248550
+         B     RDVOLLB        CALL IOS                         @VA07801 00248575
+VOL1RTN  DS    0H             CONNECTOR                                 00249000
+         USING *,R12                                                    00250000
+         L     R12,=A(DMKDSB)                                           00251000
+         USING DMKDSB,R12                                               00252000
+         CL    R10,IOBLINK    IS THIS DEVICE END               @VA01965 00253000
+         BNE   FRETIOB        IF NOT, GO FRET IOB              @VA01940 00254000
+         L     R4,IOBCAW      RESTORE ADDRESS OF WORKING STORAGE.       00255000
+         LM    R7,R8,STATREGS RESTORE ADDRESS OF IOERBLOK AND RDEVBLOK  00256000
+         TM    STATSCCW+4,CC  NO CMD CHAINING HERE             @VA07801 00257000
+         BZ    LABRED         DON'T BOTHER WITH RELEASE        @VA07801 00257100
+         NI    IOBSPEC2,255-IOBREL TURN OFF SPECIAL REL. FLG   @VA07801 00257200
+         LA    R0,STATREL+8   GET END OF RELEASE CCW ADDRESS   @VA07801 00257300
+         L     R1,IOBCSW      GET ENDING CSW ADDRESS           @V407438 00258200
+         LA    R1,0(R1)       CLEAR ANY GARBAGE                @V407438 00258300
+         CLR   R1,R0          DID WE GET THE LABEL READ?       @V407438 00258400
+         BNH   LABRED         ENDED BEFORE REL CCW             @VA07875 00258500
+         L     R5,RDEVCUB     GET ADDRESS OF ALTCU             @VA07875 00258520
+         LTR   R5,R5          IS THERE ALTCU ?                 @VA07875 00258540
+         BNZ   LABRED         YES, CAN NOT ALLOW RES/REL       @VA07875 00258560
+         OI    RDEVFTR,FTRRSRL ONLY 1 CCW LEFT, R/R MUSTBE GOOD@V407438 00258600
+LABRED   TM    IOBSTAT,IOBFATAL+IOBCC3 FATAL I/O               @VA07801 00259100
+         BNZ   FRETIOER       POSSIBLY FRET IOERBLOK           @VA07801 00259200
+         BAL   R5,COMPVOL1    COMP THE LABEL READ WITH VOLID   @VA07801 00259300
+         BE    FRETIOER       IF NOT CHANGED SKIP THE BUFFER UNLOAD     00260000
+         SPACE                                                          00261000
+SKIPVOL1 CL    R10,IOBLINK    DO WE HAVE A COPIED IOBLOK ?     @VA07015 00262100
+         BNE   FRETIOB        YES, GO FRET IOBLOK AND OUT      @VA07015 00262200
+         TM    RDEVFTR,FTREXTSN DOES DEVICE HAVE BUFFERS ?     @VA07015 00262300
+         BZ    FRETIOER       IF NOT, DO NOT ISSUE BUFFER UNLOAD        00263000
+         LM    R0,R1,PACKCHG  RESOLVE ADDRESS OF BUFFER UNLOAD CCW      00264000
+         CLI   RDEVTYPE,TYP2305    HOLD IT - DO WE HAVE THE RIGHT CCW ? 00265000
+         BNE   *+8            YES - DON'T BE A WORRY-WART.              00266000
+         LM    R0,R1,UNLD2305 NOPE - GET THE RIGHT ONE LIKE I SAID      00267000
+         ALR   R0,R7                                                    00268000
+         STM   R0,R1,STATSNS                                            00269000
+         STH   R1,IOERLEN     SAVE SENSE LENGTH FOR ERROR RECORDING     00270000
+         LA    R1,READBUF     LOAD R1 W/ INTERRUPT RETURN ADDRESS AND   00271000
+         ST    R1,IOBIRA      STORE IT IN THE IOBLOK.                   00272000
+         ST    R4,IOBCAW      SET CAW ADDR IN IOBLOK           @VA01727 00273000
+         STM   R7,R8,STATREGS SAVE PTR TO IOERBLOK AND RDEVBLOK@VA01727 00274000
+         CALL  DMKIOSQR       CALL IOS FOR BUFFER UNLOAD OPERATION.     00275000
+         GOTO  DMKDSPCH       WAIT FOR I/O TO COMPLETE.                 00276000
+         SPACE                                                          00277000
+READBUF  DS    0H             CONNECTOR                                 00278000
+         USING *,R12                                                    00279000
+         L     R12,=A(DMKDSB)                                           00280000
+         USING DMKDSB,R12                                               00281000
+         L     R4,IOBCAW      RESTORE ADDRESS OF WORKING STORAGE        00282000
+         LM    R7,R8,STATREGS RESTORE ADDRESS OF IOERBLOK AND RDEVBLOK. 00283000
+         TM    IOBSTAT,IOBFATAL+IOBCC3  WAS THERE AN ERROR CONDITION    00284000
+         BNZ   FRETIOER       IF YES, EXIT                              00285000
+         LH    R3,IOERDW      SAVE NUMBER OF DW IN WORKING STORAGE.     00286000
+         ST    R7,IOBIOER     STORE ADDRESS OF IOERBLOK FOR RECORDER.   00287000
+         MVC   IOERVSER(6),RDEVSER MOVE IN OLD VOLID           @VA01727 00288000
+         CALL  DMKIOESD       RECORD THIS RECORD.                       00289000
+         B     FRETSTAT       RELEASE WORKING STORAGE                   00290000
+         SPACE                                                          00291000
+FRETIOER LA    R0,IOERSIZE    SIZE OF 1 IOERBLOK                        00292000
+         AH    R0,IOEREXT     INCLUDE EXTRA SIZE (IF ANY)               00293000
+         LR    R1,R7          LOCATION OF IOERBLOK.                     00294000
+         CALL  DMKFRET        FRET THIS STORAGE                         00295000
+         SPACE                                                          00296000
+FRETSTAT BAL   R5,TESTVOL     CHECK VOLUME STATUS              @VA03772 00297000
+         ICM   R2,B'1000',STATCALL RESTORE CALLING IND..       @VA03772 00298000
+         L     R13,STATGR13   AND SAVEAREA REG                 @VA03772 00299000
+         LR    R1,R4          ADDRESS OF STAT DSECT                     00300000
+         LA    R0,STATSIZE    ALSO ITS SIZE                             00301000
+         CALL  DMKFRET        FRET IT                                   00302000
+         BAL   R5,CKIOB       FRET POSSIBLE IOERBLOK                    00303000
+         LTR   R2,R2          ENTERED AT DMKDSBSD ?            @VA02264 00304000
+         BM    RETNSHUT       IF YES, EXIT TO CALLER , OTHERWISE        00305000
+FRETIOB  LR    R1,R10         R1 IS ADDR OF IOB                @VA01940 00306000
+         LA    R0,IOBSIZE     GET IT'S SIZE                    @VA01965 00307000
+         CALL  DMKFRET        AND RELEASE IT                   @VA01965 00308000
+         GOTO  DMKDSPCH       GOTO THE DISPATCHER.                      00309000
+         SPACE                                                          00310000
+RETNSHUT EXIT  EXIT TO CALLER.                                          00311000
+         SPACE 3                                                        00312000
+*        BUILD A BUFFER TO READ THE VOLID OF PACK                       00313000
+         SPACE                                                          00314000
+GETSTBUF LA    R0,STATSIZE    GET A BUFFER TO READ THE VOL1 LABEL       00315000
+         CALL  DMKFREE                                                  00316000
+         LR    R4,R1          SAVE THE POINTER TO THE BUFFER            00317000
+         XC    STATDASD(STATSIZE*8),STATDASD      ZERO OUT THE BUFFER   00318000
+         MVC   STATVOL1(6),BLANKS INITIALIZE LABL AND VOL1     @VA04062 00318500
+         MVC   STATDASD(RDVOLEND-RDVOLID),RDVOLID MOVE MDL CCWS@V407438 00319000
+         LA    R14,((RDVOLEND-8)-RDVOLID)/8 GET LOOP COUNT     @V4M0003 00320100
+         LA    R1,STATSEEK    ADDR OF THE FIRST TO DO          @V407438 00321000
+RESOLVAD L     R15,0(R1)      GET THE CURRENT ADDRESS          @V407438 00322000
+         ALR   R15,R4         ADJUST BY BEGINNING OF GOTTEN STG@V407438 00323000
+         ST    R15,0(R1)      AND RESTORE                      @V407438 00324000
+         LA    R1,8(R1)       BUMP TO NEXT CCW                 @V407438 00325000
+         BCT   R14,RESOLVAD   CONTINUE UNTIL ALL CCW'S ARE DONE@V4M0003 00326100
+         BR    R5             RETURN TO THE CALLING ROUTINE             00335000
+         SPACE 3                                                        00336000
+*        COMPARE THE VOLID READ TO THE VOLID IN THE REAL DEVICE BLOCK   00337000
+         SPACE                                                          00338000
+COMPVOL1 CLC   STATVOL1,=C'VOL1'   STANDARD VOL 1 LABEL                 00339000
+         BE    STANDLBL       YES -                                     00340000
+         CLC   STATVOL1,=C'CMS='   PACK HAVE CMS TYPE LABEL             00341000
+         BE    STANDLBL       YES -                                     00342000
+         MVC   STATLABL+4(2),STATLABL MOVE LABEL IN PIECES     @VA04062 00343500
+         MVC   STATLABL(4),STATVOL1 PREVENT OVERLAP            @VA04062 00344500
+STANDLBL EQU   *              HERE FOR STANDARD LABEL                   00345000
+         CLC   STATLABL,RDEVSER    WAS THE PACK CHANGED ?               00346000
+         BCR   8,R5           RETURN WITH THE CONDITION CODE SET        00347000
+         MVI   STATPACK,X'FF' INDICATE PACK WAS CHANGED                 00348000
+         BR    R5             RETURN WITH THE CONDITION CODE SET        00349000
+         SPACE 3                                                        00350000
+*        TEST IF PACK WAS CHANGED AND IN USE BY THE SYSTEM              00351000
+         SPACE                                                          00352000
+TESTVOL  CLI   STATPACK,X'FF' WAS THE PACK CHANGE                       00353000
+         BCR   7,R5           NO- RETURN TO THE CALLER                  00354000
+         SWITCH          MAKE SURE WE ARE ON THE IO PROCESSOR  @V4075A0 00354100
+         CLI   RDEVTYPE,TYP3330 IS IT A 3330                   @V60B6B8 00354110
+         BNE   TESTSYS        NO, NO SPECIAL 3330V CHECK       @V60B6B8 00354120
+         TM    RDEVFTR,SYSVIRT+VIRTUAL IS IT A VUA             @V60B6B8 00354130
+         BNZ   MNT3330V       YES, CHECK FOR WAITING USER      @V60B6B8 00354140
+TESTSYS  EQU   *              CONTINUE STANDARD DASD CHECKS    @V60B6B8 00354150
+         TM    RDEVFLAG,RDEVSYS+RDEVOWN WAS PACK IN USE BY SYSTEM       00355000
+         BNZ   ERROR956       DO NOT MOVE IN NEW VOLID; VARY OFFLINE    00356000
+         MVC   RDEVSER,STATLABL    MOVE IN THE NEW VOLID                00357000
+         TM    RDEVSTAT,RDEVDED    DEVICE DEDICATED ?                   00358000
+         BO    *+8                 YES --                               00359000
+         OI    RDEVFLAG,RDEVMOUT INDICATE VOLUME MOUNTED; NOT ATTACHED  00360000
+         CLI   RDEVTYPE,TYP3340 3340 TYPE ?                    @V2A2029 00361000
+         BCR   7,R5           NO - RETURN TO CALLER            @V2A2029 00362000
+         NI    RDEVFTR,X'FF'-(FTRRPS+FTR70MB+FTR35MB) RESET    @V2A2029 00363000
+         TM    STATSDAT+2,X'80' RPS FEATURE PRESENT ?          @V2A2029 00364000
+         BZ    *+8            NO -                             @V2A2029 00365000
+         OI    RDEVFTR,FTRRPS INDICATE RPS FEATURE             @V2A2029 00366000
+         TM    STATSDAT+2,X'02' 3340 70MB PACK MOUNTED ?       @V2A2029 00367000
+         BZ    SET35MB        NO -- MUST BE 35MB PACK          @V2A2029 00368000
+         OI    RDEVFTR,FTR70MB INDICATE 70MB PACK MOUNTED      @V2A2029 00369000
+         BR    R5             RETURN TO CALLER                 @V2A2029 00370000
+SET35MB  OI    RDEVFTR,FTR35MB INDICATE 35MB PACK MOUNTED      @V2A2029 00371000
+         BR    R5             RETURN TO CALLER IF NOT IN USE BY SYSTEM  00372000
+         SPACE 1                                                        00372100
+ERROR956 OI    RDEVSTAT,RDEVDISA   MARK THE DEVICE OFFLINE              00373000
+         LH    R1,IOBRADD     GET THE REAL DEVICE ADDRESS               00374000
+         CALL  DMKCVTBH       AND CONVERT IT                            00375000
+         LR    R3,R1          SAVE CONVERTED ADDRESS                    00376000
+         LA    R0,(L'DSB956+7)/8   GET A MSG BUFFER                     00377000
+         CALL  DMKFREE                                                  00378000
+         MVC   0(L'DSB956,R1),DSB956    MOVE IN THE MSG                 00379000
+         STCM  R3,7,DSB956AD(R1)   FILL IN THE CONVERTED ADDRESS        00380000
+         MVC   DSB956VS(6,R1),STATLABL  THE VOLID ALSO                  00381000
+         LR    R3,R0          SAVE THE BUFFER LENGTH (DW)               00382000
+         LA    R0,L'DSB956    SET UP THE MSG LENGTH                     00383000
+         LA    R2,DFRET+NORET+OPERATOR+ALARM PARM REG                   00384000
+         CALL  DMKQCNWT       TELL THE OPERATOR                         00385000
+         BR    R5             RETURN TO THE CALLER                      00386000
+         EJECT                                                          00386100
+MNT3330V EQU   *              PROCESS 3330V MOUNT              @V60B6B8 00386200
+*                                                                       00386300
+*        THIS ROUTINE IS ENTERED WHEN A 3330V VOLUME                    00386400
+*        HAS BEEN MOUNTED ON A NON-DEDICATED VUA.                       00386500
+*        THIS CODE WILL SCAN THE QUEUE OF MSSCOM                        00386600
+*        BLOCKS WHICH DESCRIBE MACHINES WAITING FOR                     00386700
+*        3330V'S. THIS QUEUE IS CREATED BY DMKSSS                       00386800
+*        WHEN A MOUNT ORDER FOR A SYSTEM VOLUME IS                      00386900
+*        ISSUED TO THE MSC. THE UNSOLICITED DEVICE                      00387000
+*        END, INDICATING MOUNT COMPLETE, IS GENERATED                   00387100
+*        BY THE STAGING ADAPTER WHEN THE FIRST CYLINDER                 00387200
+*        OF THE REQUESTED VOLUME HAS BEEN STAGED.                       00387300
+*                                                                       00387400
+*        WHEN THE CORRECT MSSCOM BLOCK IS FOUND, THE                    00387500
+*        ADDRESS OF A CPEXBLOK IS EXTRACTED. THIS                       00387600
+*        CPEXBLOK IS CREATED BY DMKSSS WHEN THE MSSCOM                  00387700
+*        BLOCK IS QUEUED. THE DISPATCH ADDRESS IN THE                   00387800
+*        CPEXBLOK POINTS TO AN ENTRY IN DMKSSS AT WHICH                 00387900
+*        A LINK TO A SYSTEM 3330V IS TO CONTINUE.                       00388000
+*                                                                       00388100
+         MVC   RDEVSER,STATLABL MOVE LABEL INTO RDEVBLOK       @V60B6B8 00388200
+         NI    RDEVFLAG,X'FF'-RDEVSEL                          @VMI2007 00388210
+*                                 HOLLY                                 00388300
+         L     R1,MOUNTQ      ANCHOR FOR QUEUE OF MSSCOM BLOCKS@V60B6B8 00388400
+         L     R6,0(R1)       FIRST MSSCOM BLOCK               @V60B6B8 00388500
+         LTR   R6,R6          IS THERE A Q                     @V60B6B8 00388600
+         BZ    NOWAIT         NO, NO ONE WAITING               @V60B6B8 00388700
+         USING VSCOMM,R6      ADDRESSABILITY FOR ASSEMBLER     @V60B6B8 00388800
+COMPVOL  EQU   *              LOOP TO FIND BLOCK FOR THIS      @V60B6B8 00388900
+*                             VOLUME                                    00389000
+         CLC   RDEVSER,MSSSER COMPARE VOLSER JUST MOUNTED      @V60B6B8 00389100
+*                            TO VOLSER THIS BLOCK DESCRIBES             00389200
+         BE    COMMFOUN       THIS IS THE ONE                  @V60B6B8 00389300
+DEVADBAD EQU   *                                               @VMI2016 00389310
+         LA    R1,MSSNEXT     RESET R1 FOR FUTURE RECHAINING   @V60B6B8 00389400
+         L     R6,MSSNEXT     GET NEXT BLOCK POINTER           @V60B6B8 00389500
+         LTR   R6,R6          IS THERE ANOTHER BLOCK           @V60B6B8 00389600
+         BNZ   COMPVOL        YES, CHECK IT                    @V60B6B8 00389700
+NOWAIT   EQU   *              NO ONE WAITING ON THIS MOUNT     @V60B6B8 00389800
+         OI    RDEVFLAG,RDEVMOUT SET FLAG: VOLUME MOUNTED      @V60B6B8 00389900
+         BR    R5             RETURN: NO ONE WAITING           @V60B6B8 00390000
+COMMFOUN EQU   *              SOMEONE NEEDS THIS VOLUME        @V60B6B8 00390100
+         LH    R1,RDEVADD     DEVICE ADDR                      @VMI2016 00390103
+         L     R15,RDEVCUA    RCUBLOK ADDR                     @VMI2016 00390106
+         LH    R0,RCUADD-RCUBLOK(R15) CU ADDR                  @VMI2016 00390109
+         OR    R1,R0          CU-DEV ADDR                      @VMI2016 00390112
+         TM    RCUTYPE-RCUBLOK(R15),RCUSUB SUBORD CUBLOK?      @VMI2016 00390115
+         BZ    GOTPRIME       NO, PRIME, POINTS TO RCHBLOK     @VMI2016 00390118
+         L     R15,RCUPRIME-RCUBLOK(R15) GET PRIME RCUBLOK     @VMI2016 00390121
+GOTPRIME EQU   *              THIS RCUBLOK POINTS TO RCHBLOK   @VMI2016 00390124
+         L     R15,RCUCHA-RCUBLOK(R15) RCHBLOK ADDR            @VMI2016 00390127
+         LH    R0,RCHADD-RCHBLOK(R15) CHAN ADDR                @VMI2016 00390130
+         OR    R1,R0          CH - CU - DEV ADDR               @VMI2016 00390133
+         CH    R1,MSSVUA      IS MSS P.C.I. ON CORRECT ADDR    @VMI2016 00390136
+         BNE   DEVADBAD       NO, MUST BE ALT PATH             @VMI2016 00390139
+         L     R2,MSSTASK1    ADDR OF CPEXBLOK FOR DMKSSS      @V60B6B8 00390200
+         LA    R0,CPEXSIZE    SIZE OF CPEXBLOK FOR DMKFREE     @V60B6B8 00390300
+*                                  HOLLY                                00390400
+         CALL  DMKFREE        HOLLY                            @V60B6B8 00390500
+         USING CPEXBLOK,R1    HOLLY                            @V60B6B8 00390600
+         STM   R0,R15,CPEXREGS SAVE REGS IN CPEXBLOK           @V60B6B8 00390700
+*                                 HOLLY                                 00390800
+         L     R15,=V(DMKSSSEN) STACK A CPEXBLOK               @V60B6B8 00390900
+*                                 HOLLY                                 00391000
+         ST    R15,CPEXADD    FOR DMKSSEN                      @V60B6B8 00391100
+*                                  HOLLY                                00391200
+         CALL  DMKSTKCP       PUT THE CPEXBLOK ON DISPATCH Q   @V60B6B8 00391300
+         BR    R5             BACK TO THE MAINLINE             @V60B6B8 00391400
+         DROP  R6             THROUGH WITH MSSCOM              @V60B6B8 00391500
+         USING STATDASD,R4                                     @V60B6B8 00391600
+*  THIS ROUTINE WILL CHECK FOR A SECOND IOERBLOK . IF ONE WAS           00777000
+*  OBTAINED STORAGE WILL BE GIVEN BACK TO THE SYSTEM.                   00778000
+*                                                                       00779000
+CKIOB    L     R1,IOBIOER     GET ADDR OF 2'ND IOERBLOK        @VA07801 00780000
+         LA    R1,0(R1)       CLEAR HI BYTE                             00781000
+         LTR   R1,R1          WAS BLOCK REALY OBTAINED ?                00782000
+         BZ    NOTUSED        BRANCH IF NO.                             00783000
+         TM    IOERCSW+5-IOERBLOK(R1),IFCC+CCC+CDC IS CHANNEL  @VA01254 00784000
+*                             ERROR                                     00785000
+*                             INDICATED ?                               00786000
+         BZ    CKEND          NO, GO FRET IOERBLOK             @VA01254 00787000
+         LR    R3,R1          SAVE THE IOERBLOK POINTER        @VA01254 00788000
+         L     R1,IOERCCRA-IOERBLOK(R3) CHANNEL REC ADDR       @V508690 00789500
+         L     R0,IOERCCRL-IOERBLOK(R3) CHANNEL REC LENGTH     @V508690 00790500
+         CALL  DMKFRET        RELEASE STORAGE                  @VA01254 00793000
+         LR    R1,R3          GET IOERBLOK POINTER             @VA01254 00794000
+CKEND    EQU   *                                               @VA01254 00795000
+         LA    R0,IOERSIZE    LOAD IOERBLOK SIZE.                       00796000
+         AH    R0,IOEREXT-IOERBLOK(,R1) INCLUDE EXTRA SIZE (IF ANY)     00797000
+         CALL  DMKFRET                                                  00798000
+NOTUSED  MVC   IOBIOER,ZEROES CLEAR ADDRESS IN IOBLOK IN CASE           00799000
+         BR    R5                       RETURN TO CALLER.               00800000
+         SPACE 1                                                        00801000
+DSB956   DC    C'DMKDSB956A DASD XXX VOLID XXXXXX NOT MOUNTED; NOW OFFL*01217000
+               INE'                                                     01218000
+DSB956AD EQU   16             DISP OF THE UNIT ADDRESS                  01219000
+DSB956VS EQU   26             DISP OF THE VOL SER NO                    01220000
+         SPACE                                                          01221000
+RDVOLID  CCW   X'07',STATCCHH-STATDASD,CC+SILI,6   SEEK                 01222000
+         CCW   X'08',STATSRCH-STATDASD,CC+SILI,1               @V407438 01222250
+         CCW   X'03',0,SILI,1 TIC/NOP FOR 3330V'S              @V407438 01222500
+         CCW   X'31',STATCCHH+2-STATDASD,CC+SILI,5    SRCHID            01223000
+         CCW   X'08',STATSRCH-STATDASD,CC+SILI,1 TIC                    01224000
+         CCW   X'06',STATVOL1-STATDASD,CC+SILI,10 READ DATA    @V2A2029 01225000
+         CCW   X'04',STATSDAT-STATDASD,SILI+CC,IOERSNSZ SENSE  @VA07801 01225500
+         CCW   X'94',STATSDAT-STATDASD,SILI+CC,IOERSNSZ RELSE  @VA07801 01226000
+         CCW   X'04',STATSDAT-STATDASD,SILI,IOERSNSZ SENSE     @VA07801 01226500
+VOL1CCHH DC    X'0000000000000300' SEARCH AURGUMENT                     01227000
+RDVOLEND EQU   *              END OF CH PGMS + SEEK/SRCH ARG   @V407438 01227250
+         SPACE                                                          01227500
+PACKCHG  CCW   X'A4',IOERDATA-IOERBLOK,SILI,24   BUFFER UNLOAD COMMAND  01228000
+UNLD2305 CCW   X'24',IOERDATA-IOERBLOK,SILI,128  DITTO FOR 2305 ONLY    01229000
+         SPACE                                                          01230000
+MOUNTQ   DC    V(DMKSSSMQ)    ANCHOR FOR QUEUE OF MSSCOM BLOCKS@V60B6B8 01230010
+*                             DESCRIBING 3330V'S BEING MOUNTED          01230020
+         LTORG                                                 @V407438 01270750
+         EJECT                                                          01271000
+         COPY  IOER           GET IOERSNSZ DEFINED             @V407438 01271250
+         EJECT                                                          01271500
+STATDASD DSECT                                                          01273000
+STATSEEK DS    D              SEEK CCW                                  01274000
+STATTIC1 DS    D              TIC TO "STATSRCH"                @V407438 01274250
+STATNOP  DS    D              NOP, END HERE FOR 3330V CYL FAULT@V407438 01274500
+STATSRCH DS    D              SEARCH ID EQUAL CCW                       01275000
+STATTIC  DS    D              TIC CCW                                   01276000
+STATREAD DS    D              READ DATA CCW                             01277000
+STATSCCW DS    D              SENSE CCW (3340)                 @VA07801 01277500
+STATREL  DS    D              RELEASE CCW                      @VA07801 01278000
+STATSEN  DS    D              SENSE FOR DETECTING RELEASE      @VA07801 01278500
+STATCCHH DS    D              SEARCH AURGUMENT (BBCCHHR)                01279000
+STATVOL1 DS    CL4            (VOL1)                                    01280000
+STATLABL DS    CL6            VOLUME SERIAL NUMBER.                     01281000
+         DS    CL4                                                      01282000
+STATPACK DS    CL1            PACK CHANGE SWITCH                        01283000
+STATCALL DS    CL1            CALLED FROM SHUTDOWN                      01284000
+STATSDAT DS    CL(IOERSNSZ)   SENSE INFORMATION                @V407438 01285000
+STATREGS DS    D              GPR7-8 SAVE AREA                          01286000
+STATGR13 DS    F              USED TO SAVE GPR-13                       01287000
+         DS    F                                                        01288000
+         ORG   STATSEEK                                                 01289000
+STATSNS  DS    D              BUFFER UNLOAD CCW                         01290000
+         ORG                                                            01291000
+STATSIZE EQU   (*-STATDASD)/8 SIZE OF DSECT IN DOUBLE WORDS             01293000
+         EJECT                                                          01318000
+VSCOMM   MSSCOM                                                @V60B6B8 01318010
+         EJECT                                                          01318020
+         COPY  RBLOKS                                          @V200820 01319000
+         COPY  VMBLOK                                          @VA04231 01319800
+         COPY  IOBLOKS                                         @V200820 01320000
+         COPY  DEVTYPES                                        @V200820 01321000
+         COPY  EQU                                             @V200820 01322000
+         COPY  SAVE                                            @V200820 01324000
+         PSA                                                   @V200820 01325000
+         END   DMKDSB                                          @V200820 01326000

@@ -1,0 +1,430 @@
+VSQ      TITLE 'DMKVSQ     (CP)        VM/370 - RELEASE 6'              00001000
+         ISEQ  73,80          VALIDATE SEQUENCING OF INPUT              00002000
+*.                                                                      00003000
+* MODULE NAME -                                                         00004000
+*                                                                       00005000
+*        DMKVSQ                                                         00006000
+*                                                                       00007000
+* FUNCTION -                                                            00008000
+*                                                                       00009000
+*        TO LOCATE THE NEXT AVAILABLE SLOT IN A PRINTER/PUNCH           00010000
+*        BUFFER AND MOVE INTO IT A CCW AND DATA.                        00011000
+*                                                                       00012000
+* ATTRIBUTES -                                                          00013000
+*                                                                       00014000
+*        REENTRANT, RESIDENT, ENTERED VIA BALR FROM DMKVSP              00015000
+*                                                                       00016000
+* ENTRY POINTS -                                                        00017000
+*                                                                       00018000
+*        DMKVSQPD - TO LOCATE THE NEXT AVAILABLE SLOT IN A              00019000
+*                   PRINTER/PUNCH BUFFER                                00020000
+*                                                                       00021000
+* ENTRY CONDITIONS -                                                    00022000
+*                                                                       00023000
+*        GPR3  = NUMBER OF BYTES REQUESTED IN THE BUFFER                00024000
+*        GPR7  = ADDRESS OF THE SFBLOK FOR THE ACTIVE FILE              00025000
+*        GPR8  = ADDRESS OF THE VDEVBLOK FOR ADDRESSED VIRTUAL DEVICE   00026000
+*        GPR9  = ADDRESS OF VSPLCTL WORKAREA                            00027000
+*        GPR11 = ADDRESS OF USER'S VMBLOK                               00028000
+*        GPR12 = ADDRESS OF DMKVSQ                                      00029000
+*                                                                       00030000
+*        NOTE THAT WHEN DMKVSQEX IS ENTERED FROM DMKVSP, GPR13 DOES     00031000
+*        NOT POINT TO A SAVEAREA, AND THE ENTER AND EXIT MACROS MAY NOT 00032000
+*        BE USED.                                                       00033000
+*                                                                       00034000
+* EXIT CONDITIONS -                                                     00035000
+*                                                                       00036000
+*        NORMAL -  RETURN TO CALLER VIA ADDRESS SPECIFIED IN REGISTER   00037000
+*        14 + 4.                                                        00038000
+*                                                                       00039000
+*        ERROR -  RETURN TO CALLER VIA BR R14, WITH INFORMATION         00040000
+*        SET UP FOR DMKVSP TO CALL ITS ERROMSG ROUTINE.                 00041000
+*                                                                       00042000
+         EJECT                                                          00043000
+*                                                                       00044000
+* CALLS TO OTHER ROUTINES -                                             00045000
+*                                                                       00046000
+*        DMKPGTSG - TO OBTAIN DASD PAGE BUFFER SPACE                    00047000
+*        DMKRPAGT - TO READ A PAGE BUFFER INTO VIRTUAL MEMORY           00048000
+*        DMKRPAPT - WRITE A BUFFER FROM VIRTUAL MEMORY TO DASD          00049000
+*        DMKSPLCV - TO CLOSE A NEW DASD OUTPUT SPOOL FILE               00050000
+*        DMKSPLDL - TO PURGE A PARTIALLY COMPLETE FILE                  00051000
+*        DMKPGTVR - TO RELEASE VIRTUAL BUFFER                           00052000
+*        DMKPGTVG - TO GET A VIRTUAL BUFFER                             00053000
+*        DMKPTRUL - TO UNLOCK A LOCK BUFFER PAGE                        00054000
+*        DMKFREE, DMKFRET FOR THE USUAL REASONS                         00055000
+*                                                                       00056000
+* EXTERNAL REFERENCES -                                                 00057000
+*                                                                       00058000
+*        DMKBOXHR - CLASS X PAGE HEADER LINE                            00059000
+*        DMKVSPWA - ADDRESS OF 3211 INDEX WORK AREA                     00060000
+*                                                                       00061000
+* TABLES / WORKAREAS -                                                  00062000
+*                                                                       00063000
+*                                                                       00064000
+* REGISTER USAGE -                                                      00065000
+*                                                                       00066000
+*        GPR2  = ADDRESS OF SPLINK                                      00067000
+*        GPR3  = NUMBER OF BYTES OF BUFFER REQUESTED                    00068000
+*        GPR5  = ADDRESS OF WORK BUFFER (VSPBUFBK)                      00069000
+*        GPR6  = INTERNAL SUBROUTINE LINKAGE                            00070000
+*        GPR7  = ADDRESS OF SFBLOK FOR ACTIVE FILE                      00071000
+*        GPR8  = ADDRESS OF VDEVBLOK FOR ACTIVE VIRTUAL DEVICE          00072000
+*        GPR9  = ADDRESS OF VSPLCTL WORKAREA                            00073000
+*        GPR10 = SAVE DMKVSP RETURN ADDRESS                             00074000
+*        GPR11 = ADDRESS OF THE USER'S VMBLOK                           00075000
+*        GPR12 = DMKVSQ BASE ADDRESS                                    00076000
+*        GPR14,15 - BALR LINKAGE FOR DMKFREE/DMKFRET                    00077000
+*                                                                       00078000
+         EJECT                                                          00079000
+* NOTES -                                                               00080000
+*                                                                       00081000
+* OPERATION -                                                           00082000
+*                                                                       00083000
+*        1. LOCATE NEXT AVAILABLE SLOT IN PRINTER/PUNCH BUFFER.         00084000
+*           PAGE IN THE BUFFER, IF NECESSARY, AND LOCK THE BUFFER       00085000
+*           IN STORAGE.                                                 00086000
+*                                                                       00087000
+*        2. IF ENOUGH ROOM EXISTS IN THIS BUFFER FOR THE CURRENT        00088000
+*           REQUEST, GO TO STEP 3. OTHERWISE, CALL DMKPGTSG TO OBTAIN A 00089000
+*           NEW SPOOLING PAGE BUFFER AND WRITE OUT THE FULL BUFFER      00090000
+*           TO DASD.                                                    00091000
+*                                                                       00092000
+*        3. MOVE THE CCW AND DATA FROM THE WORK BUFFER TO THE VIRTUAL   00093000
+*           BUFFER.                                                     00094000
+*                                                                       00095000
+*        4. UNLOCK THE BUFFER PAGE AND RETURN TO DMKVSP.                00096000
+*                                                                       00097000
+* ERROR MESSAGES -                                                      00098000
+*                                                                       00099000
+*        NONE                                                           00100000
+*                                                                       00101000
+*.                                                                      00102000
+         EJECT                                                          00103000
+         COPY  OPTIONS                                                  00104000
+         COPY  LOCAL               OPTIONS                              00105000
+         EJECT                                                          00106000
+DMKVSQ   CSECT LOADER              CONTROL ONLY                         00107000
+         SPACE                                                          00108000
+         ENTRY DMKVSQPD                                                 00109000
+         SPACE 3                                                        00110000
+         EXTRN DMKPGTVR,DMKPGTSG                                        00111000
+         EXTRN DMKPGTVG                                                 00112000
+         EXTRN DMKSPLCV                                                 00113000
+         EXTRN DMKBOXHR                                                 00114000
+         EXTRN DMKRPAGT,DMKRPAPT                                        00115000
+         EXTRN DMKPTRUL,DMKSPLDL                                        00116000
+         EXTRN DMKVSPWA                                        @V60BCAA 00117000
+         EXTRN DMKVSP                                          @V60BCAA 00118000
+         SPACE 3                                                        00119000
+         USING PSA,R0                                                   00120000
+         USING SPLINK,R2                                                00121000
+         USING SFBLOK,R7                                                00122000
+         USING VDEVBLOK,R8                                              00123000
+         USING VSPLCTL,R9                                               00124000
+         USING VMBLOK,R11                                               00125000
+         SPACE 2                                                        00126000
+DMKVSQPD EQU   *                                                        00127000
+         SPACE                                                          00128000
+         USING *,R12                                                    00129000
+         LR    R12,R15             ESTABLISH BASE REGISTER     @V60BCAA 00130000
+         SPACE 2                                                        00131000
+         B     VSQ0001                                                  00132000
+ID       DC    CL8'DMKVSQ'         MODULE NAME                          00133000
+VSQ0001  EQU   *                                                        00134000
+PRTDATA  EQU   *  HERE TO LOCATE THE NEXT AVAILABLE                     00135000
+*              SLOT IN A PRINTER/PUNCH BUFFER --                        00136000
+*              ON ENTRY, R3 CONTAINS THE NUMBER OF BYTES REQUESTED      00137000
+         SPACE                                                          00138000
+         LR    R10,R14            SAVE RETURN ADDRESS TO DMKVSP@V60BCAA 00139000
+         L     R5,VSPBUFBK         GET ADDRESS OF WORK BUFFER           00140000
+         TM    SFBTYPE,TYPPRT      PRINTER FILE ?                       00141000
+         BZ    PRTCONT             NO -                                 00142000
+         CLI   VDEVCLAS,C'X'       CLASS X ??                           00143000
+         BNE   PRTCONT             NO -                                 00144000
+         L     R4,=A(DMKVSPWA)    ADDR OF 3211 INDEX WORK AREA @V60BCAA 00145000
+         USING WORKAREA,R4                                              00146000
+         L     R1,HDRADD           ADDRESS OF HEADER CCW AND MSG        00147000
+         LTR   R1,R1               BUFFER AVAILABLE ??                  00148000
+         BM    PRTCONT             DO NOT USE HEADER LINE               00149000
+         BNZ   XCONT               YES - PROCESS X CLASS                00150000
+         L     R1,=A(DMKBOXHR)     INSTALLATION HEADER PRESENT ??       00151000
+         SL    R8,VMDVSTRT   VDEVBLOK DISP                     @VA00716 00152000
+         LTR   R1,R1               ??                                   00153000
+         BNZ   HDRTRAN             YES - GET IT                         00154000
+HDRERR   AL    R8,VMDVSTRT   VDEVBLOK ADDRESS                  @VA00716 00155000
+         MVC   HDRADD(4),FFS INDICATE PAGE ERROR OR DMKBOXHR   @VA00716 00156000
+         B     PRTCONT             NOT PRESENT - FORGET USING HEADER    00157000
+HDRTRAN  TRANS 2,1,OPT=(BRING,DEFER,SYSTEM),IOER=HDRERR        @VA00716 00158000
+         AL    R8,VMDVSTRT   VDEVBLOK ADDRESS                  @VA00716 00159000
+         LA    R0,15               SIZE OF BUFFER                       00160000
+         CALL  DMKFREE             GET STORAGE                          00161000
+         MVI   0(R1),C' '          CLEAR BUFFER                         00162000
+         MVC   1(119,R1),0(R1)                                          00163000
+         MVC   0(20,R1),VSPPREAM MOVE IN PREAMBLE CCW'S        @V293598 00164000
+         MVC   62(46,R1),0(R2)     MOVE IN HEADER FOR CLASS X LIST      00165000
+         ST    R1,HDRADD           STORE ADDRESS OF BUFFER AND CONT     00166000
+XCONT    CLI   0(R5),X'8B'         SKIP IMMEDIATELY ??                  00167000
+         BE    XSKIP               YES -                                00168000
+         CLI   0(R5),X'89'         WRITE SKIP CCW ??                    00169000
+         BNE   PRTCONT             NO - CONTINUE                        00170000
+         MVI   0(R5),X'01'         CHANGE WRITE SKIP TO WRITE           00171000
+         BAL   R6,PRTCONT          MOVE TO SPOOL BUFFER                 00172000
+XSKIP    L     R5,HDRADD           ADDRESS OF CCW AND DATA              00173000
+         LA    R3,8                LENGTH OF SPACE IMMEDIATE            00174000
+         BAL   R6,PRTCONT          MOVE SPACE TO PRINT BUFFER           00175000
+         A     R5,F8               POINT TO HEADER WRITE CCW            00176000
+         LA    R3,112              LENGTH OF CCW AND DATA               00177000
+         DROP  R4                                                       00178000
+         SPACE                                                          00179000
+PRTCONT  L     R1,VSPVPAGE         GET VIRTUAL BUFFER ADDRESS           00180000
+*                                  PAGE THE BUFFER IN                   00181000
+         SL    R8,VMDVSTRT   VDEVBLOK DISP                     @VA00716 00182000
+         TRANS 2,1,OPT=(BRING,LOCK,DEFER,SYSTEM),IOER=EMSG429  @VA00716 00183000
+         AL    R8,VMDVSTRT   VDEVBLOK ADDRESS                  @VA00716 00184000
+         LH    R14,VSPNEXT         GET POINTER TO NEXT SLOT             00185000
+         LTR   R14,R14             POINTER ZERO ??                      00186000
+         BNZ   PRTNOTAG       CAN'T BE TIME TO SET TAG         @V293598 00187000
+         LA    R14,16         SET ORDINARY 1ST DISP            @V293598 00188000
+         CLC   SFBSTART(4),VSPDPAGE FIRST PAGE OF FILE ??      @V293598 00189000
+         BNE   PRTNOTAG       NO - DON'T SET TAG               @V293598 00190000
+         MVC   16(12,R2),MODELCCW INITIALIZE THE CCWS          @V293598 00191000
+         MVI   16(R2),X'03'   MAKE COMMAND NOP                 @V293598 00192000
+         MVI   23(R2),L'VSPXTAG    SET COUNT FIELD             @V293598 00193000
+         MVI   27(R2),L'VSPXTAG+16  SET TIC DISPLACEMENT       @V293598 00194000
+         MVI   28(R2),C' '    SET FIRST TAG CHAR TO BLANK      @V293598 00195000
+         MVC   29(L'VSPXTAG-1,R2),28(R2)  BLANK THE ENTIRE FLD @V293598 00196000
+         LA    R14,L'VSPXTAG+16(,R14)  NEXT DBLWD BOUNDARY     @V293598 00197000
+         MVC   SPRECNUM(4),F1 INIT SPOOL BUFFER REC COUNT      @V293598 00198000
+PRTNOTAG AR    R3,R14         ADD DISP TO NUMBER OF            @V293598 00199000
+*                                  BYTES REQUESTED                      00200000
+         LA    R4,4088             MAXIMUM NUMBER OF BYTES     @V60B9BA 00201000
+         CLC   SFBSTART(4),VSPDPAGE IS IT FIRST DASD BUFFER ?  @V60B9BA 00202000
+         BNE   *+8                 XFER IF NOT                 @V60B9BA 00203000
+         LA    R4,4040             FEWER BYTES IN FIRST BUFFER @V60B9BA 00204000
+         CR    R3,R4               WILL WE FALL OFF END ?      @V60B9BA 00205000
+         BNH   PRTDATA2            NO --                                00206000
+         SR    R3,R14              RESTORE R3 TO ENTRY VALUE            00207000
+         LA    R4,10               RETRY COUNT OF 10                    00208000
+         STH   R4,SFBMISC1         AND SAVE                             00209000
+PRTSG    LR    R4,R2               SAVE BUFFER ADDRESS                  00210000
+         MVC   SPFILID,SFBFILID    FILE ID FOR VALIDATING PAGE @V60B9BA 00211000
+         MVC   SPTIME,SFBTIME     MORE VALIDATION DATA         @V60B9BA 00212000
+         CALL  DMKPGTSG            GET A SPOOLING PAGE BUFFER           00213000
+         LTR   R1,R1               VALID DASD ADDRESS CCPD              00214000
+         BNZ   SPACGOOD            SPACE AVAILBLE                       00215000
+         SPACE                                                          00216000
+*        SPOOLING SPACE FULL                                            00217000
+         LR    R2,R4               RESTORE BUFFER ADDRESS               00218000
+         L     R0,SFBSTART         GET BUFFER START ADDRESS             00219000
+         ST    R0,SPNXTPAG         AND CHAIN TAIL TO START OF FILE      00220000
+         LM    R0,R1,VSPDPAGE      GET CURRENT BUFFER ADDRESSES         00221000
+         SL    R8,VMDVSTRT    VDEVBLOK DISPLACEMENT            @VA01460 00222000
+         CALL  DMKRPAPT,PARM=SYSTEM AND WRITE IT TO DASD                00223000
+         BNZ   EMSG429        BUFFER WRITE ERROR               @VA01460 00224000
+         NI    SFBFLAG2,255-SFBPURGE RESET FOR NOW             @VA07846 00225000
+         AL    R8,VMDVSTRT    VDEVBLOK ADDRESS                 @VA01460 00226000
+         ST    R0,SFBLAST          UPDATE BUFFER LAST ADDRESS           00227000
+MSG427   BAL   R6,SETOPTS          AND CLEAR FILE AND DEVICE            00228000
+         B     MSG427I             GIVE ERROR MSG DMKVSP427I            00229000
+         SPACE                                                          00230000
+SPACGOOD ST    R1,SPNXTPAG         SAVE FORWARD BUFFER LINK             00231000
+         LM    R0,R1,VSPDPAGE      GET CURRENT BUFFER ADDRESSES         00232000
+         SL    R8,VMDVSTRT    VDEVBLOK DISPLACEMENT            @VA01460 00233000
+         CALL  DMKRPAPT,PARM=SYSTEM AND WRITE IT TO DASD                00234000
+         LR    R2,R4               RESTORE BUFFER ADDRESS               00235000
+         BZ    WRGOOD              BUFFER WRITTEN NO ERRORS             00236000
+         AL    R8,VMDVSTRT    VDEVBLOK ADDRESS                 @VA01460 00237000
+         OI    SFBFLAG,SFBRECER    INDICATE BUFFER WRITE ERROR          00238000
+         MVC   VSPDPAGE(4),SPNXTPAG USE NEXT CCPD AS CURRENT CCPD       00239000
+         ICM   R14,B'0011',SFBMISC1     GET RETRY COUNT                 00240000
+         BZ    MSG429              FAILED 10 CONSECUTIVE RETIES         00241000
+         BCTR  R14,0               -1                                   00242000
+         STH   R14,SFBMISC1        AND SAVE                             00243000
+         B     PRTSG               AND RETRY                            00244000
+         SPACE                                                          00245000
+WRGOOD   AL    R8,VMDVSTRT    VDEVBLOK ADDRESS                 @VA01460 00246000
+         L     R15,SPPREPAG   SAVE CCPD OF PREVIOUS BUFFER     @VA01460 00247000
+         ST    R0,SFBLAST          SAVE ADDRESS OF LAST BUFFER WRITTEN  00248000
+         L     R0,VSPDPAGE         GET OLD BUFFER ADDRESS               00249000
+         ST    R0,SPPREPAG         AND SAVE AS BACK-CHAIN               00250000
+         L     R0,SPNXTPAG         GET NEW BUFFER ADDRESS               00251000
+         ST    R0,VSPDPAGE         AND SAVE IN CONTROL BLOK             00252000
+         L     R0,SFBSTART         CHAIN FORWARD POINTER TO             00253000
+         ST    R0,SPNXTPAG         FIRST BUFFER                         00254000
+         SR    R0,R0               CLEAR OUT OLD BUFFER                 00255000
+         ST    R0,SPRECNUM         RECORD COUNTER                       00256000
+         LA    R14,SPSIZE          OFFSET OF FIRST RECORD IN BUFFER     00257000
+         AR    R3,R14              POINTER TO NEW NEXT SLOT             00258000
+         TM    SFBFLAG,SFBRECER    BUFFER ERROR CORRECTION PENDING ?    00259000
+         BO    *+10                YES -- DO NOT UPDATE SFBPNT          00260000
+         MVC   SFBPNT,SFBLAST      UPDATE SFBPNT TO LAST BUFFER         00261000
+PRTDATA2 STH   R3,VSPNEXT          SAVE IN CONTROL BLOCK                00262000
+         AR    R2,R14              POINT TO REAL ADDRESS OF SLOT        00263000
+         SR    R3,R14              NUMBER OF BYTES REQUESTED IN R3      00264000
+         BCTR  R3,0                -1 FOR MOVE                          00265000
+         EX    R3,MOVEBUFF         MOVE CCW AND DATA FROM WORK BUFFER   00266000
+*                                  TO THE VIRTUAL BUFFER                00267000
+         SR    R2,R14              RESTORE R2 TO START OF BUFFER        00268000
+         L     R14,SPRECNUM        GET BUFFER CCW COUNT                 00269000
+         LA    R14,1(R14)          UPDATE BY ONE                        00270000
+         ST    R14,SPRECNUM        SAVE BUFFER COUNT                    00271000
+         OI    SFBFLAG2,SFBFLNMT INDIC. SOMETHING IN THE FILE  @VA04920 00272000
+         TM    0(R5),X'03'    CONTROL IMMEDIATE CMND?          @VA02094 00273000
+         BO    SKIPCCW        YES--DON'T UPDATE COUNT          @VA02094 00274000
+         L     R14,SFBRECNO        UPDATE RECORD COUNT                  00275000
+         LA    R14,1(R14)          ..                                   00276000
+         ST    R14,SFBRECNO        ..                                   00277000
+SKIPCCW  EQU   *                                               @VA02094 00278000
+         TM    SFBFLAG,SFBRECER    PAGE WRITE ERROR ??                  00279000
+         BZ    CONACT              CHECK FOR ACTIVE CONSOLE             00280000
+         NI    SFBFLAG,X'FF'-SFBRECER   RESET ERROR INDICATER           00281000
+         LTR   R3,R15              IS THERE A PREVIOUS CCPD BUFFER ??   00282000
+         BNZ   UPDTPNT             YES -- GO UPDATE FORWARD POINTER     00283000
+         MVC   SFBSTART(4),SPPREPAG UPDATE SFBSTART ADDRESS             00284000
+         B     UPSFBPNT            AND CONTINUE                         00285000
+         SPACE                                                          00286000
+UPDTPNT  LR    R4,R2               SAVE ADDRESS OF CURRENT BUFFER       00287000
+         SL    R8,VMDVSTRT    VDEVBLOK DISPLACEMENT            @VA01460 00288000
+         CALL  DMKPGTVG            GET VIRTUAL BUFFER                   00289000
+         TRANS 2,1,OPT=(BRING,DEFER,LOCK,SYSTEM),IOER=EMSG429  @VA01460 00290000
+         LR    R0,R3               CCPD OF BUFFER TO BE UPDATED         00291000
+         CALL  DMKRPAGT,PARM=(BRING+SYSTEM)                             00292000
+         BNZ   EMSG429        BUFFER READ ERROR                @VA01460 00293000
+         MVC   SPNXTPAG(4),4(R4)   UPDATE FORWARD POINTER               00294000
+         CALL  DMKRPAPT,PARM=SYSTEM WRITE OUT BUFFER                    00295000
+         BNZ   EMSG429        BUFFER WRITE ERROR               @VA01460 00296000
+         SR    R0,R0               RELEASE STORAGE PAGE                 00297000
+         CALL  DMKRPAGT,PARM=SYSTEM ..                                  00298000
+         CALL  DMKPGTVR            RELEASE VIRTUAL BUFFER ADDRESS       00299000
+         LR    R2,R4               RESTORE REAL BUFFER ADDRESS          00300000
+         AL    R8,VMDVSTRT    VDEVBLOK ADDRESS                 @VA01460 00301000
+UPSFBPNT MVC   SFBPNT,SFBLAST SAVE ADDRESS OF LAST GOOD WRITE           00302000
+CONACT   CLI   VDEVTYPE,TYP3210    CONSOLE                              00303000
+         BNE   UNLOCK              NO - GO UNLOCK AND EXIT              00304000
+         CLC   SFBSTART(4),VSPDPAGE 1ST PAGE OF FILE?          @V293598 00305000
+         BNE   VSPCKR1        NO - CHK FOR REC 1.              @V293598 00306000
+         TM    SPRECNUM+3,X'FD' YES - IS THIS REC 2?           @V293598 00307000
+         BZ    CONSWRT        YES - WRITE THE BUFFER           @V293598 00308000
+         B     VSPCKOP        NO - CHK FOR OPERATOR            @V293598 00309000
+VSPCKR1  EQU   *                                               @V293598 00310000
+         TM    SPRECNUM+3,X'FE'    RECORD ONE ??                        00311000
+         BZ    CONSWRT             YES -- WRITE BUFFER TO SPOOL DEVICE  00312000
+VSPCKOP  EQU   *                                               @V293598 00313000
+         TM    VMOSTAT,VMSYSOP     SYSTEM OPERATOR  ??                  00314000
+         BZ    UNLOCK              NO --  ALL DONE GET OUT              00315000
+         TM    SPRECNUM+3,X'0E'    16 LINES SINCE LAST WRITE ??         00316000
+         BNZ   UNLOCK              NO --                                00317000
+         B     NOTOPER        SKIP SET - DONE FIRST TIME       @VA08481 00318000
+CONSWRT  OI    SFBFLAG2,SFBPURGE FLAG FOR CKP                  @VA08481 00319000
+NOTOPER  MVC   SPNXTPAG(4),SFBSTART CHAIN THIS BUFFER TO START @VA08481 00320000
+         MVC   SPFILID,SFBFILID    FILE ID FOR VALIDATING PAGE @V60B9BA 00321000
+         MVC   SPTIME,SFBTIME     MORE VALIDATION DATA         @V60B9BA 00322000
+         LR    R4,R2               SAVE REAL ADDRESS                    00323000
+         LM    R0,R1,VSPDPAGE      DASD AND VIRTUAL ADDRESS             00324000
+         SL    R8,VMDVSTRT    VDEVBLOK DISPLACEMENT            @VA01460 00325000
+         CALL  DMKRPAPT,PARM=SYSTEM WRITE BUFFER TO SPOOLING DEV        00326000
+         BNZ   CONSWRT1       IF ERRORS, DONT UPDATE SFBLAST   @VA03374 00327000
+         ST    R0,SFBLAST     SAVE ADDR OF LAST BUFFER WRITTEN @VA03374 00328000
+         ST    R0,SFBPNT      SAVE CURRENT PAGE BUFFER         @VA07159 00329000
+         NI    SFBFLAG2,255-SFBPURGE OK SO TURN IT OFF         @VA07846 00330000
+CONSWRT1 EQU   *                                               @VA03374 00331000
+         AL    R8,VMDVSTRT    VDEVBLOK ADDRESS                 @VA01460 00332000
+         LR    R2,R4               RESTORE REAL ADDRESS                 00333000
+UNLOCK   L     R1,VSPVPAGE         GET VIRTUAL PAGE ADDRESS             00334000
+         CALL  DMKPTRUL            UNLOCK PAGE                          00335000
+         LR    R14,R10             RESTORE RETURN ADDRESS      @V60BCAA 00336000
+         LA    R14,4(R14)          RETURN TO NON-ERROR PATH IN @V60BCAA 00337000
+*                                  DMKVSP                               00338000
+         B     RETRN               SET UP TO RETURN TO CALLER  @V60BCAA 00339000
+         SPACE 3                                                        00340000
+PRTPUR   XC    VSPSFBLK(4),VSPSFBLK CLEAR SFBLOK POINTER                00341000
+         SL    R8,VMDVSTRT    VDEVBLOK DISPLACEMENT            @VA01460 00342000
+         CALL  DMKSPLDL       AND PURGE THE FILE                        00343000
+         AL    R8,VMDVSTRT    VDEVBLOK ADDRESS                 @VA01460 00344000
+         SR    R7,R7          CLEAR SFBLOK GPR                          00345000
+         B     PRTDONE        AND EXIT NOW                              00346000
+         SPACE                                                          00347000
+SETOPTS  MVC   SFBCLAS,VDEVCLAS    MOVE IN FILE CLASS                   00348000
+         SL    R8,VMDVSTRT    VDEVBLOK DISPLACEMENT            @VA01460 00349000
+         CALL  DMKSPLCV            CALL VIRTUAL OUTPUT FILE CLOSE       00350000
+         AL    R8,VMDVSTRT    VDEVBLOK ADDRESS                 @VA01460 00351000
+*                                  ROUTINE                              00352000
+         SPACE 2                                                        00353000
+PRTDONE  EQU   *  HERE WHEN FINISHED CLOSING THE FILE                   00354000
+         L     R9,VDEVSPL          RESTORE ADDRESS OF WORKAREA          00355000
+         L     R1,VSPVPAGE         GET VIRTUAL BUFFER ADDRESS           00356000
+         SR    R0,R0               DUMMY DASD ADDRESS                   00357000
+         SL    R8,VMDVSTRT    VDEVBLOK DISPLACEMENT            @VA01460 00358000
+         CALL  DMKRPAGT,PARM=SYSTEM TO RELEASE CORE PAGE, AND           00359000
+         CALL  DMKPGTVR            TO RELEASE VIRTUAL BUFFER ADDRESS    00360000
+         AL    R8,VMDVSTRT    VDEVBLOK ADDRESS                 @VA01460 00361000
+         L     R1,VSPBUFBK         GET ADDRESS OF WORK BUFFER           00362000
+         LTR   R1,R1               BLOK TO BE FRETED ??                 00363000
+         BZ    FRETSPL             NO - FRET VSPLCTL BLOK               00364000
+         LA    R0,VSPBUFSZ         SIZE OF BLOK                         00365000
+         CALL  DMKFRET             FRET IT                              00366000
+         SPACE                                                          00367000
+FRETSPL  LR    R1,R9               GET ADDRESS OF VSPLCTL WORKAREA      00368000
+         LA    R0,VSPSIZE          AND ITS SIZE                         00369000
+         CALL  DMKFRET             AND FREE IT                          00370000
+         SR    R9,R9                                                    00371000
+         ST    R9,VDEVSPL          CLEAR ADDRESS OF VSPLCTL             00372000
+         NI    VDEVSFLG,X'FF'-(VDEVPURG+VDEVCFCL) RESET PURGE AND       00373000
+*                                  CONSOLE FUNCTION FLAG                00374000
+         BR    R6                  AND LEAVE                            00375000
+         SPACE 3                                                        00376000
+         DS    0H                                                       00377000
+MSG427I  EQU   *  HERE IF SPOOL SPACE FULL                              00378000
+         LA    R2,427              ERROR MSG DMKVSQ427I                 00379000
+         B     ERMRTRN             SET UP TO RETURN ON ERROR   @V60BCAA 00380000
+*                                  PATH                                 00381000
+EMSG429  EQU   *              HERE IF IO ERROR ON TRANS        @VA01460 00382000
+         AL    R8,VMDVSTRT    VDEVBLOK ADDRESS                 @VA01460 00383000
+MSG429F  EQU   *  HERE IF SPOOLING DEVICE ERROR AND                     00384000
+*                                  SFBLOK TO BE FRETED                  00385000
+MSG429   MVC   SFBLAST(4),SFBPNT CCPD OF LAST BUFFER WRITTEN   @VA01460 00386000
+         BAL   R6,PRTPUR      PURGE FILE AND CLEAR BLOKS       @VA00808 00387000
+         SPACE                                                          00388000
+MSG429I  EQU   *  HERE IF SPOOLING I/O ERROR                            00389000
+         LA    R2,429              ERROR MSG DMKVSQ429I                 00390000
+ERMRTRN  LR    R14,R10            RESTORE CALLER'S RETURN ADDR.@V60BCAA 00391000
+*                                 RETURN WILL BE TO POINT IN DMKVSP     00392000
+*                                 WHICH WILL CALL 'ERROMSG' ROUTINE.    00393000
+RETRN    L     R12,=A(DMKVSP)      RESTORE DMKVSP'S BASE REGS. @V60BCAA 00394000
+         LR    R10,R12                                         @V60BCAA 00395000
+         A     R10,F4096                                       @V60BCAA 00396000
+         BR    R14                 RETURN TO CALLER            @V60BCAA 00397000
+         EJECT                                                          00398000
+MOVEBUFF MVC   0(0,R2),0(R5)       MOVE  DATA TO VIRTUAL BUFFER         00399000
+         SPACE 2                                                        00400000
+MODELCCW EQU   *  MODEL CCW AND TIC                                     00401000
+         DC    X'41'               PUNCH OP-CODE                        00402000
+         DC    AL3(12)             RELATIVE DATA ADDRESS                00403000
+         DC    AL1(CC+SILI,0)      FLAGS                                00404000
+         DC    AL2(80)             DATA LENGTH                          00405000
+         DC    X'08'               TIC OP-CODE                          00406000
+         DC    AL3(96)             RELATIVE ADDRESS OF NEXT RECORD      00407000
+         SPACE                                                          00408000
+*        SPACE, WRITE, AND SKIP CCWS                                    00409000
+VSPPREAM DC    X'0B000000700000018900000C6000006008000070'     @V293598 00410000
+         SPACE 2                                                        00411000
+SAVER14  DC    F'0'           SAVE AREA FOR RETURN ADDRESS     @V60BCAA 00412000
+         SPACE                                                          00413000
+         DS    0F                                                       00414000
+         LTORG                                                          00415000
+         EJECT                                                          00416000
+         COPY  EQU                                                      00417000
+         COPY  VBLOKS                                                   00418000
+         COPY  VMBLOK                                                   00419000
+         COPY  SPOOL                                                    00420000
+         PSA                                                            00421000
+         COPY  DEVTYPES                                                 00422000
+WORKAREA DSECT                MAPPING OF 3211 INDEX WORK AREA  @V60BCAA 00423000
+*                             LOCATED BY DMKVSPWA                       00424000
+WRKADD   DS    F              ADDRESS OF INDEX WORK AREA                00425000
+HDRADD   DS    F              ADDRESS OF HEADER BUFFER                  00426000
+VSPSTK   DS    F              ADDRESS OF LOCAL STACK CPEXBLOKS          00427000
+F2047    DS    F                                                        00428000
+F2048    DS    F                                                        00429000
+         END                                                            00430000

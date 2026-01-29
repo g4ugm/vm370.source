@@ -1,0 +1,1429 @@
+PGT      TITLE 'DMKPGT     (CP)        VM/370 - RELEASE 6'              00001000
+         ISEQ  73,80          VALIDATE SEQUENCING OF INPUT              00002000
+*.                                                                      00003000
+* MODULE NAME -                                                         00004000
+*                                                                       00005000
+*        DMKPGT                                                         00006000
+*                                                                       00007000
+* CONTENTS -                                                            00008000
+*                                                                       00009000
+*        DMKPGTPG - ALLOCATE ONE DASD PAGE FOR SYSTEM PAGING            00010000
+*        DMKPGTSG - ALLOCATE ONE DASD PAGE FOR SYSTEM SPOOLING          00011000
+*        DMKPGTPR - RELEASE ONE DASD PAGE FOR PAGING USE                00012000
+*        DMKPGTSP - RELEASE ONE DASD PAGE FOR SYSTEM USE                00013000
+*        DMKPGTSD - RELEASE ONE DASD PAGE FOR SPOOLING USE              00014000
+*        DMKPGTSR - RELEASE A GROUP OF DASD PAGES FOR SPOOLING USE      00015000
+*        DMKPGTCG - ALLOCATE CONTIGUOUS SPOOL SPACE FOR 370X DUMP       00016000
+*        DMKPGTVG - ALLOCATE ONE PAGE OF SYSTEM VIRTUAL STORAGE         00017000
+*        DMKPGTVR - RELEASE ONE PAGE OF SYSTEM VIRTUAL STORAGE          00018000
+*.                                                                      00019000
+         EJECT                                                          00020000
+         COPY  OPTIONS                                                  00021000
+         COPY  LOCAL OPTIONS                                            00022000
+         SPACE 2                                                        00023000
+DMKPGT   CSECT                                                          00024000
+         SPACE 3                                                        00025000
+         EXTRN DMKSTKCP,DMKCKP                                 @V200820 00026000
+         EXTRN DMKPTRXX                                        @V408246 00026100
+         EXTRN DMKSYSOW                                                 00027000
+         ENTRY DMKPGTTM,DMKPGT90                                        00028000
+         ENTRY DMKPGTTU                                                 00029000
+         ENTRY DMKPGTP5,DMKPGTP0,DMKPGTP4                               00030000
+         ENTRY DMKPGT4P,DMKPGT4T                               @V2A2029 00031000
+         ENTRY DMKPGT5P,DMKPGT5T                               @V304498 00032000
+         ENTRY DMKPGTPM       ENTRY FOR PAGE ALLOCATION IN     @V408246 00032100
+*                             SPOOL                                     00032200
+         ENTRY DMKPGTT5,DMKPGTT0,DMKPGTT4                               00033000
+         ENTRY DMKPGTDF       FLAGS AND COUNT FOR DRUM MAX.    @V408246 00033500
+         SPACE                                                          00034000
+         ENTRY DMKPGTPG,DMKPGTBN                               @VA00919 00035000
+         SPACE 3                                                        00036000
+         USING PSA,R0                                                   00037000
+         USING RECBLOK,R6                                               00038000
+         USING RDEVBLOK,R8                                              00039000
+         USING ALOCBLOK,R10                                             00040000
+         SPACE                                                          00041000
+         EJECT                                                          00042000
+*.                                                                      00043000
+*                                                                       00044000
+* SUBROUTINE NAME -                                                     00045000
+*                                                                       00046000
+*        DMKPGTPG                                                       00047000
+*                                                                       00048000
+* FUNCTION -                                                            00049000
+*                                                                       00050000
+*        TO ALLOCATE A PAGE OF DASD SPACE THAT IS TO BE USED FOR EITHER 00051000
+*        VIRTUAL MEMORY PAGING OR FOR SPOOL FILE PAGE BUFFERS           00052000
+*                                                                       00053000
+* ATTRIBUTES -                                                          00054000
+*                                                                       00055000
+*        SERIALLY REUSABLE, RESIDENT, CALLED VIA SVC                    00056000
+*                                                                       00057000
+* ENTRY POINTS -                                                        00058000
+*                                                                       00059000
+*        DMKPGTPG - TO OBTAIN A DASD PAGE FOR VIRTUAL MEMORY PAGING     00060000
+*        DMKPGTSG - TO OBTAIN A DASD PAGE FOR A SPOOL FILE RECORD       00061000
+*                                                                       00062000
+*        DMKPGTP5,DMKPGTP0,DMKPGT4P,DMKPGT5P AND DMKPGTP4 ARE ANCHOR    00063000
+*        CHAINS OF PREFERRED PAGING DEVICES,  THEY ARE INITIALIZED      00064000
+*        BY DMKCPI, DMKPGTT5,DMKPGTT0,DMKPGT4T,DMKPGT5T AND DMKPGTT4    00065000
+*        ARE ANCHORS FOR CHAINS CONNECTING ALL OTHER DEVICE BLOKS       00066000
+*        WITH OWNED VOLUMES MOUNTED.                                    00067000
+*                                                                       00068000
+*        DMKPGTTM,DMKPGTTU AND DMKPGT90 HOLD THE MAXIMUM, USED, AND     00069000
+*        90 PERCENT OF THE MAXIMUM NUMBER OF TEMPORARY CYLINDERS        00070000
+*        THAT ARE AVAILABLE.  THEY ARE INITIALIZED BY DMKCPI AND        00071000
+*        MAINTAINED BY BY ATTACHED (DMKVDB).                            00072000
+*                                                                       00073000
+* ENTRY CONDITIONS -                                                    00074000
+*                                                                       00075000
+*        GPR12 = DMKPGT BASE REGISTER                                   00076000
+*        GPR13 = ADDRESS OF STANDARD SAVEAREA                           00077000
+*                                                                       00078000
+* EXIT CONDITIONS -                                                     00079000
+*                                                                       00080000
+*        NORMAL -                                                       00081000
+*        IF A PAGE IS AVAILABLE, THE CALLER'S GPR1 WILL CONTAIN THE     00082000
+*        COMPRESSED DASD ADDRESS OF THE PAGE IN THE FORM (CCPD),        00083000
+*        WHERE CC IS THE CYLINDER NUMBER, P IS THE PAGE NUMBER ON THE   00084000
+*        CYLINDER, AND D IS THE DEVICE CODE INDEX INTO THE OWNED LIST   00085000
+*                                                                       00086000
+*        ERROR -                                                        00087000
+*        IF NO PAGE IS AVAILABLE, THE CALLER'S GPR1 IS SET TO ZERO      00088000
+*                                                                       00089000
+* CALLS TO OTHER ROUTINES -                                             00090000
+*                                                                       00091000
+*        DMKFREE  - TO OBTAIN FREE STORAGE IN WHICH TO CONSTRUCT NEW    00092000
+*                   RECORD ALLOCATION BLOKS                             00093000
+*        DMKQCNWT - TO WARN THE OPERATOR OF IMPENDING EXHAUSTION OF     00094000
+*                   SYSTEM SPOOL SPACE                                  00095000
+*                                                                       00096000
+*        DMKSTKCP - TO STACK A CPEXBLOK                                 00097000
+         EJECT                                                          00098000
+* EXTERNAL REFERENCES -                                                 00099000
+*                                                                       00100000
+*        NONE                                                           00101000
+*                                                                       00102000
+* TABLES / WORKAREAS                                                    00103000
+*                                                                       00104000
+*        NONE                                                           00105000
+*                                                                       00106000
+* REGISTER USAGE -                                                      00107000
+*                                                                       00108000
+*        GPR0,1 ARE WORK REGISTERS                                      00109000
+*        GPR2  = FUNCTION REGISTER FOR TRT                              00110000
+*        GPR3  = INDICATOR FOR SPOOLING OR PAGING ALLOCATION; FOR       00111000
+*                VIRTUAL MEMORY PAGING, GPR3 = 0, FOR SPOOLING,         00112000
+*                GPR3 = 4                                               00113000
+*        GPR4  = ADDRESS OF POINTER TO CHAIN OF OWNED DEVICES           00114000
+*        GPR5,6, AND 7 ARE WORK REGISTERS                               00115000
+*        GPR8  = ADDRESS OF RDEVBLOK FOR DEVICE ON WHICH SPACE IS       00116000
+*                BEING ALLOCATED                                        00117000
+*        GPR9  = BACKCHAIN POINTER FOR RECBLOKS                         00118000
+*        GPR10 = ADDRESS OF ALOCBLOK                                    00119000
+*        GPR11 IS NOT USED                                              00120000
+*        GPR12 = DMKPGT BASE REGISTER                                   00121000
+*        GPR13 = ADDRESS OF STANDARD SAVEAREA                           00122000
+*        GPR14,15 USED FOR BALR LINKAGE TO FREE                         00123000
+*                                                                       00124000
+*                                                                       00125000
+* NOTES -                                                               00126000
+*                                                                       00127000
+*        NONE                                                           00128000
+*                                                                       00129000
+* OPERATION -                                                           00130000
+*                                                                       00131000
+*        1. POINT TO FIRST DEVICE TYPE ANCHOR FOR OWNED DEVICES         00132000
+*                                                                       00133000
+*        2. LOCATE THE RDEVBLOK FOR THE NEXT DEVICE WITH TEMPSPACE      00134000
+*           ALLOCATED ON IT                                             00135000
+*                                                                       00136000
+*        3. POINT TO THE PROPER RECBLOK ANCHOR (FOR EITHER PAGING OR    00137000
+*           SPOOLING) AND LOCATE THE FIRST RECBLOK WITH AN AVAIL-       00138000
+*           BLE PAGE.  IF A RECBLOK IS FOUND, GO TO STEP 6              00139000
+*                                                                       00140000
+*        4. IF NO ALLOCATED CYLINDER HAS AN AVAILABLE PAGE, LOCATE THE  00141000
+*           THE NEXT AVAILABLE CYLINDER, WORKING OUTWARD FROM THE       00142000
+*           CENTER OF THE TEMPSPACE AREA.  IF NO CYLINDER IS AVAILABLE, 00143000
+*           GO TO STEP 2; OTHERWISE, CONTINUE                           00144000
+*                                                                       00145000
+*        5. CONSTRUCT A NEW RECBLOK FOR THE ALLOCATED CYLINDER, AND     00146000
+*           CHAIN IT TO THE END OF THE CURRENT CHAIN                    00147000
+*                                                                       00148000
+*        6. CALCULATE THE ADDRESS OF THE ALLOCATED PAGE, MARK IT AS     00149000
+*           ALLOCATED, AND PASS THE ADDRESS BACK TO THE CALLER          00150000
+*                                                                       00151000
+* MESSAGES -                                                            00152000
+*        DMKPGT401I SYSTEM TEMP SPACE 90 PERCENT FULL                   00153000
+*        DMKPGT400I SYSTEM TEMP SPACE FULL                              00154000
+*.                                                                      00155000
+*                                                                       00156000
+         SPACE 3                                                        00157000
+         USING *,R15                                                    00158000
+DMKPGTPG STM   R0,R15,BALRSAVE     SAVE ALL REGS                        00159000
+         LR    R12,R15        STANDARD ADDRESSABILITY                   00160000
+         DROP  R15                                                      00161000
+         USING DMKPGT,R12                                               00162000
+         SR    R3,R3          CLEAR DEVICE CHAIN INDEX                  00163000
+         CLC   CPID,=C'CPCP'  ARE WE STILL WITHIN DMKCPI LOGIC          00164000
+         BNE   NOSPACE        IF YES, DON'T INCREASE FREELIST PAGES     00165000
+         LA    R4,DMKPGTP5-4     POINT TO PAGING DEVICE CHAIN           00166000
+         CLI   DRMLIM,0       DRUM LIMITS?                     @V408246 00166100
+         BE    PGTINIT        NO                               @V408246 00166200
+         USING VMBLOK,R11                                      @V408246 00166300
+         CLC   VMPDRUM,DRMLIM+2 THIS USER AT LIMIT?            @V408246 00166400
+         BL    PGTINIT        NO                               @V408246 00166500
+         DROP  R11                                             @V408246 00166600
+         LA    R4,4(,R4)      YES, BYPASS DRUM ALLOCATION      @V408246 00166700
+         B     PGTINIT        GO INITIALIZE BLOK REGS                   00167000
+         SPACE 3                                                        00167100
+         USING DMKPGTPM,R15                                    @V408246 00167200
+DMKPGTPM DS    0H                                              @V408246 00167300
+         STM   R0,R15,BALRSAVE                                 @V408246 00167400
+         L     R12,=A(DMKPGT)                                  @V408246 00167500
+         SR    R3,R3          CLEAR FOR PAGE CHAIN             @V408246 00167600
+         B     PGTINIX        START SEARCH ON NON-PREFERED     @V408246 00167700
+*                             DISKS                                     00167800
+         SPACE 3                                                        00168000
+         ENTRY DMKPGTSG                                                 00169000
+         USING *,R15                                                    00170000
+DMKPGTSG STM   R0,R15,BALRSAVE     ENTER HERE TO GET SPOOL SPACE        00171000
+         L     R12,=A(DMKPGT)      STANDARD ADDRESSABILITY              00172000
+         DROP  R15                                                      00173000
+         USING DMKPGT,R12                                               00174000
+         LA    R3,4           SET DEVICE CHAIN INDEX FOR SPOOLING       00175000
+PGTINIX  DS    0H             PAGE ALLOCATION IN NON-PREFERED  @V408246 00175100
+         LA    R4,DMKPGTT5-4     POINT TO START OF NON-PAGING SPACE     00176000
+PGTINIT  EQU   *              HERE TO START ALLOCATING                  00177000
+         SR    R15,R15        CLEAR                                     00178000
+         SR    R14,R14        RECBLOK SAVE REGISTERS                    00179000
+         EJECT                                                          00180000
+NEXTYPE  EQU   *  LOCATE THE NEXT AVAILABLE DEVICE WITH TEMPSPACE       00181000
+         LA    R4,4(,R4)      INDEX TO NEXT DEVICE TYPE ANCHOR          00182000
+         L     R8,0(,R4)      POINT TO RDEVBLOK                         00183000
+         LTR   R8,R8          ANY DEVICES AVAILABLE ?                   00184000
+         BP    CKREC          YES -- GO FIND A PAGE                     00185000
+         BZ    NEXTYPE        NO -- GO CHECK NEXT SLOWER DEVICE TYPE    00186000
+         B     NOSPACE        WE HIT THE FENCE AND ARE OUT OF SPACE     00187000
+         SPACE 2                                                        00188000
+NEXTDEV  L     R8,RDEVPNT     POINT TO NEXT DEVICE OF THE SAME TYPE     00189000
+         C     R8,0(,R4)      ALL DEVICES OF THIS TYPE FULL ?           00190000
+         BNE   CKREC                                           @V408246 00191100
+         LTR   R3,R3          PAGING REQUEST?                  @V408246 00191200
+         BNZ   NEXTYPE        NO                               @V408246 00191300
+         C     R4,=A(DMKPGTP5) FILLED UP 2305?                 @V408246 00191400
+         BNE   NEXTYPE        NO                               @V408246 00191500
+         L     R8,=A(DMKPTRXX) POINTER TO FLAGS                @V408246 00191600
+         OI    1(R8),X'80'    RAISE DRUM FULL FLAG             @V408246 00191700
+         B     NEXTYPE                                         @V408246 00191800
+         SPACE                                                          00192000
+CKREC    LA    R9,RDEVPAGE(R3)     POINT TO START OF PAGING OR SPOOL    00193000
+*                                  CHAIN (GPR3 SET AT ENTRY)            00194000
+         LH    R0,RDEVCYL     GET POSITION OF ACCESS ARM       @VA01629 00195000
+         SPACE                                                          00196000
+NEXTREC  EQU   *  POINT TO NEXT RECORD ALLOCATION BLOK                  00197000
+         L     R6,RECPNT-RECBLOK(,R9)   POINT TO NEXT PAGE ALLOC. BLOK  00198000
+         LTR   R6,R6          ANY MORE BLOKS ?                          00199000
+         BZ    CKCYL          NO -- SEE IF A BLOK WAS FOUND             00200000
+         LR    R9,R6          SAVE BACK POINTER                         00201000
+         L     R5,RDEVFIOB    AND 1ST OF ANY CHAINED IOBLOKS            00202000
+         B     GETPAGE        GO CHECK OUT THIS CYLINDER                00203000
+         SPACE                                                          00204000
+CKCYL    LTR   R6,R15         FIND AN ALLOCATION BLOK ON AN ACTIVE CYL  00205000
+         BNZ   GETREC         YES -- ALLOCATE ON IT                     00206000
+         LTR   R6,R14         FIND ANY AVAILABLE CYLINDER ??            00207000
+         BZ    FINDCYL        NO -- GO ALLOCATE ANOTHER CYLINDER        00208000
+         SPACE                                                          00209000
+GETREC   SR    R1,R1          CLEAR WORK REGISTER                       00210000
+         IC    R1,RECUSED     GET NUMBER OF RECORDS IN USE              00211000
+         B     UPREC          AND GO ALLOCATE                           00212000
+         EJECT                                                          00213000
+*        HERE IF NO PAGE ALLOCATION BLOKS EXIST FOR THIS DEVICE --      00214000
+*        TRY TO ALLOCATE ANOTHER CYLINDER FOR THE REQUIRED FUNCTION     00215000
+         SPACE                                                          00216000
+FINDCYL  EQU   *                                                        00217000
+         L     R10,RDEVALLN   POINT TO ALLOCATION BLOK                  00218000
+         LH    R1,ALOCUSED    GET NUMBER OF CYLINDERS IN USE            00219000
+         CH    R1,ALOCMAX     AND COMPARE TO MAX AVAILABLE              00220000
+         BL    FNDCYLA        STILL SOME ROOM AVAILABLE        @V408246 00221100
+         TM    RDEVFLAG,RDEVPREF PREFERED PAGING AREA?         @V408246 00221200
+         BZ    NEXTDEV        NO                               @V408246 00221300
+         CLI   RDEVTYPE,TYP2305 DRUM?                          @V408246 00221400
+         BE    NEXTDEV        YES                              @V408246 00221500
+         L     R2,=A(DMKPTRXX) PAGING FLAGS                    @V408246 00221600
+         OI    1(R2),X'40'    RAISE PREFERRED PAGING FULL FLAG @V408246 00221700
+         B     NEXTDEV        TRY NEXT DEVICE                  @V408246 00221800
+FNDCYLA  DS    0H                                              @V408246 00221900
+         SPACE                                                          00222000
+         LA    R1,1(,R1)      BUMP NUMBER IN USE                        00223000
+         STH   R1,ALOCUSED    AND SAVE                                  00224000
+         SPACE                                                          00225000
+         SR    R2,R2          CLEAR TRT FUNCTION REGISTER               00226000
+         SPACE                                                          00227000
+         SR    R7,R7          CALCULATE LENGTH OF BIT MAP               00228000
+         LH    R6,ALOCMAX     GET NUMBER OF CYLINDERS IN ALLOCATION MAP 00229000
+         SRDL  R6,3           NUMBER OF CYLINDERS/8                     00230000
+         LTR   R7,R7          ANY REMAINDER ?                           00231000
+         BNZ   *+6            YES --                                    00232000
+         BCTR  R6,0           IF NOT, REDUCE LENGTH BY ONE              00233000
+         SPACE                                                          00234000
+         EX    R6,GETCYL      LOCATE AN UNUSED CYLINDER                 00235000
+         BNZ   PGT1A          MUST FIND ONE                             00236000
+         ABEND 1              OR DIE IN THE ATTEMPT                     00237000
+PGT1A    EQU   *                                                        00238000
+         SPACE 2                                                        00239000
+*        MARK CYLINDER AS ALLOCATED, AND CALCULATE ITS ADDRESS          00240000
+         IC    R5,ALLOCTBL-1(R2)   GET BIT MASK TO MARK CYL ALLOCATED   00241000
+         EX    R5,ALLOCATE    AND DO IT                                 00242000
+         LA    R0,ALOCMAP     GET ADDRESS OF START OF MAP               00243000
+         SR    R1,R0          GET DISPLACEMENT OF BYTE WITH 0 BIT       00244000
+         SLL   R1,3           TIMES 8                                   00245000
+         AR    R1,R2          GET BIT NUMBER ALLOCATED                  00246000
+         BCTR  R1,0           RELATIVE TO 0                             00247000
+         EX    R1,TESTODD     SEE IF IT WAS ODD OR EVEN                 00248000
+         SRL   R1,1           AND DIVIDE BY 2                           00249000
+         LR    R5,R1          SAVE DISPLACEMEMT FROM CENTER             00250000
+         BZ    *+8            IF EVEN, LEAVE PLUS AND ZIG OUT           00251000
+         LNR   R1,R1          IF ODD, MAKE MINUS AND ZAG IN             00252000
+         BCTR  R1,R0          ONE EXTRA CYLINDER                        00253000
+         SPACE                                                          00254000
+         LH    R6,ALOCMAX     GET NUMBER OF CYLINDERS IN AREA           00255000
+         SRL   R6,1           CALCULATE MIDDLE CYLINDER                 00256000
+         AR    R6,R1          GET CYLINDER THAT WAS ALLOCATED           00257000
+         SPACE 2                                                        00258000
+*        BUILD A NEW PAGE ALLOCATION BLOK FOR NEWLY ALLOCATED CYLINDER  00259000
+         SPACE 2                                                        00260000
+         LA    R10,FINDPAGE   WHERE TO GO AFTER RECBLOK IS BUIL@V200820 00261000
+         LA    R7,24          NUMBER OF PAGES FOR A 2305                00262000
+         CLI   RDEVTYPE,TYP2305    IS IT A 2305??                       00263000
+         BE    GETCORE        YES --                                    00264000
+         CLI   RDEVTYPE,TYP3340 3340 DEVICE TYPE ?             @V2A2029 00265000
+         BE    GETCORE        YES - BRANCH  (24 PAGES/CYL)     @V2A2029 00266000
+         LA    R7,32          NUMBER OF PAGES/CYLINDER - 2314           00267000
+         CLI   RDEVTYPE,TYP2314 IS THAT RIGHT ??                        00268000
+         BE    GETCORE        YES --                                    00269000
+         LA    R7,120         NUMBER OF PAGES/CYLINDER - 3350  @V304498 00270000
+         CLI   RDEVTYPE,TYP3350 3350 DEVICE TYPE ?             @V304498 00271000
+         BE    GETCORE        YES, BUILD RECBLOK               @V304498 00272000
+         LA    R7,57          NUMBER OF PAGES FOR A 3330                00273000
+         SPACE 2                                                        00274000
+GETCORE  SLL   R6,16          SHIFT CYLINDER INTO HIGH ORDER BYTES      00275000
+         LR    R2,R7          SAVE NUMBER OF PAGES AVAILABLE            00276000
+         LA    R7,X'100'(,R7) SET NUMBER IN USE TO ONE                  00277000
+         AR    R7,R6          GET CYLINDER IN HIGH ORDER BYTES          00278000
+         LA    R0,RECSIZE      GET LENGTH OF RECBLOK                    00279000
+         CALL  DMKFREE        OBTAIN NECESSARY STORAGE                  00280000
+         SR    R6,R6          SET POINTER REGISTER                      00281000
+         STM   R6,R7,RECPNT-RECBLOK(R1) SET UP POINTER, CYLINDER, U/M   00282000
+         SPACE                                                          00283000
+         BCTR  R6,0           GET -1 IN GPR6                            00284000
+         LR    R7,R6          AND GPR7                                  00285000
+         CLI   RDEVTYPE,TYP3350 3350 DEVICE (120 PAGES/CYL) ?  @V304498 00286000
+         BE    INIT3350       YES, INITIAL 3350 RECBLOK        @V304498 00287000
+         STM   R6,R7,RECMAP+8-RECBLOK(R1) INITIALIZE RECBLOK   @V304498 00288000
+         SRDL  R6,0(R2)       INSERT ONE ZERO PER AVAILABLE PAGE        00289000
+         STM   R6,R7,RECMAP-RECBLOK(R1) AND SET UP BIT MAP              00290000
+MAPFIN   EQU   *                                               @V304498 00291000
+         LR    R6,R1          POINT TO NEW BLOK                         00292000
+         SPACE                                                          00293000
+         SR    R1,R1          CLEAR WORK REGISTER                       00294000
+         CH    R1,RECCYL      ALLOCATING ON CYLINDER 0 ??               00295000
+         BNE   CKPREF         NO -- ALL SET THE WAY IT IS               00296000
+         SPACE                                                          00297000
+         MVI   RECMAP,B'11100000'  FIRST 3 RECS ARE PERMANENTLY ALLOC.  00298000
+         IC    R1,RECMAX      GET NUMBER OF AVAILABLE RECS              00299000
+         CLI   RDEVTYPE,TYP3350 3350 DEVICE TYPE ?             @V304498 00300000
+         BE    INITCYL0       YES, INITIALIZE CYL 0 PAGE MAP   @V304498 00301000
+         S     R1,F3          DECREMENT BY 3                            00302000
+CYLZERO  EQU   *                                               @V304498 00303000
+         STC   R1,RECMAX      AND SAVE                                  00304000
+         SPACE                                                          00305000
+CKPREF   EQU   *                                                        00306000
+*        CHAIN NEW RECBLOK TO ALLOCATION LIST AT PROPER POSITION,       00307000
+*        BASED ON DISPLACEMENT FROM CENTER                              00308000
+         SPACE                                                          00309000
+         CLI   RDEVTYPE,TYP2305 ALLOCATING ON FIXED HEAD DEVICE ?       00310000
+         BE    CHAINFXD         YES --                                  00311000
+         B     NONPREF        NOT FIXED HEAD, SORT CHAIN       @V408246 00312100
+INIT3350 LA    R2,56          INITIALIZE FOR REMAINDER(120-64) @V304498 00316000
+         SRDL  R6,0(R2)       INSERT ONE ZERO PER AVAIL. PAGE  @V304498 00317000
+         STM   R6,R7,RECMAP+8-RECBLOK(R1) AND SET UP BIT MAP   @V304498 00318000
+         MVI   RECMAP-RECBLOK(R1),X'00' INITIALIZE RECBLOK     @V304498 00319000
+         MVC   RECMAP+1-RECBLOK(7,R1),RECMAP-RECBLOK(R1)       @V304498 00320000
+         B     MAPFIN         CHECK FOR CYLINDER 0             @V304498 00321000
+         SPACE 1                                                        00322000
+INITCYL0 OI    RECMAP,PAGE4   ALLOC FIRST 4 PAGES ON CYL 0     @V304498 00323000
+         S     R1,F4          DECREMENT BY 4                   @V304498 00324000
+         B     CYLZERO        COMPLETE UPDATE OF RECMAP        @V304498 00325000
+         SPACE                1                                         00326000
+NONPREF  LA    R9,RDEVPAGE(R3) POINT TO LIST ANCHOR            @VA01097 00327000
+         L     R1,RDEVALLN    GET POINTER TO ALLOCBLOK         @VA04554 00328000
+         LH    R1,ALOCMAX-ALOCBLOK(R1) GET NUMBER OF CYL       @VA03281 00329000
+         SRL   R1,1           GET MIDDLE CYLINDER                       00330000
+         SPACE                                                          00331000
+CHAINLP  L     R2,RECPNT-RECBLOK(,R9)   POINT TO NEXT BLOK ON LIST      00332000
+         LTR   R2,R2          AT THE END ??                             00333000
+         BZ    CHAINT         YES                                       00334000
+         LH    R0,RECCYL-RECBLOK(,R2)   GET CYLINDER OF NEXT BLOK       00335000
+         SR    R0,R1          GET DISPLACEMENT FROM CENTER              00336000
+         LPR   R0,R0          FORCE +                                   00337000
+         CR    R0,R5          COMPARE TO NEW BLOKS DISPLACEMENT         00338000
+         BH    CHAINT         IF FARTHER FROM CENTER, CHAIN IN          00339000
+         LR    R9,R2          OTHERWISE, REMEMBER PREVIOUS BLOK         00340000
+         B     CHAINLP        AND KEEP LOOKING                          00341000
+         SPACE                                                          00342000
+CHAINFXD EQU   *               ALLOCATING ON FIXED HEAD DEVICE:         00343000
+         L     R2,RDEVPAGE(R3) GET TOP BLOK ON LIST                     00344000
+         LA    R9,RDEVPAGE(R3) AND LIST ANCHOR                          00345000
+*                              MAKE NEW (EMPTY) BLOK FIRST:             00346000
+         SPACE                                                          00347000
+CHAINT   ST    R2,RECPNT      CHAIN NEXT BLOK                           00348000
+CHAINP   ST    R6,RECPNT-RECBLOK(,R9)   CHAIN IN PRIVIOUS               00349000
+         SPACE                                                          00350000
+*        FIND OUT HOW CLOSE WE ARE TO RUNNING OUT OF SPACE              00351000
+*                                                                       00352000
+         TM    RDEVFLAG,RDEVPREF IF THIS DEVICE IS PREFERRED   @VM01503 00353000
+*                             PAGING                                    00354000
+         BCR   1,R10          THEN BYPASS SPACE ACCOUNTING     @VM01503 00355000
+         L     R1,DMKPGTTU    GET NUMBER OF CYLINDERS IN USE (TOTAL)    00356000
+         A     R1,F1          BUMP                                      00357000
+         ST    R1,DMKPGTTU    AND SAVE                                  00358000
+         C     R1,DMKPGT90    COMPARE TO NUMBER THAT IS 90 PERCENT OF   00359000
+         BCR   4,R10          (BL) TOTAL  -- IF LOWER, CONTINUE@V200820 00360000
+         TM    MSGSW,X'80'    OTHERWISE, SEE IF MESSAGE HAS BEEN GIVEN  00361000
+         BCR   1,R10          (BO) WARNING ALREADY GIVEN       @V200820 00362000
+         SPACE                                                          00363000
+         LA    R0,CPEXSIZE    GET CORE FOR A CPEXBLOK                   00364000
+         CALL  DMKFREE        ...                                       00365000
+         USING CPEXBLOK,R1                                              00366000
+         LA    R15,PGTMSG     GET EXECUTION ADDRESS                     00367000
+         STM   R15,R14,CPEXADD     SAVE ALL REGS AND EXECUTION ADDRESS  00368000
+         MVC   CPEXR11(4),ASYSVM USER MAY LOG OFF BEFORE MSG.  @VA08425 00368500
+         CALL  DMKSTKCP       STACK FOR DELAYED EXECUTION               00369000
+         OI    MSGSW,X'80'    INDICATE THAT MESSAGE HAS BEEN GIVEN      00370000
+         BR    R10            AND CONTINUE                     @V200820 00371000
+         SPACE 2                                                        00372000
+PGTMSG   EQU   *              HERE TO GIVE MESSAGE                      00373000
+         MSG   'DMKPGT401I SYSTEM TEMP SPACE 90 PERCENT FULL'  @VA04554 00374000
+         CALL  DMKQCNWT,PARM=OPERATOR+NORET+ALARM  WARN THE OPERATOR    00375000
+         GOTO  DMKDSPCH       WHEN FINISHED, EXIT TO DISPATCH  @VA04554 00376000
+         EJECT                                                          00377000
+GETPAGE  EQU   *  HERE TO ALLOCATE A PAGE ON THE CYLINDER               00378000
+         SR    R1,R1          CLEAR WORK REG                            00379000
+         IC    R1,RECUSED     GET NUMBER OF RECS IN USE                 00380000
+         EX    R1,RECOMP      ANY PAGES AVAILABLE ??                    00381000
+         BE    NEXTREC        NO PAGES AVAILABLE --                     00382000
+         SPACE 1                                                        00382100
+         TM    APSTAT1,PROCIO      EXECUTING ON AP             @V4M0112 00382200
+         BZ    UPREC          YES- BYPASS TRACKING ARM         @V4M0112 00382300
+         SPACE                                                          00383000
+         LTR   R3,R3          SPOOL ALLOCATION ??                       00384000
+         BNZ   UPREC          YES -- ALLOCATE HERE                      00385000
+         CLI   RDEVTYPE,TYP2305                                @V304498 00386000
+         BE    UPREC                                           @V304498 00387000
+         SPACE                                                          00388000
+         CH    R0,RECCYL      IS DEVICE POSITIONED AT THIS CYLINDER     00389000
+         BE    UPREC          YES -- ALLOCATE HERE                      00390000
+         CLI   RDEVTYPE,TYP3340 3340 DEVICE ?                  @V2A2029 00391000
+         BNE   CKACT          NO -- CHECK FOR ACTIVE           @V2A2029 00392000
+         TM    RDEVFTR,FTR70MB 3340 WITH 70MB DATA MODULE ?    @V2A2029 00393000
+         BZ    CKACT          NO - BRANCH                      @V2A2029 00394000
+         X     R0,F1          MAKE CYLINDER ODD OR EVEN        @V2A2029 00395000
+         CH    R0,RECCYL      IS DEVICE POSITIONED AT THIS     @V2A2029 00396000
+*                             CYL ?                                     00397000
+         BE    UPREC          YES --                           @V2A2029 00398000
+CKACT    LTR   R15,R15        HAVE WE FOUND AN ACTIVE CYLINDER @V2A2029 00399000
+         BNZ   NEXTREC        YES -- KEEP LOOKING FOR CURRENT           00400000
+         LTR   R14,R14        HAVE WE FOUND AN AVAILABLE CYLINDER       00401000
+         BNZ   CKIOB          YES --                                    00402000
+         LR    R14,R6         SAVE 1ST AVAILABLE CYLINDER               00403000
+         SPACE                                                          00404000
+CKIOB    CR    R5,R8          ANY MORE IOBLOKS QUEUED                   00405000
+         BE    NEXTREC        NO --                                     00406000
+         CLC   IOBCYL-IOBLOK(2,R5),RECCYL    IO ACTIVE FOR THIS CYL     00407000
+         BE    GETIOBR        YES -- SAVE THIS BLOK                     00408000
+         L     R5,IOBFPNT-IOBLOK(,R5)   POINT TO NEXT BLOK              00409000
+         B     CKIOB          AND KEEP LOOKING                          00410000
+         SPACE                                                          00411000
+GETIOBR  LR    R15,R6         SAVE THIS RECBLOK                         00412000
+         B     NEXTREC        AND KEEP LOOKING                          00413000
+         SPACE                                                          00414000
+UPREC    LA    R1,1(,R1)      BUMP NUMBER OF RECORDS IN USE             00415000
+         STC   R1,RECUSED     AND SAVE                                  00416000
+         SPACE                                                          00417000
+FINDPAGE EQU   *  CALCULATE NUMBER OF NEXT AVAILABLE PAGE ON CYLINDER   00418000
+         SR    R2,R2          CLEAR FUNCTION REGISTER FOR TRT           00419000
+         TRT   RECMAP,FREETABL     FIND AN AVAILABLE PAGE               00420000
+         BNZ   PGT2A          MUST BE ONE AVAILABLE                     00421000
+         ABEND 2              ELSE WE DIE HERE                          00422000
+PGT2A    EQU   *                                                        00423000
+         SPACE                                                          00424000
+         IC    R5,ALLOCTBL-1(R2)   GET BIT MASK TO ALLOCATE PAGE        00425000
+         EX    R5,ALLOCATE    AND DO IT                                 00426000
+         LA    R0,RECMAP      POINT TO START OF BIT MAP                 00427000
+         SR    R1,R0          GET DISPLACEMENT OF BYTE WITH 0 BIT       00428000
+         SLL   R1,3           TIMES 8                                   00429000
+         AR    R1,R2          GET RELATIVE PAGE NUMBER                  00430000
+         LH    R2,RECCYL      GET CYLINDER NUMBER                       00431000
+         SLL   R2,8           SAVE                                      00432000
+         AR    R2,R1          INSERT PAGE NUMBER                        00433000
+         SLL   R2,8           SAVE CYLINDER AND PAGE                    00434000
+         IC    R2,RDEVCODE+1  INSERT DEVICE CODE                        00435000
+         L     R8,RDEVPNT     GET POINTER TO NEXT DEVICE ON CHAIN       00436000
+         ST    R8,0(,R4)      AND ALLOCATE ON IT NEXT TIME              00437000
+         LTR   R3,R3          IS THIS A PAGING REQUEST?                 00438000
+         BNZ   NOACNT1        NO, NO ACCOUNTING TO PERFORM              00439000
+         TM    RDEVTYPE,TYP2305 FAST PAGING DEVICE ?           @V304498 00440000
+         BZ    ACNTDSK1       NOT A DRUM , ACCOUNT FOR DISK             00441000
+         USING VMBLOK,R11                                               00442000
+         LH    R3,VMPDRUM     ADD 1 TO COUNT OF USER PAGES              00443000
+         LA    R3,1(R3)       ALLOCATED ON DRUM                         00444000
+         STH   R3,VMPDRUM                                               00445000
+         B     NOACNT1                                                  00446000
+ACNTDSK1 LH    R3,VMPDISK     ADD 1 TO COUNT OF USER PAGES              00447000
+         LA    R3,1(R3)       ALLOCATED ON DISK                         00448000
+         STH   R3,VMPDISK                                               00449000
+NOACNT1  EQU   *                                                        00450000
+SETADDR  ST    R2,BALR1       STORE IN CALLER'S GPR1                    00451000
+         LM    R0,R15,BALRSAVE     RESTORE REGS                         00452000
+         BR    R14            AND EXIT                                  00453000
+         SPACE 3                                                        00454000
+NOSPACE  EQU   *  HERE IF ALL TEMPSPACE IS GONE --                      00455000
+         CLC   CPID,=C'CPCP'  RUNNING SYSTEM YET ??                     00456000
+         BNE   SET0           NO -- BYPASS MSG IF STILL IN CPINIT       00457000
+         TM    MSGSW,X'40'    TEMP SPACE FULL MSG BEING SENT ?          00458000
+         BO    SET0           YES --FORGET IT THIS TIME                 00459000
+         OI    MSGSW,X'40'    INDICATE MSG BEING SENT                   00460000
+         LA    R0,CPEXSIZE    GET CORE FOR A CPEXBLOK                   00461000
+         CALL  DMKFREE        ...                                       00462000
+         USING CPEXBLOK,R1                                              00463000
+         LA    R15,PGTMSG2    GET EXECUTION ADDRESS                     00464000
+         STM   R15,R14,CPEXADD     SAVE ALL REGS AND EXECUTION ADDRESS  00465000
+         MVC   CPEXR11(4),ASYSVM USER MAY LOG OFF BEFORE MSG.  @VA08425 00465500
+         CALL  DMKSTKCP       STACK BLOK FOR DEFERED EXECUTION          00466000
+SET0     SR    R2,R2          SET ZERO ADDRESS                          00467000
+         B     SETADDR        AND EXIT                                  00468000
+         SPACE                                                          00469000
+PGTMSG2  EQU   *  HERE TO GIVE NO SPACE MESSAGE                         00470000
+         MSG   'DMKPGT400I SYSTEM TEMP SPACE FULL'             @VA04554 00471000
+         CALL  DMKQCNWT,PARM=OPERATOR+ALARM WARN THE OPERATOR           00472000
+MSG2RET  NI    MSGSW,X'BF'    RESET TEMP SPACE FULL MSG SWITCH          00473000
+         GOTO  DMKDSPCH       AND LEAVE                                 00474000
+         EJECT                                                          00475000
+*.                                                                      00476000
+*                                                                       00477000
+* SUBROUTINE NAME -                                                     00478000
+*                                                                       00479000
+*        DMKPGTPR                                                       00480000
+*                                                                       00481000
+* FUNCTION -                                                            00482000
+*                                                                       00483000
+*        TO DE-ALLOCATE A PAGE OF DASD SPACE THAT HAS BEEN USED FOR     00484000
+*        VIRTUAL MEMORY PAGING                                          00485000
+*                                                                       00486000
+* ATTRIBUTES -                                                          00487000
+*                                                                       00488000
+*        SERIALLY REUSABLE, RESIDENT, CALLED VIA SVC                    00489000
+*                                                                       00490000
+* ENTRY POINTS -                                                        00491000
+*                                                                       00492000
+*        DMKPGTPR                                                       00493000
+*        DMKPGTSD                                                       00494000
+*        DMKPGTSP                                                       00495000
+*                                                                       00496000
+* ENTRY CONDITIONS -                                                    00497000
+*                                                                       00498000
+*        GPR5  = ADDRESS OF THE SWPTABLE ENTRY THAT CONTAINS THE COMP-  00499000
+*                RESSED DASD ADDRESS OF THE PAGE TO BE RELEASED         00500000
+*        GPR12 = DMKPGTPR BASE REGISTER                                 00501000
+*        GPR13 = ADDRESS OF STANDARD SAVEAREA                           00502000
+*                                                                       00503000
+* EXIT CONDITIONS -                                                     00504000
+*                                                                       00505000
+*        NORMAL -                                                       00506000
+*        THE PAGE IS MARKED AS DE-ALLOCATED, AND THE PROPER USE         00507000
+*        COUNTS ARE UPDATED                                             00508000
+*                                                                       00509000
+*        ERROR -                                                        00510000
+*        NONE                                                           00511000
+*                                                                       00512000
+* CALLS TO OTHER ROUTINES -                                             00513000
+*                                                                       00514000
+*        DMKFRET  - TO RETURN TO FREE STORAGE ANY RECBLOKS WHOSE PAGES  00515000
+*                   ARE COMPLETELY DE-ALLOCATED                         00516000
+*                                                                       00517000
+* EXTERNAL REFERENCES -                                                 00518000
+*                                                                       00519000
+*        THE SYSTEM OWNED VOLUME LIST (DMKSYSOW) IS REFERENCED TO       00520000
+*        LOCATE THE RDEVBLOK FOR THE DEVICE ON WHICH A PAGE HAS BEEN    00521000
+*        ALLOCATED                                                      00522000
+*                                                                       00523000
+* TABLES / WORKAREAS -                                                  00524000
+*                                                                       00525000
+*        NONE                                                           00526000
+         EJECT                                                          00527000
+*                                                                       00528000
+* REGISTER USAGE -                                                      00529000
+*                                                                       00530000
+*        GPR0,1,2,3, AND 4 ARE WORK REGISTERS                           00531000
+*        GPR5  = ADDRESS OF SWPTABLE ENTRY                              00532000
+*        GPR6  = ADDRESS OF RECBLOK                                     00533000
+*        GPR7 IS NOT USED                                               00534000
+*        GPR8  = ADDRESS OF RDEVBLOK                                    00535000
+*        GPR9 IS NOT USED                                               00536000
+*        GPR10 = ADDRESS OF ALLOCBLOK                                   00537000
+*        GPR11 IS NOT USED                                              00538000
+*        GPR12 = BASE ADDRESS FOR DMKPGTPG                              00539000
+*        GPR13 = ADDRESS OF STANDARD SAVEAREA                           00540000
+*        GPR14,15 ARE USED FOR BALR LINKAGE AND RETURN                  00541000
+*                                                                       00542000
+* NOTES -                                                               00543000
+*                                                                       00544000
+*        NONE                                                           00545000
+*                                                                       00546000
+* OPERATION -                                                           00547000
+*                                                                       00548000
+*        1. IF THE PAGE HAS NOT YET BEEN ALLOCATED, SIMPLY RESET THE    00549000
+*           SWPTABLE ENTRY TO ZERO; OTHERWISE, CONTINUE                 00550000
+*                                                                       00551000
+*        2. LOCATE THE RDEVBLOK FOR THE DEVICE ON WHICH THE PAGE HAS    00552000
+*           BEEN ALLOCATED BY INDEXING INTO THE OWNED LIST WITH THE     00553000
+*           DEVICE CODE SUPPLIED IN THE DASD ADDRESS                    00554000
+*                                                                       00555000
+*        3. LOCATE THE RECBLOK FOR THE CYLINDER ON WHICH THE PAGE IS    00556000
+*           ALLOCATED                                                   00557000
+*                                                                       00558000
+*        4. CALCULATE THE BIT WHICH REPRESENTS THE PAGE AND SET IT TO   00559000
+*           ZERO; DECREMENT THE NUMBER OF PAGES IN USE                  00560000
+*                                                                       00561000
+*        5. IF THE NUMBER IN USE IS ZERO, DE-ALLOCATE THE CYLINDER;     00562000
+*           OTHERWISE CONTINUE                                          00563000
+*                                                                       00564000
+*        6. RESET THE SWPTABLE ENTRY TO ZERO, AND RETURN TO CALLER      00565000
+*                                                                       00566000
+*.                                                                      00567000
+         EJECT                                                          00568000
+         USING SWPFLAG,R5                                               00569000
+         ENTRY DMKPGTSD                                                 00570000
+         USING *,R15                                                    00571000
+DMKPGTSD STM   R0,R15,BALRSAVE     ENTER AND SAVE REGS                  00572000
+         L     R12,=A(DMKPGT)  STANDARD ADDRESSABILITY                  00573000
+         DROP  R15                                                      00574000
+         USING DMKPGT,R12                                               00575000
+         LA    R3,(RDEVRECS-RDEVPAGE) DISP TO RDEVRECS CHAIN            00576000
+         B     SPOOLDEL                                                 00577000
+         SPACE 2                                                        00578000
+         ENTRY DMKPGTSP                                        @VM01002 00579000
+         USING *,R15                                           @VM01002 00580000
+DMKPGTSP STM   R0,R15,BALRSAVE ENTER AND SAVE REGISTERS        @VM01002 00581000
+         L     R12,=A(DMKPGT) STANDARD ADDRESSABILITY          @VM01002 00582000
+         USING DMKPGT,R12                                      @VM01002 00583000
+         SLR   R3,R3          CLEAR INDEX FOR PAGING CHAIN     @VM01002 00584000
+         MVI   UCTL,UCTLDR+UCTLSYS ACNT FOR PAGE+SYSTEM VMBLOK @VM01031 00585000
+         B     SPOOLDEL                                        @VM01002 00586000
+         SPACE 2                                                        00587000
+         ENTRY DMKPGTPR                                                 00588000
+         USING *,R15                                                    00589000
+DMKPGTPR STM   R0,R15,BALRSAVE     ENTER AND SAVE REGS                  00590000
+         L     R12,=A(DMKPGT) STANDARD ADDRESSABILITY                   00591000
+         DROP  R15                                                      00592000
+         USING DMKPGT,R12                                               00593000
+         SR    R3,R3          CLEAR INDEX FOR PAGING CHAIN     @VA04554 00594000
+         OI    UCTL,UCTLDR    FLAG ENTRY FOR PAGING                     00595000
+         SPACE 2                                                        00596000
+SPOOLDEL EQU   *                                                        00597000
+         L     R4,SWPCYL      GET DASD ADDRESS                          00598000
+         BAL   R14,FINDEVIC   GO LOCATE RDEVBLOK FOR THIS PAGE          00599000
+         SPACE                                                          00600000
+         LA    R9,RDEVPAGE(R3)  POINT TO PAGE OR SPOOL ALLOCATION CHAIN 00601000
+         LR    R15,R9         AND SAVE ADDRESS OF ANCHOR                00602000
+         BAL   R14,FINDREC    AND GO FIND THE RECORD ALLOCATION BLOK    00603000
+         SPACE                                                          00604000
+         SR    R2,R2          CLEAR DIVIDEND REGISTER                   00605000
+         LR    R7,R2          SAVE FOR CLEARING SWPTABLE                00606000
+         IC    R2,SWPDPAGE    GET PAGE NUMBER                           00607000
+         BCTR  R2,0           RELATIVE TO ZERO                          00608000
+         SRDL  R2,3           DIVIDED BY 8                              00609000
+         SRL   R3,29          GET REMAINDER                             00610000
+         LA    R1,RECMAP(R2)  POINT TO BYTE CONTAINING BIT FOR PAGE     00611000
+         IC    R3,ALLOCTBL(R3)     GET BIT MASK TO DE-ALLOCATE          00612000
+         EX    R3,TEST        IS PAGE ALLOCATED ??                      00613000
+         BO    PGT3A          IT BETTER BE --                           00614000
+         ABEND 3              OR WE ARE FATALLY ILL                     00615000
+PGT3A    EQU   *                                                        00616000
+         SPACE                                                          00617000
+         EX    R3,DEALLOC     DE-ALLOCATE THE PAGE                      00618000
+         IC    R3,RECUSED     GET NUMBER OF PAGES IN USE                00619000
+         S     R3,F1          DECREMENT IN-USE COUNT                    00620000
+         STC   R3,RECUSED     AND SAVE IT                               00621000
+         BP    RECLEFT        IF SOME PAGES STILL IN USE, SKIP          00622000
+         SPACE                                                          00623000
+         BAL   R14,EMPTYCYL   IF NO RECORDS IN USE, GO DEALLOCATE THE   00624000
+*                             CYLINDER                                  00625000
+         B     ZEROPAGE       RESET SWPTABLE ENTRY                      00626000
+         SPACE                                                          00627000
+RECLEFT  EQU   *              AT LEAST ONE RECORD STILL IN USE:         00628000
+         CLI   RDEVTYPE,TYP2305    FIXED HEAD DEVICE ??                 00629000
+         BNE   ZEROPAGE       NO -- LEAVE WELL ENOUGH ALONE             00630000
+         L     R0,RECPNT      REMOVE PARTIALLY EMPTY BLOCK              00631000
+         ST    R0,RECPNT-RECBLOK(,R9)   FROM CURRENT LIST POSITION      00632000
+         L     R0,0(,R15)     AND PLACE IT                              00633000
+         ST    R6,0(,R15)     AT THE                                    00634000
+         ST    R0,RECPNT      TOP OF THE LIST                           00635000
+         SPACE                                                          00636000
+ZEROPAGE EQU   *  HERE TO CLEAR SWPTABLE ENTRY                          00637000
+         OI    SWPFLAG,SWPRECMP    PAGE MUST BE RE-ASSIGNED NEXT TIME   00638000
+         ST    R7,SWPCYL      INDICATE ZERO PAGE                        00639000
+         TM    UCTL,UCTLDR    IS PAGE BEING RELEASED FOR PAGING?        00640000
+         BZ    NOACNT2        NO, SPOOLING, NO ACCOUNTING REQD.         00641000
+         DROP  R11            TEMPORALLY SWITCH VMBLOKS        @VM01031 00642000
+         USING VMBLOK,R4                                       @VM01031 00643000
+         LR    R4,R11         NORMAL CASE IS AGAINST THE USER  @VM01031 00644000
+         TM    UCTL,UCTLSYS   IS THIS THE NORMAL CASE?         @VM01031 00645000
+         BZ    *+8            YES, BR.                         @VM01031 00646000
+         L     R4,ASYSVM      NOPE, ACNT FOR PAGE AGAINST SYS  @VM01031 00647000
+         TM    RDEVTYPE,TYP2305 FAST PAGING DEVICE ?           @V304498 00648000
+         BZ    ACNTDSK2       NOT A DRUM, ACCOUNT FOR DISK              00649000
+         LH    R3,VMPDRUM     SUBTRACT 1 FROM COUNT OF USER             00650000
+         S     R3,F1          PAGES ALLOCATED ON DRUM          @VA04554 00651000
+         BM    NOACNT2        IF MINUS, LEAVE COUNT = 0        @VA04554 00651500
+         STH   R3,VMPDRUM                                               00652000
+         B     NOACNT2                                                  00653000
+ACNTDSK2 LH    R3,VMPDISK     SUBTRACT 1 FROM COUNT OF USER             00654000
+         S     R3,F1          PAGES ALLOCATED ON DISK                   00655000
+         BM    NOACNT2        IF MINUS, LEAVE COUNT = 0        @VA04554 00655500
+         STH   R3,VMPDISK                                               00656000
+NOACNT2  MVI   UCTL,X'00'     CLEAR FLAG                       @VM01031 00657000
+         LM    R0,R15,BALRSAVE   RESTORE CALLER'S REGS                  00658000
+         BR    R14            AND EXIT TO CALLER                        00659000
+         DROP  R4             RETURN TO STANDARD VMBLOK USAGE  @VM01031 00660000
+         USING VMBLOK,R11                                      @VM01031 00661000
+         EJECT                                                          00662000
+*.                                                                      00663000
+*                                                                       00664000
+* SUBROUTINE NAME -                                                     00665000
+*                                                                       00666000
+*        DMKPGTSR                                                       00667000
+*                                                                       00668000
+* FUNCTION -                                                            00669000
+*                                                                       00670000
+*        TO RELEASE A SET OF DASD PAGES THAT BELONG TO A SPOOL FILE     00671000
+*        THAT IS NO LONGER NEEDED                                       00672000
+*                                                                       00673000
+* ATTRIBUTES -                                                          00674000
+*                                                                       00675000
+*        SERIALLY RE-USABLE, RESIDENT, CALLED VIA SVC                   00676000
+*                                                                       00677000
+* ENTRY POINTS -                                                        00678000
+*                                                                       00679000
+*        DMKPGTSR                                                       00680000
+*                                                                       00681000
+* ENTRY CONDITIONS -                                                    00682000
+*                                                                       00683000
+*        GPR1  = THE ADDRESS OF THE FIRST OF A CHAIN OF DUMMY           00684000
+*                RECBLOKS.  THE BIT MAP FOR EACH BLOK CONTAINS A 1 FOR  00685000
+*                EVERY PAGE THAT IS TO BE RELEASED ON THE CYLINDER THAT 00686000
+*                IT REPRESENTS                                          00687000
+*                                                                       00688000
+* EXIT CONDITIONS -                                                     00689000
+*                                                                       00690000
+*        NORMAL -                                                       00691000
+*        THE RELEASED PAGES ARE MARKED AS DE-ALLOCATED, AND THE         00692000
+*        APPROPRIATE USED COUNTS ARE UPDATED                            00693000
+*                                                                       00694000
+*        ERROR -                                                        00695000
+*        NONE                                                           00696000
+*                                                                       00697000
+* CALLS TO OTHER ROUTINES -                                             00698000
+*                                                                       00699000
+*        DMKFRET  - TO RETURN TO FREE STORAGE BOTH THE DUMMY RECBLOKS   00700000
+*                   AND ALSO ANY RECBLOKS WHOSE PAGES HAVE ALL BEEN DE- 00701000
+*                   ALLOCATED                                           00702000
+*                                                                       00703000
+* EXTERNAL REFERENCES -                                                 00704000
+*                                                                       00705000
+*        THE SYSTEM OWNED LIST (DMKSYSOW) IS REFERENCED TO LOCATE THE   00706000
+*        THE RDEVBLOK FOR THE VOLUME CONTAINING THE PAGE                00707000
+*                                                                       00708000
+* TABLES / WORKAREAS -                                                  00709000
+*                                                                       00710000
+*        NONE                                                           00711000
+         EJECT                                                          00712000
+*                                                                       00713000
+* REGISTER USAGE -                                                      00714000
+*                                                                       00715000
+*        SEE PROLOGUE TO DMKPGTPR ABOVE                                 00716000
+*                                                                       00717000
+* NOTES -                                                               00718000
+*                                                                       00719000
+*        NONE                                                           00720000
+*                                                                       00721000
+* OPERATION -                                                           00722000
+*                                                                       00723000
+*        DMKPGTSR OPERATES IN ESSENTIALLY THE SAME MANNER AS DMKPGTPR,  00724000
+*        WITH THE THE EXCEPTION THAT WHEN THE PROPER RDEVBLOK AND       00725000
+*        RECBLOK HAVE BEEN LOCATED, THE BIT MASK IN THE DUMMY           00726000
+*        RECBLOK IS EXCLUSIVE OR'ED AGAINST THE MAP IN THE              00727000
+*        REAL BLOK TO ZERO OUT THE BITS FOR THE PAGES BEING DEALLOCATED 00728000
+*                                                                       00729000
+*        DMKPGTPR AND DMKPGTSR USE SEVERAL COMMON SUBROUTINES TO LOCATE 00730000
+*        THE RDEVBLOK FOR THE AFFECTED VOLUME, LOCATE THE RECBLOK       00731000
+*        CONTAINING THE PAGE, AND TO DE-ALLOCATE A CYLINDER WHOSE       00732000
+*        PAGES HAVE ALL BEEN FREED.                                     00733000
+*                                                                       00734000
+*.                                                                      00735000
+         EJECT                                                          00736000
+         ENTRY DMKPGTSR                                                 00737000
+         USING *,R15                                                    00738000
+DMKPGTSR STM   R0,R15,BALRSAVE     ENTER AND SAVE REGS                  00739000
+         L     R12,=A(DMKPGT) STANDARD ADDRESSABILITY                   00740000
+         DROP  R15                                                      00741000
+         USING DMKPGT,R12                                               00742000
+         LR    R5,R1          SAVE ADDRESS OF DUMMY BLOK                00743000
+         SPACE                                                          00744000
+SAVECYL  L     R4,RECCYL-RECBLOK(,R5)   GET DASD PAGE ADDRESS           00745000
+         LR    R3,R4          AND SAVE IT                               00746000
+         BAL   R14,FINDEVIC   GO LOCATE THE PROPER RDEVBLOK             00747000
+         SPACE                                                          00748000
+         LA    R9,RDEVRECS    POINT TO SPOOLING ALLOCATION CHAIN        00749000
+         BAL   R14,FINDREC    GO LOCATE THE PROPER RECORD ALLOCATION    00750000
+         SPACE                                                          00751000
+         XC    RECMAP,RECMAP-RECBLOK(R5)     REMOVE ALLOCATED PAGES     00752000
+         N     R3,=A(X'FF00') STRIP OUT ALL BUT NUMBER OF RECS DELETED  00753000
+         SRL   R3,8           PLACE IN LOW ORDER                        00754000
+         SR    R2,R2          CLEAR WORK REGISTER                       00755000
+         IC    R2,RECUSED     GET NUMBER PREVIOUSLY IN USE              00756000
+         SR    R2,R3          DECREMENT                                 00757000
+         STC   R2,RECUSED     AND SAVE                                  00758000
+         BP    NEXTSPL        STILL RECORDS IN USE IN THIS BLOK         00759000
+         BZ    PGT4A          ALL RECORDS DEALLOCATED                   00760000
+         ABEND 4              DE-ALLOCATE MORE THAN WE HAD              00761000
+PGT4A    EQU   *                                                        00762000
+         SPACE                                                          00763000
+         BAL   R14,EMPTYCYL   GO DE-ALLOCATE THE CYLINDER --            00764000
+         SPACE                                                          00765000
+NEXTSPL  LR    R1,R5          POINT TO BLOK JUST USED                   00766000
+         L     R5,RECPNT-RECBLOK(,R5)   POINT TO NEXT BLOK TO DE-ALLOC. 00767000
+         LA    R0,RECSIZE      GET LENGTH OF DUMMY BLOK                 00768000
+         CALL  DMKFRET        FRET IT                                   00769000
+         LTR   R5,R5          ANY MORE TO DO                            00770000
+         BNZ   SAVECYL        YES -- CONTINUE                           00771000
+         LM    R0,R15,BALRSAVE     RESTORE REGS                         00772000
+         BR    R14            AND EXIT TO CALLER                        00773000
+         EJECT                                                          00774000
+*****************************                                           00775000
+*                                                                       00776000
+*        COMMON SUBROUTINES FOR DMKPGTPR AND DMKPGTSR --                00777000
+*                                                                       00778000
+*****************************                                           00779000
+         SPACE 3                                                        00780000
+FINDEVIC EQU   *  HERE TO LOCATE THE RDEVBLOK WHICH HAS THE CHAIN       00781000
+*                 ANCHOR FOR THE PAGE TO BE DELETED -- AT ENTRY,        00782000
+*                 GPR4 MUST CONTAIN THE COMPRESSED DASD ADDRESS (CCPD)  00783000
+         SPACE                                                          00784000
+         LA    R8,X'FF'       GET MASK TO STRIP ALL BUT DEVICE CODE     00785000
+         NR    R8,R4          GET DEVICE CODE IN GPR8                   00786000
+         SRL   R4,16          SHIFT CYLINDER NUMBER TO LOW ORDER        00787000
+         SLL   R8,3           GET DEVICE CODE TIMES 8                   00788000
+         A     R8,=A(DMKSYSOW) POINT TO CORRECT OWNED LIST ENTRY        00789000
+         LH    R8,OWNDRDEV-OWNDLIST(,R8)     POINT TO RDEVLBOK          00790000
+         SLL   R8,3(0)        CONVERT TO BYTE INDEX            @V200820 00791000
+         A     R8,ARIODV      ---                                       00792000
+         BR    R14            RETURN TO CALLER                          00793000
+         SPACE 3                                                        00794000
+FINDREC  EQU   *  HERE TO LOCATE THE PROPER RECORD ALLOCATION BLOK      00795000
+*                 AT ENTRY, GPR9 POINTS TO THE ALLOCATION CHAIN ANCHOR  00796000
+*                 AND GPR4 HAS THE CYLINDER NUMBER DESIRED --           00797000
+         L     R6,RECPNT-RECBLOK(,R9)   POINT TO NEXT BLOK ON CHAIN     00798000
+         LTR   R6,R6          IS THERE ONE ??                           00799000
+         BNZ   PGT5A          YES--                                     00800000
+         ABEND 5              NO-- AARRRGGGHHHHH.....                   00801000
+PGT5A    EQU   *                                                        00802000
+         SPACE                                                          00803000
+         CH    R4,RECCYL      IS THE BLOK FOR THIS CYLINDER ??          00804000
+         BCR   8,R14          YES -- EXIT TO CALLER                     00805000
+         LR    R9,R6          SAVE BACK CHAIN                           00806000
+         B     FINDREC        AND KEEP LOOKING                          00807000
+         SPACE 3                                                        00808000
+EMPTYCYL EQU   *  HERE TO DE-ALLOCATE AN EMPTY CYLINDER --              00809000
+*                 AT ENTRY, GPR4 HAS THE CYLINDER TO DELETE --          00810000
+*                 AND GPR6 AND 9 POINT TO CURRENT AND PREVIOUS BLOKS    00811000
+         SPACE                                                          00812000
+         L     R10,RDEVALLN   GET POINTER TO ALOCBLOK                   00813000
+         LA    R1,1           SET TENTATIVE DECREMENT                   00814000
+         LH    R2,ALOCMAX     GET NUMBER OF CYLINDERS                   00815000
+         SRL   R2,1           DIVIDE BY 2 TO GET MIDDLE CYLINDER        00816000
+         SPACE 2                                                        00817000
+         SR    R2,R4          GET DISPLACEMENT FROM MIDDLE CYLINDER     00818000
+         BP    GETDISP        IF DISPLACEMENT POSITIVE, BYPASS          00819000
+         LPR   R2,R2          FORCE POSITIVE DISPLACEMENT               00820000
+         SR    R1,R1          SET DECREMENT TO ZERO                     00821000
+         SPACE 2                                                        00822000
+GETDISP  EQU   *  CALCULATE BIT DISPLACEMENT IN MASK                    00823000
+         AR    R2,R2          DOUBLE THE DISPLACEMENT FROM THE CENTER   00824000
+         SR    R2,R1          AND DECREMENT, IF NECESSARY               00825000
+         SRDL  R2,3           DIVIDE DISPLACEMENT BY 8                  00826000
+         SRL   R3,29          AND SAVE REMAINDER                        00827000
+         IC    R3,ALLOCTBL(R3)     GET BIT MASK TO DE-ALLOCATE          00828000
+         LA    R1,ALOCMAP(R2) POINT TO BYTE TO TEST                     00829000
+         EX    R3,TEST        FIRST SEE IF CYLINDER IS ALLOCATED        00830000
+         BO    PGT6A          IT HAD BETTER BE,                         00831000
+         ABEND 6              OR WE'RE IN TROUBLE                       00832000
+PGT6A    EQU   *                                                        00833000
+         SPACE                                                          00834000
+         L     R15,RECPNT     GET POINTER TO NEXT BLOK ON LIST          00835000
+         TM    RDEVFLAG,RDEVPREF   IS THIS A PREFERED VOLUME ?          00836000
+         BZ    UNCHAIN        NO -- FREE THE CYLINDER                   00837000
+         LTR   R15,R15        IF PREFERRED, UNCHAIN ONLY THE LAST BLOK  00838000
+         BCR   7,R14          NOT THE LAST -- EXIT                      00839000
+         SPACE                                                          00840000
+UNCHAIN  EQU   *              HERE TO UNCHAIN THE BLOK AND DEALLOCATE   00841000
+         EX    R3,DEALLOC     DE-ALLOCATE THE CYLINDER --               00842000
+         LH    R3,ALOCUSED    GET NUMBER OF CYLINDERS NOW IN USE --     00843000
+         BCTR  R3,0           DECREMENT BY ONE                          00844000
+         STH   R3,ALOCUSED    AND SAVE                                  00845000
+         TM    RDEVFLAG,RDEVPREF IS THIS A PREFERED VOLUME ?   @VA01097 00846000
+         BO    GETPNT         YES -                            @VA01097 00847000
+         SPACE                                                          00848000
+         L     R1,DMKPGTTU    GET NUMBER OF CYLINDERS INUSE             00849000
+         BCTR  R1,0           DECREMENT                                 00850000
+         ST    R1,DMKPGTTU    AND SAVE                                  00851000
+         C     R1,DMKPGT90    LESS THAN 90 PERCENT IN USE ?             00852000
+         BH    GETPNT         NO --                                     00853000
+         NI    MSGSW,X'FF'-X'80'   YES MAKE SURE MSG SWITCH IS OFF      00854000
+         SPACE                                                          00855000
+GETPNT   EQU   *                                                        00856000
+         ST    R15,RECPNT-RECBLOK(,R9)  UNCHAIN EMPTY BLOK              00857000
+         LR    R1,R6          GET POINTER TO EMPTY BLOK                 00858000
+         LA    R0,RECSIZE     GET ITS SIZE                              00859000
+         LR    R3,R14         SAVE RETURN ADDRESS                       00860000
+         CALL  DMKFRET        RETURN THE BLOK TO FREE STORAGE           00861000
+         BR    R3             AND EXIT                                  00862000
+         EJECT                                                          00863000
+*.                                                                      00864000
+* SUBROUTINE NAME -                                                     00865000
+*                                                                       00866000
+*        DMKPGTCG - ALLOCATE CONTIGUOUS SPOOL AREA FOR 370X DUMP        00867000
+*                                                                       00868000
+* ENTRY CONDITIONS -                                                    00869000
+*                                                                       00870000
+*        GR0 = NUMBER OF SPOOL PAGES REQUESTED, MAX = 64                00871000
+*        GR14 =RETURN ADDRESS                                           00872000
+*        GR15 =ADDRESS OF DMKPGTCG                                      00873000
+*                                                                       00874000
+* EXIT CONDITIONS -                                                     00875000
+*                                                                       00876000
+*        GR0  = UNCHANGED                                               00877000
+*        GR1  = COMPRESSED DASD ADDRESS OF FIRST PAGE ALLOCATED         00878000
+*        GR8  = RDEVBLOK ADDRESS WHERE PAGES WERE ALLOCATED             00879000
+*              OR                                                       00880000
+*        GR1  =  0   REQUESTED SPACE WAS NOT AVAILABLE                  00881000
+*                                                                       00882000
+* CALLS TO OTHER ROUTINES -                                             00883000
+*                                                                       00884000
+*        DMKFREE  - TO BUILD RECBLOK'S FOR THE ALLOCATED CYLINDERS      00885000
+*        DMKQCNWT - TO SEND WARNING MESSAGE IF TEMPSPACE FULL           00886000
+*        DMKSTKCP - TO STACK CPEXBLOK FOR ABOVE CALL                    00887000
+*                                                                       00888000
+* EXTERNAL REFERENCES -       NONE                                      00889000
+*                                                                       00890000
+* TABLES / WORK AREAS -       NONE                                      00891000
+*                                                                       00892000
+* REGISTER USAGE -                                                      00893000
+*                                                                       00894000
+*        GR14, 15 = WORK REGISTERS                                      00895000
+*        GR13 = NUMBER OF CYLINDERS REQUIRED                            00896000
+*        GR12 = MODULE BASE REGISTER                                    00897000
+*        GR11 = VMBLOK ADDRESSABILITY                                   00898000
+*        GR10 = ALOCBLOK ADDRESSABILITY                                 00899000
+*        GR9  = WORK REGISTER                                           00900000
+*        GR8  = RDEVBLOK ADDRESSABILITY                                 00901000
+*        GR7  = WORK REGISTER                                           00902000
+*        GR6  = RECBLOK ADDRESSABILITY                                  00903000
+*        GR0-5 = WORK REGISTERS                                         00904000
+*                                                                       00905000
+* NOTES -                                                               00906000
+*                                                                       00907000
+*        DMKPGTCG WILL ONLY ALLOCATE CONTIGUOUS AREAS WHICH FALL        00908000
+*        IN THE CORRECT POSITION WITHIN AN ALOCMAP BYTE. THIS MAY       00909000
+*        RESULT IN FALSE INDICATIONS OF NO AVAILABLE SPACE UNDER        00910000
+*        CERTAIN CONDITIONS, BUT THIS SHOULD NOT BE A SIGNIFICANT       00911000
+*        PERCENTAGE OF THE POSSIBLE SITUATIONS. (P < .05)               00912000
+*                                                                       00913000
+* OPERATION -                                                           00914000
+*                                                                       00915000
+*        1.  FIND A REAL DEVICE BLOCK WHICH HAS AT LEAST THE            00916000
+*            REQUESTED NUMBER OF CYLINDERS AVAILABLE.                   00917000
+*        2.  SCAN THE ALOCBLOK FOR THE DEVICE TO DETERMINE IF           00918000
+*            THE REQUEST CAN BE SATISFIED. IF NOT, REPEAT FROM          00919000
+*            STEP 1.                                                    00920000
+*        3.  MARK THE CHOSEN CYLINDERS AS ALLOCATED, BUILD THE          00921000
+*            'CCPD' TO RETURN TO THE CALLER IN GR1.                     00922000
+*        4.  BUILD THE RECBLOK'S FOR THE ALLOCATED CYLINDERS            00923000
+*            AND CHAIN THEM INTO THE RECBLOK CHAIN.                     00924000
+*        5.  CHECK TO SEE IF EITHER 90 PERCENT OF TEMP SPACE HAS        00925000
+*            BEEN USED, OR IF ALL OF TEMPSPACE HAS BEEN USED.           00926000
+*            IF YES, STACK A CPEXBLOK TO WARN THE SYSTEM OPERATOR.      00927000
+*        6.  PASS RDEVBLOK ADDRESS AND 'CCPD' BACK TO CALLER, EXIT.     00928000
+*.                                                                      00929000
+         SPACE 3                                                        00930000
+         ENTRY DMKPGTCG                                        @V200820 00931000
+         USING DMKPGTCG,R15                                    @V200820 00932000
+DMKPGTCG DS    0D         ALLOCATE CONTIGUOUS DASD SPOOL SPACE @V200820 00933000
+         STM   R0,R15,BALRSAVE                                 @V200820 00934000
+         L     R12,=A(DMKPGT)                                  @V200820 00935000
+         DROP  R15                                             @V200820 00936000
+         USING DMKPGT,R12                                      @V200820 00937000
+         SPACE                                                          00938000
+         LTR   R3,R0          KICK OUT INVALID REQUESTS        @V200820 00939000
+         BNP   CONFAIL                                         @V200820 00940000
+         CH    R3,=H'64'      . . .                            @V200820 00941000
+         BH    CONFAIL                                         @V200820 00942000
+         LA    R4,DMKPGTT5-4  ALLOCATE ON SPOOL DISKS ONLY     @V200820 00943000
+CONEXTT  EQU   *              NEXT DEVICE TYPE FOR ALLOCATION  @V200820 00944000
+         LA    R4,4(0,R4)     . . .                            @V200820 00945000
+         L     R8,0(0,R4)     FIRST RDEVBLOK ON THIS CHAIN     @V200820 00946000
+         LTR   R8,R8                                           @V200820 00947000
+         BP    CONXTDV        FOUND AN RDEVBLOK                @V200820 00948000
+         BZ    CONEXTT        TRY THE NEXT DEVICE TYPE         @V200820 00949000
+         B     CONFAIL        RAN OUT OF TYPES TO TRY          @V200820 00950000
+CONEXTD  EQU   *              NEXT DEVICE OF THE SAME TYPE     @V200820 00951000
+         L     R8,RDEVPNT     . . .                            @V200820 00952000
+         CL    R8,0(0,R4)     WRAP AROUND TO THE START ?       @V200820 00953000
+         BE    CONEXTT        YES -- NEXT DEVICE TYPE          @V200820 00954000
+CONXTDV  EQU   *                                               @V200820 00955000
+         LA    R7,57(0)       PAGES / CYLINDER FOR 3330        @V200820 00956000
+         CLI   RDEVTYPE,TYP3330    . . .                       @V200820 00957000
+         BE    CONNCYL                                         @V200820 00958000
+         LA    R7,120(0)      PAGES / CYLINDER FOR 3350        @V304498 00959000
+         CLI   RDEVTYPE,TYP3350 . . .                          @V304498 00960000
+         BE    CONNCYL                                         @V304498 00961000
+         LA    R7,32(0)       PAGES / CYLINDER FOR 2314        @V200820 00962000
+         CLI   RDEVTYPE,TYP2314    . . .                       @V200820 00963000
+         BE    CONNCYL                                         @V200820 00964000
+         LA    R7,24(0)       PAGES / CYYLINDER  FOR 2305/3340 @V2A2029 00965000
+         CLI   RDEVTYPE,TYP3340 . . .                          @V2A2029 00966000
+         BE    CONNCYL                                         @V2A2029 00967000
+         CLI   RDEVTYPE,TYP2305    . . .                       @V200820 00968000
+         BNE   CONEXTT        TRY NEXT DEVICE TYPE             @V200820 00969000
+CONNCYL  EQU   *              CALCULATE NUMBER OF CYLINDERS    @V200820 00970000
+         SLR   R2,R2                                           @V200820 00971000
+         L     R3,BALR0       NUMBER OF PAGES REQUESTED        @V200820 00972000
+         DR    R2,R7          DIVIDE BY PAGES / CYLINDER       @V200820 00973000
+         LTR   R2,R2               REMAINDER ?                 @V200820 00974000
+         BZ    *+8                 NO --                       @V200820 00975000
+         LA    R3,1(0,R3)     BUMP NUMBER OF CYLINDERS         @V200820 00976000
+         LA    R6,0(R3,R3)    GR6 = INDEX TO MASK BYTES        @V200820 00977000
+         LA    R6,CONMASK-2(R6)    POINT TO THE CORRECT MASKS  @V200820 00978000
+         L     R10,RDEVALLN   ALOCBLOK FOR THIS DEVICE         @V200820 00979000
+         LH    R9,ALOCMAX     MAXIMUM NUMBER OF AVAILABLE CYLS @V200820 00980000
+         SH    R9,ALOCUSED    CHECK FOR ENOUGH REMAINING       @V200820 00981000
+         BNP   CONEXTD        NOPE - NEXT DEVICE, SAME TYPE    @V200820 00982000
+         CR    R9,R3          ENOUGH TO FULFILL REQUEST ?      @V200820 00983000
+         BL    CONEXTD        NOPE - NEXT DEVICE, SAME TYPE    @V200820 00984000
+         LH    R9,ALOCMAX     MAXIMUM CYLINDERS AGAIN          @V200820 00985000
+         SRL   R9,3(0)        CONVERT TO BYTE INDEX LIMIT      @V200820 00986000
+         TM    ALOCMAX+1,X'07'     EVEN NUMBER OF BYTES IN MAP @V200820 00987000
+         BNZ   *+6                 NO -- O.K. AS IS            @V200820 00988000
+         BCTR  R9,0           STOP SHORT OF CYLINDER ZERO      @V200820 00989000
+         LA    R10,ALOCMAP    POINT TO FIRST MAP BYTE          @V200820 00990000
+CONCYLF  EQU   *              FIND THE UNUSED CYLINDERS        @V200820 00991000
+         SR    R0,R0          EVEN / ODD INDICATOR             @V200820 00992000
+         IC    R1,0(0,R6)     PICK UP EVEN-BIT MASK            @V200820 00993000
+         EX    R1,TESTCYL     TEST FOR UNUSED CYLINDERS        @V200820 00994000
+         BZ    CONFCYL        FOUND THEM                       @V200820 00995000
+         LA    R0,1(0)        NOW TRY THE ODD BITS             @V200820 00996000
+         IC    R1,1(0,R6)     . . .                            @V200820 00997000
+         EX    R1,TESTCYL                                      @V200820 00998000
+         BZ    CONFCYL        FOUND THEM                       @V200820 00999000
+         LA    R10,1(0,R10)   NEXT BYTE IN THE MAP             @V200820 01000000
+         BCT   R9,CONCYLF     KEEP LOOKING                     @V200820 01001000
+         B     CONEXTD        NEXT DEVICE OF THE SAME TYPE     @V200820 01002000
+CONFCYL  EQU   *              ALLOCATE OUR CYLINDERS           @V200820 01003000
+         EX    R1,TAKECYL          MARK CYLINDERS IN USE       @V200820 01004000
+         L     R9,RDEVALLN    RECOVER ALOCBLOK BASE ADDRESS    @VM08819 01005000
+         LH    R15,ALOCUSED-ALOCBLOK(,R9)    NO. CYLS USED     @VM08819 01006000
+         AR    R15,R3         . . .WE TOOK THIS MANY           @VM08819 01007000
+         STH   R15,ALOCUSED-ALOCBLOK(,R9)    NEW CYLS USED     @VM08819 01008000
+         LH    R5,ALOCMAX-ALOCBLOK(,R9) MAX. CYLINDER NUMBER   @V200820 01009000
+         SRL   R5,1(0)        COMPUTE MIDDLE CYLINDER NUMBER   @V200820 01010000
+         LA    R9,ALOCMAP-ALOCBLOK(,R9) POINT TO START OF MAP  @V200820 01011000
+         SR    R10,R9         GR10 = DISPLACEMENT TO BYTE USED @V200820 01012000
+         SLL   R10,2(0)       . . .TIMES FOUR                  @VM08562 01013000
+         LTR   R0,R0          EVEN BIT OR ODD BIT USED ?       @V200820 01014000
+         BZ    CONZGIN        EVEN - OK AS IT IS               @VM08562 01015000
+         LNR   R10,R10        MAKE DISPLACEMENT NEGATIVE       @V200820 01016000
+         SR    R5,R3          R5 = LOWEST CYL USED.            @VA01668 01017000
+CONZGIN  EQU   *                                               @VM08562 01018000
+         AR    R5,R10         GR5 = CYLINDER NO. FOR BIT ZERO  @V200820 01019000
+         STH   R5,BALR1       BUILD 'CCPD' FOR THE CALLER      @V200820 01020000
+         MVI   BALR1+2,X'01'  START AT PAGE ONE ON CYLINDER    @V200820 01021000
+         LH    R0,RDEVCODE                                     @V200820 01022000
+         STC   R0,BALR1+3     SET DEVICE CODE IN BALR1         @V200820 01023000
+         ST    R8,BALR8       PASS BACK THE RDEVBLOK ADDRESS   @V200820 01024000
+         LR    R13,R3         NUMBER OF CYLINDERS USED         @V200820 01025000
+         LR    R4,R2          SAVE REMAINDER FROM DIVIDE       @V200820 01026000
+         LR    R6,R5          GR6 = FIRST CYLINDER USED        @V200820 01027000
+         LA    R3,4(0,0)      GR3 = RDEVRECS INDEX             @V200820 01028000
+CONRBLD  EQU   *              BUILD AND CHAIN RECBLOK'S        @V200820 01029000
+         L     R10,RDEVALLN   ALOCBLOK POINTER ONCE MORE       @V200820 01030000
+         LH    R5,ALOCMAX     CALCULATE MIDDLE CYLINDER        @V200820 01031000
+         SRL   R5,1(0)        . . .                            @V200820 01032000
+         SR    R5,R6          GR5 = DISPLACEMENT FROM CENTER   @V200820 01033000
+         LPR   R5,R5          FORCE POSITIVE                   @V200820 01034000
+         BAL   R10,GETCORE    BUILD AND CHAIN ONE RECBLOK      @VM08534 01035000
+         BCT   R13,CONFULL    BRANCH IF FULL CYLINDER USED     @V200820 01036000
+         LTR   R4,R4          WAS THERE A REMAINDER ?          @V200820 01037000
+         BNZ   *+8            YES - NOT QUITE FULL CYLINDER    @V200820 01038000
+         IC    R4,RECMAX      THIS ONE IS ALSO FULL            @V200820 01039000
+         STC   R4,RECUSED     SET THE NUMBER OF PAGES USED     @V200820 01040000
+         SLR   R14,R14        CLEAR TWO REGS                   @V200820 01041000
+         SLR   R15,R15                                         @V200820 01042000
+         ICM   R14,8,=X'80'   GET A HIGH-ORDER ONE BIT         @V200820 01043000
+         BCTR  R4,0           DECREMENT RECORD COUNT           @V200820 01044000
+         CLM   R4,B'0001',PAGE63 COUNT GREATER THAN 63 PAGES   @V304498 01045000
+         BH    OVFL64PG       YES, EXTEND ALLOCATION           @V304498 01046000
+         SRDA  R14,0(R4)      SHIFT TO PROPAGATE BITS          @V200820 01047000
+         O     R14,RECMAP     ALLOCATE THE PAGES               @V200820 01048000
+         O     R15,RECMAP+4   . . .                            @V200820 01049000
+         STM   R14,R15,RECMAP                                  @V200820 01050000
+CONEXIT  EQU   *                                               @V200820 01051000
+         LM    R0,R15,BALRSAVE     RESTORE REGISTERS           @V200820 01052000
+         BR    R14                 RETURN TO CALLER            @V200820 01053000
+OVFL64PG S     R4,=F'64'      DETERMINE REMAINDER(120-64)      @V304498 01054000
+         SRDA  R14,0(R4)      SHIFT TO PROPAGATE BITS          @V304498 01055000
+         O     R14,RECMAP+8   ALLOCATE THE BITS                @V304498 01056000
+         O     R15,RECMAP+12 . . .                             @V304498 01057000
+         STM   R14,R15,RECMAP+8 . . .                          @V304498 01058000
+         MVC   RECMAP(8),FFS  PROPAGATE FIRST 64 BITS          @V304498 01059000
+         B     CONEXIT        RESTORE REGISTERS                @V304498 01060000
+         SPACE                                                          01061000
+CONFULL  EQU   *              THIS CYLINDER IS COMPLETELY USED @V200820 01062000
+         IC    R0,RECMAX      MAXIMUM NUMBER OF PAGES          @V200820 01063000
+         STC   R0,RECUSED     THEY ARE ALL IN USE              @V200820 01064000
+         MVI   RECMAP,X'FF'   FILL IN RECMAP                   @V304498 01065000
+         MVC   RECMAP+1(15),RECMAP PROPAGATE FOR 124 PAGES     @V304498 01066000
+         SLR   R7,R7          ..                               @VM01056 01067000
+         IC    R7,RECMAX      GR7 = PAGES / CYLINDER           @VM01056 01068000
+         LH    R6,RECCYL      CYLINDER FOR THIS RECBLOK        @V200820 01069000
+         LA    R6,1(0,R6)     ADD ONE FOR NEXT CYLINDER USED   @V200820 01070000
+         B     CONRBLD        GO BUILD ANOTHER RECBLOK         @V200820 01071000
+         SPACE                                                          01072000
+CONFAIL  EQU   *              TEMPSPACE IS NOT AVAILABLE       @V200820 01073000
+         SLR   R1,R1                                           @V200820 01074000
+         ST    R1,BALR1       PASS CODE BACK TO CALLER         @V200820 01075000
+         B     CONEXIT        . . .                            @V200820 01076000
+         SPACE                                                          01077000
+TESTCYL  TM    0(R10),*-*     EXECUTED TO FIND CYLINDERS       @V200820 01078000
+TAKECYL  OI    0(R10),*-*     EXECUTED TO ALLOCATE CYLINDERS   @V200820 01079000
+         SPACE                                                          01080000
+CONMASK  DC    X'8040'        EVEN / ODD MASKS FOR 1 CYLINDER  @V200820 01081000
+         DC    X'A050'                         FOR 2 CYLINDERS @V200820 01082000
+         DC    X'A854'                         FOR 3 CYLINDERS @V200820 01083000
+         DC    X'AA55'                         FOR 4 CYLINDERS @V200820 01084000
+PAGE63   DC    X'3F'          CONSTANT - 63 PAGES              @V304498 01085000
+         EJECT                                                          01086000
+*.                                                                      01087000
+*                                                                       01088000
+* SUBROUTINE NAME -                                                     01089000
+*                                                                       01090000
+*        DMKPGTVG                                                       01091000
+*                                                                       01092000
+* FUNCTION -                                                            01093000
+*                                                                       01094000
+*        TO ALLOCATE A PAGE OF VIRTUAL STORAGE SPACE BELONGING          01095000
+*        TO THE CP PAGING VMBLOK                                        01096000
+*                                                                       01097000
+* ATTRIBUTES -                                                          01098000
+*                                                                       01099000
+*        SERIALLY REUSABLE, RESIDENT, CALLED VIA SVC                    01100000
+*                                                                       01101000
+* ENTRY POINTS -                                                        01102000
+*                                                                       01103000
+*        DMKPGTVG                                                       01104000
+*                                                                       01105000
+* ENTRY CONDITIONS -                                                    01106000
+*                                                                       01107000
+*        GPR12 = DMKPGTVG BASE ADDRESS                                  01108000
+*        GPR13 = ADDRESS OF STANDARD SAVEAREA                           01109000
+*                                                                       01110000
+* EXIT CONDITIONS -                                                     01111000
+*                                                                       01112000
+*        NORMAL -                                                       01113000
+*        CALLER'S GPR1 CONTAINS THE ADDRESS OF THE VIRTUAL PAGE         01114000
+*        THAT IS ALLOCATED                                              01115000
+*                                                                       01116000
+*        ERROR -                                                        01117000
+*        NONE                                                           01118000
+*                                                                       01119000
+* CALLS TO OTHER ROUTINES -                                             01120000
+*                                                                       01121000
+*        NONE                                                           01122000
+*                                                                       01123000
+* EXTERNAL REFERENCES -                                                 01124000
+*                                                                       01125000
+*        NONE                                                           01126000
+*                                                                       01127000
+* TABLES / WORKAREAS -                                                  01128000
+*                                                                       01129000
+*        PAGETABL IS AN ALLOCATION TABLE CONTAINING 640 BITS, 1 BYTE    01130000
+*        FOR EACH PAGE (DEPENDENT ON DMKPGTBN) AVAILABLE TO             01131000
+*        DMKPGTVG FOR ALLOCATION. IT IS REFERENCED AND UPDATED          01132000
+*        DURING ALLOCATION.                                             01133000
+*                                                                       01134000
+*        DMKPGTBN IS A ONE BYTE COUNTER CONTAINING THE NUMBER           01135000
+*        OF BYTES (1 BYTE EQUALS 8 PAGES) IN PAGETABL TO BE USED FOR    01136000
+*        ALLOCATION.  THIS COUNTER IS INITIALIZED TO 16 (128 PAGES) FOR 01137000
+*        REAL STORAGE SIZE OF 256K TO 655,360 BYTES.                    01138000
+*        DMKCPI WILL MODIFY DMKPGTBN TO 40 (320 PAGES) FOR REAL         01139000
+*        STORAGE OF 655,361 TO 1.1MEG AND TO 80 (640 PAGES)             01140000
+*        FOR REAL STORAGE OVER 1.1MEG.                                  01141000
+*                                                                       01142000
+*        NOTE - REAL STORAGE SIZE REFERS TO THE LOWEST VALUE            01143000
+*        VM SYSGEN SIZE VALUE OR REAL MACHINE STORAGE VALUE.            01144000
+*                                                                       01145000
+* REGISTER USAGE -                                                      01146000
+*                                                                       01147000
+*        GPR0,1 ARE WORK REGISTERS                                      01148000
+*        GPR2  = FUNCTION REGISTER FOR TRT                              01149000
+*        GPR3,4 ARE WORK REGISTERS                                      01150000
+*        GPR5-11 ARE NOT USED                                           01151000
+*        GPR12 = DMKPGT BASE REGISTER                                   01152000
+*        GPR13 = ADDRESS OF STANDARD SAVEAREA                           01153000
+*        GPR14,15 USED FOR BALR LINKAGE                                 01154000
+*                                                                       01155000
+* NOTES -                                                               01156000
+*                                                                       01157000
+*        NONE                                                           01158000
+*                                                                       01159000
+* OPERATION -                                                           01160000
+*                                                                       01161000
+*        1. PAGETABL IS SCANNED FOR A ZERO BIT.  IF NO BITS ARE         01162000
+*           ARE ZERO, GO TO STEP 4; OTHERWISE, CONTINUE                 01163000
+*                                                                       01164000
+*        2. MARK THE PAGE AS ALLOCATED BY SETTING THE BIT TO ONE        01165000
+*                                                                       01166000
+*        3. COMPUTE THE PAGE ADDRESS AND PASS IT BACK TO THE CALLER     01167000
+*                                                                       01168000
+*.                                                                      01169000
+         EJECT                                                          01170000
+         ENTRY DMKPGTVG                                                 01171000
+         USING DMKPGTVG,R15                                    @V304498 01172000
+DMKPGTVG STM   R0,R15,BALRSAVE     ENTER AND SAVE REGS                  01173000
+         L     R12,=A(DMKPGT) STANDARD ADDRESSABILITY                   01174000
+         DROP  R15                                                      01175000
+         USING DMKPGT,R12                                               01176000
+         SR    R2,R2          CLEAR FUNCTION REGISTER FOR TRT           01177000
+         SR    R4,R4          CLEAR COUNT REG                  @VA00919 01178000
+         IC    R4,DMKPGTBN    GET BUFFER NUMBER/8 VALUE        @VA00919 01179000
+         BCT   R4,*+10        COUNT -1 FOR TRT EXECUTE         @VA00919 01180000
+EXTRT    TRT   PAGETABL(0),FREETABL LOOK FOR AN UNUSED BUFFER  @VA00919 01181000
+         EX    R4,EXTRT       EXEUTE TRT INSTRUCTION           @VA00919 01182000
+         BNZ   PGT8A          GOOD IF WE HAVE ONE.             @VA01261 01183000
+         ABEND 8              ABEND - NO VIRTUAL PAGE BUFFERS. @VA01261 01184000
+PGT8A    EQU   *                                               @VA01261 01185000
+         IC    R3,ALLOCTBL-1(R2)   GET BIT MASK TO MARK PAGE            01186000
+*        AS NOT AVAILABLE                                               01187000
+         EX    R3,ALLOCATE    AND DO IT                                 01188000
+         S     R1,=A(PAGETABL)     DISPLACEMENT OF BYTE IN PAGETABLE    01189000
+         SLL   R1,3           MULTIPLY BY 8 FOR PAGE NUMBER             01190000
+*        R2 CONTAINS A VALUE 1 - 8                                      01191000
+         ALR   R1,R2          GET PAGE NUMBER WITHIN 256K BLOCK         01192000
+         SLL   R1,12          GET PAGE ADDRESS                          01193000
+         AL    R1,=A(DMKCKP)  GET START OF SYSTEM'S VIRTUAL MEMORY      01194000
+         LTR   R1,R1          SET CONDITION CODE                        01195000
+         ST    R1,BALR1       PASS BACK ADDRESS OF PAGE                 01196000
+         B     EXIT           AND EXIT                                  01197000
+         EJECT                                                          01198000
+*.                                                                      01199000
+*                                                                       01200000
+* SUBROUTINE NAME -                                                     01201000
+*                                                                       01202000
+*        DMKPGTVR                                                       01203000
+*                                                                       01204000
+* FUNCTION -                                                            01205000
+*                                                                       01206000
+*        TO RELEASE A PAGE OF VIRTUAL MEMORY SPACE                      01207000
+*                                                                       01208000
+* ATTRIBUTES -                                                          01209000
+*                                                                       01210000
+*        SERIALLY REUSABLE, RESIDENT, CALLED VIA SVC                    01211000
+*                                                                       01212000
+* ENTRY POINTS -                                                        01213000
+*                                                                       01214000
+*        DMKPGTVR                                                       01215000
+*                                                                       01216000
+* ENTRY CONDITIONS -                                                    01217000
+*                                                                       01218000
+*        GPR1  = ADDRESS OF VIRTUAL PAGE TO BE RELEASED                 01219000
+*        GPR12 = DMKPGTVR BASE REGISTER                                 01220000
+*        GPR14 = ADDRESS OF STANDARD SAVEAREA                           01221000
+*                                                                       01222000
+* EXIT CONDITIONS -                                                     01223000
+*                                                                       01224000
+*        NORMAL -                                                       01225000
+*        PAGETABL IS UPDATED                                            01226000
+*                                                                       01227000
+*        ERROR -                                                        01228000
+*        NONE                                                           01229000
+*                                                                       01230000
+* CALLS TO OTHER ROUTINES -                                             01231000
+*                                                                       01232000
+*        NONE                                                           01233000
+*                                                                       01234000
+* EXTERNAL REFERENCES -                                                 01235000
+*                                                                       01236000
+*        NONE                                                           01237000
+*                                                                       01238000
+* TABLES / WORKAREAS -                                                  01239000
+*                                                                       01240000
+*        PAGETABL IS UPDATED TO REFLECT THE AVAILABILITY OF THE         01241000
+*        RELEASED PAGE, UNLESS IT HAS BEEN ASSIGNED TO A DEFERED        01242000
+*        REQUEST                                                        01243000
+*                                                                       01244000
+* REGISTER USAGE -                                                      01245000
+*                                                                       01246000
+*        GPR0-4 ARE WORK REGISTERS                                      01247000
+*        GPR5-11 ARE NOT USED                                           01248000
+*        GPR12 = DMKPGT BASE REGISTER                                   01249000
+*        GPR13 = ADDRESS OF STANDARD SAVEAREA                           01250000
+*        GPR14,15 ARE USED FOR BALR LINKAGE AND RETURN                  01251000
+         EJECT                                                          01252000
+*                                                                       01253000
+* NOTES -                                                               01254000
+*                                                                       01255000
+*        NONE                                                           01256000
+*                                                                       01257000
+* OPERATION -                                                           01258000
+*                                                                       01259000
+*        1. VERIFY THAT PAGE TO BE DE-ALLOCATED IS IN FACT ALLOCATED    01260000
+*                                                                       01261000
+*        2. IF ANY DEFERED REQUESTS ARE QUEUED FROM VPAGQST, GO TO      01262000
+*           STEP 5; OTHERWISE, CONTINUE                                 01263000
+*                                                                       01264000
+*        3. LOCATE THE BIT THAT REPRESENTS THE PAGE BEING DEALLOCATED,  01265000
+*           AND SET IT ZERO                                             01266000
+*                                                                       01267000
+*        4. RETURN TO CALLER                                            01268000
+*                                                                       01269000
+*.                                                                      01270000
+         EJECT                                                          01271000
+         ENTRY DMKPGTVR                                                 01272000
+         USING *,R15                                                    01273000
+DMKPGTVR STM   R0,R15,BALRSAVE     ENTER AND STORE REGS                 01274000
+         L     R12,=A(DMKPGT) STANDARD ADDRESSABILITY                   01275000
+         DROP  R15                                                      01276000
+         USING DMKPGT,R12                                               01277000
+         SPACE                                                          01278000
+         LR    R4,R1          SAVE PAGE ADDRESS                         01279000
+         SL    R1,=A(DMKCKP+4096)  GET START OF SYSTEM'S VIRTUAL MEMORY 01280000
+         LR    R2,R1          SET FOR DOUBLE REGISTER SHIFT             01281000
+         SRDL  R2,15          GET PAGE NUMBER/8                         01282000
+         SRL   R3,29          AND REMAINDER                             01283000
+         IC    R3,ALLOCTBL(R3)     GET BIT MASK FOR ALLOCATED PAGE      01284000
+         LA    R1,PAGETABL(R2)     POINT TO CORRECT BYTE TO TEST        01285000
+         EX    R3,TEST        AND SEE IF PAGE IS ALLOCATED              01286000
+         BNZ   PGT7A          PAGE IN USE --                            01287000
+         ABEND 7              TRYING TO DE-ALLOCATE PAGE NOT IN USE     01288000
+PGT7A    EQU   *                                                        01289000
+         EX    R3,DEALLOC     DE-ALLOCATE THE PAGE BUFFER      @VA01261 01290000
+EXIT     LM    R0,R15,BALRSAVE     RESTORE REGS                         01291000
+         BR    R14            AND EXIT TO CALLER                        01292000
+         EJECT                                                          01293000
+******************************                                          01294000
+*                                                                       01295000
+*        CONSTANTS, TABLES AND EXECUTED INSTRUCTIONS --                 01296000
+*                                                                       01297000
+******************************                                          01298000
+         SPACE 3                                                        01299000
+RECOMP   CLI   RECMAX,0       EXECUTED TO SEE IF ANY PAGES IN THE       01300000
+*                             REFERENCED BLOK ARE AVAILABLE             01301000
+         SPACE                                                          01302000
+GETCYL   TRT   ALOCMAP(*-*),FREETABL    EXECUTED TO LOCATE AN UNUSED    01303000
+*                                       CYLINDER IN AN ALOCBLOK         01304000
+         SPACE                                                          01305000
+ALLOCATE OI    0(R1),0        EXECUTED TO MARK A PAGE OR CYLINDER       01306000
+*                             ALLOCATED (IE, SET BIT = 1)               01307000
+         SPACE                                                          01308000
+TESTODD  TM    FREETABL,0     EXECUTED TO SEE IF THE NUMBER IN THE      01309000
+*                             EXECUTION REGISTER IS ODD (IF IT IS,      01310000
+*                             THE TM WILL RETURN A CONDITION CODE OF 1) 01311000
+         SPACE                                                          01312000
+TEST     TM    0(R1),0        EXECUTED TO TEST IF THE PAGE OR CYLINDER  01313000
+*                             THAT IS ABOUT TO BE DE-ALLOCATED HAS      01314000
+*                             BEEN ALLOCATED (IF IT HAS, THE TM WILL    01315000
+*                             RETURN A CONDITION CODE OF 1)             01316000
+         SPACE                                                          01317000
+DEALLOC  XI    0(R1),0        EXECUTED TO DE-ALLOCATE THE ALLOCATED     01318000
+*                             PAGE OR CYLINDER (IE, SET BIT = 0)        01319000
+         SPACE                                                          01320000
+FREETABL EQU   *  TRT FUNCTION TABLE USED TO LOCATE THE RELATIVE BIT    01321000
+*                 POSITION OF THE FIRST ZERO BIT IN AN ALLOCATION MAP   01322000
+         DC    128X'01'       FIRST BIT IS 0                            01323000
+         DC    64X'02'        SECOND BIT IS 0                           01324000
+         DC    32X'03'        AND SO ON --                              01325000
+         DC    16X'04'                                                  01326000
+         DC    8X'05'                                                   01327000
+         DC    4X'06'                                                   01328000
+         DC    2X'07'                                                   01329000
+         DC    X'08'                                                    01330000
+         DC    X'00'          NO BIT IS 0 --                            01331000
+         SPACE                                                          01332000
+ALLOCTBL EQU   *  BIT MAP TABLE WHOSE ENTRIES ARE LOCATED BY INDEXING   01333000
+*                 WITH THE FUNCTION RETURNED IN GPR2 AFTER TRTING       01334000
+*                 AGAINST FREETABL (ABOVE).  EACH ENTRY CONTAINS THE    01335000
+*                 BIT TO BE TURNED ON (OR OFF) BY EXECUTING ONE OF      01336000
+*                 THE 'ALLOCATE' OR 'DEALLOC' INSTRUCTIONS ABOVE --     01337000
+         DC    X'8040201008040201'                                      01338000
+         SPACE                                                          01339000
+PAGETABL EQU   *  VIRTUAL PAGE ALLOCATION TABLE - EACH BIT REPRESENTS   01340000
+*                 A PAGE OF VIRTUAL STORAGE BELONGING TO THE DUMMY      01341000
+*                             USERTHAT CONTROLS CP PAGING               01342000
+         DC    XL160'00'      1280 VIRTUAL PAGE MAX            @VA06119 01343000
+DMKPGTBN DC    AL1(16)        NUMBER OF VIRTUAL BUFFERS/8 (128 @VA00919 01344000
+*                             DEFAULT VAULE - MODIFIED BY DMKCPI        01345000
+         EJECT                                                          01346000
+*        PAGING AND SPOOLING ALLOCATION CHAIN ANCHORS                   01347000
+         SPACE                                                          01348000
+DMKPGTP5 DC    A(0)           PREFERRED PAGING DEVICES - 2305           01349000
+DMKPGTP0 DC    A(0)           PREFERRED PAGING DEVICES - 3330           01350000
+DMKPGT4P DC    A(0)           PREFERRED PAGING DEVICES - 3340  @V2A2029 01351000
+DMKPGT5P DC    A(0)           PREFERRED PAGING DEVICES - 3350  @VA08602 01352000
+DMKPGTP4 DC    A(0)           PREFERRED PAGING DEVICES - 2314           01353000
+         SPACE                                                          01354000
+DMKPGTT5 DC    A(0)           GENERAL SPOOLING/PAGING DEVICES - 2305    01355000
+DMKPGTT0 DC    A(0)           GENERAL SPOOLING/PAGING DEVICES - 3330    01356000
+DMKPGT4T DC    A(0)           GENERAL SPOOLING/PAGING - 3340   @V2A2029 01357000
+DMKPGT5T DC    A(0)           GENERAL SPOOLING/PAGING - 3350   @VA08602 01358000
+DMKPGTT4 DC    A(0)           GENERAL SPOOLING/PAGING DEVICES - 2314    01359000
+         SPACE                                                          01360000
+         DC    F'-1'          FENCE                                     01361000
+         SPACE 3                                                        01362000
+DMKPGTTU DC    F'0'           NUMBER OF TEMPORARY CYLINDERS IN USE      01363000
+         SPACE                                                          01364000
+DMKPGTTM DC    F'0'           MAXIMUM NUMBER OF CYLINDERS AVAILABLE     01365000
+         SPACE                                                          01366000
+DMKPGT90 DC    F'0'           90 PERCENT OF AVAILABLE CYLINDERS         01367000
+         SPACE 3                                                        01368000
+MSGSW    DC    X'00'                                                    01369000
+UCTL     DC    X'00'          USER STORAGE ALLOCATION FLAGS             01370000
+UCTLDR   EQU   X'80'          DO VMPDISK/VMPDRUM ACCOUNTING    @VM01031 01371000
+UCTLSYS  EQU   X'40'          USE SYS VMBLOK FOR THE ACCOUNTING@VM01031 01372000
+PAGE4    EQU   X'10'          3350 CYLINDER 0 PAGE 4 SLOT      @V304498 01373000
+         SPACE 3                                                        01374000
+*                                                                       01374400
+DRMLIM   DS    0H                                              @V408246 01374600
+DMKPGTDF DC    XL2'0',H'0'    DRUM LIMIT FLAGS AND COUNT       @V408246 01374800
+         SPACE 2                                                        01375000
+         LTORG                                                          01376000
+         EJECT                                                          01377000
+         COPY  SAVE                                                     01378000
+         COPY  ALLOC                                                    01379000
+         COPY  CORE                                                     01380000
+         COPY  RBLOKS                                                   01381000
+         PSA                                                            01382000
+         COPY  IOBLOKS                                                  01383000
+         COPY  VMBLOK                                                   01384000
+         COPY  DEVTYPES                                                 01385000
+         COPY  EQU                                                      01386000
+         END                                                            01387000

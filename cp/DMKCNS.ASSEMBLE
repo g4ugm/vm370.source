@@ -1,0 +1,2132 @@
+CNS      TITLE 'DMKCNS     (CP)        VM/370 - RELEASE 6'              00001000
+         ISEQ  73,80                                                    00002000
+*.                                                                      00003000
+* MODULE NAME -                                                         00004000
+*                                                                       00005000
+*        DMKCNS  - SLOW-SPEED TERMINAL INTERRUPT HANDLER                00006000
+*                                                                       00007000
+* FUNCTION -                                                            00008000
+*                                                                       00009000
+*        SECOND LEVEL INTERRUPT HANDLER FOR 3210, 3215, 1052, 2150,     00010000
+*        7412 SYSTEM CONSOLES, AND 2741, 1050, TTY TERMINALS.           00011000
+*        PERFORMS I/O INTERRUPT HANDLING INCLUDING ERROR RECOVERY       00012000
+*        FOR THESE DEVICES.                                             00013000
+*                                                                       00014000
+* ATTRIBUTES -                                                          00015000
+*                                                                       00016000
+*        RE-ENTRANT, RESIDENT, ENTERED VIA INTERRUPT OR CPEXBLOK        00017000
+*                                                                       00018000
+* ENTRY POINTS -                                                        00019000
+*                                                                       00020000
+*        DMKCNSIC - ENTRY FROM DMKQCN TO INITIALIZE CONTASK CCW'S       00021000
+*        DMKCNSIN - INTERRUPT RETURN ADDRESS FOR START/STOP TERMINALS   00022000
+*        DMKCNSEN - ENTRY TO ENABLE OR DISABLE A TERMINAL LINE          00023000
+*        DMKCNSED - 'BALR' SUBROUTINE TO EDIT AN INPUT DATA LINE        00024000
+*                                                                       00025000
+* ENTRY CONDITIONS -                                                    00026000
+*                                                                       00027000
+*        GPR  8 = ADDRESS OF TERMINAL RDEVBLOK (DMKCNSIC, DMKCNSEN)     00028000
+*        GPR 10 = ADDRESS OF IOBLOK FOR INTERRUPT (DMKCNSIN)            00029000
+*        GPR 11 = ADDRESS OF VMBLOK FROM 'RDEVUSER'                     00030000
+*        GPR 12 = ADDRESS OF ENTRY POINT                                00031000
+*                                                                       00032000
+* EXIT CONDITIONS -                                                     00033000
+*                                                                       00034000
+*        NORMAL - EXIT IS MADE VIA A GOTO TO DMKDSPCH                   00035000
+*                                                                       00036000
+* CALLS TO OTHER ROUTINES -                                             00037000
+*                                                                       00038000
+*        DMKBLDVM - TO BUILD A VMBLOK FOR A NEW USER                    00039000
+*        DMKCFMBK - TO PLACE A USER IN CP CONSOLE FUNCTION MODE         00040000
+*        DMKCFMAT - TO SIMULATE A VIRTUAL CONSOLE ATTENTION             00041000
+*        DMKQCNCL - TO CLEAR THE CONTASK STACK                          00042000
+*        DMKQCNET - TO PROCESS SPOOLING, ETC. OF FINISHED CONTASK'S     00043000
+*        DMKQCNTO - TO DISCONNECT A USER IN CASE OF LINE FAILURE        00044000
+*        DMKCVTBH - TO CONVERT A BINARY DEVICE ADDRESS TO EBCDIC        00045000
+*        DMKSCNRU - TO LOCATE A REAL DEVICE BLOCK (RDEVBLOK)            00046000
+*        DMKIOSQR - TO INITIATE A START I/O                             00047000
+*        DMKTRMID - TO IDENTIFY THE TRANSLATE TABLE TO BE USED          00048000
+*        DMKIOERR - TO RECORD PERMENANT I/O ERRORS                      00049000
+*        DMKMSWR  - TO SEND I/O ERROR MESSAGE TO THE OPERATOR           00050000
+*        DMKSCNRD - TO GET THE REAL ADDRESS FROM AN RDEVBLOK            00051000
+*        DMKCPIEM - RE-ENTRY TO DMKCPI FOR ALTERNATE CONSOLE            00052000
+*        DMKERMSG - TO SEND ERROR MESSAGES TO THE OPERATOR              00053000
+*        DMKIOEST - TO CAUSE THE UPDATE OF STATISTICAL DATA COUNTERS    00053100
+*        DMKLOKSW - SWITCH TO ANOTHER VMBLOK IF SYSTEM IS AP-MODE       00053200
+*        DMKPTRAN - TO BRING IN THE TRANSLATE TABLE                     00053300
+*                                                                       00054000
+* EXTERNAL REFERENCES -                                                 00055000
+*                                                                       00056000
+*        DMKTBLUP, DMKTBLPI, DMKTBLCI, DMKTBLNI, DMKTBLTI               00057000
+*        DMKTBLPO, DMKTBLCO, DMKTBLNO, DMKTBLTO                         00058000
+*                                                                       00059000
+* TABLES / WORK AREAS -         NONE                                    00060000
+*                                                                       00061000
+* REGISTER USAGE -                                                      00062000
+*                                                                       00063000
+*        GPR6  = ADDRESS OF CONTASK                                     00064000
+*        GPR8  = ADDRESS OF RDEVBLOK                                    00065000
+*        GPR10 = ADDRESS OF IOBLOK                                      00066000
+*        GPR11 = ADDRESS OF VMBLOK                                      00067000
+*        GPR12, GPR13 = DMKCNS BASE ADDRESS                             00068000
+*        GPR14, GPR15 = LINKAGE REGISTERS FOR SUBROUTINE CALLS          00069000
+*                                                                       00070000
+*        ALL OTHER REGISTERS ARE USED AS WORK REGISTERS                 00071000
+*                                                                       00072000
+* NOTES -                     NONE                                      00073000
+*                                                                       00074000
+* OPERATION - EXECUTION OF DMKCNSIC MUST BE ON THE I/O PROCESSOR        00075100
+*             IN AP-MODE                                                00075200
+*                                                                       00076000
+*        DMKCNSIC IS ENTERED VIA CPEXBLOK WHENEVER DMKQCN HAS ADDED     00077000
+*        A CONTASK TO AN EMPTY CONTASK STACK, OR WHEN A PRIORITY        00078000
+*        TASK HAS BEEN STACKED. THE CCW STRING IS BUILT IN THE          00079000
+*        CONTASK CREATED BY DMKQCN, AS FOLLOWS:                         00080000
+*                                                                       00081000
+*        1. WRITE CONTASK'S:                                            00082000
+*              3210, 3215, 1052, ETC.:                                  00083000
+*        WRITE CCW FOR THE EBCDIC DATA, WITH OR WITHOUT CARRIAGE        00084000
+*        RETURN AS SPECIFIED BY 'NOAUTO', FOLLOWED BY EITHER A NO-OP    00085000
+*        OR AN ALARM CCW, AS SPECIFIED BY 'ALARM'.                      00086000
+*              2741, 1050:                                              00087000
+*        WRITE CCW FOR THE DATA, FOLLOWED BY READ ACKNOWLEDGMENT        00088000
+*        FOR 1050 ONLY. A CARRIAGE RETURN CHARACTER (X'5B') IS ADDED    00089000
+*        TO THE END OF THE DATA UNLESS 'NOAUTO' IS SPECIFIED,           00090000
+*        AND THE NECESSARY IDLE CHARACTERS (1 IDLE PER 10 DATA CHARS)   00091000
+*        ARE INSERTED AFTER THE CARRIAGE RETURN. AN EOB IS ALSO SET     00092000
+*        FOR A 1050.                                                    00093000
+*              CPT-TWX:                                                 00094000
+*        WRITE CCW FOR THE DATA, FOLLOWED BY A WRITE FOR THE BELL       00095000
+*        IF 'ALARM' WAS SPECIFIED. THE SEQUENCE 'CR,LF,XOFF,RUBOUT'     00096000
+*        IS ADDED AT THE END OF THE DATA UNLESS 'NOAUTO' IS SET.        00097000
+*                                                                       00098000
+*        2. READ CONTASK'S:                                             00099000
+*              3210, 3215, 1052, ETC.:                                  00100000
+*        READ CCW FOR THE SPECIFIED LENGTH, FOLLOWED BY A NO-OP.        00101000
+*              2741, 1050:                                              00102000
+*        WRITE OF ADDRESSING CHARACTERS (CIRCLE-C FOR 2741, CIRCLE-C,   00103000
+*        COMMON POLL FOR 1050), FOLLOWED BY PREPARE, FOLLOWED BY READ   00104000
+*        OF SPECIFIED LENGTH, DATA-CHAINED TO A DUMMY READ-SKIP FOR     00105000
+*        4096 BYTES (TO IGNORE EXECSS DATA).                            00106000
+*              CPT-TWX:                                                 00107000
+*        WRITE FOR '., XON' PROMPTING SEQUENCE, FOLLOWED BY READ        00108000
+*        OF SPECIFIED LENGTH, DATA-CHAINED TO DUMMY READ-SKIP (4K).     00109000
+*                                                                       00110000
+*        IF THE 'INHIBIT' PARMATER IS SET IN THE READ CONTASK, EITHER   00111000
+*        THE 2741, 1050 PRINT SUPPRESS FEATURE IS ENABLED TO PREVENT    00112000
+*        DATA TYPEOUT, OR A MASKING STRING IS WRITTEN TO OBSCURE THE    00113000
+*        INPUT DATA. A NULL LINE OR ATTENTION FOR AN INHIBIT READ       00114000
+*        WILL FORCE THE MASKING STRING TO BE TYPED, AND FOR THE PRINT   00115000
+*        SUPPRESS FEATURE TO BE DISABLED.                               00116000
+*                                                                       00117000
+* TERMINAL I/O START-UP:                                                00118000
+*                                                                       00119000
+*        IF THERE IS NO I/O ACTIVE FOR THE TERMINAL, THE CONTASK        00120000
+*        IS STARTED VIA A CALL TO DMKIOSQR. IF A PREPARE IS ACTIVE      00121000
+*        FOR A START-STOP TERMINAL, THE PREPARE IS HALTED VIA 'HIO'     00122000
+*        AND EXIT IS TAKEN TO DMKDSPCH (START-UP ON THE INTERRUPT).     00123000
+*        IF THERE IS AN INPUT CONTASK ACTIVE, FOLLOWED BY A WRITE       00124000
+*        WITH 'PRIORITY' SET, THE READ IS HALTED VIA 'HIO' AND AN       00125000
+*        EXIT IS TAKEN TO DMKDSPCH.                                     00126000
+*.                                                                      00127000
+         EJECT                                                          00128000
+         COPY  OPTIONS                                         @V200820 00129000
+         COPY LOCAL OPTIONS                                    @V200820 00130000
+         EJECT                                                          00131000
+DMKCNS   START ,                                               @V200820 00132000
+         SPACE 2                                                        00133000
+         USING PSA,R0                                          @V200820 00134000
+         USING CONTASK,R6                                      @V200820 00135000
+         USING RDEVBLOK,R8                                     @V200820 00136000
+         USING IOBLOK,R10                                      @V200820 00137000
+         USING VMBLOK,R11                                      @V200820 00138000
+         SPACE                                                          00139000
+         ENTRY DMKCNSIC,DMKCNSIN,DMKCNSEN,DMKCNSED             @V200820 00140000
+         ENTRY DMKCNSTB       TRANSLATE TABLE FOR 'TRT' USE    @V200820 00141000
+         SPACE                                                          00142000
+         EXTRN DMKBLDVM,DMKCFMBK,DMKCFMAT                      @V200820 00143000
+         EXTRN DMKQCNTO,DMKERMSG,DMKSCNRD                      @V200820 00144000
+         EXTRN DMKCPIEM,DMKQCNCL,DMKQCNET,DMKIOSQR             @V200820 00145000
+         EXTRN DMKCVTBH,DMKSCNRU,DMKTRMID,DMKIOERR,DMKMSWR     @V200820 00146000
+         SPACE                                                          00147000
+         EXTRN DMKTBLUP                                        @V200820 00148000
+         EXTRN DMKTBLPI,DMKTBLCI,DMKTBMNI,DMKTBMMI,DMKTBLTI    @VM03172 00149000
+         EXTRN DMKTBLPO,DMKTBLCO,DMKTBMNO,DMKTBMMO,DMKTBLTO    @VM03172 00150000
+         EXTRN DMKIOEST       STATISTICAL COUNTER UPDATE       @VA03757 00150100
+         EXTRN DMKPTRAN                                        @V407508 00150200
+         EXTRN DMKSTKMP                                        @VA08275 00150210
+         EJECT                                                          00151000
+         USING DMKCNSIC,R12                                    @V200820 00152000
+DMKCNSIC DS    0D             ENTRY TO INITIALIZE CONTASK CCW'S@V200820 00153000
+         LM    R12,R13,CNSBASE2                                @VA05903 00154000
+         USING DMKCNS,R12,R13                                  @V200820 00155000
+         SWITCH               CONTINUE PROCESSING ON MAIN PROC @V407508 00155100
+         SPACE                                                          00156000
+         SLR   R10,R10             CLEAR IOBLOK POINTER REGISTE@V200820 00157000
+         CLI   RDEVTYPE,TYPTTY     CHECK FOR SUPPORTED DEVICE  @V200820 00158000
+         BH    CNSDISA             NOPE -- DISABLE THE LINE    @V200820 00159000
+         L     R6,RDEVCON     START OF CONTASK STACK           @V200820 00160000
+         LTR   R6,R6          JUST TO MAKE SURE WE'RE O.K.     @V200820 00161000
+         BNP   CNSEXIT        NOTHING TO DO - GO AWAY          @V200820 00162000
+         TM    CONSTAT,CONESCP     HAVE THE CCW'S BEEN DONE ?  @V200820 00163000
+         BO    INCFINS             YES - JUST CHECK START-UP   @V200820 00164000
+         SPACE                                                          00165000
+INCTASK  EQU   *              INITIALIZE CONTASK CCW'S         @V200820 00166000
+         TM    CONSTAT,CONCNTL     CONTROL CONTASK ?           @V200820 00167000
+         BO    INCFINS             YES - NO SETUP TO BE DONE   @V200820 00168000
+         L     R4,CONADDR     START OF DATA BUFFER             @VA01217 00169000
+         LH    R3,CONCNT      DATA COUNT                       @VA01217 00170000
+         CLI   RDEVTYPE,TYP3210    1052, 3215, 3210, 2150 ?    @V200820 00171000
+         BE    INC3210             YES - BUILD CCW STRING      @V200820 00172000
+         TM    CONSTAT,CONOUTPT    OUTPUT CONTASK ?            @V200820 00173000
+         BZ    INCDEVT             NO -- CHECK FOR DEVICE TYPE @V200820 00174000
+         SLR   R1,R1                                           @V200820 00175000
+         IC    R1,RDEVTMCD        TERMINAL LINE CODE INDEX     @V200820 00176000
+         L     R1,TRANSOUT(R1)     TRANSLATE TABLE ADDRESS     @VA01217 00177000
+         TRANS 2,1,OPT=(BRING,DEFER,SYSTEM),AFFINITY GET TABLE @V407508 00178100
+         LR    R1,R2          TABLE ADDRESS NEEDED IN R1       @VM03172 00179000
+         LA    R15,TRNSLAT    TRANSLATION SUBROUTINE           @VA01217 00180000
+         BALR  R14,R15        TRANSLATE DATA TO LINE CODE      @VA01217 00181000
+INCDEVT  EQU   *              SEPARATE OUT VARIOUS DEVICE TYPES@V200820 00182000
+         CLI   RDEVTYPE,TYPTTY     WORLD TRADE TELEGRAPH ?     @V200820 00183000
+         BE    INCWTTY             YES -                       @V200820 00184000
+         CLI   RDEVTYPE,TYP1050    1050-TYPE, PERHAPS ?        @V200820 00185000
+         BE    INC1050             YES --                      @V200820 00186000
+*        B     INC2741        NO --- MUST BE A 2741                     00187000
+         SPACE 2                                                        00188000
+INC2741  EQU   *              SETUP CCW STRING FOR 2741        @V200820 00189000
+         TM    CONSTAT,CONOUTPT    OUTPUT CONTASK ?            @V200820 00190000
+         BO    INW4150             YES -- COMMON WITH 1050 CODE@V200820 00191000
+         LA    R2,1(0)        LENGTH FOR ADDRESS CCW           @V200820 00192000
+         B     INC4150        JOIN COMMON 1050 CODE            @V200820 00193000
+CNSBASE2 DC    A(DMKCNS,DMKCNS+4096) BASE ADDRESSABILITY       @VA05903 00193200
+         EJECT                                                          00194000
+INC1050  EQU   *              SETUP CCW STRING FOR 1050        @V200820 00195000
+         TM    CONSTAT,CONOUTPT    OUTPUT CONTASK ?            @V200820 00196000
+         BO    INW1050             YES --                      @V200820 00197000
+         LA    R2,L'ADRS4150       FULL DATA LEN FOR FIRST CCW @V200820 00198000
+INC4150  EQU   *              COMMON 2741, 1050 READ SETUP     @V200820 00199000
+         LA    R3,2(0,R3)     INCREASE COUNT FOR CR, CIRCLE C  @V200820 00200000
+         ST    R4,CONCCW3     START ACTUAL CCW STRING BUILDING @V200820 00201000
+         STH   R3,CONCCW3+6        ...                         @V200820 00202000
+         MVC   CONCCW1(16),ADR4150      WRITE ADDRESS, PREPARE @V200820 00203000
+         STH   R2,CONCNT                SET COUNT IN WRITE     @V200820 00204000
+         MVI   CONCCW3,X'0A'  NORMALLY AN INHIBIT READ         @V200820 00205000
+         MVI   CONCCW3+4,CD+SILI   FLAGS...                    @V200820 00206000
+         TM    VMRSTAT,VMLOGON     ALL THE WAY LOGGED ON ?     @V200820 00207000
+         BZ    INCREAD        YES--LEAVE IT AS IS              @VA02192 00208000
+         TM    VMOSTAT,VMSYSOP SYSTEM OPERATOR LOGON?          @VA02192 00209000
+         BO    INCREAD        YES--DONT ALLOW TIMEOUT          @VA02192 00210000
+         MVI   CONCCW3,X'02'  TIMEOUT UNTIL HE'S LOGGED ON     @V200820 00211000
+INCREAD  EQU   *                                               @VA02192 00212000
+         MVC   CONCCW4(8),REDSKIP  READ, SKIP FOR EXCESS DATA  @V200820 00213000
+         TM    CONPARM,INHIBIT     SUPPRESS TYPEOUT OF READ ?  @V200820 00214000
+         BZ    INCFINS             NO -- ALL SET TO GO NOW     @V200820 00215000
+         OI    CONSTAT,CONESCP     REMEMBER THAT READ IS DONE  @V200820 00216000
+         OI    CONPARM,PRIORITY    FLAG IT FOR SEQUENCE        @V200820 00217000
+         CLI   RDEVTYPE,TYP1050    IS THIS A 1050 TERMINAL ?   @VM08830 00218000
+         BE    INHMASK             YES - NO PRINT SUPPRESS     @VM08830 00219000
+         TM    RDEVFLAG,RDEVPSUP   PRINT SUPPRESS AVAILABLE ?  @V200820 00220000
+         BO    INHREAD        YES - BYPASS, READ, RESTORE      @V200820 00221000
+INHMASK  EQU   *              TYPE MASK FOR INHIBIT READ       @VM08830 00222000
+         LA    R0,CONTSIZE+(STRMSKL+11)/8     SIZE OF CONTASK  @V200820 00223000
+         BAL   R7,INCOUTK     BUILD AND SETUP FAKE OUTPUT TASK @V200820 00224000
+         MVC   CONDATA(STRMSKL),STRMASK      MOVE MASK TO TASK @V200820 00225000
+         LA    R1,STRMSKL     LENGTH OF MASKING STRING         @V200820 00226000
+         STH   R1,CONCNT      ...                              @V200820 00227000
+         B     INCTASK        INITIALIZE AND START MASK WRITE  @V200820 00228000
+         SPACE                                                          00229000
+INHREAD  EQU   *              READ WITH TYPEOUT SUPPRESSION    @V200820 00230000
+         MVC   RDEVCON(4),CONPNT   REMOVE  READ FROM CHAIN     @V200820 00231000
+         LR    R5,R6          ...BUT SAVE IT'S ADDRESS         @V200820 00232000
+         LA    R0,CONTSIZE+1  SMALLER CONTASK NEEDED           @V200820 00233000
+         BAL   R7,INCOUTK     BUILD FAKE OUTPUT TASK           @V200820 00234000
+         MVI   CONCNT+1,1     DATA COUNT = ONE                 @V200820 00235000
+         MVI   CONDATA,X'14'  DATA = RESTORE CHARACTER         @V200820 00236000
+         ST    R5,RDEVCON     PUT THE READ BACK ON TOP         @V200820 00237000
+         ST    R6,CONPNT-CONTASK(,R5)   ...                    @V200820 00238000
+         BAL   R7,INCOUTK     BUILD ANOTHER TASK AHEAD OF READ @V200820 00239000
+         MVI   CONCNT+1,1     DATA COUNT = ONE                 @V200820 00240000
+         MVI   CONDATA,X'24'  DATA = BYPASS PRINTING           @V200820 00241000
+         B     INCTASK        INITIALIZE AND START THE WRITE   @V200820 00242000
+         EJECT                                                          00243000
+INW1050  EQU   *              OUTPUT FOR 1050                  @V200820 00244000
+         LA    R3,1(0,R3)     ADD ONE FOR END OF BLOCK (EOB)   @V200820 00245000
+INW4150  EQU   *              COMMON 2741, 1050 WRITE SETUP    @V200820 00246000
+         AH    R4,CONCNT      POINT TO END OF ORIGINAL DATA    @V200820 00247000
+         SLR   R1,R1          NO IDLES THAT WE KNOW OF YET     @V200820 00248000
+         TM    CONPARM,NOAUTO AUTOMATIC CARRIAGE RETURN ?      @V200820 00249000
+         BO    INW4151        NO -- NO IDLES REQUIRED          @V200820 00250000
+         LA    R1,24(0,R3)    DATA COUNT + 1.5 + ROUNDUP       @VA06176 00251100
+         SR    R0,R0          CLEAR FOR DIVIDE                 @V200820 00252000
+         D     R0,F10         COMPUTE NUMBER OF IDLES REQUIRED @V200820 00253000
+         C     R1,F15         NEVER NEED MORE THAN THIS        @V200820 00254000
+         BL    *+8            LENGTH MAY BE MORE IF BACKSPACES @V200820 00255000
+         LA    R1,15(0)            THIS IS A MAXIMUM           @V200820 00256000
+         LTR   R1,R1          DO WE NEED ANY AT ALL ?          @V200820 00257000
+         BNP   *+8            NO -- SKIP IT                    @V200820 00258000
+         EX    R1,SETIDLES    MOVE IN A STRING OF IDLE CHARACTE@V200820 00259000
+         MVI   0(R4),X'5B'    INSERT THE CARRIAGE RETURN CHARAC@V200820 00260000
+         LA    R1,1(0,R1)     ADD ONE TO INCLUDE THE 'CR'      @V200820 00261000
+         LA    R4,0(R1,R4)    POINT PAST LAST IDLE             @V200820 00262000
+INW4151  EQU   *              NO IDLES REQUIRED                @V200820 00263000
+         LA    R3,0(R1,R3)    NEW TOTAL DATA COUNT             @V200820 00264000
+         LH    R1,CONCNT      PICK UP ORIGINAL COUNT           @V200820 00265000
+         STH   R3,CONCNT      SET IN DATA TRANSFER CCW COUNT   @V200820 00266000
+         MVI   CONCOMND,X'01' SET WRITE CCW COMMAND CODE       @V200820 00267000
+         MVI   CONFLAG,SILI   SET 'SILI' BIT IN FLAGS          @V200820 00268000
+         LTR   R1,R1          CHECK FOR ZERO-LENGTH WRITE      @VM08730 00269000
+         BNP   BACKSLT        YES - DON'T GET INTO A LOOP      @VM08730 00270000
+         LA    R5,CONDATA(R1) POINT TO LAST ORIGINAL CHARACTER @V200820 00271000
+         BCTR  R5,0                ...                         @V200820 00272000
+BACKSLP  EQU   *              ADJUST UPPER/LOWER CASE BLANKS   @V200820 00273000
+         CLI   0(R5),X'81'    IS THIS AN UPPER-CASE BLANK ?    @V200820 00274000
+         BNE   BACKSLB        NO --                            @V200820 00275000
+         TM    1(R5),X'80'    PRECEEDING AN UPPER-CASE CHAR ?  @V200820 00276000
+         BO    BACKSLB        YES - LEAVE IT ALONE             @V200820 00277000
+         MVI   0(R5),X'01'    L-C BLANK BEFORE L-C CHAR.       @V200820 00278000
+BACKSLB  EQU   *              SCAN BACKWARD THROUGH THE DATA   @V200820 00279000
+         BCTR  R5,0                                            @V200820 00280000
+         BCT   R1,BACKSLP     OPTIMIZE UPPER/LOWER CASE SHIFTS @V200820 00281000
+BACKSLT  EQU   *                                               @VM08730 00282000
+         TM    CONPARM,LOGHOLD IS THIS A 'LOG HOLD' SITUATION? @VA04576 00282100
+         BNO   CK1050         NO..IS IT A 1050                 @VA04576 00282200
+         MVI   CONFLAG,CC+SILI ADD COMMAND CHAINING            @VA04576 00282300
+         MVC   CONCCW2(8),SENDC CIRCLE C AND 13 DUMMY CHARS    @VA04576 00282400
+CK1050   EQU   *                                               @VA04576 00282500
+         CLI   RDEVTYPE,TYP1050    IS THIS A 1050 TERMINAL ?   @V200820 00283000
+         BNE   INCFINS             NO -- ALL READY TO GO       @V200820 00284000
+         MVI   0(R4),X'3D'    SET 'EOB' FOR 1050 WRITE         @V200820 00285000
+         MVC   CONCCW2(8),ACKREAD  READ ACKNOWLEDGEMENT        @V200820 00286000
+         MVI   CONFLAG,CC+SILI     ADD CHAINING TO FIRST CCW   @V200820 00287000
+         B     INCFINS        ALL DONE                         @V200820 00288000
+         EJECT                                                          00289000
+INCWTTY  EQU   *              SETUP CCW STRING FOR TELETYPE    @V200820 00290000
+         TM    CONSTAT,CONOUTPT    OUTPUT CONTASK ?            @V200820 00291000
+         BO    INWWTTY              YES --                     @V200820 00292000
+         LA    R3,1(0,R3)          ADD ONE FOR RETURN OR XOFF  @V200820 00293000
+         LA    R2,CONCCW1     NORMAL PLACE FOR PROMPT CCW      @V200820 00294000
+         TM    CONPARM,INHIBIT     SHOULD WE TYPE A MASK FIELD @V200820 00295000
+         BZ    INCRTTY             NO --                       @V200820 00296000
+         MVC   CONCCW1(8),TTYMASK  TYPE MASKING CHAR SEQUENCE  @V200820 00297000
+         LA    R2,CONCCW2     FIRST CCW MOVES DOWN ONE         @V200820 00298000
+INCRTTY  EQU   *              FINISH READ CCW STRING           @V200820 00299000
+         MVC   0(8,R2),TTYREAD     SETUP, PROMTPING CCW        @V200820 00300000
+         ST    R4,8(0,R2)     SETUP DATA TRANSFER CCW          @V200820 00301000
+         MVI   12(R2),CD+SILI FLAGS...                         @V200820 00302000
+         MVI   8(R2),X'0A'    NORMALLY A READ INHIBIT          @V200820 00303000
+         TM    VMRSTAT,VMLOGON     LOGGED ON ALL THE WAY ?     @V200820 00304000
+         BZ    *+8                 YES - LEAVE AS IS           @V200820 00305000
+         MVI   8(R2),X'02'    READ WITH TIMEOUT UNTIL LOGGED ON@V200820 00306000
+         STH   R3,14(0,R2)         PUT DATA COUNT INTO THE CCW @V200820 00307000
+         MVC   16(8,R2),REDSKIP    READ, SKIP FOR EXCESS DATA  @V200820 00308000
+         B     INCFINS        ALL DONE                         @V200820 00309000
+         SPACE 2                                                        00310000
+INWWTTY  EQU   *              OUTPUT FOR TELETYPE              @V200820 00311000
+         MVI   CONCOMND,X'01' WRITE CCW COMMAND CODE           @V200820 00312000
+         MVI   CONFLAG,SILI                                    @V200820 00313000
+         LA    R4,CONDATA(R3) POINT TO LAST DATA CHARACTER + 1 @V200820 00314000
+         MVC   0(2,R4),TTYENDS+2   ADD AT LEAST XOFF, RUBOUT   @V200820 00315000
+         LA    R3,2(0,R3)          ...AND INCREASE THE COUNT   @V200820 00316000
+         TM    CONPARM,NOAUTO SUPPRESS AUTO CARRIAGE RETURN ?  @V200820 00317000
+         BO    INWTTYN        YES -- LET IT GO AS IS           @V200820 00318000
+         LA    R3,2(0,R3)     INCREASE COUNT FOR CR, LF        @V200820 00319000
+         MVC   0(4,R4),TTYENDS     MOVE IN ENDING SEQUENCE     @V200820 00320000
+INWTTYN  EQU   *                                               @V200820 00321000
+         STH   R3,CONCNT      RESET DATA COUNT IN FIRST CCW    @V200820 00322000
+         TM    CONPARM,ALARM  RING THE ALARM ?                 @V200820 00323000
+         BZ    INCFINS        NO -- ALL SET                    @V200820 00324000
+         LA    R3,4(0,R3)     ADD FOUR TO COUNT FOR ALARM      @VM08816 00325000
+         STH   R3,CONCNT           . . .                       @VM08816 00326000
+         ICM   R1,15,0(R4)    PICK UP CURRENT ENDING SEQUENCE  @VM08816 00327000
+         MVC   0(4,R4),TTYRING     RING THE BELL FOUR TIMES    @VM08816 00328000
+         STCM  R1,15,4(R4)    RESET THE ENDING CHARACTERS      @VM08816 00329000
+         B     INCFINS        NOW WE'RE ALL DONE               @V200820 00330000
+         EJECT                                                          00331000
+INC3210  EQU   *              SETUP CCW STRING FOR 3210        @V200820 00332000
+         MVI   CONFLAG,CC+SILI     SETUP CCW FLAG BYTE         @V200820 00333000
+         MVC   CONCCW2(8),NOPCCW   MOVE IN NO-OP CCW AT END    @V200820 00334000
+         LTR   R3,R3          CHECK CCW DATA COUNT             @VM08730 00335000
+         BP    *+8            O.K. AS IS                       @VM08730 00336000
+         MVI   CONCNT+1,X'01'      MINIMUM COUNT IS ONE        @VM08730 00337000
+         TM    CONSTAT,CONOUTPT    OUTPUT CONTASK ?            @V200820 00338000
+         BO    INW3210             YES --                      @V200820 00339000
+         MVI   CONCOMND,X'0A'      3210 READ CCW COMMAND CODE  @V200820 00340000
+         TM    CONPARM,INHIBIT     INHIBIT TYPEOUT OF DATA ?   @V200820 00341000
+         BZ    INCFINS             NO -- THEN WE'RE ALL DONE   @V200820 00342000
+         MVC   CONCCW2(8),CONCCW1  MOVE DOWN THE READ CCW      @V200820 00343000
+         MVC   CONCCW1(8),MSK3210  MOVE IN 3210 MASK CCW       @V200820 00344000
+         MVC   CONCCW3(8),NOPCCW   PUT BACK THE NO-OP          @V200820 00345000
+         B     INCFINS        ALL FINISHED                     @V200820 00346000
+         SPACE 2                                                        00347000
+INW3210  EQU   *              OUTPUT FOR 3210, ETC.            @V200820 00348000
+         MVI   CONCOMND,X'09'      ASSUME AUTO CARRIAGE RETURN @V200820 00349000
+         TM    CONPARM,NOAUTO+ALARM     ANYTHING ELSE TO FIX UP@V200820 00350000
+         BZ    INCFINS                  NO --                  @V200820 00351000
+         TM    CONPARM,NOAUTO      AUTO CARRIAGE RETURN ?      @V200820 00352000
+         BZ    *+8                 YES -- LEAVE FIRST CCW AS IS@V200820 00353000
+         MVI   CONCOMND,X'01'      NO --- WRITE WITHOUT C.R.   @V200820 00354000
+         TM    CONPARM,ALARM       SOUND THE AUDIBLE ALARM ?   @V200820 00355000
+         BZ    INCFINS             NO - LEAVE SECOND CCW AS IS @V200820 00356000
+         MVI   CONCCW2,X'0B'       YES -- CHANGE NO-OP TO ALARM@V200820 00357000
+         B     INCFINS                                         @V200820 00358000
+         SPACE 3                                                        00359000
+INCOUTK  EQU   *              BUILD A FAKE OUTPUT TASK         @V200820 00360000
+         BAL   R9,CNSGTSZ     ALLOCATE THE CONTASK             @V200820 00361000
+         MVI   CONSTAT,CONOUTPT    THIS A REALLY OUTPUT        @V200820 00362000
+         MVI   CONPARM,NOAUTO+PRIORITY  NO CR, PRESERVE ORDER  @V200820 00363000
+         LA    R1,CONDATA     DATA ADDRESS                     @V200820 00364000
+         ST    R1,CONADDR     ...                              @V200820 00365000
+         BR    R7             RETURN                           @V200820 00366000
+         EJECT                                                          00367000
+INCFINS  EQU   *           START UP TERMINAL I/O IF NOT ACTIVE @V200820 00368000
+         OI    CONSTAT,CONESCP     CONTASK READY FOR START I/O @V200820 00369000
+         TM    RDEVFLAG,RDEVACTV   IS THERE AN ACTIVE CONTASK ?@V200820 00370000
+         BZ    INTPREP             NO -- CHECK FOR PREPARE CCW @V200820 00371000
+         TM    CONSTAT,CONCNTL+CONOUTPT OUTPUT CONTASK ACTIVE ?@V200820 00372000
+         BNZ   CNSEXIT                  YES -- JUST WAIT FOR IT@V200820 00373000
+         TM    CONSTAT,CONACTV     IS THE TASK STILL ACTIVE ?  @V200820 00374000
+         BZ    CNSEXIT             NO -- DON'T HALT IT TWICE   @V200820 00375000
+         L     R1,CONPNT      CHECK THE NEXT CONTASK IN LINE   @V200820 00376000
+         LTR   R1,R1          ...THERE NORMALLY WILL BE ONE    @V200820 00377000
+         BNP   CNSEXIT        STRANGE - BUT JUST GOTO DMKDSPCH @V200820 00378000
+         TM    CONPARM-CONTASK(R1),PRIORITY  PRIORITY TASK ?   @V200820 00379000
+         BZ    CNSEXIT                       NO -- JUST EXIT   @V200820 00380000
+         NI    CONSTAT,255-CONACTV REMEMBER THE HALT I/O       @V200820 00381000
+         B     INTHALT        HALT THE ACTIVE I/O              @V200820 00382000
+         SPACE                                                          00383000
+INTPREP  EQU   *              HALT A PREPARE IF ONE IS ACTIVE  @V200820 00384000
+         TM    RDEVTFLG,RDEVCTL    CONTROL OPERATION ACTIVE ?  @V200820 00385000
+         BZ    CNSTART             NO -- JUST START THE DEVICE @V200820 00386000
+         TM    RDEVFLAG,RDEVPREP   IS IT A PREPARE CCW ?       @V200820 00387000
+         BZ    CNSEXIT             NO -- WAIT FOR IT TO FINISH @V200820 00388000
+INTHALT  EQU   *              HALT ANY OUTSTANDING I/O         @V200820 00389000
+         TM    RDEVSTA2,RDEVSYNC OUTSTANDING ATTENTION ??      @VA08275 00389050
+         BNO   INTHALT1       NO HANDLE HALT                   @VA08275 00389100
+         NI    RDEVSTA2,X'FF'-RDEVSYNC RESET ATTENTION         @VA08275 00389150
+         L     R3,IOBMISC     GET ATTENTION CPEXBLOK           @VA08275 00389200
+         USING CPEXBLOK,R3                                     @VA08275 00389250
+         L     R9,CPEXR10     GET ATTENTION IOBLOK             @VA08275 00389300
+         ST    R10,CPEXR10    SAVE HALT IOBLOK                 @VA08275 00389350
+         LR    R10,R9         SET UP TO FRET ATTN IOB          @VA08275 00389400
+         BAL   R9,FRETIOB     FRET ATTN IOBLOK                 @VA08275 00389450
+         L     R10,CPEXR10    RESTORE HALT IOBLOK              @VA08275 00389500
+         LA    R0,CPEXSIZE    SIZE OF CPEX IN DW               @VA08275 00389550
+         LR    R1,R3          CPEX ADDRESS IN R1               @VA08275 00389600
+         CALL  DMKFRET        FRET ATTENTION CPEXBLOK          @VA08275 00389650
+         DROP  R3                                              @VA08275 00389700
+INTHALT1 DS    0H                                              @VA08275 00389750
+         CALL  DMKSCNRD       GET THE 'CCU' ADDRESS            @V200820 00390000
+INTDHIO  EQU   *                                               @V200820 00391000
+         SPACE                                                          00392000
+         HDV   0(R1)          .......SCREEEECCCCHHHH.......    @VA06378 00393000
+         SPACE                                                          00394000
+         AIF   (NOT &TRACE(9)).NTR1                             **AIF** 00395000
+         BAL   R15,CNTRACE    TRACE HALT I/O                   @V200820 00396000
+         DC    X'0F00'        TRACE ENTRY FLAG                 @V200820 00397000
+.NTR1    ANOP                                                           00398000
+         SPACE                                                          00399000
+         BC    8,CNSEXIT      CC = 0    INTRPT ALREADY PENDING @VM08581 00400000
+         BC    2,INTDHIO      CC = 2    RETRY THE HALT I/O     @V200820 00401000
+         BC    1,CNSICC3      CC = 3    PUNT                   @V200820 00402000
+         TM    CSW+4,SM+BUSY  SHORT CONTROL UNIT BUSY ?        @V200820 00403000
+         BO    INTDHIO        YES - RETRY THE HALT I/O         @V200820 00404000
+         OI    RDEVFLAG,RDEVHIO    I/O WAS ACTUALLY HALTED     @VM08581 00405000
+         B     CNSEXIT        WAIT FOR SOMETHING TO HAPPEN     @V200820 00406000
+         EJECT                                                          00407000
+*.                                                                      00408000
+* ENTRY POINT -                                                         00409000
+*                                                                       00410000
+*        DMKCNSIN - MAIN INTERRUPT RETURN ADDRESS FOR TERMINAL I/O      00411000
+*                                                                       00412000
+* ATTRIBUTES -                                                          00413000
+*                                                                       00414000
+*        RE-ENTRANT, RESIDENT, ENETERED VIA IOBLOK UNSTACK              00415000
+*                                                                       00416000
+* ENTRY CONDITIONS -                                                    00417000
+*                                                                       00418000
+*        GPR 10 = ADDRESS OF THE UNSTACKED IOBLOK                       00419000
+*        GPR 11 = VMBLOK ADDRESS FROM IOBUSER OR RDEVUSER               00420000
+*        GPR 12 = ADDRESS OF DMKCNSIN                                   00421000
+*                                                                       00422000
+* EXIT CONDITIONS -                                                     00423000
+*                                                                       00424000
+*        EXIT IS MADE VIA GOTO DMKDSPCH                                 00425000
+*                                                                       00426000
+* OPERATION - EXECUTION MUST BE ON THE I/O PROCESSOR IN AP-MODE         00427100
+*                                                                       00428000
+*        FOR 3210, 3215, 1052, ETC. SYSTEM CONSOLES:                    00429000
+*              IF THE 'RDEVENAB' FLAG IS NOT SET, THE INTERRUPT IS      00430000
+*        IGNORED. IF A CC = 3 IS RECEIVED (CONSOLE NOT OPERATIONAL),    00431000
+*        THE MESSAGE 'DMKCNS454I LINE XXX CC=3 NOT OPERATIONAL' IS      00432000
+*        SENT TO THE SYSTEM OPERATOR, AND AN EXIT IS TAKEN.             00433000
+*        FOR DEVICE ERRORS (UNIT CHECK) OTHER THAN 'INTREQ', THE        00434000
+*        TASK IS RETRIED 16 TIMES, THEN CONSIDERED PERMANENT.           00435000
+*        FOR INTERVENTION REQUIRED, AN ATTEMPT IS MADE TO SOUND         00436000
+*        THE CONSOLE ALARM, THE RDEVBLOK IS MARKED NOT READY, AND       00437000
+*        AN EXIT IS TAKEN TO WAIT FOR THE DEVICE END INTERRUPT.         00438000
+*                                                                       00439000
+*        OUTPUT TASK - TEST VIA 'TIO' FOR A PENDING ATTENTION,          00440000
+*        SET RETURN CODE APPROPRIATELY, RETURN TASK TO DMKQCNET.        00441000
+*        INPUT TASK - CALCULATE AMOUNT OF DATA ENTERED, TEST VIA        00442000
+*        'TIO' FOR PENDING ATTENTION, SET RETURN CODE AND CALL          00443000
+*        DMKCNSED TO PERFORM INPUT EDITING AND TRANSLATION IF IT        00444000
+*        WAS REQUESTED. RETURN THE TASK TO DMKQCNET.                    00445000
+*        IF THE 'CANCEL' KEY IS HIT ON A READ (UNIT EXCEPTION),         00446000
+*        CHECK FOR CONCURRENT DEVICE END. IF YES, RETRY THE READ        00447000
+*        IMMEDIATELY. IF NO, MARK THE DEVICE TEMPORARILY NOT READY      00448000
+*        AND WAIT FOR THE DEVICE END TO RETRY THE READ.                 00449000
+*                                                                       00450000
+*        FOR 1050, 2741 CPT-TWX TERMINALS:                              00451000
+*              IF THERE IS NO ACTIVE CONTASK, CHECK FOR COMPLETION      00452000
+*        OF THE ENABLE SEQUENCE. IF YES, TRY TO IDENTIFY THE DEVICE     00453000
+*        (1050, 2741 ONLY) BY BUILDING A CONTROL CONTASK TO WRITE       00454000
+*        CIRCLE-C, PADS, (SHOULD PROVOKE 1050 RESPONSE), FOLLOWED       00455000
+*        BY A READ. IF THE RESPONSE IS CIRCLE-C OR CIRCLE-D, THE        00456000
+*        TERMINAL IS A 2741. IF THE RESPONSE IS CIRCLE-Y, IT IS A       00457000
+*        1050. WRITE THE VM/370 ONLINE MESSAGE AND START A PREPARE      00458000
+*        TO LISTEN FOR AN ATTENTION.                                    00459000
+*                                                                       00460000
+*        IF THERE WAS AN ACTIVE PREPARE, CHECK FOR 'RDEVHIO',           00461000
+*        SHOWING THAT THERE IS A MESSAGE TO WRITE. IF YES, RESTART      00462000
+*        WITH THE TOP CONTASK ON THE RDEVBLOK STACK. IF NO, CHECK       00463000
+*        FOR A UNIT CHECK ON THE PREPARE. IF 16 RETRIES DO NOT          00464000
+*        CLEAR THE ERROR, ASSUME TERMINAL POWER-OFF AND DISCONNECT      00465000
+*        THE USER VIA A CALL TO DMKQCNTO. IF THE PREPARE COMPLETED      00466000
+*        NORMALLY, ASSUME UNSOLICITED ATTENTION AND PROCESS THAT.       00467000
+*                                                                       00468000
+*        ACTIVE CONTASK - IF IT WAS A WRITE CONTASK, DO NORMAL ERROR    00469000
+*        RECOVERY, RETURN THE TASK TO DMKQCNET. IF IT WAS A READ,       00470000
+*        CALCULATE THE NUMBER OF CHARACTERS ENTERED, CHECK FOR THE      00471000
+*        CORRECT ENDING CONTROL SEQUENCE. IF THE ENDING SEQUENCE        00472000
+*        IS NOT CORRECT, AND IT INDICATES A DATA CHECK, SEND THE        00473000
+*        MSG 'READ ERROR' AND RETRY THE READ CONTASK. IF A DATA         00474000
+*        CHECK IS NOT INDICATED, ENTER ATTENTION HANDLING FOR A READ.   00475000
+*        IF EDITING OR TRANSLATION WAS RQUESTED, CALL DMKCNSED TO       00476000
+*        PERFORM THE SERVICES. IF EDITING REDUCES THE INPUT COUNT       00477000
+*        TO ZERO, RETRY THE READ. RETURN THE CONTASK TO DMKQCNET.       00478000
+*                                                                       00479000
+*        ATTENTION HANDLING -                                           00480000
+*              IF 'TERM ATTN ON' IS SET ('RDEVATOF' NOT SET), THE       00481000
+*        SEQUENCE 'RESTORE, EXCLAMATION, IDLES, CR, IDLES' IS SENT      00482000
+*        TO THE TERMINAL (NO RESTORE FOR CPT-TWX). IF ANOTHER ATTN      00483000
+*        IS HIT, THE ATTENTION COUNT 'RDEVATNC' IS SET TO TWO. IF       00484000
+*        16 RETIRES OF THE ATTENTION TASK DO NOT CLEAR THE STATUS,      00485000
+*        A TERMINAL POWER-OFF IS ASSUMED AND THE USER IS DISCON-        00486000
+*        NECTED VIA A CALL TO DMKQCNTO. OTHERWISE, THE RETURN           00487000
+*        CODE IS SET APPROPRIATELY AND THE PREVIOUSLY-ACTIVE CONTASK    00488000
+*        IS RETURNED TO DMKQCNET.                                       00489000
+*                                                                       00490000
+*        WHENEVER THERE IS NO PENDING REQUEST FOR THE TERMINAL, A       00491000
+*        PREPARE COMMAND IS ISSUED DIRECTLY (VIA START I/O) TO          00492000
+*        LISTEN FOR AN UNSOLICITED ATTENTION.                           00493000
+*.                                                                      00494000
+         EJECT                                                          00495000
+         DROP  R13                                             @V200820 00496000
+         USING DMKCNSIN,R12                                    @V200820 00497000
+DMKCNSIN DS    0D             MAIN INTERRUPT RETURN POINT      @V200820 00498000
+         LM    R12,R13,CNSBASE     ESTABLISH ADDRESSABILITY    @V200820 00499000
+         USING DMKCNS,R12,R13                                  @V200820 00500000
+         SPACE 2                                                        00501000
+         LH    R1,IOBRADD     ADDRESS OF REAL DEVICE           @V200820 00502000
+         CALL  DMKSCNRU       LOCATE RDEVBLOK, ETC.            @V200820 00503000
+         SPACE                                                          00504000
+         CLI   RDEVTYPE,TYPTTY     IS THIS A SUPPORTED TERMINAL@V200820 00505000
+         BH    CNIGNOR             NO -- IGNORE THE INTERRUPT  @V200820 00506000
+         TM    IOBFLAG,IOBRES HAS THIS IOBLOK BEEN RESET ?     @VM08809 00507000
+         BO    CNIGNOR        YES - EXIT GRACEFULLY            @VM08809 00508000
+         SWITCH               CONTINUE PROCESSING ON MAIN PROC @V407508 00508100
+         SPACE                                                          00509000
+         TM    IOBSTAT,IOBCC3 ENTRY VIA INTERRUPT ?            @V200820 00510000
+         BO    CNSICC3        NO -- CC = 3 NOT OPERATIONAL     @V200820 00511000
+         BM    CNSNINT        NO -- CC = 1 CSW STORED          @V200820 00512000
+         TM    IOBCSW+5,PRGC+PRTC+CHC+CCC+IFCC    FATAL ?      @V200820 00513000
+         BNZ   CNSLOGF                  YES - QUIT RIGHT NOW   @V200820 00514000
+         TM    IOBCSW+5,CDC   CHANNEL DATA CHECK ?             @V200820 00515000
+         BO    CNSRTRY        YES - RETRY 16 TIMES             @V200820 00516000
+         SPACE                                                          00517000
+CNSNINT  EQU   *              DETERMINE WHAT THE DEVICE TYPE IS@V200820 00518000
+         SLR   R0,R0          CONVENIENT CONSTANT              @V200820 00519000
+         CLI   RDEVTYPE,TYP3210    IS THIS AN EBCDIC TERMINAL ?@V200820 00520000
+         BNE   CNSTERM             NO -- GO HANDLE S/S TERMINAL@V200820 00521000
+         SPACE                                                          00522000
+         TM    RDEVFLAG,RDEVENAB   IS THIS CONSOLE ENABLED ?   @V200820 00523000
+         BZ    CNIGNOR             NO -- IGNORE THE INTERRUPT  @V200820 00524000
+         TM    IOBCSW+4,UC    WAS THERE A UNIT CHECK ?         @V200820 00525000
+         BZ    EBCNOUC        NO -- GO CHECK FOR NOT READY     @V200820 00526000
+         TM    IOBSPEC,IOBUNSL IS IT UNSOL. INTERRUPT?         @VA04091 00527000
+         BO    CNIGNOR        IGNORE THE INTERRUPT             @VA04091 00528000
+         L     R1,IOBIOER     POINTER TO THE IOERBLOK          @V200820 00529000
+         USING IOERBLOK,R1                                     @V200820 00530000
+         TM    IOERDATA,INTREQ     INTERVENTION REQUIRED ?     @V200820 00531000
+         BZ    CNSRTRY             NO -- RETRY 16 TIMES        @V200820 00532000
+         DROP  R1                                              @V200820 00533000
+         BAL   R2,SDRSTAT                                      @VA03757 00533100
+         OI    RDEVSTAT,RDEVNRDY   SET THE NOT READY FLAG BIT  @V200820 00534000
+         LA    R5,ALARMCCW    X'0B' = SOUND THE ALARM          @V200820 00535000
+         BAL   R2,CNSTRIO     ATTEMPT TO RING THE CONSOLE ALARM@V200820 00536000
+         B     CNIGNOR        WAIT FOR 'DE' INTERRUPT          @V200820 00537000
+         EJECT                                                          00538000
+EBCNOUC  EQU   *              NOT A UNIT CHECK                 @V200820 00539000
+         STH   R0,RDEVRCNT     CLEAR THE RETRY COUNT TO ZERO   @V200820 00540000
+         L     R6,RDEVCON     ADDRESS OF CONTASK, IF ANY       @V200820 00541000
+         TM    RDEVSTAT,RDEVNRDY   WAS THE CONSOLE NOT READY ? @V200820 00542000
+         BO    CNRSTRT             YES - MAKE READY AND RESTART@V200820 00543000
+         LA    R2,4(0,0)      SIGNAL FOR A SINGLE ATTENTION    @V200820 00544000
+         CLI   IOBCSW+4,ATTN  UNSOLICITED ATTENTION ?          @VM08635 00545000
+         BE    CNSATTN        YES - CHECK TERMINAL MODE        @VM08635 00546000
+         TM    RDEVFLAG,RDEVACTV   WAS THERE AN ACTIVE CONTASK @V200820 00547000
+         BZ    CNIGNOR             NO -- IGNORE INTERRUPT      @VM08635 00548000
+         CLI   IOBCSW+4,ATTN+BUSY  STATUS CLEARED BY 'SIO' ?   @VM08635 00549000
+         BE    CNRSTRT        YES - JUST RETRY THE SAME TASK   @VM08635 00550000
+         TM    IOBCSW+4,UE    WAS THE 'CANCEL' KEY HIT ?       @V200820 00551000
+         BZ    EBCNOUE        NO --                            @V200820 00552000
+         TM    IOBCSW+4,DE    DID THE DEVICE END ALSO COME IN ?@V200820 00553000
+         BO    CNRSTRT        YES - RESTART THE I/O IMMEDIATELY@V200820 00554000
+         OI    RDEVSTAT,RDEVNRDY   LET THE 'DE' WAKE US UP     @V200820 00555000
+         B     CNIGNOR        ...TO RESTART THE CANCELLED I/O  @V200820 00556000
+         SPACE                                                          00557000
+EBCNOUE  EQU   *                                               @V200820 00558000
+         CL    R10,IOBLINK    IS THIS THE FINAL INTERRUPT?     @VA01962 00559000
+         BNE   CNIGNOR        NO, EXIT & WAIT FOR FINAL INT    @VA01962 00560000
+         TM    RDEVFLAG,RDEVHIO    INTERRUPT DUE TO HALT I/O ? @V200820 00561000
+         BO    CNSTART             YES - START AT THE TOP      @V200820 00562000
+*        CHECK FOR PENDING 'ATTN'  (DOUBLE HIT ON THE 'REQUEST' KEY)    00563000
+         SLR   R2,R2          ATTENTION INDICATOR REGISTER     @V200820 00564000
+         STH   R2,CSW+4       CLEAR REAL CSW STATUS AREA       @V200820 00565000
+         LH    R1,IOBRADD     REAL ADDRESS OF DEVICE           @V200820 00566000
+         TIO   0(R1)          CLEAR PENDING STATUS, IF ANY     @V200820 00567000
+         BC    8,EBCOMPT      CC = 0  --  NOTHING PENDING      @V200820 00568000
+         BC    1,CNSICC3      CC = 3  --  STRANGE....          @V200820 00569000
+         TM    CSW+4,ATTN     WAS THERE AN ATTENTION PENDING ? @V200820 00570000
+         BZ    EBCOMPT        NO -- COMPLETE NORMALLY          @V200820 00571000
+         LA    R2,4(0,0)      CODE FOR SINGLE ATTENTION        @V200820 00572000
+         TM    VMMLEVEL,VMMCPENV   SINGLE ATTENTION TO CP ?    @V200820 00573000
+         BZ    EBCOMPT             NO -- LEAVE IT FOR VIRT MACH@V200820 00574000
+         LA    R2,8(0,0)      CODE FOR MULTIPLE ATTENTIONS     @V200820 00575000
+EBCOMPT  EQU   *              3210-STYLE CONTASK HAS COMPLETED @V200820 00576000
+         NI    CONSTAT,255-CONACTV      NO LONGER ACTIVE       @V200820 00577000
+         TM    CONSTAT,CONOUTPT+CONCNTL    INPUT CONTASK ?     @V200820 00578000
+         BNZ   RETTASK                  NO -- RETURN IT        @V200820 00579000
+*        CALCULATE INPUT DATA LENGTH, DO LINE EDITING, TRANSLATION      00580000
+         L     R7,CONRETN     POINTER TO CALLER'S SAVEAREA     @V200820 00581000
+         L     R3,SAVER1-SAVEAREA(,R7)  BUFFER ADDRESS         @V200820 00582000
+         LA    R4,1(0,0)                                       @V200820 00583000
+         L     R5,SAVER0-SAVEAREA(,R7)  ORIGINAL INPUT COUNT   @V200820 00584000
+         LA    R5,0(R5,R3)    POINT TO END OF ORIGINAL BUFFER  @V200820 00585000
+         BCTR  R5,0           ...ALMOST                        @V200820 00586000
+EBCSCAN  EQU   *              SCAN FOR X'00' AT END OF BUFFER  @V200820 00587000
+         CLI   0(R3),X'00'         END OF ACTUAL DATA ?        @V200820 00588000
+         BE    EBCSCND             YES - CALCULATE LENGTH READ @V200820 00589000
+         BXLE  R3,R4,EBCSCAN       NO -- CONTINUE SEARCH       @V200820 00590000
+EBCSCND  EQU   *                                               @V200820 00591000
+         S     R3,SAVER1-SAVEAREA(,R7)  GR3 = INPUT DATA LENGTH@V200820 00592000
+         B     RETEDIT    GO CHECK FOR EDITING OR TRANSLATION  @V200820 00593000
+         EJECT                                                          00594000
+CNSTERM  EQU   *              INTERRUPT ANALYSIS FOR START/STOP@V200820 00595000
+         TM    RDEVTFLG,RDEVCTL    CONTROL FUNCTION ACTIVE ?   @V200820 00596000
+         BZ    CNSTASK             NO -- SHOULD BE A CONTASK   @V200820 00597000
+         NI    RDEVTFLG,255-RDEVCTL     CONTROL OPERATION COMPL@V200820 00598000
+         TM    RDEVFLAG,RDEVPREP   WAS A PREPARE CCW ACTIVE ?  @V200820 00599000
+         BO    CNSTPRP             YES - CHECK THE RESULTS     @V200820 00600000
+         TM    RDEVTFLG,RDEVREST   ATTENTION RESET ACTIVE ?    @VA01394 00601000
+         BO    CNSAPRP             YES - CHECK INTRPT STATUS   @VA01394 00602000
+         SPACE                                                          00603000
+*              MUST HAVE BEEN THE ENABLE SEQUENCE                       00604000
+         TM    RDEVFLAG,RDEVDISB+RDEVHIO     'DISABLE' COMMAND @V200820 00605000
+         BNZ   CNSNOFF                       YES - SIGN OFF    @V200820 00606000
+         SPACE                                                          00607000
+         TM    IOBCSW+4,UC    UNIT CHECK DURING THE ENABLE ?   @V200820 00608000
+         BZ    CNSENUC        NO -- IDENTIFY TERMINAL TYPE     @V200820 00609000
+         L     R1,IOBIOER     GET ADDR OF IOERBLOK             @VA07645 00610100
+         LTR   R1,R1          IS THERE ONE ?                   @VA07645 00610200
+         BZ    NOCMDREJ       NO, KEEP TESTING                 @VA07645 00610300
+         USING IOERBLOK,R1    DECLARE BASE                     @VA07645 00610400
+         TM    IOERDATA,CMDREJ WAS IT COMMAND REJ ?            @VA07645 00610500
+         BO    CNSRECS1       GO LOG AND DISABLE LINE          @VA07645 00610600
+         DROP  R1                                              @VA07645 00610700
+NOCMDREJ L     R1,IOBCSW      CCW ADDR IN CSW                  @VA07645 00610800
+         S     R1,F8          BACK UP TO CCW (KEY IS ZERO)     @V200820 00611000
+         BP    *+8            ADDRESS IS O.K.                  @V200820 00612000
+         L     R1,IOBCAW      CHECK THE FIRST CCW              @V200820 00613000
+         CLI   0(R1),X'27'    UNIT CHECK ON THE ENABLE CMD ?   @V200820 00614000
+         BE    CNSRTRY        YES - RETRY SIXTEEN TIMES        @V200820 00615000
+         B     CNSNOFF        NO -- JUST GIVE UP ON IT         @V200820 00616000
+CNSENUC  EQU   *              ENABLE HAS COMPLETED             @V200820 00617000
+         STH   R0,RDEVRCNT    RESET THE DEVICE RETRY COUNT     @V200820 00618000
+         NI    RDEVSTA2,X'FF'-RETRYSW TURN OFF RETRY SWITCH    @VA07215 00618500
+         BAL   R9,CNSGTSK     BUILD A CONTROL CONTASK          @VM08538 00619000
+         CLI   RDEVTYPE,TYPTTY     TELEGRAPH TERMINAL ADAPTER ?@V200820 00620000
+         BE    CNSIDTY             YES - ALREADY IDENTIFIED    @V200820 00621000
+CNSITSK  EQU   *              BUILD IDENTIFY SEQUENCE CONTASK  @V200820 00622000
+         MVI   CONPARM,RDEVIDNT    THIS IS AN IDENTIFY TASK    @V200820 00623000
+         MVC   CONCCW1(16),INITRD  START BUILDING THE CCW'S    @V200820 00624000
+         LA    R1,CONCCW4     DATA ADDRESS FOR READ RESPONSE   @V200820 00625000
+         ICM   R1,8,F2+3      COMMAND CODE = X'02' READ        @V200820 00626000
+         ST    R1,CONCCW3     ...                              @V200820 00627000
+         L     R1,PREPCCW+4   FLAGS = SILI, COUNT = 1          @V200820 00628000
+         ST    R1,CONCCW3+4   ...                              @V200820 00629000
+         B     CNSTART        START THE IDENTIFY SEQUENCE      @V200820 00630000
+         EJECT                                                          00631000
+CNSTPRP  EQU   *              PREPARE CCW WAS ACTIVE           @V200820 00632000
+         NI    RDEVFLAG,255-RDEVPREP    PREPARE IS COMPLETE    @VM08581 00633000
+         TM    RDEVFLAG,RDEVHIO    INTERRUPT DUE TO HALT I/O ? @V200820 00634000
+         BO    CNSHPRP             YES - CHECK NEW STATUS      @VA01394 00635000
+         TM    IOBCSW+4,UC    UNIT CHECK ON THE PREPARE ?      @V200820 00636000
+         BO    CNSRTRP        YES - RETRY PREPARE              @VM08581 00637000
+         SLR   R6,R6          NO CONTASK AT THE MOMENT         @V200820 00638000
+         STH   R6,RDEVRCNT    CLEAR DEVICE RETRY COUNT         @V200820 00639000
+         BAL   R7,CNSEXCL     TYPE THE EXCLAMATION MARK        @V200820 00640000
+         B     CNSATTN        FIGURE OUT ATTENTION HANDLING    @V200820 00641000
+         SPACE 2                                                        00642000
+CNSHPRP  EQU   *              PREPARE HAS BEEN HALTED          @VA01394 00643000
+         CL    R11,ASYSVM     IS THERE AN ACTIVE USER ?        @VA01394 00644000
+         BNE   CNSTART        YES - START NEW CONTASK          @VA01394 00645000
+         TM    RDEVFLAG,RDEVDISB   HALTED DUE TO DISABLE CMD ? @VA01394 00646000
+         BO    CNSNOFF             YES - DROP THE LINE         @VA01394 00647000
+         B     CNSTART        TRY AGAIN                        @VA01394 00648000
+         SPACE 2                                                        00649000
+CNSAPRP  EQU   *              PREPARE FOR ATTENTION RESET      @VA01394 00650000
+         NI    RDEVFLAG,255-RDEVHIO     IGNORE HALT I/O FLAG   @VA01394 00651000
+         TM    IOBCSW+4,UC    UNIT CHECK ON THE PREPARE ?      @VA01394 00652000
+         BO    CNSRTRY        YES - RETRY                      @VA01394 00653000
+         NI    RDEVTFLG,255-RDEVREST    RESET IS COMPLETE      @VA01394 00654000
+         L     R6,RDEVCON     TOP CONTASK WAS INTERRUPTED      @VA01394 00655000
+         LH    R3,CONCNT      RESTORE LENGTH OF ATTN INPUT LINE@VA01882 00656000
+         B     CNSCATN        GO HANDLE ATTENTION SIGNAL       @VA01394 00657000
+         EJECT                                                          00658000
+CNSTASK  EQU   *              INTERRUPT FROM ACTIVE CONTASK    @V200820 00659000
+         TM    RDEVFLAG,RDEVACTV   IS THERE AN ACTIVE TASK ?   @V200820 00660000
+         BZ    CNIGNOR             NOT BY US - IGNORE INTERRUPT@V200820 00661000
+         L     R6,RDEVCON     ADDRESS OF THE ACTIVE CONTASK    @V200820 00662000
+         LTR   R6,R6          IS THERE A CONTASK?              @VA02153 00663000
+         BNZ   CNSTASK1       YES, CONTINUE                    @VA02153 00664000
+         TM    RDEVFLAG,RDEVHIO FROM A HIO?                    @VA02153 00665000
+         BNO   CNIGNOR        NO, IGNORE THE INTERRUPT         @VA02153 00666000
+         NI    RDEVFLAG,255-(RDEVACTV+RDEVHIO) RESET FLAGS     @VA02153 00667000
+         B     CNSIDLE        LET TERMINAL SIT IDLE            @VA02153 00668000
+CNSTASK1 EQU   *                                               @VA02153 00669000
+         NI    CONSTAT,255-CONACTV      NO LONGER ACTIVE       @V200820 00670000
+         TM    CONSTAT,CONCNTL     CONTROL CONTASK ?           @V200820 00671000
+         BO    CNSCTAK             YES - INTERPRET THE RESULTS @V200820 00672000
+         TM    RDEVFLAG,RDEVHIO    INTERRUPT DUE TO A HALT I/O @V200820 00673000
+         BO    CNBREAK             YES - ISSUE 'BREAK' SEQUENCE@V200820 00674000
+         SPACE                                                          00675000
+         TM    IOBCSW+4,UC    UNIT CHECK ON THIS TASK ?        @V200820 00676000
+         BO    CNSIOUC        YES - TEST FOR ATTN, READ ERROR  @V200820 00677000
+         SLR   R2,R2          CLEAR THE ATTENTION COUNT        @V200820 00678000
+         STH   R2,RDEVRCNT    RESET DEVICE RETRY COUNT         @V200820 00679000
+         TM    CONSTAT,CONOUTPT    WAS THIS AN OUTPUT TASK ?   @V200820 00680000
+         BO    RETTASK             YES - ALL DONE ALREADY      @V200820 00681000
+CNSINRD  EQU   *              PROCESS COMPLETED READ CONTASK   @V200820 00682000
+         L     R1,IOBCSW      CCW ADDRESS FROM THE CSW         @V200820 00683000
+         S     R1,F8          BACK UP TO ENDING CCW (ZERO KEY) @V200820 00684000
+         BNP   CNRSTRT        INVALID CSW - RETRY THE TASK     @V200820 00685000
+         TM    IOBCSW+5,IL    STOP ON THE DATA-CHAINED CCW ?   @V200820 00686000
+         BO    CNSINCT        YES - CALCULATE INPUT LENGTH     @V200820 00687000
+         CLI   0(R1),X'00'    READ SKIP??                      @VM08804 00688000
+         BNE   CNSDTCK        NO --                            @VM08804 00689000
+         S     R1,F8          BACK UP TO ACTUAL READ CCW       @V200820 00690000
+         LH    R3,6(0,R1)     USE FULL ORIGINAL COUNT          @V200820 00691000
+         B     CNSINCK        ...                              @V200820 00692000
+         SPACE                                                          00693000
+CNSINCT  EQU   *                                               @V200820 00694000
+         LH    R3,6(0,R1)     COUNT FROM THE READ CCW          @V200820 00695000
+         SH    R3,IOBCSW+6    ...MINUS THE RESIDUAL COUNT      @V200820 00696000
+         BM    CNSDTCK        ASSUME DATA CHECK IF NEGATIVE    @V200820 00697000
+         BP    CNSINCK        CONTINUE ONLY IF POSITIVE COUNT  @V200820 00698000
+         CLI   RDEVTYPE,TYP2741    WHAT TYPE OF TERMINAL ?     @V200820 00699000
+         BE    CNSDTCK        2741 - ZERO COUNT = DATA CHECK   @V200820 00700000
+         BH    CNSRTTY        TTY -- ZERO COUNT = GO TYPE CR,LF@V200820 00701000
+         B     CNSRT50        1050 - ZERO COUNT = NORMAL RESET @V200820 00702000
+         EJECT                                                          00703000
+CNSINCK  EQU   *              CHECK INPUT DATA VALIDITY        @V200820 00704000
+         L     R4,0(0,R1)     DATA START ADDRESS FROM CCW      @V200820 00705000
+         LA    R4,0(0,R4)     STRIP OFF THE COMMAND CODE       @V200820 00706000
+         BCTR  R3,0           DECREMENT COUNT FOR CONTROL CHAR @V200820 00707000
+         LA    R5,0(R3,R4)    POINT AT LAST INPUT CHARACTER    @V200820 00708000
+         CLI   RDEVTYPE,TYP2741    IS THIS A 2741 TERMINAL ?   @V200820 00709000
+         BNE   CNSINTR             NO -- GO TRANSLATE INPUT    @V200820 00710000
+         LTR   R0,R3          COUNT IN GR0, TEST FOR ZERO      @V200820 00711000
+         BNP   CNSINTR        ZERO COUNT - DON'T TRY IDENTIFY  @V200820 00712000
+         TM    RDEVFLAG,RDEVIDNT   CODE IDENTIFIED ALREADY ?   @V200820 00713000
+         BO    CNSINTR             YES - JUST CONTINUE AS IS   @V200820 00714000
+         BCTR  R0,0           DECREMENT TO LEAVE OFF 'CR'      @V200820 00715000
+         LR    R1,R4          START ADDRESS TO GR1             @V200820 00716000
+         CALL  DMKTRMID       TRY TO IDENTIFY TERMINAL CODE    @V200820 00717000
+         TM    RDEVFLAG,RDEVIDNT DID TRMID IDENTIFY 2741 CODE? @VA02313 00718000
+         BO    CNSINTR        YES -- GO TRANSLATE TO EBCDIC    @VA02313 00719000
+         NI    CONPARM,255-EDIT NO -- FORCE CFM TO REJECT CMD  @VA02313 00720000
+         SPACE 2                                                        00721000
+CNSINTR  EQU   *              TRANSLATE INPUT DATA TO EBCDIC   @V200820 00722000
+         SLR   R1,R1                                           @V200820 00723000
+         IC    R1,RDEVTMCD    TERMINAL CODE INDEX              @V200820 00724000
+         L     R1,TRANSIN(R1)        INPUT TRANSLATE TABLE     @V200820 00725000
+         LR    R9,R2          SAVE R2 ACROSS CALL              @VM03172 00726000
+         TRANS 2,1,OPT=(BRING,DEFER,SYSTEM),AFFINITY GET TABLE @V407508 00727100
+         LR    R1,R2          TABLE ADDRESS NEEDED IN R1       @VM03172 00728000
+         LR    R2,R9          RESTORE FROM TRANS CALL          @VM03172 00729000
+         A     R3,F1          RESTORE FULL DATA COUNT          @VA06313 00729100
+         LA    R15,TRNSLAT    TRANSLATION SUBROUTINE           @VA01217 00730000
+         BALR  R14,R15        TRANSLATE INPUT TO EBCDIC        @VA01217 00731000
+         BCTR  R3,0           SUBTRACT ONE FROM DATA COUNT     @VA06313 00731100
+         CLI   RDEVTYPE,TYP2741    SEPARATE THE DEVICE TYPES   @V200820 00732000
+         BL    CNSIN50        1050 --                          @V200820 00733000
+         BE    CNSIN41        2741 --                          @V200820 00734000
+*        BH    CNSINTY        TTY  --                                   00735000
+         CLI   0(R5),X'FF'    LAST CHARACTER = 'XOFF' ?        @V200820 00736000
+         BE    CNSRTTY        YES - SEND NEW-LINE SEQUENCE     @V200820 00737000
+         CLI   0(R5),X'0D'    LAST CHAR = 'CR' ?               @V200820 00738000
+         BE    CNSRTTY        YES - SEND NEW-LINE SEQUENCE     @V200820 00739000
+         BAL   R7,CNSEXCL     PROCESS ATTENTION OCCURRENCE     @V200820 00740000
+CNSRTTY  EQU   *              SEND TELETYPE NEW-LINE SEQUENCE  @V200820 00741000
+         LA    R7,TTYENDS     CR, LF, XOFF SEQUENCE            @V200820 00742000
+         LA    R4,3(0)        ...LENGTH                        @V200820 00743000
+         B     CNSRT41        GO BUILD CONTROL TASK FOR WRITE  @V200820 00744000
+         EJECT                                                          00745000
+CNSIN41  EQU   *              READ COMPLETION FOR 2741 TERMINAL@V200820 00746000
+         LA    R7,EOA2741     POINT TO ENDING SEQ.             @VA06314 00747100
+         LA    R1,2(R3)       COMPUTE NO. OF IDLES NEEDED      @VA06314 00747200
+         SR    R0,R0          CLEAR REG                        @VA06314 00747300
+         D     R0,F10         COMPUTE NO. OF IDLES             @VA06314 00747400
+         C     R1,F15         IDLES EXCEED MAX. ??             @VA06314 00747500
+         BNH   CNSIN41A       NO, NO FURTHER CALC.             @VA06314 00747600
+         L     R1,F15         SET IDLES TO MAX.                @VA07609 00747700
+CNSIN41A EQU   *                                               @VA06314 00747800
+         LA    R4,2(,R1)      ADD CIRCLE D AND ONE MORE IDLE   @VA06314 00747900
+CNSRT41  EQU   *              BUILD CONTROL TASK FOR READ RESET@V200820 00749000
+         OI    CONPARM,PRIORITY   MAINTAIN CONTASK SEQUENCE    @VA03983 00750000
+         OI    CONSTAT,CONACTV     READ HAS ALREADY COMPLETED  @VM08581 00751000
+         BAL   R9,CNSGTSK     BUILD AND INITIALIZE CONTROL TASK@V200820 00752000
+         ST    R7,CONADDR     DATA ADDRESS                     @V200820 00753000
+         MVI   CONCOMND,X'01' COMMAND CODE = X'01' WRITE       @V200820 00754000
+         MVI   CONFLAG,SILI                                    @V200820 00755000
+         STH   R4,CONCNT      SET DATA COUNT                   @V200820 00756000
+         CLI   RDEVTYPE,TYP2741    HAVE WE HANDLED THE COUNT ? @V200820 00757000
+         BNE   CNSREND             YES - SETUP TO WRITE 'XOFF' @V200820 00758000
+         LTR   R3,R3          2741 MUST SEND AT LEAST ONE CHAR @V200820 00759000
+         BNP   CNSIA41        ONLY ONE -- MUST BE ATTENTION    @V200820 00760000
+         BCTR  R3,0           DECREMENT COUNT FOR NEW-LINE     @V200820 00761000
+         BCTR  R5,0           POINT AT NEW-LINE (IF IT'S THERE)@V200820 00762000
+         CLI   0(R5),X'15'    TRANSLATED CARRIAGE RETURN ?     @V200820 00763000
+         BE    CNSREND        YES - READ COMPLETED NORMALLY    @V200820 00764000
+         LA    R3,1(0,R3)     RESTORE THE INPUT COUNT          @V200820 00765000
+CNSIA41  EQU   *              PROCESS ATTENTION ON INPUT LINE  @V200820 00766000
+         MVI   CONPARM,RDEVPSUP+RDEVPREP     CIRCLE-D PLUS ATTN@V200820 00767000
+         ST    R3,CONRETN     SAVE THE INPUT COUNT FOR LATER   @V200820 00768000
+         B     CNSTART        START THE WRITE CIRCLE-D         @V200820 00769000
+         SPACE 2                                                        00770000
+CNSIN50  EQU   *              READ COMPLETION FOR 1050 TERMINAL@V200820 00771000
+         LTR   R3,R3          COUNT ZERO RIGHT NOW ?           @V200820 00772000
+         BNP   CNSRT50        YES - NORMAL RESET SEQUENCE      @V200820 00773000
+         BCTR  R5,0           IGNORE CIRCLE C AT END           @V200820 00774000
+         CLI   0(R5),X'15'    LAST CHAR = TRANSLATED 'CR' ?    @V200820 00775000
+         BNE   CNSRT50        NO -- RESET WITH NEW-LINE        @V200820 00776000
+         BCTR  R3,0           IGNORE THE 'CR', ALSO            @V200820 00777000
+         LA    R5,1(0,0)      LENGTH FOR RE-ADDRESSING         @V200820 00778000
+         B     CNSRS50        GO BUILD RE-ADDRESS CONTASK      @V200820 00779000
+         SPACE                                                          00780000
+CNSRT50  EQU   *              RE-ADDRESS WITH NEW-LINE         @V200820 00781000
+         LA    R5,4(0,0)      INCLUDE 'CR', 3 IDLES            @V200820 00782000
+CNSRS50  EQU   *                                               @V200820 00783000
+         LTR   R2,R2          WERE ANY ATTENTIONS PROCESSED ?  @V200820 00784000
+         BP    RETEDIT        YES - NO RE-ADDRESS REQUIRED     @V200820 00785000
+         OI    CONSTAT,CONACTV     READ HAS ALREADY COMPLETED  @VM08581 00786000
+         OI    CONPARM,PRIORITY   MAINTAIN CONTASK SEQUENCE    @VA03983 00787000
+         BAL   R9,CNSGTSK     BUILD AND INITIALIZE CONTROL TASK@V200820 00788000
+         MVC   CONCCW1(8*3),RAD1050     RE-ADDRESSING CCW'S    @V200820 00789000
+         STH   R5,CONCCW3+6   SET LENGTH IN LAST CCW           @V200820 00790000
+         SPACE                                                          00791000
+CNSREND  EQU   *              EXECUTE ENDING TASK AFTER READ   @V200820 00792000
+         MVI   CONPARM,RDEVPSUP    FLAG THIS AS WRITE CIRCLE-D @V200820 00793000
+         L     R1,CONPNT      GR1 = COMPLETED READ CONTASK     @VM08581 00794000
+         STH   R3,CONCNT-CONTASK(,R1)   SAVE INPUT COUNT       @VM08581 00795000
+         L     R1,CONRETN-CONTASK(,R1)  RESPONSE SAVEAREA      @VM08643 00796000
+         ST    R2,SAVER2-SAVEAREA(,R1)  PASS BACK RETURN CODE  @VM08643 00797000
+         B     CNSTART        START UP THE WRITE CIRCLE-D      @VM08581 00798000
+         EJECT                                                          00799000
+CNSIOUC  EQU   *              UNIT CHECK ON CONTASK I/O        @V200820 00800000
+         L     R3,IOBIOER     IOERBLOK POINTER FROM THE IOBLOK @V200820 00801000
+         USING IOERBLOK,R3                                     @V200820 00802000
+         TM    IOERDATA,INTREQ     INTERVENTION REQUIRED ?     @V200820 00803000
+         BZ    CNSIODC             NO -- TEST FOR DATA CHECK   @V200820 00804000
+         TM    CONSTAT,CONOUTPT    OUTPUT TASK ?               @V200820 00805000
+         BO    CNBKPRP             YES - SETUP FOR PREPARE CCW @V200820 00806000
+         CLI   RDEVTYPE,TYP2741    2741 TERMINAL TYPE ?        @V200820 00807000
+         BNE   CNSATINP       NO -- MUST BE AN ATTENTION       @VA01882 00808000
+CNSIODC  EQU   *                                               @V200820 00809000
+         TM    IOERDATA,TIMEOUT    LINE TIME-OUT ?             @V200820 00810000
+         BO    CNSLOGF             YES - DROP THE LINE         @V200820 00811000
+         TM    IOERDATA,DATACHK    DATA CHECK ?                @V200820 00812000
+         BZ    CNSRTRY             NO -- RETRY SIXTEEN TIMES   @V200820 00813000
+         DROP  R3                                              @V200820 00814000
+CNSDTCK  EQU   *              DATA CHECK                       @V200820 00815000
+         TM    CONSTAT,CONOUTPT+CONCNTL      INPUT CONTASK ?   @V200820 00816000
+         BNZ   CNSRTRY        NO, RETRY SIXTEEN TIMES          @VA03757 00817000
+         BAL   R9,CNSGTSK     GET A CONTASK FOR 'READ ERROR'   @V200820 00818000
+         CLI   RDEVTYPE,TYP2741    SPEARATE THE DEVICE TYPES   @V200820 00819000
+         BH    CNSDTTY        TTY  --                          @V200820 00820000
+         BL    CNSDT50        1050 --                          @V200820 00821000
+*        BE    CNSDT41        2741 --                                   00822000
+         MVC   CONCCW1(16),RDERR41 READ ERROR CCW'S FOR 2741   @V200820 00823000
+         TM    RDEVTMCD,RDEVCORR   CORRESPONDENCE TERMINAL ?   @V200820 00824000
+         BZ    CNSDTSK             NO -- O.K. AS IS (PTTC/EBCD)@V200820 00825000
+         LA    R5,RDERRCOR    CORRESPONDENCE MESSAGE           @V200820 00826000
+         STCM  R5,B'0111',CONADDR+9 RESET CCW DATA ADDRESS     @VA01586 00827000
+         B     CNSDTSK                                         @V200820 00828000
+CNSDT50  EQU   *              1050 DATA CHECK MESSAGE          @V200820 00829000
+         MVC   CONCCW1(16),RDERR50      ...                    @V200820 00830000
+         B     CNSDTSK                                         @V200820 00831000
+CNSDTTY  EQU   *              TELETYPE READ ERROR              @V200820 00832000
+         MVC   CONCCW1(8),RDERRTY       ...                    @V200820 00833000
+         SPACE                                                          00834000
+CNSDTSK  EQU   *              SETUP FOR MESSAGE, READ REPEAT   @V200820 00835000
+         MVI   CONPARM,RDEVPSUP    READ-ENDING CONTROL TASK    @V200820 00836000
+         L     R6,CONPNT      RE-ACCESS READ CONTASK           @V200820 00837000
+         BAL   R9,CNCLEAR     CLEAR INPUT BUFFER FOR NEXT TIME @V200820 00838000
+         TM    RDEVRCNT+1,X'FF' COUNT ONE OR LARGER ???        @VA03757 00838100
+         BM    NOTFST         YES, FORGET ABOUT UPDATING       @VA03757 00838200
+         OI    RDEVRCNT+1,X'01' MAKE IT AT LEAST ONE           @VA03757 00838300
+         BAL   R2,SDRSTAT     PREPARE FOR UPDATE               @VA03757 00838400
+NOTFST   EQU   *                                               @VA03757 00838500
+         B     CNSTART        START UP THE ERROR MESSAGE TASK  @V200820 00839000
+         EJECT                                                          00840000
+CNSATINP EQU   *              CALCULATE LENGTH OF ATTN INPUT   @VA01882 00841000
+*                             LINE (TTY, 1050)                          00842000
+         L     R1,IOBCSW      CCW ADDRESS FROM THE CSW         @VA01882 00843000
+         S     R1,F8          BACK UP TO ENDING CCW (ZERO KEY) @VA01882 00844000
+         BNP   CNRSTRT        INVALID CSW - RETRY THE TASK     @VA01882 00845000
+         TM    IOBCSW+5,IL    STOP ON THE DATA-CHAINED CSW ?   @VA01882 00846000
+         BO    CNSATIN1       YES - CALCULATE INPUT LENGTH     @VA01882 00847000
+         CLI   0(R1),X'00'    READ SKIP??                      @VA01882 00848000
+         BNE   CNSDTCK        NO --                            @VA01882 00849000
+         S     R1,F8          BACK UP TO ACTUAL READ CCW       @VA01882 00850000
+         LH    R3,6(0,R1)     USE FULL ORIGINAL COUNT          @VA01882 00851000
+         B     CNSATIN2       ...                              @VA01882 00852000
+         SPACE                                                          00853000
+CNSATIN1 EQU   *              COMPUTE NUMBER OF BYTES          @VA01882 00854000
+*                             ACTUALLY READ                             00855000
+         LH    R3,6(0,R1)     COUNT FROM THE READ CCW          @VA01882 00856000
+         SH    R3,IOBCSW+6    ...MINUS THE RESIDUAL COUNT      @VA01882 00857000
+         BM    CNSDTCK        ASSUME DATA CHECK IF NEGATIVE    @VA01882 00858000
+         SPACE                                                          00859000
+CNSATIN2 EQU   *              SAVE NUMBER OF BYTES READ (TTY,  @VA01882 00860000
+*                             1050)                                     00861000
+         STH   R3,CONCNT      STASH AWAY FOR LATER USE         @VA01882 00862000
+         SPACE 1                                                        00862010
+         LTR   R3,R3          ANY DATA TO TRANSLATE?           @VA05903 00862020
+         BNP   CNBKPRP        NO...NO NEED TO TRANSLATE TO     @VA05903 00862030
+*                             EBCDID                                    00862040
+         L     R4,0(,R1)      GET DATA ADDR FROM CCW.          @VA05903 00862050
+         LA    R4,0(,R4)      REMOVE COMMAND CODE FROM ADDR.   @VA05903 00862060
+         SLR   R1,R1                                           @VA05903 00862070
+         IC    R1,RDEVTMCD    GET TERM CODE.                   @VA05903 00862080
+         L     R1,TRANSIN(R1) GET VIRT ADDR OF TRANSLATE TBL.  @VA05903 00862090
+         TRANS 2,1,OPT=(BRING,DEFER,SYSTEM) BRING IN TR TBL.   @VA05903 00862100
+         LR    R1,R2          REAL ADDR IN GPR1.               @VA05903 00862110
+         LA    R15,TRNSLAT    GO TRANSLATE                     @VA05903 00862130
+         BALR  R14,R15        ASCII TO EBCDIC.                 @VA05903 00862140
+         SPACE 2                                                        00863000
+CNBKPRP  EQU   *              SETUP PREPARE FOR 'ATTN' SIGNAL  @V200820 00864000
+         OI    RDEVTFLG,RDEVREST   ATTENTION RESET IN PROGRESS @VA01394 00865000
+         LA    R5,PREPCCW     START UP A PREPARE COMMAND       @VA01394 00866000
+         BAL   R2,CNSTRIO          . . .                       @VA01394 00867000
+         BNZ   CNSLOGF        CC = 1 IS NOT VALID              @VA01394 00868000
+         BAL   R9,FRETIOB     RELEASE IOBLOK AND IOERBLOK      @VA01394 00869000
+         B     INTHALT        HALT I/O TO PREVENT LINE HANG    @VA01394 00870000
+         EJECT                                                          00871000
+CNSCTAK  EQU   *              CONTROL TASK HAS COMPLETED       @V200820 00872000
+         TM    CONPARM,RDEVPSUP    READ COMPLETION TASK ?      @V200820 00873000
+         BZ    CNSCTID             NO -- CHECK FOR IDENTIFY    @V200820 00874000
+         TM    IOBCSW+4,UC    UNIT CHECK ON RE-ADDRESS ?       @V200820 00875000
+         BO    CNSRTRY        YES - RETRY                      @V200820 00876000
+         TM    IOBCSW+4,UE    UNIT EXCEPTION ?                 @V200820 00877000
+         BO    CNSCDRT        YES - RETRY THE CIRCLE-D         @V200820 00878000
+         TM    CONPARM,RDEVPREP    ATTN-LOGIC TASK ALSO ?      @V200820 00879000
+         BO    CNSCPRP             YES - GO HANDLE ATTENTION   @VA01394 00880000
+         BAL   R7,CNSRETN     DISPOSE OF CONTROL CONTASK       @VM08581 00881000
+         TM    CONSTAT,CONACTV     HAS THE READ FINISHED ?     @VM08581 00882000
+         BZ    CNSTART             NO -- START IT UP           @VM08581 00883000
+         LH    R3,CONCNT      PICK UP INPUT COUNT              @VM08581 00884000
+         L     R1,CONRETN     ADDRESS OF RESPONSE SAVEAREA     @VM08643 00885000
+         L     R2,SAVER2-SAVEAREA(,R1)  PICK UP RETURN CODE    @VM08643 00886000
+         B     RETEDIT        GO HANDLE EDITING, ETC.          @VM08581 00887000
+         SPACE 2                                                        00888000
+CNSCDRT  EQU   *              RETRY WRITE OF CIRCLE-D          @V200820 00889000
+         CLI   RDEVTYPE,TYPTTY     WAS 'BREAK' ALREADY DONE ?  @V200820 00890000
+         BNE   CNSRTRY             YES - JUST RETRY            @V200820 00891000
+         TM    CONSTAT,CONRTRY     HAVE WE BEEN HERE BEFORE ?  @V200820 00892000
+         BO    CNSRTRY             YES - JUST RETRY            @V200820 00893000
+         MVC   CONCCW2(8),CONCCW1  MOVE DOWN THE SINGLE CCW    @V200820 00894000
+         MVC   CONCCW1(8),BRK2741  MOVE IN A WRITE BREAK       @V200820 00895000
+         OI    CONSTAT,CONRTRY     DO THIS ONLY ONCE           @V200820 00896000
+         B     CNSRTRY        RETRY SIXTEEN TIMES              @V200820 00897000
+         EJECT                                                          00898000
+CNSCTID  EQU   *                                               @V200820 00899000
+         TM    CONPARM,RDEVIDNT    TASK TO IDENTIFY THE DEVICE @V200820 00900000
+         BZ    CNSCTPR             NO --                       @V200820 00901000
+         CLI   IOBCSW+4,CE+DE      CLEAN ENDING STATUS ?       @V200820 00902000
+         BNE   CNSCIDD             NO -- TEST FOR UNIT CHECK   @V200820 00903000
+         CLI   CONCCW4,X'1F'  CIRCLE C RESPONSE ? (2741)       @V200820 00904000
+         BE    CNSID41        YES --                           @V200820 00905000
+         CLI   CONCCW4,X'16'  CIRCLE D RESPONSE ? (2741)       @V200820 00906000
+         BE    CNSID41        YES --                           @V200820 00907000
+         CLI   CONCCW4,X'76'  CIRCLE Y RESPONSE ? (1050)       @V200820 00908000
+         BNE   CNSRTRY        NO --- RETRY THE SEQUENCE        @V200820 00909000
+CNSID50  EQU   *              IDENTIFY FOR 1050 TERMINALS      @V200820 00910000
+         MVI   RDEVTYPE,TYP1050    SET THE DEVICE TYPE         @V200820 00911000
+         MVI   RDEVTMCD,RDEVPTTC   ...TERMINAL CODE            @V200820 00912000
+         NI    RDEVFLAG,255-RDEVPSUP    NO 1050 PRINT-SUPPRESS @VM08830 00913000
+         LA    R5,RESET50     'VM/370 ONLINE' MESSAGE FOR 1050 @V200820 00914000
+         B     CNSONLN        GO SETUP TO TYPE IT OUT          @V200820 00915000
+CNSIDTY  EQU   *              IDENTIFY FOR TELEGRAPH TERMINALS @V200820 00916000
+         MVI   RDEVTMCD,RDEVUSC8   SET TERMINAL CODE           @V200820 00917000
+         LA    R5,RESETTY     'VM/370 ONLINE' MESSAGE FOR TTY  @V200820 00918000
+         B     CNSONLN        SETUP TO TYPE IT OUT             @V200820 00919000
+CNSID41  EQU   *              IDENTIFY FOR 2741 TERMINAL       @V200820 00920000
+         MVI   RDEVTYPE,TYP2741    SET THE DEVICE TYPE         @V200820 00921000
+         NI    RDEVFLAG,255-RDEVIDNT    CODE NOT YET IDENTIFIED@V200820 00922000
+         OI    RDEVTFLG,RDEVATOF   SUPPRESS ATTN UNTIL IT IS   @V200820 00923000
+         LA    R5,RESET41     'VM/370 ONLINE' MESSAGE FOR 2741 @V200820 00924000
+CNSONLN  EQU   *              WRITE 'VM/370 ONLINE' MESSAGE    @V200820 00925000
+         XC    CONCCW1(4*8),CONCCW1     RE-USE THE SAME CONTASK@V200820 00926000
+         MVC   CONCCW1(8),0(R5)    MOVE IN THE CORRECT CCW     @V200820 00927000
+         MVI   CONPARM,RDEVENAB    THIS IS AN ONLINE MESSAGE   @V200820 00928000
+         CLI   RDEVTYPE,TYP2741    IS THIS A 2741 ?            @V200820 00929000
+         BNE   CNSTART             NO -- WE'RE ALL SET         @V200820 00930000
+         MVC   CONCCW2(8),8(R5)    MOVE IN THE SECOND CCW      @V200820 00931000
+         B     CNSTART        START UP THE CONTASK I/O         @V200820 00932000
+         SPACE                                                          00933000
+CNSCIDD  EQU   *              UNCLEAN FINISH ON IDENTIFY TASK  @V200820 00934000
+         TM    IOBCSW+4,UC    WAS IT A UNIT CHECK ?            @V200820 00935000
+         BZ    CNSRTRY        NO -- JUST RETRY THE TASK        @V200820 00936000
+         L     R3,IOBIOER     IOERBLOK POINTER FROM THE IOBLOK @V200820 00937000
+         USING IOERBLOK,R3                                     @V200820 00938000
+         TM    IOERDATA,TIMEOUT    WAS IT A LINE TIME-OUT ?    @V200820 00939000
+         BO    CNSID41             YES - THAT'S A 2741 FOR YOU @V200820 00940000
+         TM    IOERDATA,CMDREJ     COMMAND REJECT ON 'BREAK' ? @V200820 00941000
+         BO    CNSDISA             YES - DISABLE THE LINE      @V200820 00942000
+         TM    IOERDATA,X'0A' DATA CHECK OR LOST DATA          @VA05612 00942100
+         BNZ   CNSRTRY        YES - GO RETRY                   @VA05612 00942200
+         TM    IOERDATA,INTREQ     INTERVENTION REQUIRED ?     @V200820 00943000
+         BZ    CNSLOGF             NO -- DISABLE AND RE-ENABLE @V200820 00944000
+         DROP  R3                                              @V200820 00945000
+         MVC   CONCCW1(8),PREPCCW  MOVE IN A PREPARE CCW       @V200820 00946000
+         MVI   CONPARM,RDEVACTV    RETRY FOR IDENTIFY          @V200820 00947000
+         XC    CONCCW2(3*8),CONCCW2     CLEAR REST OF CCW AREA @V200820 00948000
+         B     CNSTART        START UP THE PREPARE             @V200820 00949000
+         EJECT                                                          00950000
+CNSCTPR  EQU   *              CHECK OTHER CONTROL TASK ENDINGS @V200820 00951000
+         TM    CONPARM,RDEVHIO     ATTENTION-PROCESSING TASK ? @V200820 00952000
+         BO    CNSEXRT             YES --                      @V200820 00953000
+         SPACE                                                          00954000
+         TM    CONPARM,RDEVDISB    DISABLE-LINE TASK ?         @V200820 00955000
+         BO    CNSNOFC             YES --                      @V200820 00956000
+         SPACE                                                          00957000
+         TM    CONPARM,RDEVACTV    RETRY AFTER IDENTIFY FAILURE@V200820 00958000
+         BO    CNSIDNT             YES --                      @V200820 00959000
+         SPACE                                                          00960000
+*        MUST BE THE VM/370 ONLINE MESSAGE . . .                        00961000
+         TM    IOBSTAT,IOBCC1      COND CODE ONE ON START I/O ?@V200820 00962000
+         BO    CNSLOGF             YES  - DROP THE LINE        @V200820 00963000
+         TM    RDEVFLAG,RDEVDISB   DISABLE THIS LINE NOW ?     @V200820 00964000
+         BO    CNSNOFF             YES - STOP SHORT OF LOGON   @V200820 00965000
+         B     RETCNTL             RETURN TASK AND SET IDLE    @V200820 00966000
+         SPACE                                                          00967000
+CNSIDNT  EQU   *     IDENTIFY FAILED, PREPARE HAS COMPLETED    @V200820 00968000
+         TM    IOBCSW+4,UC    UNIT CHECK ON THE PREPARE ?      @V200820 00969000
+         BO    CNSRTRY        YES - RETRY SIXTEEN TIMES        @V200820 00970000
+         B     CNSITSK        GO RESET FOR IDENTIFY SEQUENCE   @V200820 00971000
+         SPACE                                                          00972000
+CNSCPRP  EQU   *              PREPARE LOGIC FOR INPUT ATTN     @VA01394 00973000
+         L     R3,CONRETN     SAVED INPUT COUNT (IF ANY)       @V200820 00974000
+         BAL   R7,CNSRETN     RETURN FINISHED CONTASK          @V200820 00975000
+CNSCATN  EQU   *              PROCESS AFTER ATTENTION RESET    @VA01394 00976000
+         BAL   R7,CNSEXCL     PROCESS ATTENTION SIGNAL         @V200820 00977000
+         TM    CONSTAT,CONOUTPT+CONCNTL      INPUT CONTASK ?   @V200820 00978000
+         BNZ   RETTASK             NO -- JUST RETURN IT        @V200820 00979000
+         B     RETEDIT        PROCESS COMPLETED INPUT TASK     @V200820 00980000
+         EJECT                                                          00981000
+CNSEXCL  EQU   *              PROCESS ATTENTION SIGNAL         @V200820 00982000
+         LTR   R6,R6          IS THERE AN ACTIVE CONTASK ?     @V200820 00983000
+         BNP   CNSEXC1        NO -- DON'T SAVE COUNT, ETC.     @V200820 00984000
+         STH   R3,CONCNT      SAVE INPUT DATA COUNT            @V200820 00985000
+         OI    CONPARM,PRIORITY   MAINTAIN SEQUENCE ORDER FOR  @VA02785 00986000
+*                                STACKING CONTASKS                      00987000
+         NI    CONSTAT,255-CONESCP CCW STRING CLOBBERED        @V200820 00988000
+CNSEXC1  EQU   *      BUILD CONTROL TASK FOR EXCLAMATION WRITE @V200820 00989000
+         MVI   RDEVATNC,X'00' CLEAR DEVICE ATTENTION COUNT     @V200820 00990000
+         LA    R0,CONTSIZE+2  GET A LARGE CONTROL TASK         @V200820 00991000
+         BAL   R9,CNSGTSZ     ...                              @V200820 00992000
+         ST    R7,CONRETN     SAVE INTERNAL RETURN ADDRESS     @V200820 00993000
+CNSEXC2  EQU   *              RE-ENTER TO REBUILD CCW STRING   @V200820 00994000
+         MVI   CONPARM,RDEVHIO     IDENTIFY THIS CONTROL TASK  @V200820 00995000
+         SLR   R1,R1          CLEAR A WORK REGISTER            @V200820 00996000
+         IC    R1,RDEVTMCD    TERMINAL CODE SPECIFICATION      @V200820 00997000
+         L     R1,TRANSOUT(R1)     GR1 = OUTPUT TRANSLATE TABLE@V200820 00998000
+         TRANS 2,1,OPT=(BRING,DEFER,SYSTEM),AFFINITY GET TABLE @V407508 00999100
+         LR    R1,R2          TABLE ADDRESS NEEDED IN R1       @VM03172 01000000
+         TM    RDEVTFLG,RDEVATOF   SUPPRESS ATTENTION SIGNAL ? @V200820 01001000
+         BO    CNSEXNO             YES - JUST SEND IDLES       @V200820 01002000
+         IC    R2,X'5A'(0,R1) GR2 = EXCLAMATION POINT CHARACTER@V200820 01003000
+         LA    R3,10(0,0)     LENGTH OF WRITE CHARACTER STRING @V200820 01004000
+         CLI   RDEVTYPE,TYPTTY     TELEGRAPH TERMINAL TYPE ?   @V200820 01005000
+         BE    CNSEXC3             YES - SETUP FOR EXCLAMATION @V200820 01006000
+         ICM   R2,B'0010',X'14'(R1)     ADD RESTORE CHARACTER  @V200820 01007000
+         STH   R2,CONDATA     SET DATA IN CONTASK BUFFER       @V200820 01008000
+         MVC   CONDATA+2(8),EXMSG45     MOVE IN IDLES, NEW-LINE@V200820 01009000
+         B     CNSEXCW        GO BUILD WRITE CCW STRING        @V200820 01010000
+CNSEXC3  EQU   *                                               @V200820 01011000
+         STC   R2,CONDATA     USE ONLY EXCLAMATION FOR TELETYPE@V200820 01012000
+         MVC   CONDATA+1(9),EXMSGTY     MOVE IN IDLES, NEW-LINE@V200820 01013000
+         B     CNSEXCW        GO BUILD WRITE CCW STRING        @V200820 01014000
+CNSEXNO  EQU   *              SUPPRESS EXCLAMATION AND NEW-LINE@V200820 01015000
+         LA    R3,6(0,0)      LENGTH OF IDLES STRING           @V200820 01016000
+         MVC   CONDATA(6),FFS      TTY IDLES = X'FF'           @V200820 01017000
+         CLI   RDEVTYPE,TYPTTY     DID WE GUESS RIGHT ?        @V200820 01018000
+         BE    CNSEXCW             YES --                      @V200820 01019000
+         MVC   CONDATA(6),IDLCHAR  2741, 1050 IDLES = X'5E'    @V200820 01020000
+         IC    R2,X'14'(0,R1) RESTORE CHARACTER                @V200820 01021000
+         STC   R2,CONDATA     SET TO RESTORE TYPING            @V200820 01022000
+CNSEXCW  EQU   *                                               @V200820 01023000
+         LA    R1,CONCCW1     WHERE TO PUT THE WRITE CCW       @V200820 01024000
+         CLI   RDEVTYPE,TYP1050    IS THIS A 1050 ?            @V200820 01025000
+         BNE   CNSEXCB             NO -- JUST BUILD WRITE CCW  @V200820 01026000
+         MVC   CONCCW1(3*8),BRK1050     RE-ADDRESSING SEQUENCE @V200820 01027000
+         OI    CONCCW3+4,CC   ADD CHAINING TO LAST CCW         @V200820 01028000
+         LA    R1,CONCCW4     NEW PLACE FOR THE WRITE CCW      @V200820 01029000
+CNSEXCB  EQU   *                                               @V200820 01030000
+         LA    R4,CONDATA     DATA ADDRESS FOR WRITE           @V200820 01031000
+         ST    R4,0(0,R1)     SET IN CCW ADDRESS FIELD         @V200820 01032000
+         MVI   0(R1),X'01'    COMMAND CODE = X'01' WRITE       @V200820 01033000
+         MVI   4(R1),SILI     CCW FLAGS = SILI                 @V200820 01034000
+         STH   R3,6(0,R1)     SET THE DATA COUNT               @V200820 01035000
+         B     CNSTART        GO WRITE EXCLAMATION POINT, ETC. @V200820 01036000
+         EJECT                                                          01037000
+CNSEXRT  EQU   *              ATTENTION TASK HAS COMPLETED     @V200820 01038000
+         TM    CONPARM,RDEVPREP    MULTIPLE-ATTENTION RESET ?  @V200820 01039000
+         BZ    CNSEXR1             NO --                       @V200820 01040000
+         TM    IOBCSW+4,UC    UNIT CHECK ON THE PREPARE ?      @V200820 01041000
+         BO    CNSRTRY        YES - RETRY THE TASK             @V200820 01042000
+         B     CNSEXC2        REBUILD CCW STRING FOR EXCLAMATIO@V200820 01043000
+CNSEXR1  EQU   *              RETURN FROM EXCLAMATION WRITE    @V200820 01044000
+         SLR   R0,R0               CONSTANT                    @V200820 01045000
+         SLR   R1,R1                                           @V200820 01046000
+         IC    R1,RDEVATNC    PICK UP ATTENTION COUNT          @V200820 01047000
+         LA    R1,1(0,R1)     INCREMENT.......                 @V200820 01048000
+         CL    R1,F2          MORE THAN TWO ATTENTIONS ?       @V200820 01049000
+         BH    *+8            YES - REMEMBER ONLY TWO          @V200820 01050000
+         STC   R1,RDEVATNC    RESET FOR NEXT TIME THROUGH      @V200820 01051000
+         TM    IOBCSW+4,UC    UNIT CHECK (SECOND ATTENTION) ?  @V200820 01052000
+         BZ    CNSEXR2        NO -- CHECK OUT THE RESULTS      @V200820 01053000
+         MVC   CONCCW1(8),PREPCCW  THROW UP A PREPARE CCW      @V200820 01054000
+         OI    CONPARM,RDEVPREP    FLAG IT...                  @V200820 01055000
+         B     CNSRTRY        USE NORMAL RETRY LOGIC           @V200820 01056000
+CNSEXR2  EQU   *              FIGURE OUT ATTENTION HANDLING    @V200820 01057000
+         L     R3,CONRETN     RECOVER INTERNAL RETURN ADDRESS  @V200820 01058000
+         BAL   R7,CNSRETN     RETURN FINISHED TASK             @V200820 01059000
+         LR    R7,R3          RETURN ADDRESS TO GR7            @V200820 01060000
+         LTR   R6,R6          IS THERE ANOTHER CONTASK ?       @V200820 01061000
+         BNP   *+8            NO -- DON'T BOTHER WITH GR3      @V200820 01062000
+         LH    R3,CONCNT      RECOVER INPUT DATA COUNT         @V200820 01063000
+         LA    R2,8(0,0)      MULTIPLE ATTENTION INDICATOR     @V200820 01064000
+         TM    VMMLEVEL,VMMCPENV   FORCE MULTIPLE ATTENTIONS ? @V200820 01065000
+         BCR   1,R7                YES - RETURN AS IS          @V200820 01066000
+         CLI   RDEVATNC,1     MORE THAN ONE ATTENTION ?        @V200820 01067000
+         BCR   7,R7           YES - RETURN AS IS               @V200820 01068000
+         LA    R2,4(0,0)      SINGLE ATTENTION INDICATOR       @V200820 01069000
+         BR    R7             RETURN...                        @V200820 01070000
+         EJECT                                                          01071000
+CNBREAK  EQU   *              PRIORITY WRITE KNOCKED DOWN READ @V200820 01072000
+         BAL   R9,CNCLEAR     CLEAR THE READ INPUT BUFFER      @V200820 01073000
+         L     R1,CONPNT      POINTER TO NEXT TASK (WRITE)     @V200820 01074000
+         ST    R1,RDEVCON     MOVE IT TO THE CHAIN TOP         @V200820 01075000
+CNBRKLP  EQU   *              MOVE READ TASK DOWN THE LIST     @V200820 01076000
+         L     R14,CONPNT-CONTASK(,R1)  NEXT TASK              @V200820 01077000
+         LTR   R14,R14        HAVE WE HIT THE END ?            @V200820 01078000
+         BNP   CNBRKFN        YES - PUT THE READ HERE          @V200820 01079000
+         TM    CONPARM-CONTASK(R14),PRIORITY PRIORITY TASK ?   @V200820 01080000
+         BZ    CNBRKFN             NO -- PUT THE READ HERE     @V200820 01081000
+         LR    R1,R14         PROGRESS ALONG THE CHAIN         @V200820 01082000
+         B     CNBRKLP        ...                              @V200820 01083000
+         SPACE 2                                                        01084000
+CNBRKFN  EQU   *              RE-CHAIN READ TASK AFTER WRITES  @V200820 01085000
+         ST    R6,CONPNT-CONTASK(,R1)   INSERT THE READ        @V200820 01086000
+         ST    R14,CONPNT                    ...               @V200820 01087000
+         BAL   R9,CNSGTSK     BUILD A CONTROL CONTASK          @V200820 01088000
+         MVI   CONPARM,RDEVPSUP    READ-COMPLETION CONTROL TASK@V200820 01089000
+         MVC   CONCCW1(8),BRKTTYS  WRITE 'XOFF' FOR TTY BREAK  @V200820 01090000
+         CLI   RDEVTYPE,TYP2741    SEPARATE THE DEVICE TYPES   @V200820 01091000
+         BH    CNSTART             GOT IT - START THE TASK     @V200820 01092000
+         MVC   CONCCW1(16),BRK2741 WRITE BREAK, EOADDR FOR 2741@V200820 01093000
+         BE    CNSTART             GOT IT --                   @V200820 01094000
+         MVC   CONCCW2(24),BRK1050 RE-ADDRESSING FOR 1050      @V200820 01095000
+         B     CNSTART                                         @V200820 01096000
+         EJECT                                                          01097000
+CNSATTN  EQU   *           LOGON NEW USER, OR ENTER C.F. MODE  @V200820 01098000
+         TM    RDEVSTA2,RDEVSYNC IS THIS 3RD TASK (2ND ATTN)   @VA08275 01098250
+         BO    CNIGNOR1       YES, WE ONLY HANDLE 2 AT A TIME  @VA08275 01098500
+         CL    R11,ASYSVM     IS RDEVUSER = SYSTEM VMBLOK ?    @V200820 01099000
+         BNE   CNSCFMD        NO -- CALL DMKCFMBK FOR C.F. MODE@V200820 01100000
+         CLC   CPID(4),=C'CPCP'    RUNNING SYSTEM YET ?        @V200820 01101000
+         BE    CNSLOGN             YES - LOGON A NEW USER      @V200820 01102000
+         BAL   R9,FRETIOB     RELEASE IOBLOK, IOERBLOK         @V200820 01103000
+         NI    RDEVFLAG,255-RDEVACTV    LET THE CONSOLE START  @V200820 01104000
+         GOTO  DMKCPIEM       BACK TO DMKCPI FOR ALTERNATE CONS@V200820 01105000
+         SPACE                                                          01106000
+CNSLOGN  EQU   *              LOGON A NEW USER                 @V200820 01107000
+         TM    RDEVFLAG,RDEVDISB   SHOULD WE LET HIM ON ?      @V200820 01108000
+         BO    CNSNOFF             NO -- DISABLE THE LINE      @V200820 01109000
+         TM    RDEVTFLG,RDEVLOG    ALREADY IN LOGON PROCESS ?  @V200820 01110000
+         BO    CNIGNOR             YES - CLEAN UP AND GET OUT  @V200820 01111000
+         OI    RDEVTFLG,RDEVLOG    ENTERING LOGON PROCESS      @V200820 01112000
+         CALL  DMKBLDVM,AFFINITY BUILD A VMBLOK AROUND RDEVBLOK@V407508 01113100
+         NI    RDEVTFLG,255-RDEVLOG     LOGON COMPLETE         @V200820 01114000
+         B     CNSCFMB        GO ENTER C.F. MODE FOR LOGON     @V200820 01115000
+         SPACE                                                          01116000
+CNSCFMD  EQU   *              PUT V.M. INTO CONSOLE FUNCTION MO@V200820 01117000
+         L     R3,RDEVAIOB    GET ACTIVE IOBLOK                @VA08275 01117050
+         LTR   R3,R3          IS THERE REALLY ONE THERE ??     @VA08275 01117100
+         BZ    CNSCFMD1       NO, CONTINUE                     @VA08275 01117150
+         OI    RDEVSTA2,RDEVSYNC TELL ACTIVE I/O ABOUT ATTN    @VA08275 01117200
+         LA    R0,CPEXSIZE    GET A CPEXBLOK FOR ATTENTION     @VA08275 01117250
+         CALL  DMKFREE                                         @VA08275 01117300
+         ST    R1,IOBMISC-IOBLOK(R3) SAVE ADDRESS OF ATTN CPEX @VA08275 01117350
+         USING CPEXBLOK,R1    TELL THE ASSEMBLER               @VA08275 01117400
+         XC    CPEXBLOK(16),CPEXBLOK ZERO 2 DOUBLEWORDS        @VA08275 01117450
+         STM   R0,R15,CPEXREGS SAVE REGS                       @VA08275 01117500
+         LA    R15,CNSCFMD1   ESTABLISH AN IRA                 @VA08275 01117550
+         ST    R15,CPEXADD    AND SAVE IT                      @VA08275 01117600
+         B     CNSEXIT        WAIT FOR ACTIVE I/O COMPLETE     @VA08275 01117650
+         DROP  R1                                              @VA08275 01117700
+CNSCFMD1 DS    0H                                              @VA08275 01117750
+         TM    VMMLEVEL,VMMCPENV   ATTENTION TO CP ?           @V200820 01118000
+         BO    CNSCFMB             YES - CALL DMKCFMBK         @V200820 01119000
+         TM    VMRSTAT,VMCFWAIT    IN CONSOLE FUNCTION WAIT ?  @V200820 01120000
+         BO    CNSCFMB             YES - CALL DMKCFMBK         @V200820 01121000
+         CL    R2,F4          MORE THAN ONE ATTENTION ?        @V200820 01122000
+         BH    CNSCFMB        YES - ENTER C.F. MODE            @V200820 01123000
+         CALL  DMKCFMAT       POST ATTENTION FOR THE VIRT MACH @V200820 01124000
+         BNZ   CNSCFMB        VIRT. MACH. TO C.F.MODE          @VA06283 01125100
+CNS3210  CLI   RDEVTYPE,TYP3210 EBCDIC TYPE CONSOLE ??         @VA06283 01125200
+         BE    CNS3210A       YES, CONTINUE                    @VA07396 01125310
+         CLI   RDEVTYPE,TYP2741 EBCDIC TYPE CONSOLE ?          @VA07396 01125320
+         BNE   CNSTART        NOT 3210 OR 2741 START NEXT TASK @VA07396 01125330
+CNS3210A EQU   *              CONTINUE FOR 3210 2741 ONLY      @VA07396 01125340
+         L     R1,IOBCAW      GET CAW ADDRESS.                 @VA06283 01125400
+         LTR   R1,R1          IS IT ZERO ?? (UNSOL.  ?? )      @VA06283 01125500
+         BZ    CNIGNOR        NO, THROW AWAY THE INTERUPT      @VA06283 01125600
+         B     CNSTART        YES, START NEXT CONTASK          @VA06283 01125700
+CNSCFMB  EQU   *              PUT VIRTUAL MACHINE IN C.F. MODE @V200820 01126000
+         NI    RDEVFLAG,255-RDEVACTV    DEVICE IS NOT ACTIVE   @V200820 01127000
+         TM    VMOSTAT,VMCF   IS CONSOLE FUNCTION RUNNING ?    @VA01782 01128000
+         BO    CNS3210        YES, CHECK FOR TYPE 3210         @VA06283 01129500
+         TM    VMRSTAT,VMLOGOFF IS USER IN LOGOFF ?            @VA01782 01130000
+         BO    CNS3210        YES, GO CHECK FOR TYPE 3210      @VA06283 01131500
+         L     R3,RDEVCON     PICK UP CURRENT CONTASK CHAIN    @V200820 01132000
+         SLR   R0,R0          CLEAR RDEVCON POINTER (PUT BREAK @V200820 01133000
+         ST    R0,RDEVCON     TASKS AT THE HEAD OF THE CHAIN)  @V200820 01134000
+         CALL  DMKCFMBK,AFFINITY ENTER CONSOLE FUNCTION MODE   @V407508 01135100
+         L     R6,RDEVCON     GET NEW TOP OF STACK             @VA03287 01136000
+         LTR   R6,R6          ANYTHING THERE?                  @VA03287 01137000
+         BNZ   CNSCFML        YES--A CPEXBLOK WILL WAKE US     @VA03287 01138000
+         ST    R3,RDEVCON     NO--PUT BACK OLD TOP             @VA03287 01139000
+         B     CNS3210        GO CHECK FOR TYPE 3210           @VA06283 01140500
+CNSCFML  EQU   *              PUT OLD CHAIN ON END OF NEW ONE  @V200820 01141000
+         L     R2,CONPNT      POINTER TO NEXT CONTASK, IF ANY  @V200820 01142000
+         LTR   R2,R2          HAVE WE REACHED THE END  ?       @V200820 01143000
+         BNP   CNSCFMN        YES - PUT BACK THE OLD CONTASKS  @V200820 01144000
+         LR    R6,R2          KEEP LOOKING FOR THE END         @V200820 01145000
+         B     CNSCFML        ...                              @V200820 01146000
+CNSCFMN  EQU   *              RESTORE PREVIOUS CONTASK CHAIN   @V200820 01147000
+         ST    R3,CONPNT      CHAIN THIS TO LAST NEW CONTASK   @V200820 01148000
+         B     CNIGNOR        EXIT - RE-ENTER VIA CPEXBLOK     @V200820 01149000
+         EJECT                                                          01150000
+RETEDIT  EQU   *     CHECK FOR INPUT EDITING OR TRANSLATION    @V200820 01151000
+         STH   R3,CONCNT    COUNT IN CONTASK FOR EDIT ROUTINE  @V200820 01152000
+         NI    CONSTAT,255-CONESCP NO LONGER READY FOR 'SIO'   @V200820 01153000
+         L     R1,CONRETN     POINTER TO CALLER'S SAVE-AREA    @V200820 01154000
+         L     R1,SAVER1-SAVEAREA(,R1)  PICK UP ORIGINAL BUFFER@V200820 01155000
+         ST    R1,CONADDR     PUT BACK IN CONTASK FOR DMKQCN   @V200820 01156000
+         LTR   R3,R3          WAS THIS A NULL LINE INPUT ?     @V200820 01157000
+         BZ    RETNULL        YES -- CHECK FOR SPECIAL HANDLING@V200820 01158000
+         TM    CONPARM,UCASE+EDIT  EDIT OR TRANSLATE DESIRED ? @V200820 01159000
+         BZ    RETTASK             NO -- LET IT GO AS IS       @V200820 01160000
+         CALL  DMKCNSED       EDIT AND/OR TRANSLATE THE INPUT  @V200820 01161000
+         LTR   R2,R2          IS THERE AN ATTN STATUS PENDING ?@V200820 01162000
+         BNZ   RETTASK        YES - RETURN IT WITHOUT RETRY    @V200820 01163000
+         LTR   R3,R3          NULL INPUT LINE AFTER EDITING ?  @V200820 01164000
+         BZ    CNRSTRT        YES - RE-ISSUE THE SAME CONTASK  @VM08581 01165000
+         SPACE                                                          01166000
+         SPACE                                                          01167000
+RETTASK  EQU   *              RETURN COMPLETED CONTASK TO DMKQC@V200820 01168000
+         TM    CONSTAT,CONCNTL     IS THIS A CONTROL CONTASK ? @V200820 01169000
+         BO    RETCNTL             YES - NO RESPONSE POSSIBLE  @V200820 01170000
+         LTR   R2,R2              ANY STATUS RETURNED ?        @VA03982 01171000
+         BZ    RETNORM            NO, PROCEED NORMALLY         @VA03982 01172000
+         B     RETSPLT                                         @VA08275 01172200
+RETSPLTA DS    0H                                              @VA08275 01172400
+         LTR   R6,R6          ANY MORE CONTASKS ??             @VA08275 01172600
+         BZ    CNSIDLE        NO, DONE WITH FRETS  (RBH)       @VA08275 01172800
+RETSPLT  TM    CONSTAT,CONSPLT    SPLIT CONTASK ?              @VA03982 01173000
+         BZ    RETNORM            NO, PROCEED NORMALLY         @VA03982 01174000
+         BAL   R7,CNSRETN         YES, RELEASE IT              @VA03982 01175000
+         B     RETSPLTA       NEXT CONTASK, IF ONE EXISTS      @VA08275 01176050
+RETNORM  EQU   *                                               @VA03982 01177000
+         TM    CONSTAT,CONRESP     RESPONSE EXPECTED ?         @V200820 01178000
+         BZ    RETCHEK             NO -- START UP NEXT TASK    @V200820 01179000
+         L     R1,CONRETN     POINTER TO RETURN SAVEAREA       @V200820 01180000
+         ST    R2,SAVER2-SAVEAREA(,R1)  SET RETURN CODE IN GR2 @V200820 01181000
+RETCHEK  EQU   *                                               @V200820 01182000
+         TM    CONPARM,LOGDROP+LOGHOLD       LOGOFF VIA MSG ?  @V200820 01183000
+         BNZ   CNSTLOG                       YES - GO RE-ENABLE@V200820 01184000
+RETCNTL  EQU   *                                               @V200820 01185000
+         SLR   R0,R0                                           @V200820 01186000
+         STH   R0,RDEVRCNT    RESET DEVICE RETRY COUNT         @V200820 01187000
+         BAL   R7,CNSRETN     RETURN FINISHED TASK TO DMKQCN   @V200820 01188000
+         B     CNSTART        START UP NEXT CONTASK            @V200820 01189000
+         SPACE                                                          01190000
+RETNULL  EQU   *              NULL LINE ON INPUT CONTASK       @V200820 01191000
+         TM    CONPARM,INHIBIT     PRINT-SUPPRESS LINE ?       @V200820 01192000
+         BZ    RETTASK             NO -- PASS ON NULL LINE     @V200820 01193000
+         NI    RDEVFLAG,255-RDEVPSUP    NO PRINT SUPPRESS      @V200820 01194000
+*        B     CNRSTRT        RETRY THE READ CONTASK                    01195000
+         EJECT                                                          01196000
+CNRSTRT  EQU   *              RESTART CONTASK AT TOP OF CHAIN  @V200820 01197000
+         NI    RDEVSTAT,255-RDEVNRDY    DEVICE IS NOW READY    @V200820 01198000
+         NI    RDEVFLAG,255-(RDEVHIO+RDEVPREP+RDEVACTV)        @V200820 01199000
+         NI    RDEVTFLG,255-RDEVCTL     RESET TERMINAL FLAGS   @V200820 01200000
+         L     R6,RDEVCON     CONTASK TO BE RESTARTED          @V200820 01201000
+         LTR   R6,R6          MAKE SURE THERE IS ONE           @V200820 01202000
+         BZ    CNSIDLE        NO -- LET TERMINAL SIT IDLE      @V200820 01203000
+         OI    CONSTAT,CONRTRY     THIS IS A RETRY OPERATION   @V200820 01204000
+         TM    CONSTAT,CONOUTPT+CONCNTL      INPUT OPERATION ? @V200820 01205000
+         BNZ   CNSTARK                       NO -- START IT    @V200820 01206000
+         BAL   R9,CNCLEAR     CLEAR THE INPUT BUFFER TO ZEROES @V200820 01207000
+         B     INCTASK        GO RE-PROCESS THE CCW STRING     @V200820 01208000
+         SPACE 2                                                        01209000
+CNSTART  EQU   *              START NEXT CONTASK FOR THIS DEVIC@V200820 01210000
+         NI    RDEVFLAG,255-(RDEVACTV+RDEVHIO)    RESET FLAGS  @V200820 01211000
+         L     R6,RDEVCON     NEXT CONTASK ON CHAIN            @V200820 01212000
+         LTR   R6,R6          IS THERE ANY WORK TO DO ?        @V200820 01213000
+         BZ    CNSIDLE        NO -- LET THE TERMINAL SIT IDLE  @V200820 01214000
+CNSTARK  EQU   *              START CONTASK ON THE REAL DEVICE @V200820 01215000
+         TM    CONSTAT,CONSYNC     SYNCHRONIZATION TASK ?      @V200820 01216000
+         BO    RETCNTL             YES - JUST RETURN IT NOW    @V200820 01217000
+         TM    CONSTAT,CONESCP     HAVE THE CCW'S BEEN BUILT ? @V200820 01218000
+         BZ    INCTASK             NO -- GO PROCESS THEM NOW   @V200820 01219000
+         LTR   R10,R10        DO WE ALREADY HAVE AN IOBLOK ?   @V200820 01220000
+         BNZ   CNSETIO        YES - SETUP FOR NEW CONTASK      @V200820 01221000
+         TM    RDEVSTAT,RDEVDISA IS DEVICE OFFLINE?            @VA02672 01222000
+         BO    CNSLOGF        TREAT AS FATAL TERMINAL ERROR    @VA02672 01223000
+         LA    R0,IOBSIZE                                      @V200820 01224000
+         CALL  DMKFREE        GET AN IOBLOK FROM FREE STORAGE  @V200820 01225000
+         LR    R10,R1                                          @V200820 01226000
+         XC    IOBLOK(IOBSIZE*8),IOBLOK CLEAR ENTIRE BLOCK     @V200820 01227000
+CNSETIO  EQU   *              RESET FIELDS IN IOBLOK           @V200820 01228000
+         ST    R11,IOBUSER    VMBLOK ADDRESS OF CONTASK OWNER  @V200820 01229000
+         LA    R1,DMKCNSIN    INTERRUPT RETURN POINT           @V200820 01230000
+         ST    R1,IOBIRA      ...                              @V200820 01231000
+         LA    R1,CONCCW1     START OF CONTASK CCW STRING      @V200820 01232000
+         ST    R1,IOBCAW      ...                              @V200820 01233000
+         XC    IOBRADD(8),IOBRADD  CLEAR FIRST DOUBLE-WORD     @V200820 01234000
+CNSIOSR  EQU   *                                               @V200820 01235000
+         OI    CONSTAT,CONACTV     CONTASK ACTIVE ON REAL DEVIC@V200820 01236000
+         OI    RDEVFLAG,RDEVACTV   DEVICE IS CURRENTLY ACTIVE  @V200820 01237000
+         NI    IOBSPEC,X'FF'-IOBUNSL TURN OFF UNSOL. INT FLAG  @VA04091 01238000
+         BAL   R9,FRETIOER        FRET ANY OLD IOERBLOK        @V200820 01239000
+         TM    RDEVSTA2,RDEVSYNC ATTN DURING ACTIVE I/O ??     @VA08275 01239250
+         BO    CNSSYNC        BETTER SYNC IT PROPERLY          @VA08275 01239500
+         CALL  DMKIOSQR       QUEUE REAL I/O FOR EXECUTION     @V200820 01240000
+         SPACE                                                          01241000
+CNSEXIT  EQU   *              RETURN TO THE DISPATCHER         @V200820 01242000
+         GOTO  DMKDSPCH                                        @V200820 01243000
+         EJECT                                                          01244000
+CNSIDLE  EQU   *              NO CONTASK'S TO BE PROCESSED     @V200820 01245000
+         CLI   RDEVTYPE,TYP3210    EBCDIC-TYPE CONSOLE ?       @V200820 01246000
+         BE    CNIGNOR             YES - JUST GO AWAY AND WAIT @V200820 01247000
+         OI    RDEVFLAG,RDEVPREP   LISTEN FOR 'ATTN'           @V200820 01248000
+         LA    R5,PREPCCW          ...                         @V200820 01249000
+         BAL   R2,CNSTRIO          START UP THE PREPARE        @V200820 01250000
+         BNZ   CNSLOGF        FATAL ERROR IF NOT CC = 0        @V200820 01251000
+         B     CNIGNOR        RELEASE THE IOBLOK AND GO AWAY   @V200820 01252000
+         SPACE 2                                                        01253000
+CNSTRIO  EQU   *              START UP I/O WITHOUT DMKIOS      @V200820 01254000
+         CALL  DMKSCNRD       GET 'CCU' DEVICE ADDRESS IN GR1  @V200820 01255000
+         ST    R5,CAW         SET THE CHANNEL ADDRESS WORD     @V200820 01256000
+         OI    RDEVTFLG,RDEVCTL    CONTROL OPERATION ACTIVE    @V200820 01257000
+         NI    RDEVFLAG,255-RDEVACTV    CONTASK NOT ACTIVE NOW @V200820 01258000
+RETRY    EQU   *                                               @VA06281 01258500
+         LA    R15,500        RETRY SIO COUNT                  @VA03542 01259000
+CNSTSIO  EQU   *                                               @V200820 01260000
+         XC    CSW(8),CSW     CLEAR THE CSW BEFORE START I/O   @VA02518 01261000
+         SPACE                                                          01262000
+         SIO   0(R1)          ATTEMPT TO START THE I/O         @V200820 01263000
+         BC    13,CNSTSIO1                                     @VA03542 01264000
+         CLI   RDEVTYPC,CLASTERM DEVICE A TERMINAL?            @VA03542 01265000
+         BNE   CNSTSIO        NO...RETRY                       @VA03542 01266000
+         CLI   RDEVTYPE,TYPTTY SUPPORTED TYPE?                 @VA03542 01267000
+         BH    CNSTSIO        NO...RETRY (BRANCH HIGH)         @VA03542 01268000
+         BCT   R15,CNSTSIO    LOOP ON SIO                      @VA03542 01269000
+         HIO   0(R1)          CLEAR UCW                        @VA03542 01270000
+         CLRIO 0(R1)          CLEAR CC=3 CONDITION             @VA03542 01271000
+CNSTSIO1 EQU   *                                               @VA03542 01272000
+         SPACE                                                          01273000
+         AIF   (NOT &TRACE(9)).NTR2                             **AIF** 01274000
+         BAL   R15,CNTRACE    TRACE THE START I/O              @V200820 01275000
+         DC    X'0B00'        TRACE ENTRY FLAG                 @V200820 01276000
+.NTR2    ANOP                                                           01277000
+         SPACE                                                          01278000
+         BCR   8,R2           CC = 0  =>  RETURN               @V200820 01279000
+         BC    1,CNSICC3      CC = 3  =>  NOT OPERATIONAL      @V200820 01280000
+*                             CC = 1  =>  CSW STATUS STORED             01281000
+         TM    CSW+4,SM+BUSY  SHORT CONTROL UNIT BUSY ?        @V200820 01282000
+         BO    RETRY          YES RETRY THE OPERATION          @VA06281 01283500
+         CLI   *,X'00'        NO - SET COND. CODE NON-ZERO     @VA01826 01284000
+         BR    R2             LET CALLER FIGURE IT OUT         @V200820 01285000
+         SPACE 2                                                        01286000
+CNSRTRP  EQU   *              PREPARE MUST BE RETRIED          @VM08581 01287000
+         OI    RDEVFLAG,RDEVPREP   TURN PREPARE FLAG BACK ON   @VM08581 01288000
+         SPACE                                                          01289000
+CNSRTRY  EQU   *              RETRY FAILING I/O OPERATION      @V200820 01290000
+         LH    R1,RDEVRCNT    RETRY COUNT ACCUMULATION         @V200820 01291000
+         LA    R1,1(0,R1)     INCREMENT..                      @V200820 01292000
+         STH   R1,RDEVRCNT    RESET FOR NEXT TIME THROUGH      @V200820 01293000
+         CL    R1,F16         HAVE WE TRIED ENOUGH TIMES ?     @V200820 01294000
+         BH    CNSRECR        YES - SEE ABOUT RECORDING ERROR  @V200820 01295000
+         L     R6,RDEVCON     POINTER TO FIRST CONTASK ON CHAIN@V200820 01296000
+         CL    R1,F1          FIRST ERROR ??                   @VA03757 01296100
+         BNE   SDRDONE        NO, CONTINUE PROCESS             @VA03757 01296200
+         BAL   R2,SDRSTAT     YES, PREPARE TO UPDATE COUNTERS  @VA03757 01296300
+SDRDONE  EQU   *                                               @VA03757 01296400
+         TM    RDEVFLAG,RDEVACTV   CONTASK ACTIVE NOW ?        @V200820 01297000
+         BO    CNRSTRT             YES - RESTART THE TASK      @V200820 01298000
+         TM    RDEVFLAG,RDEVPREP   EXECUTING PREPARE CCW ?     @V200820 01299000
+         BO    CNSIDLE             YES - RE-ISSUE THE PREPARE  @V200820 01300000
+         TM    RDEVTFLG,RDEVREST   ATTENTION RESET PROCESS ?   @VA01394 01301000
+         BO    CNBKPRP             YES - RETRY THE PREPARE     @VA01394 01302000
+         B     CNSLOGF        DISABLE THE LINE                 @VA03993 01303000
+         SPACE 2                                                        01303050
+         SPACE 2                                                        01303500
+         EJECT                                                          01304000
+CNSTLOG  EQU   *              LOGHOLD OR LOGDROP PARM SPECIFIED@V200820 01305000
+         L     R15,CONPNT     NEXT CONTASK PTR                 @VA05049 01305050
+         LTR   R15,R15        ANY CONTASK STACKED?             @VA05049 01305100
+         BZ    RTNCON         NO--SIMPLE CASE                  @VA05049 01305150
+         ST    R15,RDEVCON    NEXT ONE ON TOP                  @VA05049 01305200
+FINDEND  L     R3,CONPNT-CONTASK(,R15) LOOK FOR END            @VA05049 01305250
+         LTR   R3,R3          END OF CHAIN?                    @VA05049 01305300
+         BZ    FOUND          YES--QUE TO THE END              @VA05049 01305350
+         LR    R15,R3         SAVE THIS ONE                    @VA05049 01305400
+         B     FINDEND        CONTINUE SEARCH                  @VA05049 01305450
+FOUND    ST    R6,CONPNT-CONTASK(,R15) PUT THE ONE LAST        @VA05049 01305500
+         ST    R3,CONPNT      CLEAR THE LAST PTR               @VA05049 01305550
+RTNCON   EQU   *                                               @VA05049 01305600
+         SLR   R3,R3          CLEAR REG3                       @VA05049 01305650
+         IC    R3,CONPARM     SAVE THE PARAMETER BYTE          @V200820 01306000
+         CALL  DMKQCNCL       CLEAR ANY CONTASK STACK          @V200820 01307000
+         STC   R3,TEMPSAVE    PUT THE PARMS DOWN               @V200820 01308000
+         TM    TEMPSAVE,LOGDROP    DROP THE LINE ?             @V200820 01309000
+         BO    CNSNOFF             YES - DISBABLE AND RE-ENABLE@V200820 01310000
+         TM    RDEVFLAG,RDEVDISB   SHOULD WE DISABLE THE LINE ?@V200820 01311000
+         BO    CNSNOFF             YES - GO DO THAT            @V200820 01312000
+         L     R1,ASYSVM      GET ADDRESS OF SYSTEM VMBLOK     @V407508 01313100
+         SWTCHVM OPT=UNLOCK   SWITCH TO THE SYSTEM VMBLOK      @V407508 01313200
+         ST    R11,RDEVUSER   RESET REAL DEVICE USER           @V200820 01316000
+         B     CNSENAB        GO RE-ENABLE THE DEVICE          @V200820 01317000
+         SPACE 2                                                        01318000
+CNSRECR  EQU   *              PERMANENT I/O ERROR - RECORD IT  @V200820 01319000
+         LTR   R10,R10        DO WE HAVE AN IOBLOK ?           @V200820 01320000
+         BNP   CNSLOGF        NO -- JUST DISABLE THE LINE      @V200820 01321000
+         L     R1,IOBIOER     IOERBLOK POINTER IN THE IOBLOK   @V200820 01322000
+         LTR   R1,R1          IS THERE AN IOERBLOK ?           @V200820 01323000
+         BNP   CNSLOGF        NO --                            @V200820 01324000
+         USING IOERBLOK,R1                                     @V200820 01325000
+         TM    IOERDATA,INTREQ     WAS IT INTERVENTION REQUIRED@V200820 01326000
+         BZ    CNSRECS        NO, GO ISSUE MESSAGE             @VA06352 01327150
+         TM    RDEVFLAG,RDEVPREP EXECUTING PREPARE CCW?        @VA03616 01330000
+         BZ    CNSLOGF        NO                               @VA03616 01331000
+         CLI   RDEVRCNT+1,X'10' RETRIED 16 TIMES?              @VA04112 01332000
+         BNH   CNSLOGF        NO                               @VA07534 01333100
+         B     CNSRECS1       DISABLE THE LINE                 @VA06352 01334100
+CNSRECS  EQU   *                                               @VA03616 01335000
+         TM    VMOSTAT,VMSYSOP     ERROR ON THE OPERATOR'S LINE@V200820 01336000
+         BO    CNSRERR             YES - SKIP THE MESSAGE      @V200820 01337000
+CNSRECS1 SLR   R2,R2          CLEAR A WORK AREA                @VA06352 01338100
+         ICM   R2,8,IOERDATA  PICK UP THE SENSE BYTE           @V200820 01339000
+         BZ    CNSLOGF        STRANGE - NO BITS ARE SET        @V200820 01340000
+         SLR   R3,R3          CLEAR MESSAGE NUMBER INDEX       @V200820 01341000
+CNSRETR  EQU   *              DETERMINE WHICH ERROR MESSAGE    @V200820 01342000
+         LA    R3,1(0,R3)     INCREMENT MESSAGE NUMBER INDEX   @V200820 01343000
+         ALR   R2,R2          SHIFT BIT TO LEFT AND SET CC     @VA02588 01344000
+         BC    12,CNSRETR     LOOP IF NO CARRY                 @VA02588 01345000
+         IC    R2,MSGNUM-1(R3)     SET GR2 = MESSAGE NUMBER    @V200820 01346000
+         STC   R2,IOERNUM     SET IN IOERBLOK FOR DMKMSWR      @V200820 01347000
+         ST    R1,RDEVIOER    POINTER TO IOERBLOK IN RDEVBLOK  @V200820 01348000
+         L     R0,=C'CNS '    MODULE IDENTIFIER TO GR0         @V200820 01349000
+         CALL  DMKMSWR,AFFINITY FORMAT AND TYPE MESSAGE        @V407508 01350100
+         SLR   R0,R0                                           @V200820 01351000
+         ST    R0,RDEVIOER    CLEAR OUT IOERBLOK POINTER       @V200820 01352000
+         TM    IOERDATA,INTREQ IS THIS INTERVENTION REQ???     @VA06352 01352100
+         BO    CNSDISA        NOW DISABLE LINE                 @VA06352 01352200
+CNSRERR  EQU   *              RECORD ERROR ON LOGREC CYLINDER  @V200820 01353000
+         OI    IOBSTAT,IOBFATAL SET PERMANENT I/O ERROR FLAG   @VA03358 01354000
+         CALL  DMKIOERR,AFFINITY RECORDING SUPERVISOR          @V407508 01355100
+         NI    IOBSTAT,X'FF'-IOBFATAL CLEAR PERMANENT FLAG     @VA03358 01356000
+         B     CNSDISA        DISABLE THE LINE ONCE AND FOR ALL@V200820 01357000
+         DROP  R1                                              @V200820 01358000
+         EJECT                                                          01359000
+CNSICC3  EQU   *      CONDITION CODE THREE - NOT OPERATIONAL   @V200820 01360000
+         TM    VMOSTAT,VMSYSOP      THE OPERATOR'S CONSOLE ?   @V200820 01361000
+         BO    CNSLOGF             YES - DO NOT TRY TO SEND MSG@V200820 01362000
+         TM    RDEVSTAT,RDEVDISA   IS THIS ONE ALREADY OFFLINE @V200820 01363000
+         BO    CNIGNOR             YES - DO NOT GET INTO A LOOP@V200820 01364000
+         OI    RDEVSTAT,RDEVDISA   VARY THE TERMINAL OFFLINE   @V200820 01365000
+         NI    RDEVFLAG,255-RDEVENAB    DO NOT TRY DISABLE     @VM08561 01366000
+         LA    R2,455(0)      ERROR MESSAGE NUMBER             @V200820 01367000
+         BAL   R9,WRITERM     SEND MESSAGE TO THE OPERATOR     @V200820 01368000
+         SPACE 2                                                        01369000
+CNSDISA  EQU   *              LINE TO BE DISABLED              @V200820 01370000
+         OI    RDEVFLAG,RDEVDISB   DISABLE THIS LINE A.S.A.P.  @V200820 01371000
+         LA    R2,454(0)      ERROR MESSAGE NUMBER             @V200820 01372000
+         BAL   R9,WRITERM     SEND MESSAGE TO THE OPERATOR     @V200820 01373000
+         SPACE 2                                                        01374000
+CNSLOGF  EQU   *              FATAL TERMINAL ERROR, OR SOME SUC@V200820 01375000
+         L     R1,RDEVUSER    GET ADDRESS OF CORRECT VMBLOK    @V407508 01376100
+         SWTCHVM OPT=STAY     SWITCH TO THE CORRECT VMBLOK     @V407508 01376200
+         CALL  DMKQCNCL       CLEAR ANY TERMINAL CONTASK STACK @V200820 01379000
+         CL    R11,ASYSVM     IS THERE AN ACTIVE MACHINE ?     @V200820 01380000
+         BE    CNSNOFF        NO -- JUST DISABLE THE LINE      @V200820 01381000
+         TM    RDEVSTA2,RDEVDROP USER WILL LOGOFF?             @VA04688 01381200
+         BO    CNSNOFF        YES--PREVENT DOUBLE FRET VMBLOK  @VA04688 01381400
+         C     R8,VMTERM      IS THIS THE VITUAL CONSOLE ??    @VA07735 01381500
+         BNE   CNSNOFF        NO, DON'T LOGOFF V.M. FOR I/O ERR@VA07735 01381600
+*              INITIATE THE DISCONNECT WITH TIMEOUT PROCEDURE           01382000
+         CALL  DMKQCNTO,AFFINITY PUT THIS MACHINE TO SLEEP     @V407508 01383100
+         B     CNSNOFF        DISABLE AND RE-ENABLE THE LINE   @V200820 01384000
+         SPACE 2                                                        01385000
+WRITERM  EQU   *              WRITE ERROR MESSAGE TO OPERATOR  @V200820 01386000
+         CALL  DMKSCNRD       GET 'CCU' DEVICE ADDR IN GR1     @VM08561 01387000
+         CALL  DMKCVTBH       CONVERT FOR OUTPUT               @VM08561 01388000
+         ICM   R1,8,BLANKS    INSERT HIGH-ORDER BLANK          @VM08561 01389000
+         L     R0,MSGHEAD     PUT 'CNS', X'00' IN GR0          @V200820 01390000
+         O     R2,MSGPARM     PARMS FOR DMKERMSG               @V200820 01391000
+         CALL  DMKERMSG,AFFINITY SEND MSG, RETURN HERE         @V407508 01392100
+         BR    R9             INTERNAL RETURN                  @V200820 01393000
+         EJECT                                                          01394000
+CNSNOFF  EQU   *       DISABLE THE LINE, POSSIBLY RE-ENABLE    @V200820 01395000
+*        STOP CHARGING A SPECIFIC USER, SYSTEM NOW OWNS LINE            01396100
+         L     R1,ASYSVM      GET ADDRESS OF SYSTEM VMBLOK     @V407508 01396200
+         SWTCHVM OPT=UNLOCK   SWITCH TO THE SYSTEM VMBLOK      @V407508 01396300
+         ST    R11,RDEVUSER    ...                             @V200820 01399000
+         NI    RDEVFLAG,255-(RDEVIDNT+RDEVACTV+RDEVPREP)       @V200820 01400000
+         NI    RDEVSTA2,255-RDEVDROP CLEAR LOGDROP FLAG        @VA04688 01400500
+         OI    RDEVFLAG,RDEVPSUP   ASSUME PRINT SUPPRESS       @V200820 01401000
+         MVI   RDEVTFLG,X'00'      CLEAR THE TERMINAL FLAG BYTE@V200820 01402000
+         CLI   RDEVTYPE,TYP3210    IS THIS AN EBCDIC CONSOLE ? @V200820 01403000
+         BE    CNSNOFN             YES - GO TEST RDEVDISB FLAG @V200820 01404000
+         TM    RDEVFLAG,RDEVENAB   IS THE LINE ENABLED NOW ?   @V200820 01405000
+         BZ    CNIGNOR             NO -- DO NOT REISSUE DISABLE@V200820 01406000
+         BAL   R9,CNSGTSK     GET A CONTROL CONTASK            @V200820 01407000
+         MVC   CONCCW1(8),DISABLED      MOVE IN DISABLE CCW    @V200820 01408000
+         CLI   RDEVTYPE,TYPTTY     TELEGRAPH-TYPE TERMINAL ?   @V200820 01409000
+         BE    CNSNOFS             YES - JUST ISSUE THE DISABLE@V200820 01410000
+         MVI   RDEVTYPE,TYPUNDEF   DEVICE TYPE UNDEFINED       @V200820 01411000
+         MVI   RDEVTMCD,RDEVPTTC   RESET TERMINAL LINE CODE    @V200820 01412000
+         MVC   CONCCW1(3*8),DISABLEC    WRITE CIRCLE-C, DISABLE@V200820 01413000
+CNSNOFS  EQU   *                                               @V200820 01414000
+         MVI   CONPARM,RDEVDISB    FLAG THIS AS DISABLE TASK   @V200820 01415000
+         B     CNSTART        START UP THE DISABLE             @V200820 01416000
+         SPACE                                                          01417000
+CNSNOFC  EQU   *              HERE WHEN THE DISABLE COMPLETES  @V200820 01418000
+         TM    IOBSTAT,IOBCC3      CONDITION CODE ON START I/O @V200820 01419000
+         BZ    CNSNOFL             NO --                       @V200820 01420000
+         NI    RDEVFLAG,255-RDEVENAB    DON'T REISSUE DISABLE  @V200820 01421000
+         B     CNSDISA        SEND OPERATOR MSG, DISABLE LINE  @V200820 01422000
+CNSNOFL  EQU   *                                               @V200820 01423000
+         L     R1,IOBCSW      MAKE SURE WE STOPPED ON DISABLE  @V200820 01424000
+         S     R1,F8          BACK OFF TO CCW                  @VA04162 01425000
+         BNP   CNIGNOR        THROW IT AWAY (3705 EP)          @VA04162 01426000
+         CLI   0(R1),X'2F'    WAS THIS THE DISABLE ITSELF ?    @V200820 01427000
+         BE    CNSNOFT        YES - NOW WE CAN RE-ENABLE       @V200820 01428000
+         MVC   CONCCW1(8),DISABLED MOVE IN STAND-ALONE DISABLE @V200820 01429000
+         XC    CONCCW2(3*8),CONCCW2     CLEAN UP THE CONTASK   @V200820 01430000
+         B     CNSTART        . . .AND RE-ISSUE IT             @V200820 01431000
+CNSNOFT  EQU   *              CLEAN UP RDEVBLOK, RE-ENABLE     @V200820 01432000
+         CALL  DMKQCNCL       FLUSH THE LAST CONTASK           @V200820 01433000
+         NI    RDEVFLAG,255-RDEVACTV    NOT ACTIVE ANY MORE    @V200820 01434000
+CNSNOFN  EQU   *                                               @V200820 01435000
+         TM    RDEVFLAG,RDEVDISB   SHOULD WE RE-ENABLE THE LINE@V200820 01436000
+         BZ    CNSENAB             YES - GO DO JUST THAT       @V200820 01437000
+         NI    RDEVFLAG,255-(RDEVENAB+RDEVDISB)   DISABLED     @V200820 01438000
+         B     CNIGNOR         CLEAN UP AND EXIT FORTHWITH     @V200820 01439000
+         EJECT                                                          01440000
+*.                                                                      01441000
+* SUBROUTINE NAME -                                                     01442000
+*                                                                       01443000
+*        DMKCNSEN - ENABLE OR DISABLE A SLOW-SPEED TERMINAL LINE        01444000
+*                                                                       01445000
+* ATTRIBUTES -                                                          01446000
+*                                                                       01447000
+*        RE-ENTRANT, RESIDENT, ENTERED VIA GOTO OR CPEXBLOK             01448000
+*                                                                       01449000
+* ENTRY CONDITIONS -                                                    01450000
+*                                                                       01451000
+*        GPR  8 = RDEVBLOK OF THE LINE TO BE ENABLED OR DISABLED        01452000
+*        GPR 12 = ADDRESS OF DMKCNSEN                                   01453000
+*                                                                       01454000
+* EXIT CONDITIONS -                                                     01455000
+*                                                                       01456000
+*        EXIT IS MADE VIA A GOTO DMKDSPCH                               01457000
+*                                                                       01458000
+* OPERATION - EXECUTION MUST BE ON THE I/O PROCESSOR IN AP-MODE         01459100
+*                                                                       01460000
+*        1. IF THE LOGON PROCESS HAS BEEN INITIATED, EXIT.              01461000
+*        2. IF THIS IS A DISABLE REQUEST, ('RDEVDISB' SET IN            01462000
+*           'RDEVFLAG') RESET RDEVUSER TO THE SYSTEM VMBLOK,            01463000
+*           HALT AN ACTIVE ENABLE OR PREPARE, AND DISABLE THE           01464000
+*           LINE VIA A CONTROL CONTASK.                                 01465000
+*        3. IF THIS IS AN ENABLE REQUEST, RESET THE RDEVBLOK FLAGS      01466000
+*           AND CHECK THE TERMINAL DEVICE TYPE.                         01467000
+*        4. FOR 2741, 1050, TWX, ISSUE THE APPROPRIATE ENABLE CCW       01468000
+*           SEQUENCE (SAD, FOLLOWED BY ENABLE).                         01469000
+*        5. FOR 3210, 3215, ETC., WRITE THE 'VM/370 ONLINE' MESSAGE     01470000
+*           AND SOUND THE CONSOLE ALARM.                                01471000
+*.                                                                      01472000
+         EJECT                                                          01473000
+         DROP  R13                                             @V200820 01474000
+         USING DMKCNSEN,R12                                    @V200820 01475000
+DMKCNSEN DS    0D             ENTRY TO ENABLE OR DISABLE A LINE@V200820 01476000
+         LM    R12,R13,CNSBASE     ESTABLISH ADDRESSABILITY    @V200820 01477000
+         USING DMKCNS,R12,R13                                  @V200820 01478000
+         SPACE                                                          01479000
+         SLR   R0,R0          CONSTANT                         @V200820 01480000
+         STH   R0,RDEVRCNT    CLEAR THE REAL DEVICE RETRY COUNT@V200820 01481000
+         SLR   R10,R10        CLEAR THE IOBLOK REGISTER        @V200820 01482000
+         TM    RDEVTFLG,RDEVLOG    HAS LOGON BEEN INITIATED ?  @V200820 01483000
+         BO    CNSEXIT             YES - EXIT IMMEDIATELY      @V200820 01484000
+         TM    RDEVFLAG,RDEVACTV   IS THERE AN ACTIVE TASK ?   @VM08581 01485000
+         BO    CNSEXIT             YES - EXIT FORTHWITH        @VM08581 01486000
+         SWITCH               CONTINUE PROCESSING ON MAIN PROC @V407508 01486100
+         TM    RDEVFLAG,RDEVDISB   IS THIS A DISABLE REQUEST ? @V200820 01487000
+         BO    CNSDISB             YES - DISABLE AND CLEAN UP  @V200820 01488000
+         TM    RDEVTFLG,RDEVCTL    I/O ACTIVE ON THIS LINE ?   @V200820 01489000
+         BO    CNSEXIT             YES - GOTO DMKDSPCH         @V200820 01490000
+         L     R1,RDEVUSER    GET ADDRESS OF CORRECT VMBLOK    @V407508 01491100
+         SWTCHVM OPT=STAY     SWITCH TO THE CORRECT VMBLOK     @V407508 01491200
+         B     CNSENAB                                         @VA04576 01493250
+CNSBASE  DC    A(DMKCNS,DMKCNS+4096) BASE ADDRESSABILITY       @VA04576 01493500
+         SPACE                                                          01494000
+CNSENAB  EQU   *              ENABLE TP LINE FOR USER LOGON    @V200820 01495000
+         TM    RDEVSTA2,RETRYSW IS RETRY SWITCH ON ?           @VA07215 01495200
+         BO    CNSARND        YES, DON'T CLEAR RETRY COUNT     @VA07215 01495400
+         XC    RDEVRCNT(2),RDEVRCNT CLEAR RETRY COUNT          @VA07215 01495600
+CNSARND  OI    RDEVSTA2,RETRYSW TURN ON RETRY SWITCH           @VA07215 01495800
+         NI    RDEVFLAG,RDEVEPMD   LEAVE ONLY THIS FLAG SET    @V200820 01496000
+         OI    RDEVFLAG,RDEVPSUP+RDEVENAB    PRINT SUPPRESS, EN@V200820 01497000
+         NI    RDEVTFLG,255-(RDEVLOG+RDEVATOF)    RESET THESE  @V200820 01498000
+         NI    RDEVSTA2,255-RDEVDROP CLEAR LOGDROP FLAG        @VA04688 01498500
+         CLI   RDEVTYPE,TYP3210    EBCDIC SYSTEM CONSOLE ?     @V200820 01499000
+         BE    EBCONLN             YES - WRITE 'VM/370 ONLINE' @V200820 01500000
+         SLR   R1,R1                                           @V200820 01501000
+         IC    R1,RDEVSADN    PICK UP SAD INDICATOR (0,1,2,3,4)@V200820 01502000
+         SLL   R1,4(0)        CONVERT TO CCW STRING INDEX      @V200820 01503000
+         LA    R5,ENABLE0(R1) GR5 = ADDRESS OF ENABLE SEQUENCE @V200820 01504000
+CNSIOEN  EQU   *                                               @VA02518 01505000
+         BAL   R2,CNSTRIO          ISSUE A HARD START I/O      @V200820 01506000
+         BZ    CNIGNOR        O.K. - WAIT FOR THE INTERRUPT    @VM08575 01507000
+         TM    CSW+4,CE+DE    PENDING INTERRUPT CLEARED ?      @VA02518 01508000
+         BO    CNSIOEN        YES - RETRY ONE MORE TIME        @VA02518 01509000
+         CLI   0(R5),X'27'    FINISH ON THE ENABLE ITSELF ?    @V200820 01510000
+         BE    CNSRTRY        YES - USE REGULAR RETRY LOGIC    @V200820 01511000
+         B     CNSNOFF        DISABLE AND RE-ENABLE THE LINE   @V200820 01512000
+         SPACE                                                          01513000
+         EJECT                                                          01515000
+CNSDISB  EQU   *              DISABLE COMMAND WAS ISSUED       @V200820 01516000
+         CLI   RDEVTYPE,TYP3210    EBCDIC SYSTEM CONSOLE ?     @V200820 01517000
+         BE    CNSNOFF             YES - CLEAN UP FLAGS, EXIT  @V200820 01518000
+         TM    RDEVTFLG,RDEVCTL    CONTROL I/O IN PROGRESS ?   @V200820 01519000
+         BZ    CNSNOFF             NO -- UNUSUAL, BUT FIX IT   @V200820 01520000
+         B     INTHALT        KNOCK DOWN ENABLE OR PREPARE     @VM08581 01521000
+         SPACE 2                                                        01522000
+EBCONLN  EQU   *              WRITE 'VM/370 ONLINE' FOR 3215   @V200820 01523000
+         LA    R0,CONTSIZE+(EBCLMSGL+7)/8    CONTASK SIZE      @V200820 01524000
+         BAL   R9,CNSGTSZ     GET A CONTASK FOR THE WRITE      @V200820 01525000
+         MVI   CONSTAT,CONOUTPT    THIS IS REALLY OUTPUT       @V200820 01526000
+         MVI   CONPARM,ALARM       SOUND THE ALARM             @V200820 01527000
+         MVC   CONDATA(EBCLMSGL),EBCLMSG     MOVE IN MSG       @V200820 01528000
+         LA    R1,CONDATA     START OF DATA FOR WRITE          @V200820 01529000
+         ST    R1,CONADDR     SET FOR INITIALIZATION           @V200820 01530000
+         LA    R0,EBCLMSGL    DATA LENGTH                      @V200820 01531000
+         STH   R0,CONCNT      . . .                            @V200820 01532000
+         B     INCTASK        INITIALIZE AND START THE TASK    @V200820 01533000
+         SPACE 2                                                        01534000
+CNIGNOR  EQU   *              FRET IOBLOK, EXIT TO DMKDSPCH    @V200820 01535000
+         TM    RDEVSTA2,RDEVSYNC ATTN WITH ACTIVE I/O ??       @VA08275 01535100
+         BZ    CNIGNOR1       NO, DON'T SYNC THEN              @VA08275 01535200
+CNSSYNC  DS    0H                                              @VA08275 01535300
+         NI    RDEVSTA2,X'FF'-RDEVSYNC RESET SYNC FLAG         @VA08275 01535400
+         L     R1,IOBMISC     GET CPEXBLOK FOR ATTENTION       @VA08275 01535500
+         CALL  DMKSTKMP       STACK THE ATTENTION HANDLING     @VA08275 01535600
+CNIGNOR1 DS    0H                                              @VA08275 01535700
+         BAL   R9,FRETIOB     RETURN IOBLOK, IOERBLOK          @V200820 01536000
+         GOTO  DMKDSPCH       GET OUT OF HERE                  @V200820 01537000
+SDRSTAT  EQU   *                                               @VA05194 01537050
+         LTR   R10,R10        DOES IOBLOK EXISTS?              @VA05194 01537100
+         BZR   R2             NO--FORGET SDR UPDATE            @VA05194 01537150
+         ICM   R1,15,IOBIOER  GET IOERBLOK                     @VA05194 01537200
+         BZR   R2             NO IOERBLOK--RETURN              @VA05194 01537250
+         USING IOERBLOK,R1                                     @VA05194 01537300
+         NI    IOERFLG3,X'FF'-IOERREAD RESET FLAG              @VA05194 01537350
+         ST    R1,RDEVIOER    POINTER TO IOERBLOK IN RDEVBLOK  @VA05194 01537400
+         LTR   R6,R6          IS THERE A CONTASK?              @VA05194 01537450
+         BZ    NORDFLAG       NO--DO NOT SET READ FLAG         @VA05194 01537500
+         TM    CONSTAT,CONOUTPT+CONCNTL INPUT CONTASK?         @VA05194 01537550
+         BNZ   NORDFLAG       NO--DO NOT SET READ FLAG         @VA05194 01537600
+         OI    IOERFLG3,IOERREAD TURN ON READ FLAG             @VA05194 01537650
+         DROP  R1                                              @VA05194 01537700
+NORDFLAG EQU   *                                               @VA05194 01537750
+         SLR   R1,R1          CLEAR PARAMETER REG              @VA05194 01537800
+         CALL  DMKIOEST,AFFINITY UPDATE STATISTICAL COUNTERS   @V407508 01537860
+         ST    R1,RDEVIOER    CLEAR OUT IOERBLOK PTR           @VA05194 01537900
+         BR    R2             RETURN TO IN LINE CODE           @VA05194 01537950
+         EJECT                                                          01538000
+FRETIOER EQU   *                                               @V200820 01539000
+         L     R1,IOBIOER     GET IOERBLOK                     @V200820 01540000
+         LTR   R1,R1          IS THERE ONE ?                   @V200820 01541000
+         BCR   8,R9           NO -- RETURN                     @V200820 01542000
+         USING IOERBLOK,R1                                     @V200820 01543000
+         LA    R0,IOERSIZE    GET SIZE OF IOERBLOK IN DBL-WDS  @V200820 01544000
+         AH    R0,IOEREXT     ADD EXTRA SIZE OF IOERBLOK       @V200820 01545000
+         DROP  R1                                              @V200820 01546000
+         CALL  DMKFRET        RETURN IT TO FREE STORAGE        @V200820 01547000
+         SLR   R1,R1          CLEAR                            @V200820 01548000
+         ST    R1,IOBIOER     IOERBLOK PTR                     @V200820 01549000
+         NI    IOBFLAG,X'FF'-IOBERP IND ERP NOT IN CTL         @VA03381 01550000
+         BR    R9                                              @V200820 01551000
+         SPACE 2                                                        01552000
+FRETIOB  EQU   *              RETURN IOBLOK TO FREE STORAGE    @V200820 01553000
+         LTR   R10,R10        DO WE HAVE AN IOBLOK ?           @V200820 01554000
+         BCR   8,R9           NO -- JUST RETURN                @V200820 01555000
+         ST    R9,BALR9       SAVE GR9 FOR A MINUTE            @V200820 01556000
+         BAL   R9,FRETIOER   RELEASE IOERBLOK, IF ANY          @V200820 01557000
+         LA    R0,IOBSIZE     SIZE OF IOBLOK                   @V200820 01558000
+         LR    R1,R10                                          @V200820 01559000
+         CALL  DMKFRET        RETURN THE IOBLOK TO FREE STORAGE@V200820 01560000
+         SLR   R10,R10        NO MORE IOBLOK                   @V200820 01561000
+         L     R9,BALR9       RESTORE RETURN REGISTER          @V200820 01562000
+         BR    R9             . . .                            @V200820 01563000
+         SPACE 2                                                        01564000
+CNSGTSK  EQU   *         BUILD AND INITIALIZE CONTROL CONTASK  @V200820 01565000
+         LA    R0,CONTSIZE    SIZE OF A MINIMUM CONTASK        @V200820 01566000
+CNSGTSZ  EQU   *              BUILD A LARGER CONTROL TASK      @V200820 01567000
+         CALL  DMKFREE                                         @V200820 01568000
+         XC    0(CONTSIZE*8,R1),0(R1)   CLEAR CONTASK TO ZEROES@V200820 01569000
+         LR    R6,R1          USE STANDARD GR6 ADDRESSABILITY  @V200820 01570000
+         L     R1,RDEVCON     CURRENT CONTASK STACK, IF ANY    @V200820 01571000
+         ST    R6,RDEVCON     CONTROL TASK TO HEAD OF CHAIN    @V200820 01572000
+         ST    R1,CONPNT      ...RECONNECT OLD CONTASK CHAIN   @V200820 01573000
+         STH   R0,CONTSKSZ    SAVE CONTASK SIZE IN DOUBLE-WORDS@V200820 01574000
+         MVI   CONSTAT,CONCNTL+CONESCP  CONTROL CONTASK        @V200820 01575000
+         ST    R11,CONUSER    SET VMBLOK ADDRESS               @V200820 01576000
+         BR    R9             RETURN                           @V200820 01577000
+         EJECT                                                          01578000
+         AIF   (NOT &TRACE(9)).NTR3                             **AIF** 01579000
+CNTRACE  EQU   *              CP TRACE TABLE ENTRY FOR SIO, HIO@V200820 01580000
+         TM    TRACFLG2,TRACBEF    I/O TRACING ACTIVE ?        @V200820 01581000
+         BZ    CNNOTRC             NO -- RESTORE CC AND RETURN @V200820 01582000
+         STM   R2,R4,TEMPSAVE SAVE TRACE WORK REGS             @V407508 01583100
+         SLR   R4,R4          CLEAR REG4 FOR ENTRY FLAG        @V407508 01583600
+         IC    R4,0(,R15)     LOAD ENTRY TYPE FLAG             @V407508 01584100
+         TRACE CODE=(R4),R14,R2,R3  GET CURRENT TRACE ENTRY    @V407508 01584600
+         STCM  R15,8,1(R14)        MOVE IN THE CONDITION CODE  @V200820 01585000
+         NI    1(R14),X'30'        ...AND ONLY THE COND CODE   @V200820 01586000
+         STH   R1,2(0,R14)    SAVE THE REAL DEVICE ADDRESS     @V200820 01587000
+         ST    R10,4(0,R14)   IOBLOK ADDRESS, IF ANY           @V200820 01588000
+         MVC   8(4,R14),CAW   CHANNEL ADDRESS WORD             @V200820 01589000
+         XC    12(4,R14),12(R14)   CLEAR LAST WORD             @V200820 01590000
+         CLI   1(R14),X'10'   CONDITION CODE ONE ?             @V200820 01591000
+         BNE   *+10           NO -- DO NOT MOVE IN CSW         @V200820 01592000
+         MVC   12(4,R14),CSW+4     MOVE IN CSW STATUS          @V200820 01593000
+         LM    R2,R4,TEMPSAVE  RESTORE REGS USED BY TRACE      @V407508 01594100
+CNNOTRC  EQU   *              RESTORE CONDITION CODE, RETURN   @V200820 01599000
+         SPM   R15            RESET COND. CODE                 @V200820 01600000
+         B     2(0,R15)       SKIP OVER TRACE FLAG ON RETURN   @V200820 01601000
+.NTR3    ANOP                                                           01602000
+         SPACE 3                                                        01603000
+CNCLEAR  EQU   *         SUBROUTINE TO CLEAR READ INPUT BUFFER @V200820 01604000
+         L     R1,CONRETN     POINTER TO ORIGINAL SAVEAREA     @V200820 01605000
+         USING SAVEAREA,R1                                     @V200820 01606000
+         L     R0,SAVER1      ADDRESS OF READ BUFFER           @V200820 01607000
+         L     R1,SAVER0      LENGTH OF BUFFER                 @V200820 01608000
+         DROP  R1                                              @V200820 01609000
+         ST    R0,CONADDR     RESET BUFFER ADDRESS             @V200820 01610000
+         STH   R1,CONCNT      . . . BUFFER LENGTH              @V200820 01611000
+         NI    CONSTAT,255-CONESCP CCW STRING CLOBBERED        @V200820 01612000
+         SR    R3,R3          ZERO ADDRESS, ZERO PAD           @V200820 01613000
+         MVCL  R0,R2          CLEAR INPUT BUFFER TO ZEROES     @V200820 01614000
+         BR    R9             RETURN TO CALLER                 @V200820 01615000
+         SPACE 2                                                        01616000
+CNSRETN  EQU   *              RETURN FINISHED TASK TO DMKQCNET @V200820 01617000
+         L     R15,CONPNT     REMOVE TOP CONTASK FROM CHAIN    @V200820 01618000
+         ST    R15,RDEVCON         . . .                       @V200820 01619000
+         SLR   R15,R15                                         @V200820 01620000
+         ST    R15,CONPNT     CLEAR FORWARD POINTER FOR DMKQCN @V200820 01621000
+         CALL  DMKQCNET       DISPOSE OF THIS TASK             @V200820 01622000
+         L     R6,RDEVCON     GR6 = NEW TOP CONTASK            @V200820 01623000
+         BR    R7             RETURN                           @V200820 01624000
+         EJECT                                                          01625000
+         DS    0D                                              @V200820 01626000
+*---------------------------------------------------------------------* 01627000
+*        THE ENABLE CCW STRINGS ARE INDEXED BY 'RDEVSADN'             * 01628000
+ENABLE0  CCW   X'13',0,CC+SILI,1        SETADDR ZERO           @V200820 01629000
+         CCW   X'27',0,SILI,1           ENABLE                 @V200820 01630000
+ENABLE1  CCW   X'17',0,CC+SILI,1        SETADDR ONE            @V200820 01631000
+         CCW   X'27',0,SILI,1           ENABLE                 @V200820 01632000
+ENABLE2  CCW   X'1B',0,CC+SILI,1        SETADDR TWO            @V200820 01633000
+         CCW   X'27',0,SILI,1           ENABLE                 @V200820 01634000
+ENABLE3  CCW   X'1F',0,CC+SILI,1        SETADDR THREE          @V200820 01635000
+         CCW   X'27',0,SILI,1           ENABLE                 @V200820 01636000
+ENABLE4  CCW   X'27',0,SILI,1           ENABLE ( RDEVSADN = 4 )@V200820 01637000
+*---------------------------------------------------------------------* 01638000
+         SPACE                                                          01639000
+DISABLEC CCW   X'01',ADDR50,CC+SILI,4   WRITE ADDRESS CHARACTER@V200820 01640000
+         CCW   X'0D',BREAKCHR,CC+SILI,3 FORCE CONTROL MODE     @V200820 01641000
+DISABLED CCW   X'2F',0,SILI,1           DISABLE THE LINE       @V200820 01642000
+         SPACE                                                          01643000
+RESETTY  CCW   X'01',TTYSTMSG,SILI,L'TTYSTMSG                  @V200820 01644000
+RESET41  CCW   X'0D',BREAKCHR,CC+SILI,3                        @V200820 01645000
+RESET50  CCW   X'01',STMSG,SILI,STMSGL                         @V200820 01646000
+         SPACE                                                          01647000
+INITRD   CCW   X'0D',BREAKCHR,CC+SILI,3                        @V200820 01648000
+         CCW   X'01',ADDR50,CC+SILI,L'ADDR50                   @V200820 01649000
+         SPACE                                                          01650000
+RDERR50  CCW   X'01',RDERR150,SILI+CD,L'RDERR150  HEADER CHARS @V200820 01651000
+         CCW   X'00',RDERRBCD+1,SILI,L'RDERRBCD-1 'READ ERROR' @V200820 01652000
+RDERR41  CCW   X'0D',BREAKCHR,CC+SILI,3           'READ ERROR' @V200820 01653000
+         CCW   X'01',RDERRBCD,SILI,L'RDERRBCD                  @V200820 01654000
+RDERRTY  CCW   X'01',RDERRTTY,SILI,L'RDERRTTY     'READ ERROR' @V200820 01655000
+         SPACE 1                                                        01656000
+PREPCCW  CCW   X'06',0,SILI,1      WAIT FOR ATTENTION SIGNAL   @V200820 01657000
+         SPACE                                                          01658000
+SENDC    CCW   X'01',ADDR50,SILI,14                            @VA04576 01658500
+BRK2741  CCW   X'0D',BREAKCHR,CC+SILI,3      BREAK FOR 2741    @V200820 01659000
+         CCW   X'01',EOADDR,SILI,1                             @V200820 01660000
+BRK1050  CCW   X'01',AD50,CC+SILI,3          BREAK FOR 1050    @V200820 01661000
+         CCW   X'06',0,CC+SILI,1                               @V200820 01662000
+         CCW   X'01',EOADDR,SILI,1                             @V200820 01663000
+BRKTTYS  CCW   X'01',XOFF,SILI,1             BREAK FOR TTY     @V200820 01664000
+         SPACE                                                          01665000
+RAD1050  CCW   X'01',ADREST50,CC+SILI,4      READ END FOR 1050 @V200820 01666000
+         CCW   X'06',0,CC+SILI,1                               @V200820 01667000
+         CCW   X'01',EOADDR,SILI,*-*                           @V200820 01668000
+         SPACE                                                          01669000
+ALARMCCW CCW   X'0B',0,SILI,1      RING THE CONSOLE ALARM      @V200820 01670000
+ADR4150  CCW   X'01',ADRS4150,SILI+CC,*-*    1050, 2741 READ   @V200820 01671000
+         CCW   X'06',0,SILI+CC,1                               @V200820 01672000
+ACKREAD  CCW   X'0A',0,SKIP+SILI,1      READ ACK FROM 1050     @V200820 01673000
+TTYREAD  CCW   X'01',TTYREDY,SILI+CC,2  READ PROMPTING FOR TTY @V200820 01674000
+TTYMASK  CCW   X'01',TTYHIDE,SILI+CC,TTYHIDN    MASK FOR TTY   @V200820 01675000
+REDSKIP  CCW   X'00',0,SKIP+SILI,4096   IGNORE EVERYTHING READ @V200820 01676000
+NOPCCW   CCW   X'03',0,SILI,1                STANDARD NO-OP    @V200820 01677000
+MSK3210  CCW   X'09',MASKCON,SILI+CC,8       WRITE MASK STRING @V200820 01678000
+         SPACE                                                          01679000
+TRANSIN  DS    0F             INPUT TRANSLATE TABLE ANCHORS    @V200820 01680000
+         DC    A(DMKTBLPI)    PTTC/EBCD           -> EBCDIC    @VM03172 01681000
+         DC    A(DMKTBLCI)    CORRESPONDENCE      -> EBCDIC    @VM03172 01682000
+         DC    A(DMKTBMNI)    APL PTTC/EBCD       -> EBCDIC    @VM03172 01683000
+         DC    A(DMKTBMMI)    APL CORRESPONDENCE  -> EBCDIC    @VM03172 01684000
+         DC    A(DMKTBLTI)    USACII-8            -> EBCDIC    @VM03172 01685000
+         SPACE                                                          01686000
+TRANSOUT DS    0F             OUTPUT TRANSLATE TABLE ANCHORS   @V200820 01687000
+         DC    A(DMKTBLPO)    EBCDIC -> PTTC/EBCD              @VM03172 01688000
+         DC    A(DMKTBLCO)    EBCDIC -> CORRESPONDENCE         @VM03172 01689000
+         DC    A(DMKTBMNO)    EBCDIC -> APL PTTC/EBCD          @VM03172 01690000
+         DC    A(DMKTBMMO)    EBCDIC -> APL CORRESPONDENCE     @VM03172 01691000
+         DC    A(DMKTBLTO)    EBCDIC -> USAII-8 LEVEL          @VM03172 01692000
+         SPACE                                                          01693000
+MSGHEAD  DC    C'CNS',X'00'   GR0 VALUES FOR CALL TO DMKERMSG  @V200820 01694000
+MSGPARM  DC    X'A0C90000'    RETURN, OPERATOR, LETTER 'I'     @V200820 01695000
+         SPACE                                                          01696000
+SETIDLES MVC   0(*-*,R4),IDLCHAR   MOVE IDLES TO CONTASK       @V200820 01697000
+         SPACE                                                          01698000
+*        "VM/370 ONLINE" MESSAGES FOR TTY, 3210, 1050, 2741:            01699000
+TTYSTMSG DC    X'FFFFB1516BB3F5CDED0D05F373339373A3B151'       @V200820 01700000
+EBCLMSG  DC    X'151515',C' VM/370 ONLINE '                    @V200820 01701000
+EBCLMSGL EQU   *-EBCLMSG                                       @V200820 01702000
+STMSG    DC    X'165B5E5E2A4923070E15014C4A46734A6B'           @V200820 01703000
+BREAKCHR DC    X'01010101464370070B13015125314C25295B5E5E5E'   @V200820 01704000
+STMSGL   EQU   *-STMSG                                         @V200820 01705000
+         SPACE 1                                                        01706000
+RDERRCOR DC    X'164A294F2A01294A4A514A5B'      CORR LINE ERROR@V200820 01707000
+RDERR150 DC    X'165B5E5E5E5E5E5E5E5E5E5E'      1050 LINE ERROR@V200820 01708000
+EOADDR   EQU   RDERR150       END OF ADDRESS (1050,2741)       @V200820 01709000
+EOA2741  DC    X'16',16X'5E'  2741 READ ENDING SEQUENCE        @VA06314 01709100
+RDERRBCD DC    X'16526B6268016B52524C525B'      PTTC LINE ERROR@V200820 01710000
+RDERRTTY DC    X'B1514BA3832305A34B4BF34BB151' TTY LINE ERROR  @VA01576 01711000
+         SPACE                                                          01712000
+ADDR50   DC    X'1FDFDFDFDFDFDFDFDFDFDFDFDFDFE202' 1050 ADDRESS@VA08899 01713000
+EXMSG45  DC    X'DEDEDEDB5E5E5E5E'  3 IDLES, NEW-LINE, 4 IDLES @V200820 01714000
+EXMSGTY  DC    X'FFFFFFB151FFFFFFFF' 3 IDLES, NEW-LINE, 4 IDLES@V200820 01715000
+STRMASK  DC    X'14',C'********',8X'16'      2741, 1050 MASK   @VM08679 01716000
+         DC    C'HHHHHHHH',8X'16'                 . . .        @VM08679 01717000
+         DC    C'SSSSSSSS',8X'16'                 . . .        @VM08679 01718000
+STRMSKL  EQU   *-STRMASK                                       @V200820 01719000
+TTYREDY  DC    X'7589'        . , XON                          @V200820 01720000
+TTYHIDE  DC    X'05',8X'55',X'B1',X'05',8X'13',X'B1',X'05'     @VA01833 01721000
+         DC    8X'CB',X'B1'                                    @VA01833 01722000
+TTYHIDN  EQU   *-TTYHIDE                                       @V200820 01723000
+TTYENDS  DC    X'B151C9FF'    CR, LF, XOFF, RUBOUT             @V200820 01724000
+TTYRING  DC    X'E1E1E1E1'    RING THE TELETYPE ALARM (BELL)   @VM08679 01725000
+ADRS4150 DC    X'1FDFDFDF1F2315'   CIRCLE C, CIRCLE C, /, 0    @V200820 01726000
+IDLCHAR  DC    16X'5E'        IDLE STRING FOR INSERTION        @V200820 01727000
+MASKCON  DC    C'XXXXXXXX'    MASK STRING FOR 3210-TYPE CONSOLE@V200820 01728000
+XOFF     DC    X'C9'          TELEGRAPH 'XOFF' CHARACTER       @V200820 01729000
+ADREST50 DC    X'16'          CIRCLE D - POSITIVE RESPONSE     @VM08830 01730000
+AD50     DC    X'1FE202'      CIRCLE C, A ,1                   @VA08899 01731000
+         SPACE 1                                                        01732000
+MSGNUM   DC    AL1(0,1,2,3,4,5,27,28)                          @V200820 01733000
+         EJECT                                                          01734000
+         LTORG                                                 @V200820 01735000
+         EJECT                                                          01736000
+*.                                                                      01737000
+* OPERATION OF DMKCNSED SUBROUTINE -                                    01738000
+*                                                                       01739000
+*        2. CLEAR TRANSLATE TABLE TO BINARY ZEROS AND STORE CODE BYTES  01740000
+*           FOR EDIT CHARACTERS AT APPROIATE DISPLACEMENTS INTO THE     01741000
+*           TRANSLATE TABLE.                                            01742000
+*        3. EXECUTE A TRT INSTRUCTION TO SCAN INPUT SOURCE FOR AN       01743000
+*           EDIT CHARACTER.  AN ADDITIONAL PASS OF THE INPUT SOURCE     01744000
+*           IS REQUIRED IF A LINE DELETE CHARACTER OR EDIT ESCAPE       01745000
+*           IS FOUND ON PASS 1.  AT THE END OF PASS 1 CHECK TO SEE      01746000
+*            IF PASS 2 IS REQUIRED.             IF NOT, RETURN.  IF     01747000
+*           PASS 2 IS REQUIRED, REMOVE THE CHARACTER DELETE             01748000
+*           AND EDIT ESCAPE CHARACTER CODE BYTES FROM THE TRANSLATE     01749000
+*           TABLE AND RESTART THE SCAN.  AT THE END OF PASS 2           01750000
+*           CALL DMKFRET TO RETURN THE TRANSLATE TABLE TO FREE          01751000
+*           STORAGE AND RETURN.                                         01752000
+*                                                                       01753000
+*           WHEN AN EDIT CHARACTER IS FOUND CONTINUE WITH THE           01754000
+*           RESPECTIVE SECTION BELOW:                                   01755000
+*                                                                       01756000
+*           LINE END CHARACTER (#) - CHANGE THE LINE END CHARACTER TO   01757000
+*           A X'15' AND RESTART SCAN AT THE NEXT SOURCE CHARACTER.      01758000
+*                                                                       01759000
+*           LINE DELETE CHARACTER (¢) - IF THIS IS THE FIRST PASS       01760000
+*           INDICATE THAT A SECOND PASS IS REQUIRED AND RESTART SCAN    01761000
+*           AT THE NEXT SOURCE CHARACTER; OTHERWISE MOVE ALL SOURCE     01762000
+*           CHARACTERS TO THE RIGHT OF THE LINE DELETE CHARACTER        01763000
+*           TO EITHER THE BEGINNING OF THE LINE OR TO THE PREVIOUS      01764000
+*           LINE END CHARACTER, WHICHEVER OCCURS FIRST. ADJUST          01765000
+*           INPUT COUNT TO REFLECT THE NUMBER OF CHARACTERS DELETED.    01766000
+*           RESTART SCAN AT BEGINNING OF INPUT LINE.                    01767000
+*                                                                       01768000
+*           CHARACTER DELETE CHARACTER (@) - MOVE ALL SOURCE            01769000
+*           CHARACTERS TO THE RIGHT OF THE CHARACTER DELETE CHARACTER   01770000
+*           ONE CHARACTER TO THE LEFT.  ADJUST INPUT COUNT. RESTART     01771000
+*           SCAN AT THE NEXT INPUT SOURCE CHARACTER.                    01772000
+*                                                                       01773000
+*           ESCAPE CHARACTER (") - IF THIS IS THE FIRST PASS            01774000
+*           INDICATE THAT A SECOND PASS IF REQUIRED AND RESTART SCAN    01775000
+*           AT THE NEXT SOURCE CHARACTER; OTHERWISE MOVE ALL            01776000
+*           SOURCE CHARACTERS TO THE RIGHT OF THE ESCAPE CHARACTER      01777000
+*           ONE CHARACTER TO THE LEFT.  ADJUST INPUT COUNT.  RESTART    01778000
+*           SCAN AT THE NEXT INPUT SOURCE CHARACTER.                    01779000
+*                                                                       01780000
+*.                                                                      01781000
+         EJECT                                                          01782000
+         DROP  R13                                             @VA01217 01783000
+DMKCNSED DS    0D         ENTRY FOR INPUT EDITING OR TRANSLATIO@V200820 01784000
+         STM   R0,R15,BALRSAVE     SAVE REGISTERS              @V200820 01785000
+         LR    R12,R15                                         @V200820 01786000
+         USING DMKCNSED,R12                                    @V200820 01787000
+         L     R4,CONADDR     PICK UP DATA ADDRESS             @V200820 01788000
+         LA    R4,0(0,R4)                                      @V200820 01789000
+         LH    R3,CONCNT      PICK UP FULL INPUT DATA LENGTH   @V200820 01790000
+         TM    CONPARM,EDIT   IS EDITING DESIRED ?             @V200820 01791000
+         BZ    ENDEDIT        NO -- GO CHECK FOR TRANSLATION   @V200820 01792000
+         LA    R9,DMKCNSTB    SET TABLE ADDRESS IN R9          @V200820 01793000
+         XC    0(256,R9),0(R9)     CLEAR TO ZEROS              @V200820 01794000
+         LA    R2,4           SET LOOP COUNT                   @V200820 01795000
+         SPACE 1                                                        01796000
+INITRTBL EQU   *                                               @V200820 01797000
+         LA    R1,VMTLEND-1(R2)    POINTER TO EDIT CHARACTER   @V200820 01798000
+         SLR   R7,R7          CLEAR                            @V200820 01799000
+         IC    R7,0(,R1)      GET EDIT CHARACTER               @V200820 01800000
+         LTR   R7,R7              IS IT A VALID CHARACTER?     @VA04219 01800300
+         BZ    NOTVALID           NO, CHECK NEXT               @VA04219 01800600
+         LA    R7,0(R9,R7)    GET TRT TABLE PTR + EDIT CHARACTE@V200820 01801000
+         LR    R5,R2          GET INDEX                        @V200820 01802000
+         SLL   R5,2           * 4                              @V200820 01803000
+         EX    R5,SETFUNC     PLACE FUNCTION BYTE IN TRT TABLE @V200820 01804000
+NOTVALID BCT   R2,INITRTBL        LOOP THROUGH ALL EDIT CHARS. @VA04219 01805500
+         SPACE 1                                                        01806000
+         MVI   TEMPR0,@1STPASS     CLEAR FLAG, SET FIRST PASS  @V200820 01807000
+EDSTRT1  EQU   *                                               @V200820 01808000
+         LR    R1,R4          GR1 = POINTER TO FIRST DATA CHAR @V200820 01809000
+EDSTRT2  EQU   *                                               @V200820 01810000
+         LA    R13,0(R3,R4)   GR13 = PTR TO LAST DATA CHAR + 1 @V200820 01811000
+EDSTRT3  EQU   *                                               @V200820 01812000
+         LR    R5,R13         GET LENGTH FOR EXECUTE INSTR     @V200820 01813000
+         SR    R5,R1          ...                              @V200820 01814000
+         BNP   ENDPASS        END OF LINE                      @V200820 01815000
+         C     R5,F256        .GT. 256 ?                       @V200820 01816000
+         BNH   *+8            NO                               @V200820 01817000
+         L     R5,F256        USE 256 AS THE MAXIMUM LENGTH    @V200820 01818000
+         BCTR  R5,0           DECREMENT FOR EX                 @V200820 01819000
+         EX    R5,EDSEARCH    LOOK FOR AN EDIT CHARACTER       @V200820 01820000
+         BC    4+2,EDFUNC-4(R2)  FUNCTION BYTE FOUND - GO EDIT @V200820 01821000
+         LA    R1,1(R1,R5)    SET REG 1 TO NEXT INPUT BYTE     @V200820 01822000
+         B     EDSTRT3        CHECK FOR ANY MORE CHARS IN INPUT@V200820 01823000
+         SPACE 1                                                        01824000
+EDFUNC   B     LINEEND        CODE X'04' - LINE END CHARACTER  @V200820 01825000
+         B     LINEDEL        CODE X'08' - LINE DEL CHARACTER  @V200820 01826000
+         B     CHARDEL        CODE X'0C' - CHARACTER DELETE    @V200820 01827000
+         B     ESCAPE         CODE X'10' - ESCAPE CHARACTER    @V200820 01828000
+         EJECT                                                          01829000
+ENDPASS  EQU   *              HERE AT END OF PASS              @V200820 01830000
+         TM    TEMPR0,@1STPASS+NEED2ND  IN FIRST AND NEED 2ND ?@V200820 01831000
+         BNO   ENDEDIT        NO                               @V200820 01832000
+         NI    TEMPR0,X'FF'-@1STPASS  INDICATE FIRST PASS DONE @V200820 01833000
+         SLR   R7,R7          CLEAR                            @V200820 01834000
+         IC    R7,VMTCDEL     CHARACTER DELETE CHARACTER       @V200820 01835000
+         LA    R7,0(R9,R7)    GET TRT TABLE + CHARACTER DELETE @V200820 01836000
+         MVI   0(R7),0        REMOVE FUNCTION BYTE FROM TABLE  @V200820 01837000
+         SLR   R7,R7          CLEAR                            @V200820 01838000
+         IC    R7,VMTLEND     LOGICAL LINE END CHARACTER       @V200820 01839000
+         LA    R7,0(R9,R7)    GET TRT TABLE + LOGICAL LINE END @V200820 01840000
+         MVI   0(R7),0        REMOVE FUNCTION BYTE FROM TABLE  @V200820 01841000
+         B     EDSTRT1        START PASS 2                     @V200820 01842000
+         SPACE 1                                                        01843000
+LINEEND  EQU   *  HERE WHEN A LINE END CHARACTER IS FOUND      @V200820 01844000
+         MVI   0(R1),X'15'    CHANGE THE LOGICAL LINE END CHAR @V200820 01845000
+         LA    R1,1(,R1)      SET LINE PTR PAST THIS CHARACTER @V200820 01846000
+         B     EDSTRT3        RESTART SCAN                     @V200820 01847000
+         SPACE 1                                                        01848000
+LINEDEL  EQU   *  HERE WHEN A LINE DELETE CHARACTER IS FOUND   @V200820 01849000
+         TM    TEMPR0,@1STPASS     FIRST PASS ?                @V200820 01850000
+         BNO   LINEDEL2       NO                               @V200820 01851000
+         OI    TEMPR0,NEED2ND INDICATE 2ND PASS NEEDED         @V200820 01852000
+         LA    R1,1(,R1)      SET LINE PTR PAST THIS CHARACTER @V200820 01853000
+         B     EDSTRT3        RESTART SCAN                     @V200820 01854000
+         SPACE 1                                                        01855000
+LINEDEL2 EQU   *                                               @V200820 01856000
+         LR    R6,R1          GET CURRENT CHARACTER PTR        @V200820 01857000
+LINEDELL CLR   R6,R4          AT BEGINNING OF LINE ?           @V200820 01858000
+         BE    LINEBEG        YES                              @V200820 01859000
+         CLI   0(R6),X'15'    AT LOGICAL LINE END ?            @V200820 01860000
+         BE    LINEBEG        YES                              @V200820 01861000
+         MVI   0(R6),X'00'    ZERO CHARACTERS DELETED          @VA03519 01862000
+         BCTR  R6,0           DECREMENT                        @V200820 01863000
+         B     LINEDELL                                        @V200820 01864000
+         SPACE 1                                                        01865000
+LINEBEG  EQU   *                                               @V200820 01866000
+         LA    R14,1(,R1)     GET START OF DATA TO BE MOVED    @V200820 01867000
+         LR    R1,R6          SET NEW LINE PTR                 @V200820 01868000
+         LR    R7,R13         GET END OF LINE PTR              @V200820 01869000
+         SR    R7,R14         GET NUMBER OF CHARS TO MOVE      @V200820 01870000
+         BZ    LINESZCL       NOTHING TO MOVE, LINE DELETE LAST@V200820 01871000
+         LR    R15,R7         GET COUNT HERE TOO               @V200820 01872000
+         MVCL  R6,R14         COMPRESS LINE                    @V200820 01873000
+LINESZCL SR    R14,R6         GET DISPLACEMENT OF MOVE         @V200820 01874000
+         SR    R3,R14         ADJUST INPUT COUNT               @V200820 01875000
+         B     EDSTRT2        RESTART SCAN WITH ADJUSTED COUNT @V200820 01876000
+         SPACE 1                                                        01877000
+CHARDEL  EQU   *  HERE WHEN A CHARACTER DELETE IS FOUND        @V200820 01878000
+         LR    R6,R1          GET CURRENT CHARACTER PTR        @V200820 01879000
+         LR    R7,R13         GET END OF LINE PTR              @V200820 01880000
+         BCTR  R3,0           REDUCE INPUT COUNT BY 1          @V200820 01881000
+         LA    R14,1(,R6)     GET FROM PTR                     @V200820 01882000
+         CLR   R1,R4          IS CHAR DELETE FIRST CHAR IN LINE@V200820 01883000
+         BE    CHARMOVE       YES                              @V200820 01884000
+         BCTR  R3,0           REDUCE INPUT COUNT BY 1          @V200820 01885000
+         BCTR  R6,0           REDUCE TO PTR BY 1               @V200820 01886000
+CHARMOVE SR    R7,R14         GET NUMBER OF CHARS TO MOVE      @V200820 01887000
+         BZ    ENDPASS        NOTHING TO MOVE, CHAR DELETE LAST@V200820 01888000
+         LR    R15,R7         GET COUNT HERE TOO               @V200820 01889000
+         LR    R1,R6          SET NEW LINE PTR                 @V200820 01890000
+         MVCL  R6,R14         COMPRESS LINE                    @V200820 01891000
+         B     EDSTRT2        RESTART SCAN WITH ADJUSTED COUNT @V200820 01892000
+         SPACE 1                                                        01893000
+ESCAPE   EQU   *  HERE WHEN AN ESCAPE CHARACTER IS FOUND       @V200820 01894000
+         TM    TEMPR0,@1STPASS     FIRST PASS ?                @V200820 01895000
+         BNO   ESCAPE2        NO                               @V200820 01896000
+         LA    R1,1(,R1)      SET LINE PTR PAST THIS CHARACTER @V200820 01897000
+         CLR   R1,R13         IS ESCAPE THE LAST CHAR IN LINE ?@V200820 01898000
+         BNE   ESCAPET        NO                               @V200820 01899000
+         BCTR  R3,0           REDUCE INPUT COUNT BY 1          @V200820 01900000
+         B     ENDPASS                                         @V200820 01901000
+         SPACE 1                                                        01902000
+ESCAPET  EQU   *                                               @V200820 01903000
+         OI    TEMPR0,NEED2ND INDICATE 2ND PASS NEEDED         @V200820 01904000
+         LA    R1,1(,R1)      SET LINE PTR PAST THIS CHARACTER @V200820 01905000
+         B     EDSTRT3        RESTART SCAN                     @V200820 01906000
+         SPACE 1                                                        01907000
+ESCAPE2  EQU   *                                               @V200820 01908000
+         LR    R6,R1          GET TO PTR                       @V200820 01909000
+         LA    R14,1(,R6)     GET FROM PTR                     @V200820 01910000
+         LR    R7,R13         GET END OF LINE PTR              @V200820 01911000
+         SR    R7,R14         GET NUMBER OF CHARS TO MOVE      @V200820 01912000
+         LR    R15,R7         GET COUNT HERE TOO               @V200820 01913000
+         MVCL  R6,R14         COMPRESS LINE                    @V200820 01914000
+         LA    R1,1(,R1)      SET LINE PTR PAST THIS CHARACTER @V200820 01915000
+         BCTR  R3,0           REDUCE INPUT COUNT BY 1          @V200820 01916000
+         B     EDSTRT2        RESTART SCAN WITH ADJUSTED COUNT @V200820 01917000
+         SPACE 1                                                        01918000
+ENDEDIT  EQU   *  HERE WHEN INPUT EDITING IS FINISHED          @V200820 01919000
+         L     R6,BALR6       PICK UP CONTASK ADDRESS          @V200820 01920000
+         STH   R3,CONCNT      RESET ADJUSTED COUNT IN CONTASK  @V200820 01921000
+         ST    R3,BALR3       STORE REVISED SOURCE COUNT       @V200820 01922000
+         TM    CONPARM,UCASE  TRANSLATE INPUT TO UPPER CASE ?  @V200820 01923000
+         BZ    EDTEXIT        NO -- ALL FINISHED AS IS         @V200820 01924000
+         L     R1,=A(DMKTBLUP)     UPPER CASE TRANSLATE TABLE  @V200820 01925000
+         LA    R15,TRNSLAT    TRANSLATION SUBROUTINE           @VA01217 01926000
+         BALR  R14,R15        TRANSLATE DATA TO UPPER-CASE     @VA01217 01927000
+EDTEXIT  EQU   *                                               @V200820 01928000
+         LM    R0,R15,BALRSAVE     RESTORE REGISTERS           @V200820 01929000
+         BR    R14            RETURN                           @V200820 01930000
+         SPACE 2                                                        01931000
+DMKCNSTB DC    256X'00'       LINE EDITING TRANSLATE TABLE     @V200820 01932000
+         SPACE                                                          01933000
+SETFUNC  MVI   0(R7),0        EXECUTED MVI                     @V200820 01934000
+EDSEARCH TRT   0(0,R1),0(R9)  EXECUTED TRT                     @V200820 01935000
+         LTORG                                                 @V200820 01936000
+         EJECT                                                          01937000
+         DROP  R12                                             @VA01217 01938000
+         USING TRNSLAT,R15    USE LOCAL ADDRESSABILITY HERE    @VA01217 01939000
+TRNSLAT  DS    0H             CONSOLE TRANSLATION ROUTINE      @VA01217 01940000
+         STM   R3,R4,TEMPSAVE      SAVE ORIGINAL REGISTERS     @VA01217 01941000
+         LA    R0,256(0,0)    LENGTH FOR ONE TRANSLATE         @VA01217 01942000
+TRNSONE  EQU   *              TRANSLATE IN 256-BYTE BLOCKS     @VA01217 01943000
+         SR    R3,R0          DECREMENT COUNT BY 256 BYTES     @VA01217 01944000
+         BNP   TRNSTWO        GO TRANSLATE REMAINDER           @VA06313 01945100
+         TR    0(256,R4),0(R1)     TRANSLATE SUPPLIED DATA     @VA01217 01946000
+         ALR   R4,R0          BUMP DATA POINTER BY 256 BYTES   @VA01217 01947000
+         B     TRNSONE        . . .                            @VA01217 01948000
+         SPACE                                                          01949000
+TRNSTWO  EQU   *              TRANSLATE LAST PART OF DATA      @VA01217 01950000
+         AR    R3,R0          MAKE THE COUNT POSITIVE AGAIN    @VA01217 01951000
+         BZ    TRNSEXIT       DO NOT TRANSLATE ZERO BYTES      @VA06313 01951300
+         BCTR  R3,0           REDUCE DATA COUNT FOR EXECUTE    @VA06313 01951600
+         EX    R3,TRNSLATE    TRANSLATE LESS THAN 256 BYTES    @VA01217 01952000
+TRNSEXIT DS    0H                                              @VA06313 01952100
+         LM    R3,R4,TEMPSAVE      RESTORE ORIGINAL VALUES     @VA01217 01953000
+         BR    R14            RETURN                           @VA01217 01954000
+         SPACE                                                          01955000
+TRNSLATE TR    0(*-*,R4),0(R1)     EXECUTED TRANSLATE          @VA01217 01956000
+         EJECT                                                          01957000
+TIMEOUT  EQU   X'01'                                           @V200820 01958000
+         EJECT                                                          01959000
+         PSA                                                 , @V306638 01960000
+         COPY  EQU                                             @V306638 01961000
+         COPY  DEVTYPES                                        @V306638 01962000
+*        BITS DEFINED IN BALR0 FOR EDITING                              01963000
+@1STPASS EQU   X'80'          ON MEANS EXECUTING FIRST PASS    @V200820 01964000
+NEED2ND  EQU   X'40'          ON MEANS 2ND PASS NEEDED         @V200820 01965000
+         EJECT                                                          01966000
+         COPY  IOBLOKS                                         @V306638 01967000
+         COPY  IOER                                            @V306638 01968000
+         COPY  RBLOKS                                          @V306638 01969000
+         COPY  SAVE                                            @V306638 01970000
+         COPY  VMBLOK                                          @V306638 01971000
+         END   DMKCNS                                                   01972000

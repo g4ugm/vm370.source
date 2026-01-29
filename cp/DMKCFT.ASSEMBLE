@@ -1,0 +1,635 @@
+CFT      TITLE 'DMKCFT     (CP)        VM/370 - RELEASE 6'              00001000
+         ISEQ  73,80          VALIDATE INPUT SERIALIZATION              00002000
+*.                                                                      00003000
+*                                                                       00004000
+* MODULE NAME -                                                         00005000
+*        DMKCFT                                                         00006000
+*                                                                       00007000
+* FUNCTION -                                                            00008000
+*        TO ALLOW THE USER TO SPECIFY OPTIONS FOR                       00009000
+*        HIS TERMINAL.                                                  00010000
+*                                                                       00011000
+* ATTRIBUTES -                                                          00012000
+*        REENTRANT, PAGEABLE, CALLED VIA SVC                            00013000
+*                                                                       00014000
+* ENTRY POINTS -                                                        00015000
+*        DMKCFTRM - THIS THE ONLY ENTRY POINT IN THIS MODULE            00016000
+*                                                                       00017000
+* ENTRY CONDITIONS -                                                    00018000
+*        GPR 9 - ADDRESS OF THE COMMAND LINE BUFFER                     00019000
+*        GPR 11- ADDRESS OF VMBLOK                                      00020000
+*        GPR 13- ADDRESS OF SAVE AREA                                   00021000
+*                                                                       00022000
+* EXIT CONDITIONS -                                                     00023000
+*        NORMAL                                                         00024000
+*        GPR 2 = 0                                                      00025000
+*                                                                       00026000
+*        ERROR                                                          00027000
+*        GPR 2 = ERROR MESSAGE CODE                                     00028000
+*                                                                       00029000
+* CALLS TO OTHER ROUTINES -                                             00030000
+*        DMKSCNFD - TO LOCATE THE NEXT ARGUMENT                         00031000
+*        DMKQCNWT - TO SEND RESPONSE MESSAGE TO TERMINAL                00032000
+*        DMKERMSG - TO SEND ERROR MESSAGES TO TERMINAL                  00033000
+*                                                                       00034000
+* TABLES/WORKAREAS -                                                    00035000
+*        VMBLOK, RDEVBLOK                                               00036000
+*                                                                       00037000
+* REGISTER USAGE -                                                      00038000
+*        GPR 0 - LENGTH OF ARGUMENT IN COMMAND LINE BUFFER              00039000
+*        GPR 1 - ADDRESS OF ARGUMENT IN COMMAND LINE BUFFER             00040000
+*        GPR 2 - PARAMETER REGISTER FOR CALLED ROUTINES                 00041000
+*        GPR 3 - ADDRESS OF THE FIRST ARGUMENT OF A PAIR                00042000
+*        GPR 4 - LENGTH OF SECOND ARGUMENT OF A PAIR                    00043000
+*        GPR 5 - ADDRESS OF THE SECOND ARGUMENT OF A PAIR               00044000
+*        GPR 6 - RETURN ADDRESS IF 'ON' SPECIFIED                       00045000
+*        GPR 7 - RETURN ADDRESS IF 'OFF' SPECIFIED                      00046000
+*        GPR 8 - ADDRESS OF TERMINAL RDEVBLOK                           00047000
+*        GPR 9 - ADDRESS OF THE COMMAND LINE BUFFER                     00048000
+*        GPR 10-ADDRESS OF SYSLOCS                                      00049000
+*        GPR 11- ADDRESS OF VMBLOK                                      00050000
+*        GPR 12- BASE REGISTER FOR THE MODULE                           00051000
+*        GPR 13- ADDRESS OF SAVEAREA                                    00052000
+*        GPR 14- LINKAGE REGISTER                                       00053000
+*        GPR 15- LINKAGE REGISTER                                       00054000
+*                                                                       00055000
+* NOTES -                                                               00056000
+*        NONE                                                           00057000
+*                                                                       00058000
+*                                                                       00059000
+* COMMAND FORMAT -                                                      00060000
+*                                                                       00061000
+*              +------------+-------------------------------+           00062000
+*              |  TERMINAL  |   CHARDEL          ON         |           00063000
+*              |  TERM      |   LINEDEL          OFF        |           00064000
+*              |            |   LINEND          (CHAR)      |           00065000
+*              |            |   ESCAPE                      |           00066000
+*              |            |   TABCHAR                     |           00066500
+*              |            |                               |           00067000
+*              |            |   APL                         |           00068000
+*              |            |   ATTN             ON         |           00069000
+*              |            |   MASK             OFF        |           00070000
+*              |            |   TEXT                        |           00070100
+*              |            |   TIMESTMP                    |           00071000
+*              |            |                               |           00072000
+*              |            |   LINESIZE         NNN        |           00073000
+*              |            |                               |           00074000
+*              |            |   MODE             CP         |           00075000
+*              |            |                    VM         |           00076000
+*              +------------+-------------------------------+           00077000
+*                                                                       00078000
+*                                                                       00079000
+* OPERATION -                                                           00080000
+*                                                                       00081000
+*        1. CALL DMKSCNFD TO LOCATE THE NEXT ARGUMENT IN THE COMMAND    00082000
+*           LINE. IF NONE FOUND AND NO PREVIOUS SET OF ARGUMENTS        00083000
+*           HAVE BEEN PROCESSED, CALL DMKERMSG TO SEND DMKCFT026E       00084000
+*           ERROR MESSAGE. IF NO ARGUMENT FOUND AND PREVIOUS PROCESS-   00085000
+*           ING HAS BEEN DONE, CALL DMKQCNWT TO OUTPUT 'COMMAND         00086000
+*           COMPLETE' MESSAGE AND EXIT.                                 00087000
+*        2. SAVE THE LENGTH AND ADDRESS OF THE FIRST ARGUMENT OF THE    00088000
+*           SET, SET A FLAG TO INDICATE THIS, AND CALL DMKSCNFD TO      00089000
+*           LOCATE THE SECOND ARGUMENT OF THE SET. IF NONE FOUND, CALL  00090000
+*           DMKERMSG TO SEND DMKCFT026E ERROR MESSAGE.                  00091000
+*        3. COMPARE THE FIRST ARGUMENT AGAINST A LIST OF VALID          00092000
+*           ARGUMENTS. IF GET NO MATCHES, CALL DMKERMSG TO SEND         00093000
+*           DMKCFT002E ERROR MESSAGE.                                   00094000
+*        4. IF MATCH IS FOUND, CHECK THE ARGUMENT FOR VALID ABREV-      00095000
+*           IATION. IF NOT THE PROPER ABREVIATION, GO BACK TO STEP 3    00096000
+*           TO CONTINUE SCAN OF THE LIST. IF GOOD ,GO TO THE PROPER     00097000
+*           SUBROUTINE TO HANDLE THE REQUEST.                           00098000
+*        5. APL - TEST IF THE TERMINAL IS A TTY. IF SO, CALL DMKERMSG   00099000
+*           TO SEND ERROR MESSAGE DMKCFT006E. IF TERMINAL IS OTHER THAN 00100000
+*            A TTY, GO TO STEP 12 TO INTERROGATE THE SECOND ARGUMENT.   00101000
+*           IF ARGUMENT IS 'ON', RETURN TO STEP 5B. IF 'OFF' RETURN     00102000
+*           TO STEP 5C. IF NEITHER, RETURN TO STEP 5A.                  00103000
+*        5A. CALL DMKERMSG TO SEND DMKCFT002E ERROR MESSAGE.            00104000
+*        5B. CHECK IF 'APL' ALREADY ON. IF IT IS, GO TO STEP 1. IF      00105000
+*            NOT, TURN THE 'APL' BIT IN THE RDEVTMCD FIELD OF           00106100
+*            THE TERMINAL RDEVBLOK ON AND THE 'TEXT' BIT OFF.           00106200
+*            GO TO STEP 1.                                              00106300
+*        5C. CHECK IF 'APL' ALREADY OFF. IF SO, GO TO STEP 1. IF NOT,   00108000
+*            SUBTRACT '8' FROM THE RDEVTMCD FIELD AND GO TO STEP 1.     00109000
+*        5D. TEXT - TEST IF THE TERMINAL IS A 3277.  IF NOT,            00109010
+*            CALL DMKERMSG TO SEND ERROR MESSAGE DMKCFT006E.            00109020
+*            IF TERMINAL IS A 3277, GO TO STEP 12 TO                    00109030
+*            THE SECOND ARGUMENT.  IF ARGUMENT IS 'ON', RETURN          00109040
+*            TO STEP 5E.  IF 'OFF', RETURN TO STEP 5F.  IF              00109050
+*            NEITHER, GO TO STEP 5A.                                    00109060
+*        5E. CHECK IF 'TEXT' ALREADY ON.  IF IT IS, GO TO               00109070
+*            STEP 1.  IF NOT, TURN TO 'TEXT' BIT IN THE                 00109080
+*            RDEVTMCD FIELD OF THE TERMINAL RDEVBLOK ON AND             00109090
+*            THE 'APL' BIT OFF.  GO TO STEP 1.                          00109100
+*        5F. CHECK IF 'TEXT' ALREADY OFF.  IF SO, GO TO STEP 1.         00109110
+*            IF NOT, TURN OFF THE 'TEXT' BIT IN THE RDEVTMCD            00109120
+*            FIELD AND GO TO STEP 1.                                    00109130
+*        6. CHARDEL - GO TO STEP 12 TO INTERROGATE SECOND ARGUMENT.     00110000
+*           IF 'ON', RETURN TO STEP 6B. IF 'OFF', RETURN TO STEP 6C.    00111000
+*           IF 'CHAR', RETURN TO STEP 6A.                               00112000
+*        6A. MOVE THE SPECIFIED CHARACTER INTO THE RDEVCDEL FIELD OF    00113000
+*            THE TERMINAL RDEVBLOK AND GO TO STEP 1.                    00114000
+*        6B. MOVE THE SYSTEM DEFAULT CHARDEL CHARACTER FROM             00115000
+*            DMKSYSCD IN SYSLOCS TO THE RDEVCDEL FIELD AND GO TO        00116000
+*            STEP 1.                                                    00117000
+*        6C. ZERO OUT THE RDEVCDEL FIELD AND GO TO STEP 1.              00118000
+*        7. LINEDEL - GO TO STEP 12 TO INTERROGATE THE SECOND           00119000
+*           ARGUMENT.IF 'ON' RETURN TO STEP 7B--IF 'OFF' RETURN TO      00120000
+*           STEP 7C--IF A CHARACTER ,RETURN TO STEP 7A.                 00121000
+*        7A. MOVE THE ENTERED CHARACTER INTO THE RDEVLDEL FIELD OF      00122000
+*            THE RDEVBLOK AND GO TO STEP 1.                             00123000
+*        7B. MOVE THE SYSTEM DEFAULT LINE DELETE CHARACTER FROM THE     00124000
+*            DMKSYSLD FIELD IN SYSLOCS TO RDEVLDEL AND GO TO STEP 1.    00125000
+*        7C. ZERO OUT THE RDEVLDEL FIELD AND GO TO STEP 1.              00126000
+*        8. LINEND - GO TO STEP 12 TO INTERROGATE THE SECOND ARGUMENT.  00127000
+*           IF 'ON' RETURN TO STEP 8B -- IF 'OFF', RETURN TO STEP 8C    00128000
+*           AND IF CHARACTER, RETURN TO STEP 8A.                        00129000
+*        8A. MOVE THE SPECIFIED CHARACTER INTO THE RDEVLEND FIELD OF    00130000
+*            THE TERMINAL RDEVBLOK AND GO TO STEP 1.                    00131000
+*        8B. MOVE THE SYSTEM DEFAULT LINE END CHARACTER FROM THE        00132000
+*            DMKSYSLE FIELD OF SYSLOCS AND GO TO STEP 1.                00133000
+*        8C. ZERO OUT THE RDEVLEND FIELD AND GO TO STEP 1.              00134000
+*        9. ESCAPE - GO TO STEP 12 TO INTERROGATE THE SECOND ARGUMENT.  00135000
+*           IF 'ON', RETURN TO STEP 9B-- IF 'OFF' RETURN TO STEP 9C     00136000
+*           AND IF A CHARACTER, RETURN TO STEP 9A.                      00137000
+*        9A. MOVE THE SPECIFIED CHARACTER INTO THE RDEVESCP FIELD OF    00138000
+*            RDEVBLOK FOR THE TERMINAL AND GO TO STEP 1.                00139000
+*        9B. MOVE THE SYSTEM DEFAULT ESCAPE CHARACTER FROM THE          00140000
+*            DMKSYSES FIELD OF SYSLOCS TO THE RDEVESCP FIELD OF THE     00141000
+*            TERMINAL RDEVBLOK AND GO TO STEP 1.                        00142000
+*        9C. ZERO OUT THE RDEVESCP FIELD IN THE RDEVBLOK AND GO TO      00143000
+*            STEP 1.                                                    00144000
+*       9.1. TABCHAR - INVOKE STEP 12 TO DETERMINE WHETHER 'ON', 'OFF', 00144070
+*            OR 'CHAR' WAS SPECIFIED AS THE ARGUMENT FOR THE TABCHAR.   00144140
+*            IF 'ON' RETURN TO STEP 9.1B, IF 'OFF' RETURN TO STEP 9.1C, 00144210
+*            OR IF A CHARACTER RETURN TO STEP 9.1A.                     00144280
+*      9.1A. CHECK THAT THE SPECIFIED CHARACTER IS NOT ALPHABETIC,      00144350
+*            NUMERIC, OR A 3270 CONTROL CHARACTER; IF SO, MOVE IT INTO  00144420
+*            THE VMGRFTAB FIELD OF THE USER'S VMBLOK, OTHERWISE, DON'T  00144490
+*            CHANGE VMGRFTAB AND SEND AN INVALID OPERAND MESSAGE.       00144560
+*      9.1B. MOVE THE SYSTEM DEFAULT TAB CHAR (X'6A') INTO THE USER'S   00144630
+*            VMGRFTAB AND GO TO STEP 1.                                 00144700
+*      9.1C. ZERO OUT THE USER'S VMGRFTAB FIELD OF THE VMBLOK AND THEN  00144770
+*            GO TO STEP 1.                                              00144840
+*        10. LINESIZE - CALL DMKCVTDB TO CONVERT THE SECOND ARGUMENT    00145000
+*            TO BINARY. IF THE CONVERT FAILS, CALL DMKERMSG TO SEND     00146000
+*            DMKCFT002E ERROR MESSAGE.THEN CHECK IF A LINESIZE OF ZERO  00147000
+*            WAS SPECIFIED. IF SO , CALL DMKERMSG TO SEND DMKCFT002E    00148000
+*            ERROR MESSAGE. IF NUMBER IS OK, STORE THE NEW              00149000
+*            LINESIZE INTO THE RDEVLLEN FIELD OF THE TERMINAL           00150000
+*            RDEVBLOK AND GO TO STEP 1.                                 00151000
+*        11. MASK - GO TO STEP 12 TO INTERROGATE THE SECOND ARGUMENT.   00152000
+*            IF 'ON' RETURN TO STEP 11B -- IF 'OFF' , RETURN TO         00153000
+*            STEP 11C -- AND IF NEITHER, RETURN TO STEP 11A.            00154000
+*        11A. CALL DMKERMSG TO SEND ERROR MESSAGE DMKCFT002E.           00155000
+*        11B. TURN OFF THE RDEVPSUP FLAG IN THE RDEVFLAG FIELD          00156000
+*             OF THE TERMINAL RDEVBLOK AND GO TO STEP 1.                00157000
+*        11C. TURN ON THE RDEVPSUP FLAG IN THE RDEVFLAG FIELD           00158000
+*             OF THE TERMINAL RDEVBLOK AND GO TO STEP 1.                00159000
+*        12. THIS IS A SUBROUTINE TO CHECK SECOND ARGUMENT OF A SET.    00160000
+*            CHECK IF 'OFF'. IF IT IS RETURN ON REGISTER 7. IF NOT      00161000
+*            CHECK FOR 'ON'. IF IT IS, RETURN ON REGISTER 6. IF         00162000
+*            NEITHER OF THESE, RETURN ON REGISTER 14.                   00163000
+*        13. MODE  OPTION, CHECK FOR VALID ARG, CP OR VM.               00164000
+*            SET THE APPROPRIATE VMBLOK STATUS OR ISSUE ERROR MSG       00165000
+*                                                                       00166000
+*                                                                       00167000
+* RESPONSES -                                                           00168000
+*        NONE                                                           00169000
+*                                                                       00170000
+* ERROR MESAGES -                                                       00171000
+*        DMKCFT002E INVALID OPERAND - (OPERAND)                         00172000
+*        DMKCFT006E INVALID DEVICE TYPE - (ADDR)                        00173000
+*        DMKCFT026E OPERAND MISSING OR INVALID                          00174000
+*                                                                       00175000
+*.                                                                      00176000
+         COPY  OPTIONS                                         @V407510 00176100
+         EJECT                                                          00176200
+         SPACE 3                                                        00177000
+DMKCFT   CSECT                                                          00178000
+         SPACE 2                                                        00179000
+MODID    DC    CL8'DMKCFT'                                              00180000
+         SPACE 2                                                        00181000
+         EXTRN DMKSCNFD                                                 00182000
+         EXTRN DMKCVTDB                                                 00183000
+         EXTRN DMKCVTBH                                                 00184000
+         EXTRN DMKSCNVD                                        @V200820 00185000
+         EXTRN DMKERMSG                                                 00186000
+         EXTRN DMKTBLGR                                        @V60A6B6 00186500
+         SPACE 2                                                        00187000
+         USING PSA,R0                                                   00188000
+         USING VMBLOK,R11                                               00189000
+         USING SAVEAREA,R13                                             00190000
+         SPACE 2                                                        00191000
+FIRSTARG EQU   X'80'          INDICATE THAT A FIRST ARGUMENT WAS SPEC.  00192000
+SECNDARG EQU   X'40'          INDICATE THAT A SECOND ARG. WAS SPEC.     00193000
+TERMDONE EQU   X'20'          AT LEAST ONE TERM.  COMM. PROCESSED       00194000
+ZIP      EQU   X'00'          USED TO ZERO FIELDS                       00195000
+         EJECT                                                          00196000
+DMKCFTRM RELOC                                                          00197000
+         MVC   SAVEWRK1(4),ZEROES  ZERO FLAG AREA                       00198000
+CFTARG1  CALL  DMKSCNFD       LOCATE FIRST ARGUMENT                     00199000
+         BZ    CFTSAV1        HAVE ARGUMENT - GO PROCESS                00200000
+         TM    SAVEWRK1,TERMDONE   ANY PROCESSING DONE ?                00201000
+         BO    TERMEXIT       YES - TAKE BRANCH                         00202000
+         B     CFT026         NO ARGUMENTS FOUND                        00203000
+CFTSAV1  LR    R2,R0          SAVE LENGTH OF FIRST ARG.                 00204000
+         LR    R3,R1          SAVE ADDRESS OF FIRST ARG.                00205000
+         OI    SAVEWRK1,FIRSTARG   INDICATE FIRST ARG RECIEVED          00206000
+         CALL  DMKSCNFD       LOCATE SECOND ARGUMENT                    00207000
+         BNZ   CFT026         NOT A PAIR OF ARGUMENTS                   00208000
+         LR    R4,R2          LENGTH OF FIRST ARGUMENT TO R4            00209000
+         BCTR  R4,0           MINUS ONE FOR 'EX'                        00210000
+         LA    R5,TERMBGN     INITIALIZE BXLE REGS FOR SCAN             00211000
+         LA    R6,TERMLEN     LENGTH OF ONE ENTRY              @V200820 00212000
+         LA    R7,TERMEND     . . .                                     00213000
+         SPACE                                                          00214000
+SCANLOOP EX    R4,TERMCLC     COMPARE ARGUMENT TO LIST                  00215000
+         BE    TERMABRV       IF GET A HIT, GO CHECK ABREVIATION        00216000
+         SPACE                                                          00217000
+TERMBXLE BXLE  R5,R6,SCANLOOP GO BACK IF HAVE MORE IN LIST              00218000
+         B     CFT002         SEND ERROR MESSAGE IF CAN'T FIND          00219000
+         SPACE                                                          00220000
+TERMABRV LH    R8,8(,R5)      LOAD ABREVIATION COUNT                    00221000
+         BCTR  R8,0           SET UP FOR 'EX'                           00222000
+         EX    R8,TERMCLC     MAKE SURE HAVE ENOUGH CHARACTERS          00223000
+         BNE   TERMBXLE       GO SCAN SOME MORE IF NOT CORRECT          00224000
+         LR    R6,R5          ADDRESS OF LIST ENTRY TO R6               00225000
+         LR    R5,R1          ADDRESS OF SECOND ARGUMENT TO R5          00226000
+         LR    R4,R0          LENGTH OF SECOND ARGUMENT                 00227000
+         L     R8,VMTERM      LOAD TERMINAL RDEVBLOK ADDRESS            00228000
+         USING RDEVBLOK,R8                                              00229000
+         L     R10,ASYSLC     ADDRESS OF SYSLOCS                        00230000
+         USING SYSLOCS,R10                                              00231000
+         LH    R15,10(0,R6)   PICK UP DISPLACEMENT TO SUBROUTIN@V200820 00232000
+         B     DMKCFT(R15)    GO TO IT                         @V200820 00233000
+         EJECT                                                          00234000
+TERMBGN  DS    0F             START OF DECODING TABLE          @V200820 00235000
+         DC    C'CHARDEL ',H'2',AL2(CHARDEL-DMKCFT)            @V200820 00236000
+         DC    C'LINEDEL ',H'5',AL2(LINEDEL-DMKCFT)            @V200820 00237000
+         DC    C'LINEND  ',H'5',AL2(LINEND-DMKCFT)             @V200820 00238000
+         DC    C'ESCAPE  ',H'2',AL2(ESCAPE-DMKCFT)             @V200820 00239000
+         DC    C'TABCHAR ',H'3',AL2(TABCHAR-DMKCFT)            @V60A6B6 00239500
+         DC    C'MASK    ',H'1',AL2(MASK-DMKCFT)               @VM08722 00240000
+         DC    C'ATTN    ',H'2',AL2(TERMATTN-DMKCFT)           @V200820 00241000
+         DC    C'APL     ',H'3',AL2(APL-DMKCFT)                @V200820 00242000
+         DC    C'TEXT    ',H'4',AL2(TEXT-DMKCFT)               @V387398 00242100
+         DC    C'LINESIZE',H'5',AL2(LINESIZE-DMKCFT)           @V200820 00243000
+TERMEND  DC    C'MODE    ',H'3',AL2(MODE-DMKCFT)               @V200820 00244000
+*ERMEND  DC    C'TIMESTMP',H'4',AL2(STAMP-DMKCFT)                       00245000
+TERMLEN  EQU   *-TERMEND      LENGTH OF ONE ENTRY              @V200820 00246000
+TERMCLC  CLC   0(0,R3),0(R5)  EXECUTED COMPARE                          00247000
+         EJECT                                                          00248000
+APL      EQU   *                                                        00249000
+         LTR   R8,R8          IS THERE A REAL DEVICE BLOCK ?   @V200820 00250000
+         BNP   TONDONE        NO -- DON'T DO ANYTHING          @V200820 00251000
+         CLI   RDEVTYPC,CLASTERM   IS THIS A LOCAL TERMINAL ?  @V200820 00252000
+         BNE   TSTGRAF        NO,TEST FOR GRAF DEVICE          @V305798 00253000
+         CLI   RDEVTYPE,TYPBSC IS IT A REMOTE 3270 ?           @V305798 00254000
+         BNE   BSCEND         NO,ERROR                         @V305798 00255000
+         BAL   R3,GETNICB     FIND NICBLOK                     @V305798 00256000
+         USING NICBLOK,R2                                      @V305798 00257000
+         LA    R6,APLRON      LOAD TURN ON                     @V305798 00258000
+         LA    R7,APLROFF     LOAD TURN OFF                    @V305798 00259000
+         B     APLRCHK                                         @V305798 00260000
+BSCEND   EQU   *                                               @V305798 00261000
+         CLI   RDEVTYPE,TYPTTY     TELEGRAPH TERMINAL ?        @V200820 00262000
+         BNL   CFT006              YES - APL NOT VALID HERE    @V200820 00263000
+         B     SETAPL         SET ON RETURN                    @V305798 00264000
+TSTGRAF  CLI   RDEVTYPC,CLASGRAF IS IT A GRAF TYPE ?           @V305798 00265000
+         BNE   CFT006         NO, ERROR                        @V305798 00266000
+         TM    RDEVTYPE,TYP3277+TYP3278 IS IT A 3270 TYPE?     @V60A6B6 00267000
+         BZ    CFT006         NO, ERROR                        @V60A6B6 00268000
+SETAPL   LA    R6,APLON       SET RETURN FOR ON                @V305798 00269000
+         LA    R7,APLOFF      RETURN FOR 'OFF'                          00270000
+APLRCHK  EQU   *                                               @V305798 00271000
+         BAL   R14,TSTONOFF   GO DO TEST FOR ON/OFF                     00272000
+         B     LOADARG2       IF RETURN HERE = BAD ARGUMENT             00273000
+         SPACE                                                          00274000
+APLON    OI    RDEVTMCD,RDEVAPLP   SET THE APL BIT - X'08'     @V200820 00275000
+         NI    RDEVTMCD,255-RDEVTEXT TURN OFF TEXT BIT         @V387398 00275100
+         B     TONDONE        . . .                                     00276000
+         SPACE                                                          00277000
+APLOFF   NI    RDEVTMCD,255-RDEVAPLP    TURN OFF APL BIT       @V200820 00278000
+         B     TONDONE        . . .                                     00279000
+APLRON   OI    NICTMCD,NICAPL                                  @V305798 00280000
+         NI    NICTMCD,255-NICTEXT    TURN OFF TEXT BIT        @V387398 00280100
+         B     TONDONE        TURN APL ON                      @V305798 00281000
+APLROFF  NI    NICTMCD,255-NICAPL TURN APL OFF                 @V305798 00282000
+         B     TONDONE                                         @V305798 00283000
+         EJECT                                                          00284000
+TEXT     EQU   *                                               @V387398 00284010
+         LTR   R8,R8          IS THERE A REAL DEVICE BLOCK ?   @V387398 00284020
+         BNP   TONDONE        NO -- DON'T DO ANYTHING          @V387398 00284030
+         CLI   RDEVTYPC,CLASTERM   IS THIS A LOCAL TERMINAL ?  @V387398 00284040
+         BNE   TTSTGRAF       NO,TEST FOR GRAF DEVICE          @V387398 00284050
+         CLI   RDEVTYPE,TYPBSC IS IT A REMOTE 3270 ?           @V387398 00284060
+         BNE   CFT006         NO,ERROR                         @V387398 00284070
+         BAL   R3,GETNICB     FIND NICBLOK                     @V387398 00284080
+         USING NICBLOK,R2                                      @V387398 00284090
+         LA    R6,TEXTRON     LOAD TURN ON                     @V387398 00284100
+         LA    R7,TEXTROFF    LOAD TURN OFF                    @V387398 00284110
+         B     TEXTRCHK                                        @V387398 00284120
+TTSTGRAF CLI   RDEVTYPC,CLASGRAF IS IT A GRAF TYPE ?           @V387398 00284130
+         BNE   CFT006         NO, ERROR                        @V387398 00284140
+         TM    RDEVTYPE,TYP3277+TYP3278 IS IT A 3270 TYPE ?    @V60A6B6 00284150
+         BZ    CFT006         NO, ERROR                        @V60A6B6 00284160
+         LA    R6,TEXTON      SET RETURN FOR ON                @V387398 00284170
+         LA    R7,TEXTOFF     RETURN FOR 'OFF'                 @V387398 00284180
+TEXTRCHK EQU   *                                               @V387398 00284190
+         BAL   R14,TSTONOFF   GO DO TEST FOR ON/OFF            @V387398 00284200
+         B     LOADARG2       IF RETURN HERE = BAD ARGUMENT    @V387398 00284210
+         SPACE                                                          00284220
+TEXTON   OI    RDEVTMCD,RDEVTEXT   SET THE TEXT BIT - X'20'    @V387398 00284230
+         NI    RDEVTMCD,255-RDEVAPLP TURN OFF APL BIT          @V387398 00284240
+         B     TONDONE        . . .                            @V387398 00284250
+         SPACE                                                          00284260
+TEXTOFF  NI    RDEVTMCD,255-RDEVTEXT    TURN OFF TEXT BIT      @V387398 00284270
+         B     TONDONE        . . .                            @V387398 00284280
+TEXTRON  OI    NICTMCD,NICTEXT     TURN TEXT ON                @V387398 00284290
+         NI    NICTMCD,255-NICAPL  TURN APL OFF                @V387398 00284300
+         B     TONDONE                                         @V387398 00284310
+TEXTROFF NI    NICTMCD,255-NICTEXT TURN TEXT OFF               @V387398 00284320
+         B     TONDONE                                         @V387398 00284330
+         EJECT                                                          00284340
+CHARDEL  LA    R6,CHARON      RETURN FOR ON                             00285000
+         LA    R7,CHAROFF     RETURN FOR OFF                            00286000
+         BAL   R14,TSTCHAR    GO TEST FOR ON/OFF/CHAR          @VA04451 00287500
+*                                                                       00288000
+*        RETURN HERE IF CHAR WAS SPECIFIED                              00289000
+*                                                                       00290000
+         MVC   VMTCDEL(1),0(R5)    MOVE IN SPECIFIED CHARACTER @V200820 00291000
+         B     TONDONE        . .                                       00292000
+         SPACE                                                          00293000
+CHARON   MVC   VMTCDEL(1),DMKSYSCD MOVE IN SYSTEM DEFAULT CHAR @V200820 00294000
+         B     TONDONE                                                  00295000
+         SPACE                                                          00296000
+CHAROFF  MVI   VMTCDEL,X'00'       DO NOT USE CHARACTER DELETE @V200820 00297000
+         B     TONDONE                                                  00298000
+         EJECT                                                          00299000
+LINEDEL  LA    R6,LINDON      RETURN FOR ON                             00300000
+         LA    R7,LINDOFF     RETURN FOR OFF                            00301000
+         BAL   R14,TSTCHAR    GO TEST FOR ON/OFF/CHAR          @VA04451 00302500
+*                                                                       00303000
+*        RETURN HERE IF CHAR SPECIFIED                                  00304000
+*                                                                       00305000
+         MVC   VMTLDEL(1),0(R5)    MOVE IN SPECIFIED CHARACTER @V200820 00306000
+         B     TONDONE        . .                                       00307000
+         SPACE                                                          00308000
+LINDON   MVC   VMTLDEL(1),DMKSYSLD MOVE IN SYSTEM DEFAULT CHAR @V200820 00309000
+         B     TONDONE        . .                                       00310000
+         SPACE                                                          00311000
+LINDOFF  MVI   VMTLDEL,X'00'       DO NOT USE LINE DELETE      @V200820 00312000
+         B     TONDONE                                                  00313000
+         EJECT                                                          00314000
+LINEND   LA    R6,LINENDON    RETURN FOR ON                             00315000
+         LA    R7,LINENOFF    RETURN FOR OFF                            00316000
+         BAL   R14,TSTCHAR    GO TEST FOR ON/OFF/CHAR          @VA04451 00317500
+*                                                                       00318000
+*        RETURN HERE FOR CHAR                                           00319000
+*                                                                       00320000
+         MVC   VMTLEND(1),0(R5)    MOVE IN SPECIFIED CHARACTER @V200820 00321000
+         B     TONDONE        . .                                       00322000
+         SPACE                                                          00323000
+LINENDON MVC   VMTLEND(1),DMKSYSLE MOVE IN SYSTEM DEFAULT CHAR @V200820 00324000
+         B     TONDONE        . .                                       00325000
+         SPACE                                                          00326000
+LINENOFF MVI   VMTLEND,X'00'  DO NOT USE LOGICAL LINE END      @V200820 00327000
+         B     TONDONE                                                  00328000
+         EJECT                                                          00329000
+ESCAPE   LA    R6,ESCPON      RETURN IF 'ON'                            00330000
+         LA    R7,ESCPOFF     RETURN IF 'OFF'                           00331000
+         BAL   R14,TSTCHAR    GO TEST FOR ON/OFF/CHAR          @VA04451 00332500
+         MVC   VMTESCP(1),0(R5)    MOVE IN SPECIFIED CHARACTER @V200820 00333000
+         B     TONDONE                                                  00334000
+         SPACE                                                          00335000
+ESCPON   MVC   VMTESCP(1),DMKSYSES MOVE IN SYSTEM DEFAULT CHAR @V200820 00336000
+         B     TONDONE                                                  00337000
+         SPACE                                                          00338000
+ESCPOFF  MVI   VMTESCP,X'00'  DO NOT USE ESCAPE CHARACTER      @V200820 00339000
+         B     TONDONE                                                  00340000
+         EJECT                                                          00341000
+TABCHAR  LA    R6,TABCHON     RETURN IF 'ON'                   @V60A6B6 00341040
+         LA    R7,TABCHOFF    RETURN IF 'OFF'                  @V60A6B6 00341080
+         BAL   R14,TSTCHAR    GO TEST FOR ON/OFF/CHAR          @V60A6B6 00341120
+         L     R7,=A(DMKTBLGR)   MUST TRANSLATE 3270           @V60A6B6 00341160
+         TR    0(1,R5),0(R7)  ORDERS TO BLANKS                 @V60A6B6 00341200
+         CLI   0(R5),X40      IS CHARACTER A BLANK ?           @V60A6B6 00341240
+         BE    LOADARG2       IF YES, THEN THIS IS AN ERROR    @V60A6B6 00341280
+         MVC   VMGRFTAB(1),0(5)  MOVE IN SPECIFIED CHARACTER   @V60A6B6 00341320
+         B     TONDONE                                         @V60A6B6 00341360
+         SPACE                                                          00341400
+TABCHON  MVI   VMGRFTAB,X6A   MOVE IN SYSTEM DEFAULT CHAR      @V60A6B6 00341440
+         B     TONDONE                                         @V60A6B6 00341480
+         SPACE                                                          00341520
+TABCHOFF MVI   VMGRFTAB,X00   ZERO THE LOGICAL TAB CHARACTER   @V60A6B6 00341560
+         B     TONDONE                                         @V60A6B6 00341600
+         SPACE                                                          00341640
+X00      EQU   X'00'                                           @V60A6B6 00341680
+X40      EQU   X'40'                                           @V60A6B6 00341720
+X6A      EQU   X'6A'                                           @V60A6B6 00341760
+         EJECT                                                          00341800
+LINESIZE LR    R0,R4          LENGTH TO REG 0                           00342000
+         LR    R1,R5          ADDRESS TO REG 1                          00343000
+         CALL  DMKCVTDB       GO CONVERT TO BINARY                      00344000
+         BNZ   LOADARG2       BAD CONVERT                               00345000
+         CL    R1,F255        ANYTHING OVER 255 IS ERROR                00346000
+         BH    LOADARG2       ..........                                00347000
+         N     R1,F255        SAVE ONLY LOW ORDER BYTE                  00348000
+         LTR   R1,R1          IS LINESIZE ZERO ?                        00349000
+         BZ    LOADARG2       YES - NO CAN DO                           00350000
+         LTR   R8,R8          IS THERE A TERMINAL RDEVBLOK ?   @V200820 00351000
+         BNP   TONDONE        NO -- DON'T DO ANYTHING          @V200820 00352000
+         CLI   RDEVTYPC,CLASTERM IS THIS A LOCAL TERMINAL      @V2D3931 00353000
+         BNE   *+12           NO, BYPASS TEST FOR 3270 REMOTE  @V2D3931 00354000
+         CLI   RDEVTYPE,TYPBSC IS THIS A 3270 BISYNC LINE      @V2D3931 00355000
+         BE    *+12           YES, GET POINTER TO NICBLOK      @V2D3931 00356000
+         CLI   RDEVTYPC,CLASSPEC   IS THIS A LOCAL TERMINAL ?  @V200820 00357000
+         BNE   SETRLEN             YES -- SET LINE LENGTH      @V200820 00358000
+         BAL   R3,GETNICB     GET THE NICBLOK ADDRESS          @V200820 00359000
+         USING NICBLOK,R2                                      @V200820 00360000
+         STC   R1,NICLLEN     SET THE TERMINAL LINE LENGTH     @V200820 00361000
+         B     TONDONE             ALL DONE HERE               @V200820 00362000
+SETRLEN  EQU   *              SET LINE LENGTH FOR LOCAL TERM   @V200820 00363000
+         STC   R1,RDEVLLEN    STORE NEW LINE LENGTH                     00364000
+         B     TONDONE        . .                                       00365000
+         EJECT                                                          00366000
+MASK     EQU   *              TERMINAL MASK ON / OFF           @V200820 00367000
+         LTR   R8,R8          IS THERE A TERMINAL RDEVBLOK ?   @V200820 00368000
+         BNP   TONDONE        NO -- DO NOTHING                 @V200820 00369000
+         CLI   RDEVTYPC,CLASGRAF   GRAPHICS TERMINAL ?         @V200820 00370000
+         BE    CFT006              YES - INVALID DEVICE TYPE   @V200820 00371000
+         CLI   RDEVTYPC,CLASTERM IS THIS A LOCAL TERMINAL      @V2D3931 00372000
+         BNE   *+12           NO, BYPASS TEST FOR 3270 REMOTE  @V2D3931 00373000
+         CLI   RDEVTYPE,TYPBSC IS THIS A 3270 REMOTE LINE      @V2D3931 00374000
+         BE    CFT006         YES, INVALID DEVICE TYPE         @V2D3931 00375000
+         CLI   RDEVTYPC,CLASSPEC   3705-BASED TERMINAL ?       @V200820 00376000
+         BNE   MASKTRM             NO -- PROCESS NORMALLY      @V200820 00377000
+         BAL   R3,GETNICB     GET THE NICBLOK ADDRESS          @V200820 00378000
+         LA    R6,MASKSON     RETURN FOR 'ON'                  @V200820 00379000
+         LA    R7,MASKSOFF    RETURN FOR 'OFF'                 @V200820 00380000
+         B     MASKS          GO CHECK FOR ON OR OFF           @V200820 00381000
+MASKTRM  EQU   *                                               @V200820 00382000
+         SWITCH               SWITCH TO MAIN PROCESSOR         @V407510 00382100
+         LA    R6,MASKON      RETURN FOR ON                    @V200820 00383000
+         LA    R7,MASKOFF     RETURN FOR OFF                            00384000
+MASKS    EQU   *                                               @V200820 00385000
+         BAL   R14,TSTONOFF   GO - TEST FOR ON/OFF                      00386000
+*                                                                       00387000
+*        IF RETURN HERE - MEANS BAD ARGUMENT                            00388000
+*                                                                       00389000
+         B     LOADARG2       GO -SEND ERROR MESSAGE                    00390000
+         SPACE                                                          00391000
+MASKON   NI    RDEVFLAG,255-RDEVPSUP   TURN OFF PRINT SUPPRESS FEATURE  00392000
+         B     TONDONE        . .                                       00393000
+         SPACE                                                          00394000
+MASKOFF  OI    RDEVFLAG,RDEVPSUP   INDICAT THAT PRINT SUPP. AVAILABLE   00395000
+         B     TONDONE  ...                                             00396000
+         SPACE                                                          00397000
+MASKSON  NI    NICFLAG,255-NICPSUP TURN ON MASK                @V200820 00398000
+         B     TONDONE                                         @V200820 00399000
+         SPACE                                                          00400000
+MASKSOFF OI    NICFLAG,NICPSUP     TURN OFF MASK               @V200820 00401000
+         B     TONDONE                                         @V200820 00402000
+         EJECT                                                          00403000
+TERMATTN LTR   R8,R8          IS THERE A TERMINAL RDEVBLOK ?   @V200820 00404000
+         BNP   TONDONE        NO -- DO NOTHING                 @V200820 00405000
+         CLI   RDEVTYPC,CLASGRAF   GRAPHICS TERMINAL ?         @V200820 00406000
+         BE    CFT006              YES - INVALID DEVICE TYPE   @V200820 00407000
+         CLI   RDEVTYPC,CLASTERM IS THIS A LOCAL TERMINAL      @V2D3931 00408000
+         BNE   *+12           NO, BYPASS TEST FOR 3270 REMOTE  @V2D3931 00409000
+         CLI   RDEVTYPE,TYPBSC IS THIS A 3270 REMOTE LINE      @V2D3931 00410000
+         BE    CFT006         YES, INVALID DEVICE TYPE         @V2D3931 00411000
+         CLI   RDEVTYPC,CLASSPEC   3705-BASED TERMINAL ?       @V200820 00412000
+         BNE   TERMATT             NO -- PROCESS NORMALLY      @V200820 00413000
+         BAL   R3,GETNICB     GET THE NICBLOK ADDRESS          @V200820 00414000
+         LA    R6,ATTNSON     RETURN FOR 'ON'                  @V200820 00415000
+         LA    R7,ATTNSOFF    RETURN FOR 'OFF'                 @V200820 00416000
+         B     TERMATS        GO FIND OUT WHICH IT IS          @V200820 00417000
+TERMATT  LA    R6,ATTNON      RETURN FOR ON                    @V200820 00418000
+         LA    R7,ATTNOFF     SET UP FOR 'OFF'                          00419000
+TERMATS  EQU   *                                               @V200820 00420000
+         BAL   R14,TSTONOFF   GO CHECK ARGUMENT                         00421000
+*                                                                       00422000
+*        IF RETURN HERE - HAVE BAD ARGUMENT                             00423000
+*                                                                       00424000
+         B     LOADARG2 G0 SEND ERROR MESSAGE                           00425000
+         SPACE                                                          00426000
+ATTNON   NI    RDEVTFLG,X'FF'-RDEVATOF  RESET OFF FLAG FOR TERMINAL     00427000
+         B     TONDONE  CONTINUE                                        00428000
+         SPACE                                                          00429000
+ATTNOFF  OI    RDEVTFLG,RDEVATOF  SET FLAG FOR ATTN OFF                 00430000
+         B     TONDONE  CONTINUE                                        00431000
+         SPACE                                                          00432000
+ATTNSON  NI    NICFLAG,255-NICATOF TURN ATTN CHAR ON           @V200820 00433000
+         B     TONDONE                                         @V200820 00434000
+         SPACE                                                          00435000
+ATTNSOFF OI    NICFLAG,NICATOF     TURN ATTN CHAR OFF          @V200820 00436000
+         B     TONDONE                                         @V200820 00437000
+         EJECT                                                          00438000
+STAMP    LA    R6,STMPON      RETURN FOR ON                    @V200820 00439000
+         LA    R7,STMPOFF     RETURN FOR OFF                   @V200820 00440000
+         BAL   R14,TSTONOFF   CHECK FOR ON OR OFF              @V200820 00441000
+         B     LOADARG2       INVALID OPERAND                  @V200820 00442000
+         SPACE                                                          00443000
+STMPON   OI    VMMLEVEL,VMMSTMP    TURN ON TIME STAMP          @V200820 00444000
+         B     TONDONE                                         @V200820 00445000
+         SPACE                                                          00446000
+STMPOFF  NI    VMMLEVEL,255-VMMSTMP     TURN OFF TIME STAMP    @V200820 00447000
+         B     TONDONE                                         @V200820 00448000
+         SPACE 3                                                        00449000
+GETNICB  EQU   *              SUBROUTINE TO GET NICBLOK ADDRESS@V200820 00450000
+         LH    R2,VMTRMID     370X NCP RESOURCE REFERENCE      @V200820 00451000
+         N     R2,F4095       STRIP OFF DEVICE CODE            @V200820 00452000
+         MH    R2,=AL2(NICSIZE*8)  CONVERT TO NICLIST INDEX    @V200820 00453000
+         AL    R2,RDEVNICL                                     @V200820 00454000
+         BR    R3             RETURN - NICBLOK IN GR2          @V200820 00455000
+         EJECT                                                          00456000
+         SPACE 3                                                        00457000
+MODE     CL    R4,F2          MUST BE ONLY 2 CHARS             @V200930 00458000
+         BNE   LOADARG2       NO, ERROR                        @V200930 00459000
+         CLC   0(2,R5),=C'CP' IS IT CP ??                      @V200930 00460000
+         BE    MODCP          YES, SET IT                      @V200930 00461000
+         CLC   0(2,R5),=C'VM' IS IT VM ??                      @V200930 00462000
+         BNE   LOADARG2       NO, ERROR                        @V200930 00463000
+         NI    VMMLEVEL,X'FF'-VMMCPENV CPMOD FLAG OFF          @V200930 00464000
+         B     TONDONE        DONE, GET NEXT                   @V200930 00465000
+MODCP    OI    VMMLEVEL,VMMCPENV SET CP MODE                   @V200930 00466000
+         B     TONDONE        DONE, GET NEXT                   @V200930 00467000
+         SPACE 3                                                        00468000
+TONDONE  OI    SAVEWRK1,TERMDONE   IND. THAT AT LEAST ONE ARG. PROCESS  00469000
+         NI    SAVEWRK1,255-(FIRSTARG+SECNDARG)   TURN OFF 1ST AND 2ND  00470000
+         B     CFTARG1        GO SEE IF ANY MORE ARGUMENTS              00471000
+         SPACE  2                                                       00471100
+TSTCHAR EQU *                                                  @VA04451 00471300
+         CL    R4,F1          ONE CHAR IN ARGUMENT?            @VA04451 00471500
+         BNE   TSTONOFF       NO, TEST FOR ON/OFF              @VA04451 00471700
+         CLC   0(0,R5),=X'C1' POSSIBLY ALPHANUMERIC?           @VA04451 00471900
+         BL    RETNR14        NO, VALID CHARACTER              @VA04451 00472100
+         CLC   0(0,R5),=X'D0' IS THIS SPECIAL CHARACTER?       @V60A6B6 00472140
+         BE    RETNR14        YES, THEN VALID                  @V60A6B6 00472180
+         CLC   0(0,R5),=X'E0' OTHER SPECIAL CHARACTER?         @V60A6B6 00472220
+         BE    RETNR14        YES, VALID                       @V60A6B6 00472260
+         CLC   0(0,R5),=X'F9' IS IT ALPHANUMERIC?              @VA04451 00472300
+         BH    RETNR14        NO, VALID CHARACTER              @VA04451 00472500
+         B     LOADARG2       SEND ERROR MSG                   @VA04451 00472700
+         SPACE 2                                                        00472900
+TSTONOFF EQU   *                                                        00473000
+         BCTR  R4,0           MINUS ONE FOR 'EX'                        00476000
+         EX    R4,COMPOFF     'OFF' ????                                00477000
+         BE    RETOFF         YES ---                                   00478000
+         EX    R4,COMPON      'ON' ????                                 00479000
+         BE    RETON          YES ---                                   00480000
+         LA    R4,1(,R4)      RESTORE BYTE COUNT FOR ERROR MESSAGE      00481000
+         B     LOADARG2       GO SEND ERROR MESSAGE                     00482000
+         SPACE                                                          00483000
+RETNR14  BR    R14            RETURN FOR CHARACTER                      00484000
+RETOFF   BR    R7             RETURN FOR 'OFF'                          00485000
+RETON    BR    R6             RETURN FOR 'ON'                           00486000
+         SPACE                                                          00487000
+COMPOFF  CLC   0(0,R5),=C'OFF '         EXECUTED COMPARE                00488000
+COMPON   CLC   0(0,R5),=C'ON '                                          00489000
+         EJECT                                                          00490000
+TERMEXIT EXIT                                                           00491000
+         SPACE 4                                                        00492000
+LOADARG2 LR    R2,R4          LOAD LENGTH INTO R2                       00493000
+         LR    R3,R5          LOAD ADDRESS OF BAD ARGUMENT              00494000
+         SPACE                                                          00495000
+CFT002   LR    R0,R2          LENGTH                                    00496000
+         LR    R1,R3          ADDRESS                                   00497000
+         LA    R2,2         ERROR CODE                                  00498000
+         B     CALLERM        . . .                                     00499000
+         SPACE                                                          00500000
+CFT006   EQU   *              DMKCFT006E INVALID DEVICE TYPE - @V200820 00501000
+         SLR   R1,R1          CLEAR PARM REGISTER              @V200820 00502000
+         LA    R2,006(0)      MESSAGE NUMBER TO GR2            @V200820 00503000
+         SLR   R0,R0          IF ANY DATA, WILL BE IN GR1      @V200820 00504000
+         LH    R8,VMVTERM     DISP TO VIRTUAL CONSOLE VDEVBLOK @V200820 00505000
+         LTR   R8,R8          IS THERE ONE ?                   @V200820 00506000
+         BM    CALLERM        NO -- MESSAGE WITH NO DATA       @V200820 00507000
+         AL    R8,VMDVSTRT    GET THE VDEVBLOK ADDRESS         @V200820 00508000
+         CALL  DMKSCNVD       COMPUTE 'CCU' FORM OF VADDR      @V200820 00509000
+         CALL  DMKCVTBH            CONVERT THE ADDRESS TO HEX           00510000
+         ICM   R1,8,X40FFS         BLANK THE HIGH BYTE                  00511000
+         SLR   R0,R0               ZIP GPR 0                            00512000
+         B     CALLERM             GO SEND THE ERROR MESSAGE            00513000
+         SPACE                                                          00514000
+CFT026   LA    R2,26         ERROR CODE                                 00515000
+         SR    R1,R1          ZERO PARM REG                             00516000
+         SPACE                                                          00517000
+CALLERM  ICM   R0,14,MODID+3  LOAD MODULE ID                            00518000
+         CALL  DMKERMSG       . . .                                     00519000
+*                                                                       00520000
+*        DMKERM WILL RETURN DIRECTLY TO DMKCFM - NOT HERE --            00521000
+*                                                                       00522000
+         EJECT                                                          00523000
+         LTORG                                                          00524000
+         EJECT                                                          00525000
+         PSA                                                 , @V306638 00526000
+         COPY  DEVTYPES                                        @V306638 00527000
+         COPY  EQU                                             @V306638 00528000
+         COPY  NETWORK                                         @V306638 00529000
+         COPY  RBLOKS                                          @V306638 00530000
+         COPY  SAVE                                            @V306638 00531000
+         SYSLOCS                                             , @V306638 00532000
+         COPY  VMBLOK                                          @V306638 00533000
+         END                                                            00534000

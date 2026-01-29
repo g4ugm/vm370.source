@@ -1,0 +1,357 @@
+MID      TITLE 'DMKMID     (CP)        VM/370 - RELEASE 6'              00001000
+*.                                                                      00002000
+* MODULE NAME -                                                         00003000
+*                                                                       00004000
+*        DMKMID                                                         00005000
+*                                                                       00006000
+* FUNCTION -                                                            00007000
+*                                                                       00008000
+*        TO CHANGE THE DATE IN SYSTEM LOW STORAGE                       00009000
+*        AT MIDNITE AND RESET THE CLOCK COMPARATOR FOR                  00010000
+*        THE NEXT MIDNITE EVENT.  ALSO SEND MESSAGES TO                 00011000
+*        ALL USERS ABOUT THE DATE CHANGE.                               00012000
+*                                                                       00013000
+* ATTRIBUTES -                                                          00014000
+*                                                                       00015000
+*        RE-ENTERABLE, PAGEABLE, CALLED VIA SVC                         00016000
+*                                                                       00017000
+* ENTRY POINTS -                                                        00018000
+*                                                                       00019000
+*        DMKMIDNT - CHANGE DATE AT MIDNITE                              00020000
+*                                                                       00021000
+* ENTRY CONDITIONS -                                                    00022000
+*                                                                       00023000
+*        GPR10 - TRQBLOK FOR TIMER EVENT                                00024000
+*        GPR12 - BASE ADDRESS                                           00025000
+*        GPR13 - SAVE AREA                                              00026000
+*                                                                       00027000
+* EXIT CONDITIONS -                                                     00028000
+*                                                                       00029000
+*        TIMER EVENTS RESET FOR NEXT MIDNITE                            00030000
+*        MESSAGES ISSUED TO ALL USERS                                   00031000
+*        DATE ADJUSTED                                                  00032000
+*        NO RETURN CONDITIONS TO CALLER                                 00033000
+*                                                                       00034000
+* CALLS TO OTHER ROUTINES -                                             00035000
+*                                                                       00036000
+*        DMKERMSG - TO WRITE ERROR MESSAGE                              00037000
+*        DMKSCHST - TO SCHEDULE NEXT MIDNITE EVENT                      00038000
+*        DMKCVTDT - TO GET NEW DATE AND TIME                            00039000
+*        DMKLOKSW - SWITCH TO ANOTHER VMBLOK IF SYSTEM IS AP-MODE       00039100
+*                                                                       00040000
+* EXTERNAL REFERENCES -                                                 00041000
+*                                                                       00042000
+*        DMKSYSTI - TO GET TIME ZONE                                    00043000
+*        DMKSYSDW - TO CHANGE DAY OF THE WEEK                           00044000
+*        DMKSYSVM - TO FIND ALL VMBLOKS FOR MESSAGES                    00045000
+*                                                                       00046000
+* TABLES / WORK AREAS -                                                 00047000
+*                                                                       00048000
+*        VMBLOK                                                         00049000
+*        TRQBLOK                                                        00050000
+*        DATE - IN PSA                                                  00051000
+*        TODATE - IN PSA                                                00052000
+*        WKDAY - DAY OF THE WEEK TABLE                                  00053000
+*        MTBL - DAYS IN MONTH TABLE                                     00054000
+*                                                                       00055000
+* REGISTER USAGE -                                                      00056000
+*                                                                       00057000
+*        R0-R9 SCRATCH AND LINKAGE AND CALLING PARAMETERS               00058000
+*        R10 - TRQBLOK                                                  00059000
+*        R11 - VMBLOKS FOR MESSAGES                                     00060000
+*        R12 - BASE                                                     00061000
+*        R13 - SAVE AREA                                                00062000
+*        R14-R15 - LINKAGE                                              00063000
+*                                                                       00064000
+* NOTES -                                                               00065000
+*                                                                       00066000
+*        IF THE DATE IS NOT VALID THE DAY OF THE WEEK IS                00067000
+*        CHANGED AND THE NEXT MIDNITE EVENT IS SCHEDULED                00068000
+*        BUT THE DATE IS NOT ADJUSTED.  THE DATE CAN BE                 00069000
+*        MANUALLY CHANGED BY STORING (STCP) IN THE DATE                 00070000
+*        FIELD IN PSA .... WITH EXTREME CARE OF COURSE.                 00071000
+*                                                                       00072000
+* OPERATION -                                                           00073000
+*                                                                       00074000
+*        1. ADJUST THE TIMER EVENT IN THE TRQBLOK FOR NEXT              00075000
+*        MIDNITE AND CALL DMKSCHST TO SET THE EVENT                     00076000
+*                                                                       00077000
+*        2. VALIDATE THE PRESENT DATE ... IT MUST BE IN THE             00078000
+*        FORM -- MM/DD/YY, WITH NO DIGIT LESS THAN 0 OR                 00079000
+*        GREATER THAN 9. ISSUE ERROR MSG DMKMID310E IF ERROR            00080000
+*                                                                       00081000
+*        3. CONVERT MM DD YY TO BINARY FOR ARITHMETIC                   00082000
+*                                                                       00083000
+*        4. ADJUST THE DAY BY ADDING  ONE.                              00084000
+*        ADJUST THE MONTH BY ONE IF THE DAY IS OVER THE                 00085000
+*        MONTH LIMIT ( CHECK AGAINST THE MTBL).                         00086000
+*        ADJUST THE YEAR BY ONE IF THE MONTH GOES TO 13.                00087000
+*        SET THE DAY TO ONE FOR A NEW MONTH.                            00088000
+*        SET THE MONTH TO ONE FOR A NEW YEAR.                           00089000
+*                                                                       00090000
+*        5. CONVERT THE MM DD YY TO DECIMAL AND STORE BACK              00091000
+*        IN THE DATE FIELD                                              00092000
+*                                                                       00093000
+*        6. SET THE DAY OF THE WEEK FIELD IN DMKSYSDW                   00094000
+*                                                                       00095000
+*        7. SEND A MESSAGE TO ALL USERS ABOUT THE DATE CHANGE           00096000
+*                                                                       00097000
+*        8. RETURN TO CALLER ( DMKSCH )                                 00098000
+*                                                                       00099000
+* ERROR MESSAGES -                                                      00100000
+*                                                                       00101000
+*        DMKMID310E DATE MM/DD/YY INVALID; NOT CHANGED                  00102000
+*                                                                       00103000
+*.                                                                      00104000
+         EJECT                                                          00104100
+         COPY  OPTIONS                                         @V407508 00104200
+         COPY  LOCAL OPTIONS                                   @V407508 00104300
+         EJECT                                                          00104400
+DMKMID   START                                                          00105000
+MODID    DC    CL8'DMKMID'    MODULE IDENTIFIER                @V305435 00106000
+         EXTRN DMKERMSG                                        @V305435 00107000
+         EXTRN DMKDMPTD,DMKDMPDT EXTERNAL TIME AND DATE        @VA08237 00107101
+         EXTRN DMKSCHST,DMKCVTDT,DMKSYSTI,DMKSYSDW             @V200820 00108000
+         EXTRN DMKENTKC,DMKSTKCP,DMKSYSTS,DMKSYSTE,DMKPRGMC,DMKSYSAT    00108100
+         EXTRN DMKMNIST                                        @VMD0138 00108250
+         USING *,R12          BASE                                      00109000
+         USING VMBLOK,R11                                               00110000
+         USING SAVEAREA,R13                                             00111000
+DMKMIDNT RELOC ENTRY          PRINT FOR MIDNIGHT               @V305435 00112000
+         USING PSA,R0                                                   00113000
+         USING TRQBLOK,R10                                              00114000
+         LA    R2,TRQBVAL     POINT TO CLOCK COMP VALUE                 00115000
+         BAL   R3,ADJTIME     SET FOR NEXT MIDNITE                      00116000
+         LR    R1,R10         POINT TO TRQBLOK                          00117000
+         CALL  DMKSCHST       SCHEDULE NEXT EVENT                       00118000
+         LA    R2,TODATE      POINT TO MIDNITE CONSTANT                 00119000
+         BAL   R3,ADJTIME     ADJUST FOR NEW MIDNITE                    00120000
+         L     R2,=A(DMKDMPTD) GET DUMP'S MIDNIGHT             @VA07902 00120010
+         STM   R4,R5,0(R2)    AND REFRESH IT                   @VA07902 00120020
+         L     R14,PREFIXB    GET PREFIX ADDRESS OF OTHER PROC @V4M0222 00120100
+         MVC   TODATE-PSA(,R14),TODATE MOVE NEW MIDNIGHT       @V4M0222 00120200
+*                             CONSTANT INTO OTHER PROC'S PSA   @V4M0222 00120300
+         SPACE 2                                                        00121000
+* NOW CHECK THE DATE FOR VALIDITY                                       00122000
+         MVI   YEARSW,00      CLEAR SW                                  00123000
+         LA    R7,DATE        POINT TO DATE                             00124000
+         LA    R8,8           COUNTER                                   00125000
+DTLOOP   CLI   0(R7),C'0'     IS IT LESS THAN ZERO ??                   00126000
+         BL    TSTSLSH        YES, CAN ONLY BE A /                      00127000
+         CLI   0(R7),C'9'     IS IT BIGGER THAN NINE ??                 00128000
+         BH    DATERR         YES, NO GOOD                              00129000
+DTNXT    LA    R7,1(R7)       POINT TO NEXT BYTE                        00130000
+         BCT   R8,DTLOOP      LOOP FOR ALL OF DATE                      00131000
+         B     DATEOK         DATE IS OK ..                             00132000
+TSTSLSH  CLI   0(R7),C'/'     IS IT A SLASH                             00133000
+         BE    DTNXT          YES, OK                                   00134000
+DATERR   LA    R2,310         ERROR MESSAGE NUMBER             @V305435 00135000
+         LA    R0,L'DATE      LENGTH OF TEXT OF MESSAGE        @V305435 00136000
+         ICM   R0,B'1110',MODID+3 MODULE IDENTIFIER            @V305435 00137000
+         ICM   R2,B'1000',ERMPARM PARMS FOR DMKERMSG           @V305435 00138000
+         CALL  DMKERMSG       CALL THE MESSAGE WRITTER         @V305435 00139000
+         B     SETDAY         ADJUST DAY BUT NOT DATE                   00140000
+         SPACE 2                                                        00141000
+* DATE IS OK .. CONVERT MM DD YY TO BINARY                              00142000
+DATEOK   LA    R2,DATE        POINT TO MM                               00143000
+         BAL   R3,DTBIN       CONVERT                                   00144000
+         STH   R0,BINMM       SAVE                                      00145000
+         LA    R2,DATE+3      POINT TO DD                               00146000
+         BAL   R3,DTBIN       CONVERT                                   00147000
+         STH   R0,BINDD       SAVE                                      00148000
+         LA    R2,DATE+6      POINT TO YY                               00149000
+         BAL   R3,DTBIN       CONVERT                                   00150000
+         STH   R0,BINYY       SAVE                                      00151000
+         TM    BINYY+1,X'03'  TEST FOR LEAP YEAR                        00152000
+         BNZ   NOTLPY         NO, FEB OK IN TABLE                       00153000
+         MVI   FEB+1,29       SET FEB FOR LEAP YEAR                     00154000
+         SPACE 1                                                        00155000
+* NOW ADJUST THE MM DD YY                                               00156000
+NOTLPY   LH    R1,BINDD       GET DAY                                   00157000
+         LA    R1,1(R1)       UP THE DAY                                00158000
+         STH   R1,BINDD       SET DAY                                   00159000
+         LH    R1,BINMM       GET MONTH                                 00160000
+         SLL   R1,1           TIMES TWO                                 00161000
+         LA    R2,MTBL-2(R1)  POINT TO MONTH DAY TABLE                  00162000
+         LH    R1,0(R2)       GET MAX DAYS PER MONTH                    00163000
+         CH    R1,BINDD       HAVE WE GONE OVER ??                      00164000
+         BNL   SETDATE        NO, DAY AND MONTH OK                      00165000
+         LA    R1,1           SET DAY ONE                               00166000
+         STH   R1,BINDD       ..                                        00167000
+         LH    R1,BINMM       GET MONTH                                 00168000
+         LA    R1,1(R1)       NEXT MONTH                                00169000
+         STH   R1,BINMM       SET MONTH                                 00170000
+         CH    R1,=H'13'      NEW YEAR ??                               00171000
+         BL    SETDATE        MONTH OK                                  00172000
+         LA    R1,1           MONTH ONE                                 00173000
+         STH   R1,BINMM       SET MONTH                                 00174000
+         LH    R1,BINYY       GET YEAR                                  00175000
+         LA    R1,1(R1)       NEXT YEAR                                 00176000
+         STH   R1,BINYY       SET NEW YEAR                              00177000
+         OI    YEARSW,X'01'   SET NEW YEAR SWITCH                       00178000
+         SPACE 1                                                        00179000
+* NOW SET DATE TO DECIMAL FOR ARITHMETIC                                00180000
+SETDATE  LH    R0,BINMM       GET MONTH                                 00181000
+         BAL   R3,DTDEC       CONVERT TO DECIMAL                        00182000
+         MVC   DATE(2),TEMPSAVE+2  SET MONTH                            00183000
+         LH    R0,BINDD       GET DAY                                   00184000
+         BAL   R3,DTDEC       CONVERT                                   00185000
+         MVC   DATE+3(2),TEMPSAVE+2     SET DAY                         00186000
+         LH    R0,BINYY       GET YEAR                                  00187000
+         BAL   R3,DTDEC       CONVERT                                   00188000
+         MVC   DATE+6(2),TEMPSAVE+2                                     00189000
+         L     R14,PREFIXB    GET PREFIX ADDRESS OF OTHER PROC @V4M0222 00189100
+         MVC   DATE-PSA(,R14),DATE MOVE NEW DATE INTO OTHER    @V4M0222 00189200
+*                             PROCESSOR'S PSA                  @V4M0222 00189300
+         L     R2,=A(DMKDMPDT) MUST REFRESH DMKDMP'S ....      @VA08237 00189400
+         MVC   0(8,R2),DATE   DATE AS WELL                     @VA08237 00189500
+         SPACE 2                                                        00190000
+* NOW RESET THE DAY OF THE WEEK                                         00191000
+SETDAY   L     R1,=A(DMKSYSDW)     GET ADDRESS OF CURRENT DAY           00192000
+         SR    R2,R2          CLEAR                                     00193000
+         IC    R2,0(R1)       GAT DAY OF WEEK NUMBER                    00194000
+         LA    R2,1(R2)       NEXT DAY                                  00195000
+         MH    R2,=H'11'      INDEX FOR TABLE                           00196000
+         LA    R2,WKDAY-22(R2)     INDEX INTO TABLE                     00197000
+*        NOTE .. 02 = TUESDAY .... 08 = MONDAY .. THINK ABOUT IT !!     00198000
+         MVC   0(11,R1),0(R2) SET NEW DAY OF WEEK DATA                  00199000
+         MVC   MDWEEK(9),2(R2)     SET DAY OF WEEK                      00200000
+         MVI   MDWEEK+9,C' '       ... FOLLOWED BY A BLANK     @VA05017 00200500
+         L     R2,=A(DMKSYSTI)     GET ZONE ID ADDRESS                  00201000
+         MVC   MDZONE,0(R2)   GET ZONE                                  00202000
+         SR    R2,R2          CLEAR                                     00203000
+         IC    R2,1(R1)       GET LENGTH OF WEEKDAY                     00204000
+         LA    R1,MDATE(R2)   INDEX FOR DATE POSITION                   00205000
+         LA    R2,MTIME       TIME POSITION                             00206000
+         MVC   MDATEL,=CL8' ' CLEAR AREA                                00207000
+         CALL  DMKCVTDT       GET DATE AND TIME                         00208000
+         LA    R1,MMSG        NEW DAY MESSAGE                           00209000
+         LA    R0,MMSGL       SIZE                                      00210000
+         BAL   R3,MSGALL      GIVE ALL THE MESSAGE                      00211000
+         L     R4,=A(DMKSYSTS)    GET THE START TIME           @V50A2B5 00211010
+         L     R5,=A(DMKSYSTE)    GET THE END TIME             @V50A2B5 00211020
+         CLC   0(8,R4),ZEROES     DID IT START AT 0            @V50A2B5 00211030
+         BNE   CALLST             NO                           @V50A2B5 00211040
+         CLC   0(8,R5),HRS24      WILL IT END AT HOUR 24       @V50A2B5 00211050
+         BNE   CALLST                                          @V50A2B5 00211060
+         L     R4,=A(DMKPRGMC)    SEE IF MONITOR ALREADY ON    @V50A2B5 00211070
+         ICM   R4,B'1111',0(R4)                                @V50A2B5 00211080
+         BZ    EXITS              NO                           @V50A2B5 00211090
+         L     R4,=A(DMKSYSAT)    SEE IF AUTODISK IS ON        @V50A2B5 00211100
+         TM    0(R4),AUTGO                                     @V50A2B5 00211110
+         BNO   EXITS              NO                           @V50A2B5 00211120
+         LA    R0,CPEXSIZE                                     @V50A2B5 00211130
+         CALL  DMKFREE            GET A CPEXBLOK               @V50A2B5 00211140
+         USING CPEXBLOK,R1                                     @V50A2B5 00211150
+         STM   R0,R15,CPEXR0      PUT IN THE REGISTERS         @V50A2B5 00211160
+         L     R5,=A(DMKENTKC)    ADDRESS OF ROUTINE           @V50A2B5 00211170
+         ST    R5,CPEXADD                                      @V50A2B5 00211180
+         ST    R5,CPEXR12         AND R12                      @V50A2B5 00211190
+         L     R5,ASYSOP          OPERATOR DOES IT             @V50A2B5 00211200
+         ST    R5,CPEXR11                                      @V50A2B5 00211210
+         CALL  DMKSTKCP           STACK THE BLOCK              @V50A2B5 00211220
+         B     EXITS                                           @V50A2B5 00211230
+CALLST   CALL  DMKMNIST            HANDLE THE TRQS             @VMD0138 00211245
+EXITS    EQU   *                                               @V50A2B5 00211250
+         EXIT                                                           00212000
+         EJECT                                                          00213000
+* DMKMID SUBROUTINES                                                    00214000
+DTBIN    SR    R0,R0          CLEAR                                     00215000
+         ST    R0,TEMPSAVE    CLEAR                                     00216000
+         ST    R0,TEMPSAVE+4  CLEAR                                     00217000
+         PACK  TEMPSAVE+6(2),0(2,R2)    PACK MM DD OR YY                00218000
+         NI    TEMPSAVE+7,X'F0'    SIGN OFF                             00219000
+         OI    TEMPSAVE+7,X'0C'    MAKE SIGN C                          00220000
+         CVB   R0,TEMPSAVE    CONVERT TO BINARY                         00221000
+         BR    R3             RETURN                                    00222000
+         SPACE 2                                                        00223000
+DTDEC    CVD   R0,TEMPSAVE    CONVERT TO DECIMAL                        00224000
+         OI    TEMPSAVE+7,X'0F'    MAKE SIGN F                          00225000
+         UNPK  TEMPSAVE(4),TEMPSAVE+6(2)     UNPACK DATA                00226000
+         BR    R3             RETURN                                    00227000
+         SPACE 2                                                        00228000
+ADJTIME  LM    R4,R5,0(R2)    GET TIME TO ADJUST                        00229000
+         LA    R8,1           CONSTANT                                  00230000
+         LM    R6,R7,HRS24    24 HOURS IN MICRO SECONDS SHIFTED         00231000
+         ALR   R5,R7          ADD 1 WORD                                00232000
+         BC    12,*+6         NO OVERFLOW                               00233000
+         ALR   R4,R8          ADD 1                                     00234000
+         ALR   R4,R6          ADD 2 WORD                                00235000
+         STM   R4,R5,0(R2)    RESET TIME                                00236000
+         BR    R3             RETURN                                    00237000
+         SPACE 2                                                        00238000
+MSGALL   DS    0H             SEND MESSAGE TO ALL              @V407508 00239100
+         STM   R0,R1,SAVEWRK2 SAVE REGS DESTROYED BY SWTCHVM   @V407508 00239200
+         L     R1,ASYSVM      GET ADDRESS OF SYSTEM VMBLOK     @V407508 00239300
+         L     R1,VMPNT-VMBLOK(,R1) POINT TO STRING OF USERS   @V407508 00239400
+         LTR   R1,R1          ARE THERE ANY?                   @V407508 00239500
+         BE    MSGEXIT        NO - EXIT                                 00243000
+         LR    R9,R1          REMEMBER THE FIRST VMBLOK        @V407508 00244100
+NXTM     DS    0H                                              @V407508 00244200
+         TM    VMMLEVEL-VMBLOK(R1),VMMSGON RECEIVING MESSAGES? @V407508 00244300
+         BZ    NXTUSER        NO FIND NEXT GUY                          00247000
+         SWTCHVM              LOCK THIS VMBLOK                 @V407508 00247100
+         LM    R0,R1,SAVEWRK2 RESTORE SAVED REGISTERS          @V407508 00247200
+         CALL  DMKQCNWT,PARM=ALARM+NORET     SEND MESSAGE               00248000
+         LR    R1,R11         SET UP REG 1 CORRECTLY           @V407508 00249100
+NXTUSER  DS    0H             GET THE NEXT VMBLOK              @V407508 00249200
+         L     R1,VMPNT-VMBLOK(,R1) GET NEXT VMBLOK ADDRESS    @V407508 00249300
+         CR    R9,R1          BACK TO START ??                 @V407508 00249400
+         BNE   NXTM           NO - NEXT MESSAGE, PLEASE                 00252000
+         SPACE                                                          00253000
+MSGEXIT  DS    0H             SET UP TO EXIT                   @V407508 00254100
+         L     R1,SAVER11     GET CALLERS VMBLOK ADDRESS       @V407508 00254200
+         SWTCHVM              LOCK CALLERS VMBLOK              @V407508 00254300
+         BR    R3             EXIT                                      00256000
+         EJECT                                                          00257000
+* DMKMID TABLES AND WORK AREAS                                          00258000
+YEARSW   DC    H'0'           SWITCH 01 FOR NEW YEAR                    00259000
+         SPACE 2                                                        00260000
+HRS24    DS    0D                                                       00261000
+         DC    X'000141DD76000000' 24 HOURS IN TOD CLOCK UNITS          00262000
+         SPACE 1                                                        00263000
+WKDAY    DC    X'02',X'06',CL9'TUESDAY'                                 00264000
+         DC    X'03',X'08',CL9'WEDNESDAY'                               00265000
+         DC    X'04',X'07',CL9'THURSDAY'                                00266000
+         DC    X'05',X'05',CL9'FRIDAY'                                  00267000
+         DC    X'06',X'07',CL9'SATURDAY'                                00268000
+         DC    X'07',X'05',CL9'SUNDAY'                                  00269000
+         DC    X'01',X'05',CL9'MONDAY'                                  00270000
+BINMM    DC    H'0'           MONTHS IN BINARY                          00271000
+BINDD    DC    H'0'           DAYS                                      00272000
+BINYY    DC    H'0'           YEARS                                     00273000
+         SPACE 2                                                        00274000
+MTBL     DC    H'31'          JAN                                       00275000
+FEB      DC    H'28'          FEB                                       00276000
+         DC    H'31'          MAR                                       00277000
+         DC    H'30'          APR                                       00278000
+         DC    H'31'          MAY                                       00279000
+         DC    H'30'          JUN                                       00280000
+         DC    H'31'          JUL                                       00281000
+         DC    H'31'          AUG                                       00282000
+         DC    H'30'          SEP                                       00283000
+         DC    H'31'          OCT                                       00284000
+         DC    H'30'          NOV                                       00285000
+         DC    H'31'          DEC                                       00286000
+         EJECT                                                          00287000
+ERMPARM  DC    X'B0'          PARM=RETURN+OPERATOR+ALARM       @V305435 00288000
+         SPACE 2                                                        00289000
+MMSG     DC    X'151515'                                                00290000
+         DC    C'TIME IS '                                              00291000
+MTIME    DC    CL8' '                                                   00292000
+         DC    C' '                                                     00293000
+MDZONE   DC    CL3' '                                                   00294000
+         DC    C' '                                                     00295000
+MDWEEK   DC    CL10' '                                                  00296000
+MDATE    EQU   MDWEEK+2                                                 00297000
+MDATEL   DC    CL8' '                                                   00298000
+         DC    X'1515'        CR                                        00299000
+MMSGL    EQU   *-MMSG                                                   00300000
+         EJECT                                                          00301000
+         COPY  SAVE                                                     00302000
+         COPY  VMBLOK                                                   00303000
+         COPY  EQU                                                      00304000
+         PSA                                                            00305000
+         COPY  MONBLOKS                                        @V50A2B5 00305100
+         COPY  TIMER                                                    00306000
+         END                                                            00307000

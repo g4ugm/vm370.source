@@ -1,0 +1,381 @@
+CIO      TITLE 'DMSCIO     (CMS)       VM/370 - RELEASE 6'              00001000
+         SPACE 2                                                        00002000
+*.                                                                      00003000
+* MODULE NAME: DMSCIO (ALSO KNOWN AS CARDIO)                            00004000
+*                                                                       00005000
+* FUNCTION:    TO PERFORM READER/PUNCH I/O OPERATIONS                   00006000
+*                                                                       00007000
+* ATTRIBUTES:  NUCLEUS RESIDENT, REENTRANT                              00008000
+*                                                                       00009000
+* ENTRY POINTS:  DMSCIOR(CARDRD) - READ ONE CARD RECORD                 00010000
+*                DMSCIOP(CARDPH) - PUNCH ONE CARD RECORD                00011000
+*                DMSCIOSI        - PUNCH CALLER'S BUFFER                00012000
+*                                                                       00013000
+* ENTRY CONDITIONS:  UPON ENTRY, R1 POINTS TO A PARAMETER LIST IN       00014000
+*        THE FOLLOWING FORMAT:                                          00015000
+*              DS   0F                                                  00016000
+*        PLIST DC   CL8'ENTRYPOINTNAME'                                 00017000
+*              DC   XL1 - '00' = READ 80 BYTES                          00018000
+*                         '80' = READ NUMBER OF BYTES SPECIFIED         00019000
+*                                (IF PUNCHING, FIELD IS IMMATERIAL)     00020000
+*              DC   AL3(BUFFER)                                         00021000
+*              DC   H'NUMBER OF BYTES TO READ'                          00022000
+*              DC   H'NUMBER OF BYTES ACTUALLY READ'                    00023000
+*                                                                       00024000
+* EXIT CONDITIONS:  AT EXIT, R15 CONTAINS ONE OF THE FOLLOWING CODES:   00025000
+*        CODE  MEANING                                                  00026000
+*           0  NO ERROR - NORMAL COMPLETION                             00027000
+*           1  END-OF-FILE ON READER                                    00028000
+*           2  INTERVENTION REQUIRED ON READER (MAY MEAN RDR EMPTY)     00029000
+*           3  UNKNOWN ERROR                                            00030000
+*           5  INCORRECT LENGTH (IF READING OTHER THAN 80, ACTUAL       00031000
+*                               NUMBER READ SET IN PLIST)               00032000
+*         100  DEVICE NOT ATTACHED OR INTERVENTION REQUIRED ON PUNCH    00033000
+*                                                                       00034000
+* CALLS TO OTHER ROUTINES:    DMSIOW - WAIT FOR INTERRUPT               00035000
+*                             DMSERR - PROCESS ERROR MESSAGES           00036000
+*                                                                       00037000
+* EXTERNAL REFERENCES:        NUCON                                     00038000
+*                                                                       00039000
+* TABLES/WORKAREAS:           R13 AREA PROVIDED BY DMSITS               00040000
+*                             (USED WITH CDSECT DSECT)                  00041000
+*                                                                       00042000
+* REGISTER USAGE:                                                       00043000
+*         R1   PLIST POINTER AT ENTRY                                   00044000
+*         R2   PLIST POINTER SAVE                                       00045000
+*         R4   READ BYTE COUNT OR 0 (WHICH INDICATES PUNCHING)          00046000
+*         R5   READER OR PUNCH DEVICE ADDRESS                           00047000
+*        R10   RETURN ADDRESS SAVE                                      00048000
+*        R11   BASE IN CALLER'S BUFFER OR 0 (WHICH MEANS PUNCHING ONE   00049000
+*                                           CARD RECORD)                00050000
+*        R12   BASE REG IN CODE                                         00051000
+*        R13   BASE REG IN CDSECT                                       00052000
+*        R14   RETURN REG AT ENTRY                                      00053000
+*        R15   A(WAIT) OR RETURN CODE                                   00054000
+*                                                                       00055000
+         EJECT                                                          00056000
+* NOTES: TO USE ENTRY POINT DMSCIOSI, THE CALLER MUST PROVIDE A         00057000
+*        4096-BYTE BUFFER ON A PAGE BOUNDARY.  THE BUFFER MUST          00058000
+*        BE IN THE FOLLOWING FORMAT:                                    00059000
+*                                                                       00060000
+*        PAGE BOUNDARY  +--------+--------+                             00061000
+*                       | BUFCTR | BATCTR |                             00062000
+*                   +8  +--------+--------+                             00063000
+*                       |        |        |                             00064000
+*                  +16  +--------+--------+                             00065000
+*                       | BUFDATA         |                             00066000
+*                       |                 |                             00067000
+*                       |                 |                             00068000
+*                       |     (ETC.)      |                             00069000
+*                                                                       00070000
+*        WHERE 'BUFCTR' IS A FULLWORD CONTAINING THE ADDRESS OF THE     00071000
+*        NEXT AVAILABLE LOCATION IN THE BUFFER, AND 'BUFDATA' IS        00072000
+*        THE FIRST DATA LOCATION, AND BATCTR IS A FULLWORD USED         00073000
+*        FOR CMS BATCH ACCOUNTING.                                      00074000
+*                                                                       00075000
+*        WHEN DMSCIOSI IS CALLED, THE DATA PORTION OF THE               00076000
+*        BUFFER SHOULD CONTAIN CHAINED PUNCH CCWS, TIC CCWS,            00077000
+*        AND THE DATA TO BE PUNCHED.  FOR EFFICIENCY, THE               00078000
+*        LAST ENTRY IN THE BUFFER SHOULD BE A NOP CCW.                  00079000
+*                                                                       00080000
+* OPERATION:                                                            00081000
+*                                                                       00082000
+*        DMSCIOR(CARDRD) -                                              00083000
+*        1. IF NUMBER OF BYTES TO READ IS GIVEN, SET R4 WITH THIS       00084000
+*        NUMBER.  OTHERWISE, SET R4 TO 80.                              00085000
+*        2. SET R5 TO READER DEVICE ADDRESS.                            00086000
+*        3. GO TO 11.                                                   00087000
+*                                                                       00088000
+*        DMSCIOP(CARDPH) -                                              00089000
+*        4. ZERO R4 TO INDICATE WE ARE PUNCHING.                        00090000
+*        5. SET R5 TO PUNCH DEVICE ADDRESS.                             00091000
+*        6. GO TO 11.                                                   00092000
+*                                                                       00093000
+*        DMSCIOSI -                                                     00094000
+*        7. ZERO R4 TO INDICATE WE ARE PUNCHING.                        00095000
+*        8. SET R5 TO PUNCH DEVICE ADDRESS.                             00096000
+*        9. SET R11 TO ADDRESS OF CALLER'S BUFFER.                      00097000
+*        10. GO TO 13.                                                  00098000
+*                                                                       00099000
+*        SINGLE CARD SETUP ROUTINE -                                    00100000
+*        11. ZERO R11 TO INDICATE READING OR PUNCHING 1 CARD RECORD.    00101000
+*        12. BUILD CCWS IN R13 AREA TO READ OR PUNCH ONE CARD.          00102000
+*                                                                       00103000
+*        I/O ROUTINE -                                                  00104000
+*        13. ISSUE START I/O.                                           00105000
+*        14. CALL DMSIOW(WAIT) TO WAIT FOR INTERRUPT.                   00106000
+*        15. ANALYZE STATUS AND, IF NECESSARY, SENSE INFORMATION.       00107000
+*        16. RETURN TO CALLER WITH APPROPRIATE RETURN CODE.             00108000
+*.                                                                      00109000
+**********************************************************************  00110000
+         EJECT                                                          00111000
+**********************************************************************  00112000
+*                                                                       00113000
+*        ENTRY POINTS                                                   00114000
+*                                                                       00115000
+**********************************************************************  00116000
+         SPACE 1                                                        00117000
+DMSCIO   START 0                                                        00118000
+         ENTRY DMSCIOR,CARDRD                                           00119000
+DMSCIOR  EQU   DMSCIO                                                   00120000
+CARDRD   EQU   DMSCIO                                                   00121000
+         LR    R12,R15        ESTABLISH ADDRESSABILITY                  00122000
+         USING DMSCIO,R12     ...                                       00123000
+         USING NUCON,R0                                                 00124000
+         USING CDSECT,R13                                               00125000
+         LA    R5,12          ASSUME DEVICE '00C' FOR READER            00126000
+         LA    R4,80          SET DEFAULT FOR RDR BYTE COUNT            00127000
+         TM    8(R1),X'80'    EXTENDED PLIST GIVEN?                     00128000
+         BZ    JOIN           NO, READ 80 BYTES                         00129000
+         LH    R4,12(,R1)     YES, LOAD GIVEN BYTE COUNT                00130000
+         LTR   R4,R4          AND MAKE SURE IT IS NOT ZERO              00131000
+         BZ    NORMRET0       IF SO RETURN - ZERO BYTES ALREADY READ    00132000
+         B     JOIN                                                     00133000
+         SPACE 1                                                        00134000
+         ENTRY DMSCIOP,CARDPH                                           00135000
+DMSCIOP  EQU   *                                                        00136000
+CARDPH   EQU   DMSCIOP                                                  00137000
+         LR    R12,R15        GET SAME ADDRESSABILITY AS ABOVE          00138000
+         LA    R15,DMSCIOP-DMSCIO  ...                                  00139000
+         SR    R12,R15        NOW IT IS CORRECT                         00140000
+         LA    R5,13          ASSUME DEVICE '00D' FOR PUNCH             00141000
+         SR    R4,R4          ZERO R4 TO INDICATE PUNCHING              00142000
+         B     JOIN                                                     00143000
+         SPACE 1                                                        00144000
+         ENTRY DMSCIOSI                                                 00145000
+DMSCIOSI EQU   *                                                        00146000
+         LR    R12,R15        GET SAME ADDRESSABILITY AS ABOVE          00147000
+         LA    R15,DMSCIOSI-DMSCIO                                      00148000
+         SR    R12,R15        NOW IT IS CORRECT                         00149000
+         LR    R10,R14        SAVE RETURN ADDRESS                       00150000
+         LA    R5,13          ASSUME DEVICE '00D' FOR PUNCH             00151000
+         LR    R2,R1          SAVE PLIST POINTER IN R2                  00152000
+         SR    R4,R4          ZERO R4 TO INDICATE PUNCHING              00153000
+         L     R11,8(,R2)     ADDRESS OF BUFFER IN R11                  00154000
+         USING BUFSECT,R11                                              00155000
+         LA    R3,BUFDATA     ADDRESS OF START OF CCW CHAIN             00156000
+         B     IOGO           GO START PUNCHING                         00157000
+         SPACE 1                                                        00158000
+JOIN     EQU   *                                                        00159000
+         SR    R11,R11        ZERO R11 TO INDICATE NONBUFFER OPERATION  00160000
+         LR    R10,R14        SAVE RETURN ADDRESS IN R10                00161000
+         LR    R2,R1          SAVE PLIST POINTER IN R2                  00162000
+         MVC   CDCCWS(16),DUCCWS  INITIALIZE CCWS IN WORK AREA          00163000
+         LTR   R4,R4          PUNCHING?                                 00164000
+         BZ    CCWOK          IF SO, DEFAULT PUNCH CCW IS OK            00165000
+         MVI   CDCCWS,X'42'   INSERT READ COMMAND                       00166000
+         STCM  R4,7,CDCCWS+5  AND READ BYTE COUNT                       00167000
+CCWOK    MVC   CDCCWS+1(3),9(R2)   INSERT DATA ADDRESS INTO CCW         00168000
+         LA    R3,CDCCWS      GET CCW ADDRESS IN R3                     00169000
+         B     IOGO                                                     00170000
+         EJECT                                                          00171000
+**********************************************************************  00172000
+*                                                                       00173000
+*        I/O ROUTINE.  R3= CCW ADDRESS                                  00174000
+*                      R5= DEVICE ADDRESS                               00175000
+*                      R11= ZERO MEANS PUNCHING 1 CARD OR READ          00176000
+*                      R11 NOT ZERO MEANS PUNCHING CALLER'S BUFFER      00177000
+*                      R4=  ZERO MEANS PUNCHING                         00178000
+*                      R4 NOT ZERO MEANS READING                        00179000
+*                                                                       00180000
+*        IF NOT ZERO, R11 IS BASE REG IN CALLER'S BUFFER                00181000
+*        IF NOT ZERO, R4 CONTAINS THE READ BYTE COUNT                   00182000
+*                                                                       00183000
+**********************************************************************  00184000
+         SPACE 1                                                        00185000
+IOGO     EQU   *                                                        00186000
+         MVC   CDWAITP(20),DUWAITP  INITIALIZE WAIT PLIST IN WORK AREA  00187000
+         LTR   R4,R4          PUNCHING?                                 00188000
+         BZ    WPOK           IF SO, WAIT PLIST OK                      00189000
+         MVC   CDWAITP+8(4),WTRDR  CHANGE PLIST FOR RDR1                00190000
+WPOK     LA    R1,CDWAITP     ADDRESS OF WAIT PLIST IN R1               00191000
+         SPACE 1                                                        00192000
+SIO      ST    R3,CAW         STORE ADDRESS OF CCWS IN CAW              00193000
+         SIO   0(R5)          ISSUE START I/O                           00194000
+         BC    8,IOWAIT       BRANCH IF SUCCESSFULLY STARTED            00195000
+         BC    4,CSWSTOR      CC1 - CSW STORED                          00196000
+         BC    2,BUSY         CC2 - BUSY                                00197000
+         B     ERR113S        CC3 - NOT OPERATIONAL                     00198000
+         SPACE 1                                                        00199000
+IOWAIT   EQU   *                                                        00200000
+         L     R15,=V(WAIT)   ADDRESS OF WAIT ROUTINE                   00201000
+         BALR  R14,R15        WAIT FOR INTERRUPT                        00202000
+         MVC   CDCSW(8),CSW   MOVE IT TO SAVE AREA                      00203000
+         TM    CDSTAT+1,X'40' INCORRECT LENGTH?                         00204000
+         BZ    NOWLR          NO                                        00205000
+         TM    8(R2),X'80'    EXTENDED PLIST GIVEN?                     00206000
+         BZ    ERROR5         NO, RETURN ERROR ONLY                     00207000
+         LH    R7,CDCCWS+6    CCW BYTE COUNT...                         00208000
+         SH    R7,CDCSW+6     ...LESS RESIDUAL COUNT...                 00209000
+         STH   R7,14(,R2)     ...EQUALS BYTES ACTUALLY READ             00210000
+ERROR5   TIO   0(R5)          CLEAR ANY PENDING DE                      00211000
+         BNZ   ERROR5         ...                                       00212000
+         LA    R15,5          RETURN CODE 5 - INCORRECT LENGTH          00213000
+         B     ERRET                                                    00214000
+         SPACE 1                                                        00215000
+NOWLR    TM    CDSTAT,X'02'   HAVE WE UNIT CHECK?                       00216000
+         BO    FEEL           CHECK SENSE INFO                          00217000
+         TM    CDSTAT+1,X'3F' ANY UNEXPECTED ERROR?                     00218000
+         BZ    NORMRET        NO, ALL DONE                              00219000
+         SPACE 1                                                        00220000
+ERROR3   LA    R15,3          RETURN CODE 3 - UNKNOWN ERROR             00221000
+         B     ERRET                                                    00222000
+         SPACE 1                                                        00223000
+CSWSTOR  MVC   CDSTAT(2),CSW+4 SAVE STORED CSW (BYTES 4,5 ONLY)         00224000
+         TM    CDSTAT,X'02'   HAVE WE UNIT CHECK?                       00225000
+         BO    FEEL           CHECK SENSE INFO                          00226000
+         TM    CDSTAT,X'0C'   NICE CE+DE? (AS FROM NOP)                 00227000
+         BO    NORMRET0       IF SO, WE ARE DONE, NO CARDS PUNCHED      00228000
+         TM    CDSTAT,X'01'   HAVE WE END OF FILE?                      00229000
+         BZ    MAYRETRY            SEE IF WE CAN TRY IT AGAIN  @VA03450 00230100
+         SPACE 1                                                        00231000
+ERROR1   LA    R15,1          RETURN CODE 1 - END OF FILE               00232000
+         B     ERRET                                                    00233000
+MAYRETRY TM    CSW+4,BUSYBIT+DE                                @VA03450 00233300
+         BO    SIO                 TRY IT AGAIN                @VA03450 00233600
+         B     ERROR3              UNKNOWN ERROR               @VA03450 00233900
+         SPACE 1                                                        00234000
+BUSY     LA    R14,SIO        SET RETURN ADDRESS TO RETRY SIO           00235000
+         L     R15,=V(WAIT)   ADDRESS OF WAIT ROUTINE                   00236000
+         BR    R15            WAIT FOR INTERRUPT                        00237000
+         SPACE 1                                                        00238000
+FEEL     LA    R15,CDSNCCW    INITIALIZE SENSE CCWS IN WORK AREA        00239000
+         MVC   0(16,R15),DUSNCCW   ...                                  00240000
+         ST    R15,CAW                                                  00241000
+         LA    R15,CDSENFO    ADDRESS FOR SENSE BYTES                   00242000
+         STCM  R15,7,CDSNCCW+1     INSERT ADDRESS INTO CCW              00243000
+SENSIO   SIO   0(R5)            START THE SENSE OPERATION      @VA02086 00244100
+         BC    4,SENSNOGO       CC=1, CSW STORED, CHECK BUSY   @VA02086 00245100
+         TIO   0(R5)                                                    00246000
+         BC    2,*-4                                                    00247000
+         TM    CDSENFO,X'40'  INTERVENTION REQUIRED?                    00248000
+         BZ    ERROR3         IF NOT, GIVE UP                           00249000
+         LTR   R4,R4          ARE WE PUNCHING?                          00250000
+         BZ    ERR145S        PROCESS ERROR MESSAGE                     00251000
+ERROR2   LA    R15,2          RETURN CODE 2 - INT REQ ON RDR            00252000
+         B     ERRET                                                    00253000
+SENSNOGO TM    CSW+4,BUSYBIT+DE BUSY, STATUS WAS PENDING       @VA02086 00253050
+         BO    SIO              WE MAY BE ABLE TO RESTART      @VA02086 00253100
+         B     SENSIO                                          @VA02086 00253150
+         SPACE 3                                               @VA02086 00253200
+BUSYBIT  EQU   X'10'            NEW OPERATION NOT STARTED      @VA02086 00253250
+*                               BECAUSE THE CHANNEL HAD STATUS @VA02086 00253300
+*                               TO PRESENT                     @VA02086 00253350
+DE      EQU   X'04'             DEVICE END                     @VA02086 00253400
+         EJECT                                                          00254000
+**********************************************************************  00255000
+*                                                                       00256000
+*        ERROR MESSAGES                                                 00257000
+*                                                                       00258000
+**********************************************************************  00259000
+         SPACE 1                                                        00260000
+ERR113S  LA    R7,113         ERROR MESSAGE NUMBER                      00261000
+         LA    R3,NATT        TEXT ADDRESS                              00262000
+         B     ERRGO                                                    00263000
+         SPACE 1                                                        00264000
+ERR145S  LA    R7,145         ERROR MESSAGE NUMBER                      00265000
+         LA    R3,INT         TEXT ADDRESS                              00266000
+         B     ERRGO                                                    00267000
+         SPACE 1                                                        00268000
+ERRGO    LA    R8,PUNCHMS     SET FOR PUNCH MESSAGE                     00269000
+         LTR   R4,R4          ...WHICH IS OK IF                         00270000
+         BZ    ERRMSG         ...WE ARE PUNCHING                        00271000
+         LA    R8,READMS      ...BUT IF NOT, CHANGE FOR RDR MESSAGE     00272000
+ERRMSG   DMSERR MF=(E,'SYS'),LET=S,NUM=(7),TEXTA=(3),SUB=(CHARA,(8))    00273000
+         LA    R15,100        RETURN CODE 100 - MESSAGE GIVEN BY CIO    00274000
+         B     ERRET0                                                   00275000
+         SPACE 1                                                        00276000
+NATT     DC    AL1(L'NATTMS)                                            00277000
+NATTMS   DC    C'...... NOT ATTACHED'                                   00278000
+         SPACE 1                                                        00279000
+INT      DC    AL1(L'INTMS)                                             00280000
+INTMS    DC    C'INTERVENTION REQUIRED ON ......'                       00281000
+         SPACE 1                                                        00282000
+READMS   DC    C'READER'                                                00283000
+PUNCHMS  DC    C'PUNCH '                                                00284000
+         DS    0H                                                       00285000
+         EJECT                                                          00286000
+**********************************************************************  00287000
+*                                                                       00288000
+*        RETURNS                                                        00289000
+*                                                                       00290000
+**********************************************************************  00291000
+         SPACE 1                                                        00292000
+NORMRET0 LA    R4,1           MAKE R4 NONZERO                           00293000
+NORMRET  SR    R15,R15        RETURN CODE ZERO - NORMAL COMPLETION      00294000
+ERRET    LTR   R4,R4          PUNCHING?                                 00295000
+         BNZ   ERRET0         IF NOT, SKIP BATCH TEST                   00296000
+         TM    BATFLAGS,BATRUN+BATNOEX  IS BATCH RUNNING?               00297000
+         BM    BATTERUP       BRANCH IF SO                              00298000
+ERRET0   LR    R14,R10        RESTORE RETURN ADDRESS                    00299000
+         BR    R14            RETURN                                    00300000
+         SPACE 1                                                        00301000
+BATTERUP L     R6,ABATLIMT    ADDRESSABILITY IN BATCH LIMIT AREA        00302000
+         USING BATLSECT,R6    ...                                       00303000
+         LH    R7,BATPUNC     CURRENT PUNCH CARD COUNT                  00304000
+         LA    R8,1           CARD COUNT THIS PUNCHING                  00305000
+         LTR   R11,R11        ...IF NOT PUNCHING BUFFER                 00306000
+         BZ    BATIK                                                    00307000
+         L     R8,BATCTR      CARD COUNT IF PUNCHING BUFFER             00308000
+BATIK    AR    R7,R8          UPDATE TOTAL CARD COUNT                   00309000
+         LH    R8,BATPUNL     GET LIMIT AS A FULLWORD                   00310000
+         CR    R7,R8          ARE WE OVER THE LIMIT?                    00311000
+         BNH   BATHOS         NO, UPDATE BATCH'S TOTAL,RETURN           00312000
+         OI    BATFLAGS+1,BATXLIM+BATXPUN  YES, SIGNAL TROUBLE          00313000
+         L     R15,ABATABND   ...AND ABEND BATCH                        00314000
+         BR    R15            ...                                       00315000
+BATHOS   STH   R7,BATPUNC     UPDATE PUNCH COUNT                        00316000
+         LR    R14,R10        RESTORE RETURN ADDRESS                    00317000
+         BR    R14            RETURN                                    00318000
+         EJECT                                                          00319000
+**********************************************************************  00320000
+*                                                                       00321000
+*        DATA USED TO INITIALIZE FIELDS IN THE WORK AREA.               00322000
+*        'DU' PREFIX CORRESSPONDS TO ITEMS WITH 'CD' PREFIX             00323000
+*        IN CDSECT DSECT.                                               00324000
+*                                                                       00325000
+**********************************************************************  00326000
+         SPACE 1                                                        00327000
+         DS    0D                                                       00328000
+DUCCWS   DS    0CL16          CCW PACKAGE                               00329000
+         CCW   X'41',0,X'40',80    DEFAULT PUNCH COMMAND                00330000
+         CCW   X'03',0,X'20',1     NOP CCW                              00331000
+DUWAITP  DS    0CL20          WAIT PLIST                                00332000
+         DC    CL8'WAIT'                                                00333000
+         DC    CL4'PCH1'           DEFAULT FOR PUNCH                    00334000
+         DC    2F'0'                                                    00335000
+DUSENFO  DC    F'0'                                                     00336000
+DUSNCCW  DS    0CL16          CCW PACKAGE FOR SENSE                     00337000
+         CCW   X'04',0,X'60',1     SENSE CCW                            00338000
+         CCW   X'03',0,X'20',1     NOP CCW                              00339000
+         SPACE 1                                                        00340000
+WTRDR    DC    CL4'RDR1'                                                00341000
+         LTORG                                                          00342000
+         EJECT                                                          00343000
+**********************************************************************  00344000
+*                                                                       00345000
+*        DSECTS                                                         00346000
+*                                                                       00347000
+**********************************************************************  00348000
+         SPACE 1                                                        00349000
+CDSECT   DSECT                                                          00350000
+CDCCWS   DS    2D             LOCATION FOR CCW PACKAGE                  00351000
+CDWAITP  DS    5F             AREA FOR WAIT PLIST                       00352000
+CDSENFO  DS    1F             SENSE AREA                                00353000
+CDSNCCW  DS    2D             SENSE CCW PACKAGE                         00354000
+CDCSW    DS    4B             CSW SAVE AREA...                          00355000
+CDSTAT   DS    2B             ...STATUS BYTES...                        00356000
+CDCOUNT  DS    2B             ...COUNT                                  00357000
+CDMISC   DS    2D                                                       00358000
+         SPACE 1                                                        00359000
+BUFSECT  DSECT                                                          00360000
+BUFCTR   DC    A(*-*)                                                   00361000
+BATCTR   DC    A(*-*)                                                   00362000
+         DS    2F                                                       00363000
+BUFDATA  DS    500D                                                     00364000
+         SPACE 1                                                        00365000
+         BATLIMIT                                                       00366000
+         EJECT                                                          00367000
+         NUCON                                                          00368000
+         REGEQU                                                         00369000
+         END                                                            00370000

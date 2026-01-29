@@ -1,0 +1,1730 @@
+SCH      TITLE 'DMKSCH     (CP)        VM/370 - RELEASE 6'              00001000
+         ISEQ  73,80                                                    00002000
+*.                                                                      00003000
+* MODULE NAME -                                                         00004000
+*                                                                       00005000
+*        DMKSCH                                                         00006000
+*                                                                       00007000
+* FUNCTION -                                                            00008000
+*                                                                       00009000
+*        TO MAINTAIN QUEUES OF RUNNABLE AND ELIGIBLE USERS, TO ALTER    00010000
+*        USERS DISPATCHING STATUS, AND TO PERIODICALLY RECALCULATE      00011000
+*        USERS WORKING SET AND DISPATCHING PRIORITY, AND TO MAINTAIN    00012000
+*        STATISTICS ON UTILIZATION AND CONTENTION FOR MAJOR RESOURCES   00013000
+*                                                                       00014000
+*        DMKSCH ALSO CONTAINS THE ROUTINES THAT MAINTAIN THE SYSTEM TOD 00015000
+*        CLOCK COMPARATOR REQUEST QUEUE AND THE CODE THAT MONITORS FAV- 00016000
+*        ORED EXECUTION USERS                                           00017000
+*                                                                       00018000
+* ATTRIBUTES -                                                          00019000
+*                                                                       00020000
+*        SERIALLY REUSABLE, RESIDENT, CALLED VIA BALR                   00021000
+*                                                                       00022000
+* ENTRY POINTS -                                                        00023000
+*                                                                       00024000
+*        DMKSCHDL - ALTER A USER'S DISPATCHING STATUS                   00025000
+*        DMKSCHST - ESTABLISH A CLOCK COMPARATOR INTERRUPT REQUEST      00026000
+*        DMKSCHRT - RESET A CLOCK COMPARATOR INTERRUPT REQUEST          00027000
+*        DMKSCHAE - INTERRUPT ENTRY POINT WHEN FAVORED EXECUTION        00028000
+*                   MEASUREMENT INTERVAL EXPIRES                        00029000
+*        DMKSCH80 - INTERRUPT ENTRY POINT FOR "REAL" LOCATION 80 TIMER  00030000
+*        DMKSCHCP - INTERRUPT ENTRY POINT FOR "REAL" CPU TIMER          00031000
+*        DMKSCHMD - INTERRUPT ENTRY POINT FOR MIDNITE DATE CHANGE       00032000
+*        DMKSCHTI - TIMER INTERRRUPT TO UPDATE CPU UTILIZATION          00033000
+*                                                                       00034000
+*        ENTRY POINTS - NON-EXECUTABLE                                  00035000
+*                                                                       00036000
+*        DMKSCHN1 - CURRENT NUMBER OF USERS IN Q1 (INTERACTIVE)         00037000
+*        DMKSCHN2 - CURRENT NUMBER OF USERS IN Q2 (NON-INTERACTIVE)     00038000
+*        DMKSCHQ1 - Q1 TIME SLICE                                       00039000
+*        DMKSCHQ2 - Q2 TIME SLICE                                       00040000
+*        DMKSCHRL - ANCHOR FOR LIST OF DISPATCHABLE USERS               00041000
+*        DMKSCHTQ - ANCHOR FOR LIST OF OUTSTANDING CLOCK COMPARATOR     00042000
+*                   INTERRUPT REQUESTS                                  00043000
+*        DMKSCHPG - DESIRABLE PAGING OVERHEAD PERCENTAGE (<=99)         00044000
+*        DMKSCHAP - ASSURED EXECUTION PERCENTAGE FOR CURRENT FAVORED    00045000
+*                   EXECUTION USER                                      00046000
+*        DMKSCHAU - POINTER TO VMBLOK OF FAVORED USER                   00047000
+*        DMKSCHCU - SMOOTHED CPU UTILIZATION FIELD                      00048000
+*        DMKSCHCA - SMOOTHED APU UTILIZATION FIELD                      00048100
+*        DMKSCHS1 - SMOOTHED Q1 VALUE                                   00049000
+*        DMKSCHS2 - SMOOTHED Q2 VALUE                                   00050000
+*        DMKSCHCO - SMOOTHED CORE UTILIZATION FIELD                     00051000
+*        DMKSCHSC - SCHEDULER CONTENTION RATIO FIELD                    00052000
+*        DMKSCHLI - WAIT TIME SAMPLING INTERVAL                         00053000
+*                                                                       00054000
+* ENTRY CONDITIONS -                                                    00055000
+*                                                                       00056000
+*        FOR DMKSCHDL -                                                 00057000
+*        GPR11 = ADDRESS OF VMBLOK FOR CURRENT USER                     00058000
+*        GPR15 = ADDRESS OF DMKSCHDL                                    00059000
+*                                                                       00060000
+*        FOR DMKSCHST -                                                 00061000
+*        GPR1  = ADDRESS OF TRQBLOK FOR REQUESTED TIMER INTERRUPT       00062000
+*        GPR11 = ADDRESS OF CURRENT USER                                00063000
+*        GPR15 = ADDRESS OF DMKSCHST                                    00064000
+*                                                                       00065000
+*        FOR DMKSCHRT - SAME AS DMKSCHST                                00066000
+*                                                                       00067000
+*        FOR OTHER ENTRY POINTS -                                       00068000
+*        GPR10 = ADDRESS OF TRQBLOK FOR INTERRUPT                       00069000
+*        GPR11 = ADDRESS OF VMBLOK OF INTERRUPTS OWNER                  00070000
+*        GPR15 = ADDRESS OF INTERRUPT ENTRY POINT                       00071000
+*                                                                       00072000
+* EXIT CONDITIONS -                                                     00073000
+*                                                                       00074000
+*        NONE                                                           00075000
+*                                                                       00076000
+* CALLS TO OTHER ROUTINES -                                             00077000
+*                                                                       00078000
+*        DMKMIDNT - CALLED TO ALTER DATE AT MIDNIGHT                    00079000
+*        DMKFRET - TO RELEASE STORAGE                                   00080000
+*        DMKQCNWT - TO WRITE OVERLOAD DIAGNOSTICS TO OPERATOR.          00081000
+*        DMKPTRRS      COUNT REF. PAGES AND ADD TO FLUSH LIST           00081100
+*        DMKLOKSP - TO OBTAIN SPIN LOCKS                                00081200
+*                                                                       00082000
+* EXTERNAL REFERENCES -                                                 00083000
+*                                                                       00084000
+*        DMKPTRFL - ADDRESS OF FLUSHED PAGE LIST                        00085000
+*        DMKPTRU1 - ADDRESS OF USER PAGE LIST                           00086000
+*        DMKDSPNP - NUMBER OF DYNAMICALLY ASSIGNABLE PAGE FRAMES        00087000
+*        DMKPTRRL - HIGH WATER LIMIT FOR RESERVED PAGE USER             00088000
+*        DMKLOKTR - TIMER REQUEST QUEUE LOCK                            00088100
+*        DMKLOKDS - DISPATCHER QUEUES LOCK                              00088200
+*        DMKLOKRL - RUNLIST LOCK                                        00088300
+*                                                                       00089000
+* TABLES/WORKAREAS -                                                    00090000
+*                                                                       00091000
+*        TRQBLOK,TEMPSAVE                                               00092000
+*                                                                       00093000
+* REGISTER USAGE -                                                      00094000
+*                                                                       00095000
+*        GPR0-9 - TIMER ARITHMETIC AND PRIORITY CALCULATIONS            00096000
+*        GPR10  - TRQBLOK BASE                                          00097000
+*        GPR11  - VMBLOK BASE                                           00098000
+*        GPR12  - DMKSCH BASE                                           00099000
+*        GPR13  - DMKSCH BASE                                           00099100
+*        GPR14  - INTERNAL LINKAGE                                      00100000
+*        GPR15  - ADDRESSABILITY FOR QUEUE CONTROL DSECT                00101000
+*                                                                       00102000
+* NOTES -                                                               00103000
+*                                                                       00104000
+*        NONE                                                           00105000
+*                                                                       00106000
+* OPERATION -                                                           00107000
+*                                                                       00108000
+*     A. MAIN STATUS CHANGE MAINTENANCE                                 00109000
+*        1. STAMP/UNSTAMP USER'S "REAL" TIMER(S)                        00110000
+*        2. IF USER IS RUNNABLE, SKIP TO STEP 6.                        00111000
+*        3. IF USER WAS RUNNABLE BEFORE, MARK NOT RUNNABLE              00112100
+*           IF IN ELIGIBLE LIST DROP FROM LIST.                         00112200
+*        4. IF USER IS IN AN IDLE WAIT STATE, DROP FROM Q               00113000
+*        5. GO TO SECTION B TO LOOK FOR ELIGIBLE USERS TO ADD TO Q      00114000
+*        6. IF USER IS RUNNABLE, MARK IT RUNNABLE.                      00115100
+*        7. IF USER WAS RUNNABLE BUT NOT IN Q BEFORE, GO TO SECTION     00116000
+*           B TO LOOK FOR USERS TO ADD TO Q                             00117000
+*        8. IF USER WAS NOT RUNNABLE BEFORE, ADD TO APPROPRIATE RUN-    00118000
+*           NABLE LIST                                                  00119000
+*        9. IF USER'S TIME SLICE HAS BEEN EXCEEDED, DROP FROM Q         00120000
+*       10. IF USER HAS GONE COMPUTE BOUND, DROP TO LOW PRIORITY        00121000
+*       11. GO TO SECTION B                                             00122000
+*.                                                                      00123000
+         EJECT                                                          00124000
+         COPY  OPTIONS                                                  00125000
+         COPY  LOCAL OPTIONS                                            00126000
+         EJECT                                                          00127000
+DMKSCH   CSECT                                                          00128000
+         SPACE                                                          00129000
+         EXTRN DMKPTRRS                                                 00130000
+         EXTRN DMKPTRU1                                                 00131000
+         EXTRN DMKDSPNP                                                 00132000
+         EXTRN DMKCVTBH                                                 00133000
+         EXTRN DMKMIDNT                                                 00134000
+         EXTRN DMKPTRRL                                                 00135000
+         EXTRN DMKQCNWT                                        @V2B2638 00136000
+         EXTRN DMKCVTAB                                        @VA04301 00136100
+         EXTRN DMKPTRUC                                        @VA07810 00136200
+         SPACE                                                          00137000
+         ENTRY DMKSCHTI,DMKSCHCU,DMKSCHCO,DMKSCHSC             @V2B2638 00138000
+         ENTRY DMKSCHS1,DMKSCHS2,DMKSCHLI                      @V2B2638 00139000
+         ENTRY DMKSCHDL                                                 00140000
+         ENTRY DMKSCHST                                                 00141000
+         ENTRY DMKSCHRT                                                 00142000
+         ENTRY DMKSCHN1                                                 00143000
+         ENTRY DMKSCHN2                                                 00144000
+         ENTRY DMKSCHAP                                                 00145000
+         ENTRY DMKSCHTQ                                                 00146000
+         ENTRY DMKSCHRL                                                 00147000
+         ENTRY DMKSCHPG                                                 00148000
+         ENTRY DMKSCHQ1                                                 00149000
+         ENTRY DMKSCHQ2                                                 00150000
+         ENTRY DMKSCHAU                                                 00151000
+         ENTRY DMKSCHAE                                        @VA04341 00151100
+         ENTRY DMKSCHMD                                                 00152000
+         ENTRY DMKSCHW1,DMKSCHW2,DMKSCHAL                               00153000
+         ENTRY DMKSCHEL                                        @V305535 00154000
+         ENTRY DMKSCHBK                                        @VA05288 00154100
+         ENTRY DMKSCHCA                                        @V407577 00154200
+         SPACE                                                          00155000
+         AIF   (&RTIMR EQ 0).RTM3                                       00156000
+         ENTRY DMKSCH80                                                 00157000
+         ENTRY DMKSCHCP                                                 00158000
+.RTM3    ANOP                                                           00159000
+         SPACE                                                          00160000
+         SPACE                                                          00161000
+         USING PSA,R0                                                   00162000
+         USING VMBLOK,R11                                               00163000
+         SPACE 2                                                        00164000
+DMKSCHDL EQU   *                                                        00165000
+         STM   R0,R15,BALRSAVE     SAVE CALLER'S REGISTERS              00166000
+         LR    R12,R15        ESTABLISH                                 00167000
+         LA    R13,2048(,R12)                                  @V407577 00168100
+         LA    R13,2048(,R13)                                  @V407577 00168200
+         USING DMKSCHDL,R12,R13                                @V407577 00168300
+         L     R0,DMKSCHCT    GET TOTAL CALL COUNT                      00169000
+         AL    R0,F1          BUMP                                      00170000
+         ST    R0,DMKSCHCT    AND SAVE                                  00171000
+         AIF   (NOT &TRACE(9)).TR1                                      00174000
+         TM    TRACFLG1,TRAC08      TRACING ACTIVE?                     00175000
+         BZ    NOTRAC1        BRANCH IF NOT                             00176000
+         TRACE CODE=TRCSCH,R15,R1,R2                           @V407577 00177100
+         STCM  R11,B'0111',1(R15) SAVE USERS VMBLOK            @V407577 00177200
+         L     R1,VMRSTAT     SAVE USER STATUS BYTES           @VA01166 00180000
+         ST    R1,4(,R15)     IN TRACE TABLE                   @VA01166 00181000
+         LH    R1,VMIOINT     SAVE I/O INT PENDING FLAGS       @VM03123 00182000
+         ICM   R1,B'0100',VMTLEVEL GET USER TIMER LEVEL        @VM03123 00183000
+         ICM   R1,B'1000',VMQLEVEL GET USER QUEUE LEVEL        @VM03123 00184000
+         ST    R1,8(,R15)     IN THE TRACE TABLE               @VA01166 00185000
+         LR    R1,R14         GET RETURN ADDRESS               @VM03123 00186000
+         ICM   R1,B'1000',VMPEND AND INT. PENDING SUMMARY      @VM03123 00187000
+         ST    R1,12(R15)     IN THE TRACE TABLE               @VM08543 00188000
+NOTRAC1  EQU   *                                                        00194000
+.TR1     ANOP                                                           00195000
+         AIF   (&RTIMR EQ 0).RTM1                                       00196000
+         TM    VMTLEVEL,VMRON REAL TIMER RUNNING ??                     00197000
+         BNZ   CKCPWAIT                                        @VA01688 00198000
+         TM    VMPSTAT,VMV370R IS THIS EC MODE                 @VA01688 00199000
+         BZ    CKRSTAT        NO, NO CPU TIMER VALUE           @VA01688 00200000
+CKCPWAIT EQU   *                                               @VA01688 00201000
+         TM    VMRSTAT,VMCPWAIT    IN PSEUDO- WAIT ??                   00202000
+         BNZ   UNSTAMP        YES -- TIMER MUST NOT RUN                 00203000
+         TM    VMRSTAT,VMPSWAIT    IN USER WAIT ??                      00204000
+         BZ    UNSTAMP        NO -- TIMER MUST NOT RUN                  00205000
+         TM    VMTLEVEL,VMSTMPI+VMSTMPT TIMER REQUESTS QUEUED ?         00206000
+         BO    CKRSTAT        YES, BOTH TIMERS STAMPED         @VA01688 00207000
+         BAL   R3,RSTMPON     NO -- GO START IT                         00208000
+         B     CKRSTAT        --                                        00209000
+         SPACE                                                          00210000
+UNSTAMP  TM    VMTLEVEL,VMSTMPI+VMSTMPT TIMER REQUESTS QUEUED?          00211000
+         BZ    CKRSTAT        NO -- CONTINUE                            00212000
+         BAL   R3,RSTMPOFF    YES -- GO STOP IT                         00213000
+         SPACE                                                          00214000
+CKRSTAT  EQU   *                                                        00215000
+.RTM1    ANOP                                                           00216000
+         TM    VMRSTAT,VMNORUN+VMIDLE IS THIS MACHINE RUNNABLE @VA06404 00217000
+         BZ    CKRUN          YES --                                    00218000
+         TM    VMDSTAT,VMRUN+VMINQ WAS HE RUNNABLE OR IN Q BEFORE??     00218100
+         BZ    SCHEXIT        NO - NO STATUS CHG               @V408246 00218200
+         BO    RESETRUN       INDICATE NOT RUNNABLE            @V408246 00218300
+         SPACE 1                                                        00231000
+         SPACE                                                          00232000
+CKIDLE   TM    VMDSTAT,VMINQ  IN A QUEUE                       @VA04341 00233400
+         BZ    DROPL          DROP  FROM ELIGBLE LIST          @V408246 00233800
+         TM    VMRSTAT,VMLONGWT IN A LONG WAIT                 @VA04341 00234200
+         BNZ   DROPHIM        YES - DROP USER FROM QUEUE       @VA04341 00234600
+         TM    VMDSTAT,VMQSEND EXPIRED TIME SLICE              @VA04341 00235000
+         BZ    SCHEXIT        NO - RETURN TO CALLER            @VA04341 00235400
+DROPHIM  BAL   R14,DROPLIST   DROP FROM LIST                   @V408246 00235800
+         BAL   R14,DROPQ      DROP FROM QUEUE                  @V408246 00235900
+         B     CKWAITNG       SEE IF ANY USERS WAITING         @VA04341 00236200
+DROPL    TM    VMDSTAT,VMELIG IN ELIGIBLE LIST ??              @V408246 00236300
+         BZ    SCHEXIT        EXIT IF NO                       @V408246 00236400
+         BAL   R14,DROPLIST   DROP FROM LIST IF YES            @V408246 00236500
+         B     SCHEXIT        RETURN TO CALLER                 @V408246 00236600
+RESETRUN NI    VMDSTAT,X'FF'-VMRUN NOT DISPATCHABLE            @V408246 00236700
+         B     CKIDLE         CHECK FOR IDLE                   @V408246 00236800
+         SPACE                                                          00244000
+         ENTRY DMKSCHCT                                                 00245000
+DMKSCHCT DC    F'0'           COUNT TOTAL CALLS TO DMKSCH               00246000
+         EJECT                                                          00247000
+CKRUN    EQU   *  HERE TO CHECK OUT RUNNABLE USER --                    00248000
+         TM    VMQSTAT,VMPRIDSP    SHOULD USER BE SCHEDULED FOR Q1 ??   00249000
+         BZ    CKDSTAT        NO --                                     00250000
+         NI    VMQSTAT,X'FF'-VMPRIDSP REMOVE PRIORITY FLAG     @VA01354 00251000
+         SLR   R1,R1          CLEAR                            @VA01354 00252000
+         STH   R1,VMQPRIOR    USER DISPATCHING PRIORITY        @VA01354 00253000
+         TM    VMDSTAT,VMINQ  CURRENTLY IN A QUEUE ?           @VA04341 00256000
+         BO    CKDSTAT        IF YES - RE-ADD TO RUNLIST       @VA04341 00257000
+         TM    VMQLEVEL,VMQ1  ALREADY SET FOR Q1 ??            @VA07752 00257100
+         BO    AWAITING       YES, EASY AS PIE                 @VA07752 00257200
+         TM    VMDSTAT,VMELIG NOT Q1, IN Q2 ELIGIBLE ??        @VA07752 00257300
+         BZ    CKRUN1         NO, FLAG FOR Q1 ENTRY            @VA07752 00257400
+         BAL   R14,DROPLIST   DROP Q2 ELIG. THEN ADD TO Q1     @VA07752 00257500
+CKRUN1   EQU   *              NOT IN Q2 ELIGIBLE, ADD TO Q1    @VA07752 00257600
+         OI    VMQLEVEL,VMQ1  FLAG FOR QUEUE 1 ENTRY           @VA04341 00258000
+         B     AWAITING       ADD USER TO ELIGIBLE LIST        @VA04341 00259000
+         SPACE                                                          00266000
+CKDSTAT  TM    VMDSTAT,VMRUN+VMINQ WAS USER RUNNABLE OR IN A Q BEFORE   00267000
+         BO    CKTIME         YES -- GO TEST FOR TIME SLICE END         00268000
+         TM    VMDSTAT,VMINQ  IS USER IN QUEUE                 @V408246 00269200
+         BZ    AWAITING       ADD TO ELIG LIST IF NOT          @V408246 00269300
+         OI    VMDSTAT,VMRUN  MARK DISPATCHABLE                @V408246 00269400
+         B     CKTIME         NOW TEST TIME SLICE END          @VA04341 00269600
+         SPACE 1                                                        00269800
+AWAITING TM    VMQLEVEL,VMAEX+VMAEXP IS THIS A SPECIAL USER    @VA04341 00270000
+         BNZ   QAEX           YES - ADD TO QUEUE IMMEDIATELY   @VA04341 00270200
+         BAL   R14,AWAITLST   RUNNABLE AND NOT IN A QUEUE -    @VA04341 00270400
+*                             ADD TO ELIGIBLE LIST                      00270600
+         B     CKWAITNG       LOOK FOR USER TO ADD TO QUEUE    @VA04341 00270800
+         SPACE                                                          00273000
+CKTIME   EQU   *  RUNNABLE AND IN A Q - TEST FOR TIME SLICE END         00274000
+         TM    VMDSTAT,VMQSEND TIME SLICE END                  @VA04341 00274100
+         BO    TMRDROP        YES - DROP FROM QUEUE            @VA04341 00274200
+         TM    VMDSTAT,VMTSEND     TIME SLICE END ??                    00275000
+         BZ    SCHEXIT        NO - RETURN TO CALLER            @VA04341 00276100
+         NI    VMDSTAT,X'FF'-VMTSEND    UNFLAG T.S. END                 00277000
+         TM    VMQLEVEL,VMCOMP     ALREADY MARKED COMPUTE BOUND ??      00278000
+         BZ    *+8            NO .. GO FLAG 1ST TIME SLICE END          00279000
+         OI    VMQLEVEL,VMLOPRI    FLAG 2ND AND SUBSEQUENT SLICE ENDS   00280000
+         OI    VMQLEVEL,VMCOMP     ....                                 00281000
+         BAL   R14,DROPLIST   REMOVE FROM CURRENT LIST POSITION         00282000
+         CHARGE SYNC          UPDATE VMTTIME                   @V4M0203 00282100
+         BAL   R14,CALCPRI   RE-CALCULATE DISPATCHING PRIORITY @V407577 00283100
+         BAL   R14,ARUNLST    RE-ADD TO RUNLIST                @VA04341 00284500
+         B     SCHEXIT        AND RETURN TO CALLER             @VA04341 00285000
+         SPACE                                                          00288000
+         EJECT                                                          00290000
+TMRDROP  BAL   R14,DROPQ      DROP USER FROM ACTIVE QUEUE      @VA04341 00291000
+         BAL   R14,DROPLIST   ALSO FROM DISPATCHABLE LIST      @VA04341 00292000
+         NI    VMQLEVEL,X'FF'-VMHIPRI PERCENTAGE ACHIEVED      @VA04341 00293000
+         TM    VMQLEVEL,VMAEX ASSURED EXECUTION USER           @VA04341 00294000
+         BZ    AWAITING       NO - ADD TO ELIGIBLE LIST        @VA04341 00295000
+         B     NODROP         ADD USER BACK IN EXECUTABLE LIST @V4M0215 00296100
+QAEX     TM    VMQLEVEL,VMAEXP FAVORED PERCENTAGE USER         @VA04341 00297000
+         BZ    QAEXLOW        NO                               @VA04341 00298000
+         OI    VMQLEVEL,VMHIPRI YES - HE GETS TOP PRIORITY     @VA04341 00299000
+QAEXLOW  DS    0H                                              @V4M0215 00300100
+         TM    VMDSTAT,VMELIG IS USER IN ELIGIBLE LIST?        @V4M0215 00300200
+         BZ    NODROP         NO, NO NEED TO CALL DROPLIST     @V4M0215 00300300
+         BAL   R14,DROPLIST   DROP FROM ELIGIBLE LIST          @V4M0215 00300400
+NODROP   DS    0H                                              @V4M0215 00300500
+         BAL   R14,ADDQ       ADD TO ACTIVE QUEUE              @VA04341 00301000
+         BAL   R14,CALCBIAS   CALC ELIGIBLE PRIORITY           @V407577 00302100
+         ST    R0,VMEPRIOR    STORE FOR 'VMRPRIOR' CALC        @VA04341 00303000
+         BAL   R14,ARUNLST    AND THE RUNNABLE LIST            @VA04341 00304000
+*                             QUEUE ADD                                 00306000
+         B     CKWAITNG       LOOK FOR MORE USERS TO ADD TO    @VA04341 00307000
+*                             QUEUE                                     00308000
+         EJECT                                                          00340000
+*.                                                                      00341000
+* OPERATION -                                                           00342000
+*                                                                       00343000
+*     B. ADD USERS TO DISPATCHABLE LIST                                 00344000
+*                                                                       00345000
+*        1. ADD ANY USERS WAITING FOR Q1 TO RUNNABLE LIST, FIRST SUB-   00346000
+*           TRACTING THEIR PROJECTED WORKING SETS FROM THE TOTAL NUMBER 00347000
+*           OF PAGE FRAMES AVAILABLE                                    00348000
+*        2. LOCATE THE FIRST USER WAITING FOR Q2 AND SUBTRACT HIS PROJ- 00349000
+*           ECTED WORKING SET FROM THE NUMBER OF PAGES AVAILABLE; IF HE 00350000
+*           FITS ADD HIM TO THE DISPATCHABLE LIST AND CONTINUE WITH THE 00351000
+*           NEXT WAITING USER                                           00352000
+*        3. IF THE USER'S WORKING SET WILL EXCEED THE NUMBER OF AVAIL-  00353000
+*           ABLE PAGE FRAMES, FIRST INSURE THAT HIS PROJECTED WORKING   00354000
+*           SET DOES NOT EXCEED ALL OF DYNAMIC STORAGE; THEN, TEST TO   00355000
+*           SEE THAT THERE IS AT LEAST ONE Q2 (NON-INTERACTIVE) USER.   00356000
+*           IF THERE ARE NONE, ADD THIS USER TO Q2.                     00357000
+*        4. AFTER Q2 HAS BEEN FILLED OR ALL RUNNABLE USERS HAVE BEEN    00358000
+*           PROCESSED, TEST TO SEE IF THE CURRENT USER HAS BEEN DROPPED 00359000
+*           FROM Q; IF HE HAS, PLACE THE CORTABLE ENTRIES FOR HIS       00360000
+*           ACTIVE PAGE FRAMES ON THE FLUSHED PAGE LIST                 00361000
+*           INSURE THAT USER'S PROJECTED WORKING SET IS LESS THAN       00361100
+*           THE NUMBER OF REFERENCED PAGES. ADJUST IF REQUIRED.         00361200
+*                                                                       00362000
+*.                                                                      00363000
+         SPACE 2                                                        00364000
+CKWAITNG EQU   *  LOOK FOR RUNNABLE USERS TO ADD TO ACTIVE QUEUES       00365000
+         SPACE                                                          00366000
+         CHARGE STOP          NO CHARGE FOR QUEUE MANIPULATION @V407577 00367100
+         L     R5,WAITQ1      GET ELIGLIBE LIST                         00368000
+         LA    R6,WAITQ1      GET ADDRESS OF LIST ANCHOR                00369000
+         LA    R15,QUEUE1     AND OF QUEUE CONTROL                      00370000
+         L     R7,=A(DMKDSPNP)     GET ADDRESS OF PAGE COUNTER          00371000
+         L     R7,0(,R7)      GET NUMBER OF PAGEABLE PAGES              00372000
+         LTR   R7,R7          CHECK FOR ZERO PAGES             @VA03678 00373000
+         BNZ   SETEXIT        OK, CONTINUE                     @VA03678 00374000
+         LA    R7,1           INSURE COUNT OF ONE              @VA03678 00375000
+SETEXIT  LA    R8,GETQ2       SET EXIT ADDR FROM SEARCH LOOP   @VA03678 00376000
+         LA    R9,CKQ         SET RESTART ADDRESS FOR LOOP              00377000
+         SPACE                                                          00378000
+CKQ      LR    R11,R5         GET ADDRESS OF NEXT USER IN LIST          00379000
+         CR    R11,R6         END OF CHAIN ??                           00380000
+         BCR   8,R8           YES -- EXIT                               00381000
+STANDWSS LH    R0,VMWSPROJ    GET PROJECTED WORKSET SIZE       @VA01148 00389000
+         L     R1,PAGUSAGE    GET SUM OF ACTIVE WORKSETS                00390000
+         ALR   R1,R0          ADD IN THIS USERS CONTRIBUTION            00391000
+         CR    R1,R7          AND COMPARE SUM TO AVAILABLE PAGES        00392000
+         BH    CKMIN          IF SUM EXCEEDS AVAILABLE, EXIT            00393000
+ADDTOQ   L     R5,VMQFPNT     OTHERWISE, ADD TO QUEUE                   00394000
+         BAL   R14,DROPLIST   REMOVE FROM ELIGIBLE LIST                 00395000
+         BAL   R14,ADDQ       ADD TO QUEUE 1                            00396000
+         BAL   R14,ARUNLST    AND TO RUNNABLE LIST                      00397000
+         BR    R9             RESTART LOOP, OR EXIT                     00398000
+         SPACE                                                          00399000
+GETQ2    EQU   *              CHECK OUT THOSE WAITING FOR Q2            00400000
+         L     R5,WAITQ2      POINT TO 1ST WAITING BLOK                 00401000
+         LA    R6,WAITQ2      POINT TO LIST                             00402000
+         LA    R8,SETIME      SET EXIT ADDRESS FROM SEARCH LOOP         00404000
+         B     CKQ            AND LOOK FOR Q2 USERS                     00405000
+         SPACE                                                          00406000
+CKMIN    EQU   *                                                        00407000
+         LA    R9,SETIME      SET RESTART ADDRESS TO EXIT               00408000
+         CR    R0,R7          WILL USER EVER FIT ??                     00409000
+         BL    CKNQ           YES -- TEST NUMBER IN QUEUE               00410000
+         LR    R0,R7          IF NOT,                                   00411000
+         BCTR  R0,0           MAKE SURE THAT HE                         00412000
+         STH   R0,VMWSPROJ    WILL                                      00413000
+         SPACE                                                          00414000
+CKNQ     L     R2,DMKSCHN1    GET NUMBER NOW IN QUEUE 1                 00415000
+         TM    VMQLEVEL,VMQ1  ADDING TO QUEUE 1                @VA04341 00416500
+         BO    *+8            YES - MUST HAVE AT LEAST 1       @VA04341 00417000
+         A     R2,DMKSCHN2    IF ADDING TO QUEUE2, COUNT ALL USERS      00418000
+         LTR   R2,R2          ARE THERE ANY ??                          00419000
+         BZ    ADDTOQ         PUT AT LEAST ONE USER IN Q                00420000
+         LR    R1,R0          SAVE PROJECTED WORKING SET       @VA01353 00421000
+         SRL   R1,2           DIVIDE IT BY /4.                 @VA01353 00422000
+         SLR   R0,R1          GIVES US 75% OF PROJECTED        @VA01353 00423000
+         AL    R0,PAGUSAGE    ADD IN PRESENT PAGE USAGE.       @VA01353 00424000
+         CR    R0,R7          WILL HE FIT NOW ?                @VA01353 00425000
+         BNH   ADDTOQ         YES - ADD USER TO A QUEUE.       @VA01353 00426000
+         SPACE                                                          00427000
+SETIME   L     R11,BALR11     RESTORE ADDRESS OF ORIGINAL USER          00428000
+         CHARGE START         AND HIS CPU TIMER                @V407577 00429100
+         SPACE 2                                                        00430000
+CKFLUSH  EQU   *  HERE TO TEST FOR PAGES TO BE FLUSHED                  00431000
+         TM    DMKSCHAL,VMINQ      DROPPED FROM Q?             @V408246 00432100
+         BZ    SCHEXIT             NO - EXIT                   @V408246 00432200
+         NI    DMKSCHAL,255-VMINQ  RESET Q-DROP INDIC          @V408246 00432300
+         TM    VMDSTAT,VMINQ  VM NOW IN A QUEUE                @V4M0207 00432305
+         BO    SCHEXIT        YES- BYPASS PAGE RESET CALL      @V4M0207 00432310
+         CL    R11,AVMREAL    V=R VIRTUAL MACHINE?             @VA07342 00432320
+         BE    SCHEXIT        YES, BYPASS PAGE RESET           @V4M0167 00432340
+         L     R1,=A(DMKPTRUC)     FLUSHED PAGE COUNT          @VA07810 00432350
+         L     R2,DMKSCHN1    USERS IN Q1                      @VA07810 00432355
+         A     R2,DMKSCHN2    PLUS Q2                          @VA07810 00432360
+         C     R2,0(R1)       BELOW THRESHOLD                  @VA07810 00432365
+         BNH   SCHEXIT        NO- BYPASS PAGE RESET            @VA07810 00432370
+         CALL  DMKPTRRS                                        @V408246 00432400
+* TEMPR1 SET UP BY DMKPTRRS                                    @V408246 00432600
+         LH    R1,VMWSPROJ    GET PROJ WORKING SET SIZE        @V408246 00432700
+         S     R1,TEMPR1      SUBTRACT NUMBER OF REF PAGES     @V408246 00432800
+         BNP   SCHEXIT        OK IF VMWSPROJ <= REF PAGES      @V408246 00432900
+         L     R2,TEMPR1                                       @V408246 00433000
+         STH   R2,VMWSPROJ    SET PROJ WS TO NBR OF REF PAGES  @V408246 00433100
+         TM    VMDSTAT,VMINQ       MADE IT BACK TO QUEUE?      @V408246 00433200
+         BZ    CKWAITNG            NO- TRY AGAIN               @V408246 00433300
+         L     R2,PAGUSAGE    ADJUST SUM OF USERS WORKING SETS @V408246 00433400
+         SR    R2,R1          BY AMOUNT OF OVER ESTIMATE OF WS @V408246 00433500
+         LTR   R2,R2          WILL PAGE USEAGE GO NEGATIVE     @VA08454 00433520
+         BP    CKFLUSH1       NO, LET IT GO                    @VA08454 00433540
+         SR    R2,R2          YES, ZERO IS MINIMUM COUNT       @VA08454 00433560
+CKFLUSH1 EQU   *                                               @VA08454 00433580
+         ST    R2,PAGUSAGE                                     @V408246 00433600
+         B     CKWAITNG            TRY TO ADD USERS TO QUEUE   @V408246 00433700
+         SPACE 2                                                        00447000
+SCHEXIT  EQU   *  EXIT FROM SHCEDULER                                   00448000
+         LM    R0,R15,BALRSAVE     RESTORE CALLER'S REGISTERS           00449000
+         BR    R14            AND RETURN                                00450000
+         EJECT                                                          00451000
+ADDQ     EQU   *   HERE WHEN USER IS BEING PUT IN ACTIVE QUEUE          00452000
+*                                                                       00453000
+* THE VMBLOK FOR THIS USER IS TIME STAMPED AS FOLLOWS.                  00455000
+*                                                                       00456000
+*                                                                       00459000
+*        A.    VMTODINQ = TOD CLOCK                                     00460000
+*        B.    VMTMOUTQ = AMOUNT OF TIME ALLOWED TO STAY IN QUEUE       00461000
+*        C.    VMTMINQ  = CURRENT VALUE OF (VMTTIME)                    00462000
+*                         SUPERVISOR OVERHEAD TIME FOR THIS USER. IT    00463000
+*                         IS REPRESENTED BY THE DIFFERENCED FROM        00464000
+*                         X'7FFFFFFFFFFFF000'.                          00465000
+         SPACE                                                          00466000
+         USING VMQBLOK,R15                                              00467000
+         TM    VMDSTAT,VMINQ  CURRENTLY IN A QUEUE ?           @VA04341 00467100
+         BOR   R14            YES - RETURN TO CALLER           @VA04341 00467200
+         LA    R15,QUEUE2     ASSUME ADDING TO QUEUE 2         @VA04341 00467300
+         TM    VMQLEVEL,VMQ1  WERE WE CORRECT                  @VA04341 00467400
+         BZ    *+8            IF YES - QUEUE BLOCK POINTER     @VA04341 00467500
+*                             ALL SET                                   00467600
+         LA    R15,QUEUE1     OTHERWISE SET FOR QUE 1          @VA04341 00467700
+         STM   R14,R15,TEMPR14 SAVE REGISTERS FOR LATER CALLS  @VA07582 00467800
+         OI    VMDSTAT,VMINQ  FLAG AS IN QUEUE                          00468000
+         STCK  VMTODINQ       TOD CLOCK AT QUEUE ENTRY                  00469000
+         BC    12,CLOCKOK     IS CLOCK FUNCTIONING?            @VA04301 00469250
+DOWNWEGO GOTO  DMKCVTAB       CLOCK DAMAGED...ABEND WITH CVT001@VA04301 00469500
+CLOCKOK  EQU   *                                               @VA04301 00469750
+         LM    R0,R2,VMQTIME  GET TIME SLICE AND NUMBER IN QUEUE        00470000
+         TM    VMPSTAT,VMV370R     EC MODE MACHINE ?                    00471000
+         BZ    NOQUETMR       NO - CAN'T HAVE CPU TIMER                 00472000
+         L     R10,VMECEXT    GET EXTENSION VMBOLK                      00473000
+         L     R3,EXTCPTRQ-ECBLOK(,R10) ADDRESS OF TIMER REQ. BLOCK     00474000
+         STM   R0,R1,TRQBQUE-TRQBLOK(R3)  SAVE QUEUE DROP INTERVAL      00475000
+         CLC   EXTCPTMR-ECBLOK(8,R10),VMQTIME   VIRT TIMER < QTIME ?    00476000
+         BH    NOQUETMR       NO -                                      00477000
+         LM    R0,R1,EXTCPTMR-ECBLOK(R10)   GET VIRTUAL TIME            00478000
+         OI    VMTLEVEL,VMCPUTMR   VIRT. CPU TIMER RUNNING AS REAL      00479000
+         SPACE                                                          00480000
+NOQUETMR EQU   *     HERE IF VIRTUAL CPU TIMER > QUEUE DROP INTERVAL    00481000
+         TM    CPSTATUS,CPRUN WAS SYSTEM IN PROBLEM STATE?     @VA07582 00481100
+         BZ    NOPROBT        NO, CONTINUE NORMALLY            @VA07582 00481200
+         C     R11,RUNUSER    IS THIS USER RUNUSER?            @VA07582 00481300
+         BNE   NOPROBT        NO, CONTINUE NORMALLY            @VA07582 00481400
+         BAL   R14,INCPROBT   GO INCREMENT PROBTIME NOW SINCE  @VA07582 00481500
+*                             VMTMOUTQ IS TO BE CHANGED                 00481600
+         L     R14,TEMPR14    RELOAD RETURN REGISTER           @VA07582 00481700
+         STM   R0,R1,PROBSTRT SET PROBSTRT FOR DSP CALCULATION @VA07582 00481800
+NOPROBT  DS    0H                                              @VA07582 00481900
+         ST    R0,VMTMOUTQ    STORE TIME ALLOWED TO STAY IN QUEUE       00482000
+         ST    R1,VMTMOUTQ+4  ...                                       00483000
+         LA    R10,1          CONSTANT FOR ARITHMETIC                   00484000
+         ALR   R2,R10         INCREMENT NUM. USER'S IN QUEUE.           00485000
+         ST    R2,VMQNUM      SAVE IT                                   00486000
+         CHARGE SYNC          UPDATE VMTTIME                   @V4M0203 00486200
+         LM    R14,R15,TEMPR14  RESTORE CALLER'S REGISTERS     @V4M0203 00486300
+         SPACE                                                          00487000
+         SPACE                                                          00488000
+         LM    R0,R1,VMTTIME  GET TOTAL SUPERVISOR TIME TO DATE         00489000
+         SL    R1,VMQTIME+4   SUBTRACT OUT SUPERVISOR TIME SLICE ..     00490000
+         BC    8+2+1,*+6      ...                                       00491000
+         SLR   R0,R10         ..                                        00492000
+         SL    R0,VMQTIME     .                                         00493000
+         STM   R0,R1,VMTMINQ  AND SAVE AS Q-DROP TIME                   00494000
+         SPACE                                                          00495000
+         TM    VMQLEVEL,VMAEXP     ASSURED PERCENTAGE USER ?            00496000
+         BZ    LOADUP         NO -- GO SET PAGE LOAD                    00497000
+         SPACE                                                          00498000
+         LM    R2,R3,VMTTIME  GET TOTAL SUPERVISOR OVERHEAD    @VA04341 00499300
+         LA    R4,AEXPQUE2    ASSUME QUE 2 TIME SLICE          @VA04341 00499600
+         TM    VMQLEVEL,VMQ1  IS USER IN QUE 1                 @VA04341 00499900
+         BZ    *+8            NO - THEN R4 IS POINTING         @VA04341 00500200
+*                             CORRECTLY                                 00500500
+         LA    R4,AEXPQUE1    POINT TO QUE 1 TIME SLICE        @VA04341 00500800
+         TM    VMQLEVEL,VMHIPRI IS THIS FIRST HALF OF PERCENT  @VA04341 00501100
+         BZ    QAEXLAST       NO - SET UP LAST HALF            @VA04341 00501400
+         LM    R0,R1,0(R4)    GET FAVORED PERCENTAGE IN MICRO  @VA04341 00501700
+*                             SEC.                                      00502000
+         SLR   R3,R1          REMOVE PERCENTAGE FROM VMTTIME   @VA04341 00502300
+         BC    8+2+1,*+6      ADJUST FOR CARRY                 @VA04341 00502600
+         SLR   R2,R10         SUBTRACT FOR CARRY CONDITION     @VA04341 00502900
+         SLR   R2,R0          NOW CLEAN UP HIGH WORD           @VA04341 00503200
+         STM   R2,R3,VMTMINQ  LIMIT SUPERVISOR OVERHEAD TIME   @VA04341 00503500
+         STM   R0,R1,SCHBAEXP SAVE TIME SLICE FOR 'CALCPRI'    @VA04815 00503600
+         TM    VMPSTAT,VMV370R EC MODE MACHINE                 @VA04341 00503800
+         BZ    NOAEXTMR       NO - CAN'T HAVE CPU TIMER        @VA04341 00504100
+         L     R10,VMECEXT    GET VMBLOK EXTENSION             @VA04341 00504400
+         L     R3,EXTCPTRQ-ECBLOK(,R10) ADDR. OF TIMER         @VA04341 00504700
+*                             REQUEST BLOK                              00505000
+         STM   R0,R1,TRQBQUE-TRQBLOK(R3) SAVE QUEUE DROP TIME  @VA04341 00505300
+*                             SLICE                                     00505600
+         CLC   EXTCPTMR-ECBLOK(8,R10),SCHBAEXP VIRT. < QUEUE   @VA04341 00506200
+*                             SLICE                                     00506500
+         BH    NOAEXTMR       NO                               @VA04341 00506800
+         LM    R0,R1,EXTCPTMR-ECBLOK(R10) GET VIRT. CPU TIMER  @VA04341 00507100
+         OI    VMTLEVEL,VMCPUTMR VIRT. TIMER IN REAL TIMER     @VA04341 00507400
+NOAEXTMR STM   R0,R1,VMTMOUTQ STORE ASSURED TIME SLICE         @VA04341 00507700
+         NI    VMQLEVEL,VMHIPRI+VMQ1+VMAEX+VMAEXP LEAVE THESE  @VA04341 00508000
+         TM    CPSTATUS,CPRUN WAS SYSTEM IN PROBLEM STATE?     @VA07582 00508050
+         BZ    LOADUP         NO, CONTINUE NORMALLY            @VA07582 00508100
+         C     R11,RUNUSER    IS THIS USER RUNUSER?            @VA07582 00508150
+         BNE   LOADUP         NO, CONTINUE NORMALLY            @VA07582 00508200
+         STM   R0,R1,PROBSTRT SET PROBSTRT FOR DSP CALCULATION @VA07582 00508250
+         B     LOADUP         SET PAGE USAGE                   @VA04341 00508300
+QAEXLAST LM    R2,R3,8(R4)    PERCENT OF STANDARD TIME SLICE   @VA04341 00508600
+         LM    R0,R1,VMTODINQ GET TOD AT QUEUE ENTRY           @VA04341 00508900
+         ALR   R1,R3          AND ADD TO IT                    @VA04341 00509200
+         BC    8+4,*+6        THE REMAINING TIME               @VA04341 00509500
+         ALR   R0,R10         THAT THIS USER                   @VA04341 00509800
+         ALR   R0,R2          WILL BE AT LOW PRIORITY IN       @VA04341 00510100
+*                             RUNLIST                                   00510400
+         STM   R0,R1,SCHBVAL  TOD CLOCK INTERRUPT VALUE        @VA04341 00510700
+         ST    R11,SCHBUSER   FAVORED PERCENTAGE VMBLOK        @VA04341 00511000
+         LA    R1,SCHBLOK     ADDRESS OF TRQBLOK               @VA04341 00511300
+         BAL   R14,SETIMER    ESTABLISH CLOCK COMPARATOR       @VA04341 00511900
+*                             REQUEST                                   00512200
+         L     R14,TEMPR14    RESTORE BAL REGISTER             @VA04341 00512500
+         SPACE                                                          00520000
+LOADUP   L     R0,PAGUSAGE    GET CURRENT PAGE USAGE                    00521000
+         AH    R0,VMWSPROJ    ADD THIS USER'S LOAD                      00522000
+         ST    R0,PAGUSAGE    AND SAVE NEW VALUE                        00523000
+SCHMN3   MC    MNCOAQ,MNCLSCH MONITOR ADD TO Q                 @VM01017 00524000
+         SPACE                                                          00525000
+         SLR   R1,R1          INITIALIZE                                00526000
+         STH   R1,VMSTEALS    COUNTERS                                  00527000
+         L     R0,VMPGREAD    FOR                                       00528000
+         LH    R1,VMPAGES     QUEUE                                     00529000
+         SRL   R1,1           DROP                                      00530000
+         STM   R0,R1,VMRDINQ  ...............                           00531000
+         BR    R14            RETURN TO CALLER                          00532000
+         EJECT                                                          00533000
+*.                                                                      00534000
+* OPERATION -                                                           00535000
+*                                                                       00536000
+*     C. QUEUE DROP CALCULATIONS                                        00537000
+*        1A. UPDATE SMOOTHED VALUES OF UTILIZATION AND CONTENTION       00538000
+*            FOR CPU AND CORE                                           00539000
+*        1B. IF USER IS RUNNING AN EC-MODE MACHINE, CALCULATE THE       00540000
+*           AMOUNT OF TIME HIS VIRTUAL CPU TIMER SHOULD BE UPDATED.     00541000
+*           THE CALCULATION IS AS FOLLOWS;                              00542000
+*                                                                       00543000
+*              A. IF VIRTUAL CPU TIMER IS NOT IN REAL CPU TIMER -       00544000
+*                   TRQBQUE-VMTMOUTQ=DIFFERENCE                         00545000
+*                   EXTCPTMR-DIFFERENCE= NEW VIRTUAL CPU TIMER          00546000
+*                                                                       00547000
+*              B. IF VIRTUAL CPU TIMER IS IN THE REAL CPU TIMER -       00548000
+*                   VMTMOUTQ= NEW VIRTUAL CPU TIMER                     00549000
+*        1C. UNFLAG USER-IN-Q, SUBTRACT WORKSET FROM SYSTEM PAGE USAGE, 00550000
+*           AND DECREMENT NUMBER OF IN-Q USERS                          00551000
+*        2. CALCULATE ELAPSED TIME IN QUEUE AND DIVIDE INTO CPU TIME    00552000
+*           WHILE IN QUEUE.  THE RESULT, MULTIPLIED BY 4096, WILL BE    00553000
+*           THE USER'S DISPATCHING PRIORITY NEXT TIME HE IS RUN         00554000
+*        3. COMPARE THE ACTUAL WORKING SET TO THE PROJECTED WORKING SET 00562100
+*           AND NOTE THE ALGEBRAIC SIGN OF THE ERROR.  IF THE SIGN OF   00563000
+*           THE CURRENT ERROR IS THE SAME AS THAT OF THE LAST ERROR     00564000
+*           COMPUTED, REPLACE THE PROJECTED WORKING SET WITH THE ACTUAL 00565000
+*           WORKING SET.  IF THE SIGNS OF THE ERRORS ARE OPPOSITE, RE-  00566000
+*           PLACE THE PROJECTED WORKING SET SIZE WITH THE AVERAGE OF    00567000
+*           THE PROJECTED AND ACTUAL WORKING SETS                       00568000
+*.                                                                      00569000
+         SPACE 2                                                        00570000
+DROPQ    EQU   *  DROP THIS USER FROM AN ACTIVE QUEUE                   00571000
+         TM    VMDSTAT,VMINQ  CURRENTLY IN A QUEUE             @VA04341 00571100
+         BZR   R14            NO - RETURN                      @VA04341 00571200
+         SPACE                                                          00572000
+         TM    VMDSTAT,VMQSEND WAS HE TIME SLICE ENDED?        @V2B2638 00573000
+         BZ    DROPQPC        NO                               @V2B2638 00574000
+         OI    DMKSCHAL,TSEND YES, INDICATE SO FOR MONITOR     @V2B2638 00575000
+         ST    R14,TEMPR14    SAVE RETURN REG FOR LATER CALLS  @VA07582 00575100
+DROPQPC  EQU   *                                               @V2B2638 00576000
+         NI    VMDSTAT,X'FF'-(VMINQ+VMDSP+VMQSEND)     UNFLAG USER      00577000
+         L     R3,PAGUSAGE    GET SUM OF WSS IN Q USE          @V2B2638 00578000
+         LTR   R3,R3          OUTSIDE CHANCE OF ZERO WSS SIZE  @V2B2638 00579000
+         BZ    QRT                                             @V2B2638 00580000
+         SR    R2,R2                                           @VA03678 00581000
+         SLL   R3,10          *1024 FOR ACCURACY               @V2B2638 00582000
+         L     R7,=A(DMKDSPNP) ADDRESS OF PAGE COUNTER         @V2B2638 00583000
+         L     R7,0(R7)       NUMBER OF PAGABLE PAGES          @V2B2638 00584000
+         LTR   R7,R7          CHECK FOR ZERO PAGES             @VA03678 00585000
+         BZ    QRT            BYPASS SUBTRACT INSTR IF ZERO    @VA03678 00586000
+         DR    R2,R7          DIVIDED BY PAGABLE PAGES         @V2B2638 00587000
+QRT      L     R7,DMKSCHCO    SMOOTH CORE UTILIZATION VALUE    @V2B2638 00588000
+         SR    R6,R6                                           @V2B2638 00589000
+         M     R6,F15         X15                              @V2B2638 00590000
+         AR    R3,R7          TOTAL                            @V2B2638 00591000
+         SRL   R3,4           (NEW + 15*OLD)/16                @V2B2638 00592000
+         A     R3,F8          ROUND BY LOGICAL 0.5             @VA05456 00592100
+         ST    R3,DMKSCHCO    NEW SMOOTHED CORE UTILIZATION    @V2B2638 00593000
+         SPACE                                                          00594000
+         L     R0,DMKSCHN1    CURRENT NUMBER OF USERS IN Q1    @V2B2638 00595000
+         L     R1,DMKSCHN2    CURRENT NUMBER OF USERS IN Q2    @V2B2638 00596000
+         SLDL  R0,10          *1024 FOR ACCURACY               @V2B2638 00597000
+         LH    R3,DMKSCHW1    USERS ELIGIBLE FOR Q1            @V2B2638 00598000
+         AH    R3,DMKSCHW2    USERS ELIGIBLE FOR Q2            @V2B2638 00599000
+         SLL   R3,10          (E1+E2)*1024                     @V2B2638 00600000
+         LR    R4,R0                                           @V2B2638 00601000
+         AR    R4,R1          (Q1+Q2)*1024                     @V2B2638 00602000
+         AR    R3,R4          (Q1+Q2+E1+E2)*1024               @V2B2638 00603000
+         SPACE                                                          00604000
+SMOOTHQ1 SR    R6,R6          CLEAR FOR MULTIPLY               @V2B2638 00605000
+         L     R7,DMKSCHS1    YES,GET OLD SMOOTHED Q1 VALUE    @V2B2638 00606000
+         M     R6,F15                                          @V2B2638 00607000
+         AR    R0,R7          15*S1+Q1                         @V2B2638 00608000
+         A     R0,F8          ROUND BY LOGICAL 0.5             @VA05456 00608100
+         SRL   R0,4           (15S1+Q1)/16                     @V2B2638 00609000
+         ST    R0,DMKSCHS1    NEW SMOOTHED                     @V2B2638 00610000
+         SPACE                                                          00611000
+SMOOTHQ2 L     R7,DMKSCHS2    OLD SMOOTHED Q2                  @V2B2638 00612000
+         M     R6,F15                                          @V2B2638 00613000
+         AR    R1,R7          15S2+Q2                          @V2B2638 00614000
+         A     R1,F8          ROUND BY LOGICAL 0.5             @VA05456 00614100
+         SRL   R1,4           (15S2+Q2)/16                     @V2B2638 00615000
+         ST    R1,DMKSCHS2    NEW SMOOTHED Q2                  @V2B2638 00616000
+         SPACE                                                          00617000
+SMOOTHSC SR    R2,R2          CLEAR FOR DIVIDE                 @V2B2638 00618000
+         SRL   R4,10          BACK TO NORMAL TO RETAIN ACCURACY@V2B2638 00619000
+         DR    R2,R4          (Q1+Q2+E1+E2)*1024/(Q1+Q2)       @V2B2638 00620000
+         L     R7,DMKSCHSC    OLD SMOOTHED RATIO               @V2B2638 00621000
+         M     R6,F15                                          @V2B2638 00622000
+         AR    R3,R7          (15*OLD RATIO + NEW RATIO)       @V2B2638 00623000
+         A     R3,F8          ROUND BY LOGICAL 0.5             @VA05456 00623100
+         SRL   R3,4           (15OLD +NEW)/16                  @V2B2638 00624000
+         ST    R3,DMKSCHSC    NEW SMOOTHED RATIO               @V2B2638 00625000
+         SPACE                                                          00626000
+         L     R0,PAGUSAGE    GET SYSTEM PAGE USAGE                     00627000
+         SH    R0,VMWSPROJ    SUBTRACT THIS USER'S CONTRIBUTION         00628000
+         LTR   R0,R0          WILL PAGE USAGE GO NEGATIVE      @VA08454 00628100
+         BP    SMOOTHS1       NO, LET IT GO                    @VA08454 00628200
+         SR    R0,R0          YES, ZERO IS MINIMUM COUNT       @VA08454 00628300
+SMOOTHS1 EQU   *                                               @VA08454 00628400
+         ST    R0,PAGUSAGE    AND SAVE NEW VALUE                        00629000
+         LA    R15,QUEUE2     DROPPING FROM Q2 MOST LIKELY              00630000
+         TM    VMQLEVEL,VMQ1  REALLY DROPPING FROM 1 ??                 00631000
+         BZ    DROPQ2         NO --                                     00632000
+         LA    R15,QUEUE1     POINT TO QUEUE1 ANCHOR                    00633000
+         OI    DMKSCHAL,Q1DROP  INDICATE (FOR MONITOR) DROPPING FROM 1  00634000
+         OI    VMQLEVEL,VMDROP1    FLAG Q1 DROP                         00635000
+DROPQ2   L     R2,VMQNUM      GET NUMBER NOW IN Q                       00636000
+         S     R2,F1          DECREMENT AND TEST                        00637000
+         BNM   SCH1A          EVERYTHING OK --                          00638000
+         ABEND 1              DIE                                       00639000
+SCH1A    EQU   *                                                        00640000
+         ST    R2,VMQNUM      UPDATE NUMBER IN Q                        00641000
+         SPACE                                                          00642000
+         ST    R15,TEMPR15    SAVE R15 ACROSS CHARGE           @VA07582 00643110
+         CHARGE STOP          GET CPU TIME AT Q-DROP           @V407577 00643200
+         L     R15,TEMPR15    RESTORE R15 VALUE                @VA07582 00643310
+         LA    R8,1           CONSTANT                                  00644000
+         SPACE                                                          00645000
+         TM    VMPSTAT,VMV370R     EC MODE ALLOWED FOR THIS USER        00646000
+         BZ    NOCPUTMR       NO - CAN'T HAVE VIRTUAL CPU TIMER         00647000
+         L     R6,VMECEXT     GET VMBLOK EXTENSION FOR EC MACHINE       00648000
+         LM    R4,R5,EXTCPTMR-ECBLOK(R6)     GET USER'S CPU TIMER       00649000
+         L     R7,EXTCPTRQ-ECBLOK(,R6)  GET ADDR. OF TIMER REQUEST BLOK 00650000
+         LM    R2,R3,TRQBQUE-TRQBLOK(R7)     GET TIME LEFT IN QUEUE     00651000
+         LM    R0,R1,VMTMOUTQ ..                                        00652000
+         LTR   R0,R0          WAS ALL THE ALLOCATED TIMED USED          00653000
+         BNM   *+8            NO - USE VALUE THAT REMAINS      @VA07582 00654100
+         LM    R0,R1,ZEROES   CAN'T USE A NEGATIVE NUMBER               00655000
+         SPACE                                                          00657000
+         TM    VMTLEVEL,VMCPUTMR   DOES USER CPU TIMER = REAL TIMER     00658000
+         BO    TRACKTMR       YES - SPECIAL CONSIDERATIONS              00659000
+         SLR   R3,R1          CALCULATE AMOUNT OF TIME THAT             00660000
+         BC    8+2+1,*+6      VIRTUAL CPU TIMER SHOULD BE               00661000
+         SLR   R2,R8          UPDATED WITH.                             00662000
+         SLR   R2,R0          ...                                       00663000
+         SPACE                                                          00664000
+         SLR   R5,R3          NOW THAT WE KNOW THE                      00665000
+         BC    8+2+1,*+6      DIFFERENCE. SUBTRACT IT                   00666000
+         SLR   R4,R8          FROM THE VIRTUAL CPU TIMER                00667000
+         SLR   R4,R2          THIS LEAVES THE VIRTUAL                   00668000
+         STM   R4,R5,EXTCPTMR-ECBLOK(R6)  CPU TIMER CORRECT..           00669000
+         B     QUETIME        NOW CALCULATE PROBLEM TIME USED.          00670000
+         SPACE                                                          00671000
+TRACKTMR NI    VMTLEVEL,X'FF'-VMCPUTMR  NO-LONGER TRACKING CPU TIMER.   00672000
+         TM    VMTLEVEL,VMTMRINT   IS IT ALSO CPU TIMER INTERRUPT       00673000
+         BO    QUETIME        YES - HIS VIRTUAL CPU TIMER IS OK.        00674000
+         SLR   R5,R1          CALCULATE AMOUNT OF TIME                  00675000
+         BC    8+2+1,*+6      THAT SHOULD BE CHARGED TO THIS            00676000
+         SLR   R4,R8          USER'S VIRTUAL PROBLEM TIME USED.         00677000
+         SLR   R4,R0          ...                                       00678000
+         SPACE                                                          00679000
+         SLR   R3,R5          FIND TOTAL TIME THAT THIS USER            00680000
+         BC    8+2+1,*+6      ACTUALLY USED WHILE HE WAS                00681000
+         SLR   R2,R8          IN THE QUEUE.                             00682000
+         SLR   R2,R4          ...                                       00683000
+         SPACE                                                          00684000
+         STM   R0,R1,EXTCPTMR-ECBLOK(R6)  STORE VIRTUAL CPU TIMER.      00685000
+         TM    CPSTATUS,CPRUN WAS SYSTEM IN PROBLEM STATE?     @VA07582 00685100
+         BZ    NOPROBT2       NO, CONTINUE NORMALLY            @VA07582 00685200
+         C     R11,RUNUSER    IS THIS USER RUNUSER?            @VA07582 00685300
+         BNE   NOPROBT2       NO, CONTINUE NORMALLY            @VA07582 00685400
+         BAL   R14,INCPROBT   GO INCREMENT PROBTIME NOW SINCE  @VA07582 00685500
+*                             VMTMOUTQ IS TO BE CHANGED                 00685600
+         L     R14,TEMPR14    RELOAD RETURN REGISTER           @VA07582 00685700
+         STM   R2,R3,PROBSTRT SET PROBSTRT FOR DSP CALCULATION @VA07582 00685800
+NOPROBT2 DS    0H                                              @VA07582 00685900
+         STM   R2,R3,VMTMOUTQ STORE AMOUNT OF TIME THAT IS LEFT OVER    00686000
+         SPACE                                                          00687000
+NOCPUTMR EQU   *    HERE IF USER IS NON- EC MODE MACHINE                00688000
+QUETIME  EQU   *    HERE TO CALCULATE AMOUNT OF PROBLEM TIME USED.      00689000
+         SPACE                                                          00690000
+         NI    VMTLEVEL,X'FF'-VMTMRINT  RESET TIMER INTERRUPT FLAG      00691000
+         LM    R2,R3,VMTMOUTQ GET TIME VALUE REMAINING IN QUEUE         00692000
+         TM    VMQLEVEL,VMAEXP ASSURED PERCENTAGE USER         @VA04341 00693050
+         BZ    GETQTMR        NO _                             @VA04341 00693100
+         LM    R0,R1,SCHBAEXP GET PERCENTAGE TIME SLICE        @VA04341 00693150
+         TM    VMQLEVEL,VMHIPRI DROPPING WITHIN FIRST PART     @VA04341 00693200
+*                             PERCENT                                   00693250
+         BO    AEXQTMR        YES -                            @VA04341 00693300
+         CLC   SCHBVAL,ZEROES WAS CLOCK COMPARATOR THIS ONE ???@VA04341 00693350
+         BE    GETQTMR        YES - THEN ITS ALREADY RESET     @VA04341 00693400
+*                             FOR INT.                                  00693450
+         ST    R14,TEMPR14    SAVE BALR REGISTER               @VA04341 00693500
+         LA    R1,SCHBLOK     RESET CLOCK COMPARATOR           @VA04341 00693550
+         BAL   R14,RESETIMR   FOR LAST PART OF PERCENTAGE      @VA04341 00693600
+         L     R14,TEMPR14    RESTORE BALR REGISTER            @VA04341 00693650
+GETQTMR  LM    R0,R1,VMQTIME  GET STANDARD TIME SLICE INTERVAL @VA04341 00693700
+AEXQTMR  LTR   R2,R2          DID USER USE ALL TIME ALLOTED    @VA04341 00693750
+         BM    USEDALL        YES -                                     00695000
+         SLR   R1,R3          NO - CALCULATE TIME HE DID USE            00696000
+         BC    8+2+1,*+6      WHILE HE WAS IN THE QUEUE.                00697000
+         SLR   R0,R8                                                    00698000
+         SLR   R0,R2                                                    00699000
+         SPACE                                                          00700000
+USEDALL  EQU   *                                                        00701000
+         L     R2,VMVTIME     CALCULATE TOTAL PROB. STATE TIME          00702000
+         L     R3,VMVTIME+4   ...                                       00703000
+         ALR   R3,R1                                                    00704000
+         BC    8+4,*+6                                                  00705000
+         ALR   R2,R8                                                    00706000
+         ALR   R2,R0                                                    00707000
+         STM   R2,R3,VMVTIME  STORE TOTAL PROB. STATE TIME              00708000
+         ST    R14,TEMPR14    SAVE CALLERS R14                 @V407577 00715100
+         CHARGE SYNC          UPDATE VMTTIME                   @V4M0203 00715150
+         BAL   R14,CALCPRI    CALCULATE DISPATCHING PRIORITY   @V407577 00715200
+         L     R14,TEMPR14    RESTORE CALLER'S R14             @V407577 00715300
+         NI    VMQLEVEL,X'FF'-VMQ1 RESET Q1 FLAG                        00716000
+         SLR   R4,R4          RESET REGISTER 4                 @VA05979 00716500
+         CL    R11,AVMREAL    IS THIS THE VIRTUAL = REAL USER ?         00717000
+         BC    8,SAVEWS+4     YES--BYPASS WORKING SET CALCULATION       00718000
+         EJECT                                                          00719000
+*                                                                       00720000
+*        CALCULATE WORKING SET SIZE AND FLUSH ACTIVE PAGES              00721000
+*                                                                       00722000
+         SPACE                                                          00723000
+         LH    R1,VMPAGES     GET NUMBER OF RESIDENT PAGES              00725000
+         EJECT                                                          00778000
+WORKSET  EQU   *  COMPUTE PROJECTED WORKSET SIZE                        00779000
+         LR    R4,R1          SAVE PAGE REF COUNT FOR MONITOR           00780000
+         AIF   (NOT &TRACE(9)).TR3                                      00782000
+         TM    TRACFLG1,TRAC09      TRACING ACTIVE?                     00783000
+         BZ    NOTRAC3        BRANCH IF NOT                             00784000
+         TRACE CODE=TRCDROP,R15,R1,R2 TRACE DROP QUEUE         @V407577 00785100
+         MVC   12(4,R15),PAGELOAD SAVE SYS PAGE LOAD AND RATE  @VA07681 00786500
+         LH    R2,VMWSPROJ    WORKING SET PROJECTION           @V200820 00788000
+         ICM   R2,B'1100',VMPAGES  NO. RESIDENT PAGES          @V200820 00789000
+         ST    R2,8(,R15)     ...                                       00790000
+         STCM  R11,B'0111',1(R15) SAVE USERS VMBLOK            @V407577 00791100
+         LH    R2,VMQPRIOR    GET NEW PRIORITY                 @VA01166 00793000
+         ST    R2,4(,R15)     SAVE NEW PRIORITY                @VA01166 00794000
+NOTRAC3  EQU   *                                                        00800000
+.TR3     ANOP                                                           00801000
+         L     R1,VMPGRINQ    GET SUM OF RESIDENT PAGES @ EACH READ     00802000
+         SLR   R0,R0          CLEAR FOR DIVISION                        00803000
+         L     R2,VMPGREAD    GET TOTAL PAGE READS                      00804000
+         S     R2,VMRDINQ     GET PAGE READS WHILE IN Q                 00805000
+         BP    *+8            INSURE AT                                 00806000
+         LA    R2,1           ONE FOR DIVIDE                            00807000
+         DR    R0,R2          GET AVERAGE PAGES RESIDENT/READ           00808000
+         AH    R1,VMSTEALS    PLUS NUMBER OF WAITS FOR STOLEN PAGES     00809000
+         SPACE                                                          00813000
+*        R1 NOW HAS MEASURED WORKING SET                                00814000
+         SPACE                                                          00815000
+         SPACE                                                          00816000
+         TM    VMPSTAT,VMRPAGE     RESERVED PAGE USER ??                00817000
+         BZ    PROJECT        NO -- USE AVERAGE AS IT STANDS            00818000
+         L     R15,=A(DMKPTRRL)    GET MAXIMUM RESERVED COUNT           00819000
+         S     R1,0(,R15)     AND SUBTRACT FROM PROJECTION              00820000
+         BP    PROJECT        USE DIFFERENCE AS USER'S IMPACT           00821000
+         SLR   R0,R0          IF USING LESS THAN GUARANTEE,             00822000
+         B     SAVEWS         ASSUME LOAD OF 0                          00823000
+         SPACE                                                          00824000
+PROJECT  EQU   *                                                        00825000
+         LR    R0,R1          SAVE ACTUAL WORKSET                       00826000
+         SH    R1,VMWSPROJ    GET DIFFERENCE FROM WHAT WAS PROJECTED    00827000
+         LR    R2,R1          AND SAVE THE ERROR                        00828000
+         LA    R3,FFS         SET FOR NEGATIVE PROJECTION ERROR         00829000
+         TM    VMQSTAT,VMWSERNG    WAS LAST ERROR NEGATIVE ?            00830000
+         BO    *+8            YES -- ALL SET                            00831000
+         LA    R3,F1+2        SET FOR POSITIVE ERROR                    00832000
+         MH    R1,0(,R3)      COMPARE SIGNS OF ERRORS                   00833000
+         NI    VMQSTAT,X'FF'-VMWSERNG   CLEAR ERROR FLAG                00834000
+         LTR   R2,R2          CURRENT ERROR NEGATIVE ?                  00835000
+         BNM   *+8            NO -- LEAVE FLAG OFF                      00836000
+         OI    VMQSTAT,VMWSERNG    YES - FLAG NEGATIVE ERROR            00837000
+         LTR   R1,R1          ERROR THIS TIME SAME DIRECTION AS LAST    00838000
+         BP    SAVEWS         YES -- TRACKING TOO SLOWLY - USE ACTUAL   00839000
+         AH    R0,VMWSPROJ    IF ERRORS ARE OF OPPOSITE SIGN,           00840000
+         SRL   R0,1           TAKE AVERAGE OF ACTUAL AND PROJECTED      00841000
+SAVEWS   STH   R0,VMWSPROJ    SAVE NEW PROJECTED WORKSET                00842000
+SCHMN2   MC    MNCODQ,MNCLSCH MONITOR DROP FROM Q              @VM01017 00843000
+         NI    DMKSCHAL,255-Q1DROP-TSEND RESET MONITOR FLAGS   @V2B2638 00844000
+         OI    DMKSCHAL,VMINQ      SET FLAG FOR FLUSH LIST CK  @V408246 00844100
+         BR    R14            AND RETURN TO CALLER                      00845000
+         SPACE 2                                                        00846000
+         EJECT                                                          00848000
+*                                                                       00849000
+* RE-CALCULATE DISPATCHING PRIORITY (VMQPRIOR) AT Q DROP OR MINOR TIME  00850000
+* SLICE END AS : VMQPRIOR = (EXECUTION TIME/ELAPSED TIME)*4096.         00851000
+* EXECUTION TIME IS CALCULATED AS :                                     00852000
+*    EX.T. = VMQTIME*2+VMTMINQ-VMTTIME-VMTMOUTQ(+EXTCPTMR-TRQBQUE)      00853000
+*    NOTE THAT THE FINAL TERM IS USED ONLY IF VMTMOUTQ CONTAINS A       00854000
+*    RESIDUAL VIRTUAL CPU TIMER VALUE RATHER THAN A TIME IN QUEUE       00855000
+* ELAPSED TIME IS CALCULATED AS :                                       00856000
+*    EL.T. = TOD - VMTODINQ                                             00857000
+*                                                                       00858000
+         SPACE                                                          00859000
+CALCPRI  EQU   *  FIRST, LOAD UP ALL PERTINENT TIME VALUES ...          00860000
+         LM    R0,R7,VMTMOUTQ ,VMTTIME,VMTMINQ, AND VMTODINQ ...        00861000
+         LA    R15,DMKSCHQ1   POINT TO APPROPRIATE Q CONTROL BLOCK      00862000
+         TM    VMQLEVEL,VMQ1  RUNNING IN Q1 ??                          00863000
+         BO    *+8            YES -- QUEUE CONTROL IS CORRECT           00864000
+         LA    R15,DMKSCHQ2   CORRECT QUEUE CONTROL                     00865000
+         LM    R8,R9,VMQTIME-VMQBLOK(R15)   AND LOAD UP TIME SLICE      00866000
+         TM    VMQLEVEL,VMAEXP+VMHIPRI ASSURED PERCENT AND     @VA04341 00866100
+*                             FIRST HALF                                00866200
+         BNO   *+8            NO                               @VA04341 00866300
+         LM    R8,R9,SCHBAEXP YES - USE HIS PERCENT OF TIME    @VA04341 00866400
+*                             SLICE                                     00866500
+         SLDL  R8,1                GET VMQTIME*2                        00867000
+         LA    R15,1          FREQUENTLY USED CONSTANT ...              00868000
+         SPACE                                                          00869000
+         ALR   R9,R5          VMQTIME*2 + VMTMINQ                       00870000
+         BC    8+4,*+6        ...                                       00871000
+         ALR   R8,R15         ...                                       00872000
+         ALR   R8,R4          ...                                       00873000
+         SPACE                                                          00874000
+         SLR   R9,R3          - VMTTIME                                 00875000
+         BC    8+2+1,*+6      ...                                       00876000
+         SLR   R8,R15         ...                                       00877000
+         SLR   R8,R2          ...                                       00878000
+         SPACE                                                          00879000
+         LTR   R0,R0          DID WE TIME SLICE END(VMQSEND)?  @VA01553 00880000
+         BNM   *+8            NO- USE VALUE IN VMTMOUTQ        @VA01553 00881000
+         LM    R0,R1,ZEROES   YES- CAN'T ALLOW NEGATIVE        @VA01553 00882000
+*                             CALCULATION                               00883000
+         SLR   R9,R1          - VMTMOUTQ                       @VA01553 00884000
+         BC    8+2+1,*+6      ...                                       00885000
+         SLR   R8,R15         ...                                       00886000
+         SLR   R8,R0          ...                                       00887000
+         SPACE                                                          00888000
+         TM    VMTLEVEL,VMCPUTMR   RESIDUAL TIMER IN VMTMOUTQ ??        00889000
+         BZ    ELAPSED        NO -- EXECUTION TIME COMPLEATE            00890000
+         L     R1,VMECEXT     POINT TO VMBLOK EXTENSION ...             00891000
+         AL    R9,EXTCPTMR-ECBLOK+4(,R1)     GET TIME+EXTCPTMR          00892000
+         BC    8+4,*+6                                                  00893000
+         ALR   R8,R15         ...                                       00894000
+         AL    R8,EXTCPTMR-ECBLOK(,R1)  ...                             00895000
+         SPACE                                                          00896000
+         L     R1,EXTCPTRQ-ECBLOK(,R1)  POINT TO TIMER CONTROL BLOK     00897000
+         SL    R9,TRQBQUE-TRQBLOK+4(,R1)     GET TIME - TRQBQUE         00898000
+         BC    8+2+1,*+6      ...                                       00899000
+         SLR   R8,R15         ...                                       00900000
+         SL    R8,TRQBQUE-TRQBLOK(,R1)  ...                             00901000
+         SPACE                                                          00902000
+ELAPSED  EQU   *  HERE TO CALCULATE ELAPSED TIME IN QUEUE AND PRIORITY  00903000
+         STCK  TEMPSAVE       GET CURRENT TIME OF DAY                   00904000
+         BC    3,DOWNWEGO     CLOCK NOT FUNCTIONING            @VA04301 00904100
+         LM    R0,R1,TEMPSAVE ...                                       00905000
+         SLR   R1,R7          - VMTODINQ                                00906000
+         BC    8+2+1,*+6      ...                                       00907000
+         SLR   R0,R15         ...                                       00908000
+         SLR   R0,R6          ...                                       00909000
+         SRDL  R0,12          /4096                                     00910000
+         SPACE                                                          00911000
+         DR    R8,R1          EXECUTED/ELAPSED ...                      00912000
+         AH    R9,VMQPRIOR    + OLD PRIORITY                            00913000
+         SRL   R9,1                /2                                   00914000
+         STH   R9,VMQPRIOR    = NEW, SMOOTHED PRIORITY                  00915000
+         BR    R14            RETURN TO CALLER                 @V407577 00916100
+         SPACE                                                          00916200
+INCPROBT DS    0H             INCREMENT PROBLEM STATE TIME     @VA07582 00916250
+         CLC   VMTMOUTQ,PROBSTRT WAS CALCULATION ALREADY DONE? @VA07582 00916300
+         BER   R14            YES, RETURN TO CALLER            @VA07582 00916350
+         STM   R4,R7,TEMPR4   SAVE REGS USED IN SUBROUTINE     @VA07582 00916400
+         LM    R4,R5,VMTMOUTQ GET TIMER AT PROBLEM STATE END   @VA07582 00916450
+         LM    R6,R7,PROBSTRT GET TIMER AT PROBLEM STATE START @VA07582 00916500
+         SLR   R7,R5          CALC 2ND HALF OF ELAPSED TIME    @VA07582 00916550
+         BNM   *+6            WAS THERE A CARRY?               @VA07582 00916600
+         BCTR  R6,0           NO CARRY, SIGNIFICANT DIFFERENCE @VA07582 00916650
+         SLR   R6,R4          CALC 1ST HALF OF ELAPSED TIME    @VA07582 00916700
+         LM    R4,R5,PROBTIME GET TOTAL PROBLEM TIME           @VA07582 00916750
+         SLR   R5,R7          SUBTRCT 2ND HALF OF ELAPSED TIME @VA07582 00916800
+         BNM   *+6            WAS THERE A CARRY?               @VA07582 00916850
+         BCTR  R4,0           NO CARRY, SIGNIFICANT DIFFERENCE @VA07582 00916900
+         SLR   R4,R6          SUBTRCT 1ST HALF OF ELAPSED TIME @VA07582 00916950
+         STM   R4,R5,PROBTIME STORE NEW TOTAL PROBLEM TIME     @VA07582 00917000
+         LM    R4,R7,TEMPR4   RESTORE REGS USED IN SUBROUTINE  @VA07582 00917050
+         BR    R14            RETURN TO CALLER                 @VA07582 00917100
+         EJECT                                                          00917150
+ARUNLST  EQU   *  ADD A USER TO THE RUNNABLE LIST                       00918000
+         TM    VMDSTAT,VMRUN  ALL READY IN THE RUNLIST ?       @VA04341 00918400
+         BOR   R14            YES - RETURN TO CALLER           @VA04341 00918800
+         LA    R2,DMKSCHRL     POINT TO LIST                            00919000
+         LH    R0,VMQPRIOR    ADD IN BLOCKAGE DELAY FACTOR     @VA01352 00920000
+         AL    R0,VMEPRIOR    TO RESOLVE THE  RUNLIST BLOK.    @VA01352 00921000
+*                             FAILURE                                   00922000
+         ST    R0,VMRPRIOR    STORE THE DISPATCHING PRIORITY   @VA01352 00923000
+         LOCK  OBTAIN,TYPE=RL,SPIN=YES,SAVE LOCK THE RUNLIST   @V407577 00923100
+         L     R1,DMKSCHRL     GET ADDRESS OF 1ST USER NOW ON LIST      00924000
+         TM    VMQLEVEL,VMHIPRI    HIGHEST PRIORITY USER ??             00925000
+         BO    ADDLISTR       ADD TO RUNLIST                   @VA04341 00926100
+         SPACE                                                          00927000
+ADRLOOP  EQU   *                                                        00928000
+         CR    R1,R2          END OF LIST ??                            00929000
+         BE    ADDLISTR       ADD TO RUNLIST                   @VA04341 00930100
+         TM    VMQLEVEL-VMBLOK(R1),VMHIPRI   1ST BLOK HIGHEST PRIORITY  00931000
+         BO    ADDNEXT        YES -- SKIP IT                            00932000
+         CL    R0,VMRPRIOR-VMBLOK(,R1) LOWER PRIORITY ?        @VA01352 00933000
+         BL    ADDLISTR       ADD TO RUNLIST                   @VA04341 00934100
+ADDNEXT  EQU   *              POINT TO NEXT USER TO TEST                00935000
+         L     R1,VMQFPNT-VMBLOK(,R1)   GET ADDRESS OF NEXT BLOK        00936000
+         B     ADRLOOP        AND KEEP LOOKING                          00937000
+         SPACE                                                          00938000
+ADDLISTR EQU   *              INSERT VMBLOK INTO RUNLIST       @VA04341 00939300
+         OI    VMDSTAT,VMRUN  FLAG USER IN RUNNABLE LIST       @VA04341 00939600
+         L     R2,VMQBPNT-VMBLOK(,R1)   POINT TO PREVIOUS VMBLOK        00941000
+         STM   R1,R2,VMQFPNT  CHAIN NEW USER IN HERE                    00942000
+         ST    R11,VMQFPNT-VMBLOK(,R2)  CHAIN NEW BLOK TO PREVIOUS      00943000
+         ST    R11,VMQBPNT-VMBLOK(,R1)  AND TO NEXT                     00944000
+         LOCK  RELEASE,TYPE=RL,SPIN=,SAVE                      @V407577 00944100
+         BR    R14            AND RETURN TO CALLER ..                   00945000
+ADDLISTE EQU   *             INSERT VMBLOK INTO ELIGIBLE LIST  @V407577 00945100
+         OI    VMDSTAT,VMRUN  FLAG USER IN RUNNABLE LIST       @V407577 00945200
+         L     R2,VMQBPNT-VMBLOK(,R1)  POINT TO PREVIOUS VMBLOK@V407577 00945300
+         STM   R1,R2,VMQFPNT  CHAIN NEW USER IN HERE           @V407577 00945400
+         ST    R11,VMQFPNT-VMBLOK(,R2)                         @V407577 00945500
+         ST    R11,VMQBPNT-VMBLOK(,R1)                         @V407577 00945600
+         BR    R14            AND RETURN TO CALLER ..          @V407577 00945700
+         SPACE                                                          00946000
+AWAITLST EQU   *  ADD A USER TO THE ELIGIBLE LIST                       00947000
+         TM    VMDSTAT,VMELIG ALREADY IN THE ELIGIBLE LIST     @VA04341 00949000
+         BOR   R14            YES - RETURN TO CALLER           @VA04341 00950000
+         ST    R14,TEMPR14    SAVE CALLER'S R14                @V407577 00951100
+         BAL   R14,CALCBIAS   CALCULATE ELIGIBLE LIST PRIORITY @V407577 00951200
+         L     R14,TEMPR14    RESTORE CALLER'S R14             @V407577 00951300
+         LA    R2,WAITQ1      POINT TO Q1 ELIGIBLE LIST                 00976000
+         LA    R3,DMKSCHW1    AND COUNT                                 00977000
+         TM    VMQLEVEL,VMQ1  REALLY WAITING FOR Q1 ?                   00978000
+         BO    SETPRIOR       YES -- GO SET FINAL PRIORITY ...          00979000
+         LA    R2,WAITQ2      POINT TO Q2 ELIGIBLE LIST                 00980000
+         LA    R3,DMKSCHW2    AND COUNT                                 00981000
+         TM    VMQLEVEL,VMDROP1    JUST DROPPED FROM Q1 ?               00982000
+         BZ    SETPRIOR       NO -- GO SET PRIORITY                     00983000
+         LH    R1,DMKSCHIB    GET INTERACTIVE USER BIAS                 00984000
+         SLR   R0,R1          AND LOWER PRIORITY                        00985000
+         NI    VMQLEVEL,X'FF'-VMDROP1   UNFLAG Q1 DROP                  00986000
+SETPRIOR ST    R0,VMEPRIOR    SET ELIGIBLE LIST PRIORITY                00987000
+         L     R1,VMQFPNT-VMBLOK(,R2)   POINT TO 1ST BLOK ON LIST       00988000
+         LH    R4,0(R3)       COUNT OF USERS IN LIST                    00989000
+         A     R4,F1          ADD ONE                                   00990000
+         STH   R4,0(R3)       AND RESTORE                               00991000
+         OI    VMDSTAT,VMELIG      SET ELIGIBLE LIST FLAG               00992000
+SCHMN0   MC    MNCOAEL,MNCLSCH MONITOR ADD TO ELIG LIST        @VM01017 00993000
+         TM    VMQLEVEL,VMAEX HI PRIORITY Q2 ??                         00994000
+         BO    ADDLISTE       YES - ADD TO TOP OF ELIGIBLE LIST@VA04341 00995100
+         SPACE                                                          00996000
+ADQLOOP  EQU   *                                                        00997000
+         CR    R1,R2          END OF THE LIST ??                        00998000
+         BE    ADDLISTE       YES - ADD TO ELIGIBLE LIST HERE  @VA04341 00999100
+         CL    R0,VMEPRIOR-VMBLOK(,R1)  FOUND A LOWER GUY ?             01000000
+         BL    ADDLISTE       YES - ADD TO ELIGIBLE LIST HERE  @VA04341 01001100
+         L     R1,VMQFPNT-VMBLOK(,R1)   KEEP LOOKING                    01002000
+         B     ADQLOOP        ..                                        01003000
+CALCBIAS EQU   *              ADD A USER TO THE ELIGIBLE LIST  @VA04341 01003020
+         LH    R1,VMWSPROJ    GET PROJECTED WORKING SET        @VA04341 01003040
+         LA    R2,100         ... FOR ARITHMETIC               @VA04341 01003060
+         MR    R0,R2          GET SET FOR PERCENTAGE           @VA04341 01003080
+         L     R15,=A(DMKDSPNP) ADDR. OF DYNAMIC PAGE COUNT    @VA04341 01003100
+         L     R15,0(,R15)    GET NUMBER OF PAGEABLE PAGES     @VA04341 01003120
+         LTR   R15,R15        CHECK FOR ZERO PAGES             @VA04341 01003140
+         BZ    NODIV1         IF ZERO, SKIP DIVIDE INSTRUCTION.@VA04341 01003160
+         DR    R0,R15         GET WORKING SET SIZE AS % OF     @VA04341 01003180
+*                             AVAIALBLE                                 01003200
+NODIV1   MH    R1,DMKSCHPB    MULTIPLY BY PAGING BIAS FACTOR   @VA04341 01003220
+         SLR   R0,R0          CLEAR WORK REGISTER              @VA04341 01003240
+         IC    R0,VMUPRIOR    GET SHEDULING PRIORITY           @VA04341 01003260
+         MH    R0,DMKSCHUB    MULTIPLY BY USER PRIORITY BIAS   @VA04341 01003280
+         ALR   R1,R0          ADD TO PAGING BIAS               @VA04341 01003300
+         LH    R2,DMKSCHPB    GET PAGING BIAS WEIGHT FACTOR    @VA04341 01003320
+         AH    R2,DMKSCHUB    PLUS USER BIAS WEIGHT FACTOR     @VA04341 01003340
+         BZ    GETBASE        IF NO BIAS, NO WEIGHT            @VA04341 01003360
+         SLR   R0,R0          CLEAR FOR DIVISION               @VA04341 01003380
+         DR    R0,R2          AND GET WEIGHTED AVERAGE         @VA04341 01003400
+         SPACE                                                          01003420
+GETBASE  STCK  TEMPSAVE       GET TOD FOR BASE PRIORITY        @VA04341 01003440
+         BC    3,DOWNWEGO     CLOCK NOT FUNCTIONING            @VA04301 01003441
+         L     R0,TEMPSAVE    USE HIGH ORDER WORD ONLY         @VA04341 01003460
+         LH    R2,DMKSCHPD    GET PAGING DELAY SHIFT           @VA04341 01003480
+         LA    R3,RSHIFT      ASSUME RIGHT SHIFT               @VA04341 01003500
+         LTR   R2,R2          + FOR RIGHT SHIFT, - FOR LEFT    @VA04341 01003520
+         BNM   SHIFT          ALL SET FOR RIGHT SHIFT          @VA04341 01003540
+         LA    R3,LSHIFT      SET FOR LEFT SHIFT               @VA04341 01003560
+         LPR   R2,R2          ...                              @VA04341 01003580
+SHIFT    EX    R0,0(,R3)      DO PROPER SHIFT                  @VA04341 01003600
+         ALR   R0,R1          AND ADD IN BIAS                  @VA04341 01003620
+         BR    R14            AND RETURN TO CALLER             @V407577 01003650
+         SPACE 2                                                        01004000
+DROPLIST EQU   *              DROP THIS USER FROM THE          @VA04341 01005100
+*                             RUNNABLE/ELIGIBLE LIST.                   01005200
+         NI    VMDSTAT,X'FF'-VMRUN UNFLAG AS IN LIST                    01006000
+         TM    VMDSTAT,VMELIG      ARE WE DROPPING HIM FROM ELIGIBLE    01007000
+         BZ    NODELIG             NO, SKIP COUNT DECREMENT             01008000
+         LA    R1,DMKSCHW2         ADD, OF WAITQ2 COUNT                 01009000
+         TM    VMQLEVEL,VMQ1       IS HE IN Q1 ELIGIBLE LIST?           01010000
+         BZ    NOQ1                NO, USE R1 AS SETUP                  01011000
+         LA    R1,DMKSCHW1         YES, GET ADD. OF Q1 WAIT COUNT       01012000
+NOQ1     LH    R2,0(R1)       SUBTRACT 1 FROM COUNT OF                  01013000
+         S     R2,F1               USERS IN ELIGIBLE LIST               01014000
+         STH   R2,0(R1)                                                 01015000
+         NI    VMDSTAT,255-VMELIG  REMOVE ELIGIBLE LIST FLAG            01016000
+         LM    R1,R2,VMQFPNT  GET CHAIN POINTERS               @V407577 01016100
+         ST    R1,VMQFPNT-VMBLOK(,R2)   AND                    @V407577 01016200
+         ST    R2,VMQBPNT-VMBLOK(,R1)   UNCHAIN                @V407577 01016300
+         BR    R14            EXIT TO CALLER                   @V407577 01016400
+NODELIG  EQU   *                                                        01017000
+         LOCK  OBTAIN,TYPE=RL,SPIN=YES,SAVE  LOCK THE RUNLIST  @V407577 01017100
+         LM    R1,R2,VMQFPNT  GET CHAIN POINTERS                        01018000
+         ST    R1,VMQFPNT-VMBLOK(,R2)   AND                             01019000
+         ST    R2,VMQBPNT-VMBLOK(,R1)   UNCHAIN                         01020000
+         LOCK  RELEASE,TYPE=RL,SPIN=,SAVE                      @V407577 01020100
+         BR    R14            EXIT TO CALLER                            01021000
+         SPACE                                                          01022000
+RSHIFT   SRL   R0,0(R2)       EXECUTED TO ALTER BASE PRIORITY           01023000
+LSHIFT   SLL   R0,0(R2)       ....                                      01024000
+         EJECT                                                          01025000
+*.                                                                      01026000
+* OPERATION -                                                           01027000
+*                                                                       01028000
+*     D. REAL TIMER STAMP                                               01029000
+*        1. CONVERT THE CURRENT TIMER VALUE TO THE APPROPRIATE UNITS;   01030000
+*           IE, CONVERT THE LOCATION 80 TIMER TO MICROSECONDS           01031000
+*        2. STORE THE TOD CLOCK, AND ADD TO IT THE VALUE IN THE TIMER   01032000
+*        3. ESTABLISH A TOD CLOCK COMPARATOR REQUEST FOR THE SPECIFIED  01033000
+*           INTERVAL                                                    01034000
+*.                                                                      01035000
+         SPACE 2                                                        01036000
+          AIF   (&RTIMR EQ 0).RTM2                                      01037000
+RSTMPON  EQU   *  START UP A REAL INTERVAL TIMER                        01038000
+         STCK  TEMPSAVE       GET CURRENT TOD                  @VA02049 01039000
+         BC    3,DOWNWEGO     CLOCK NOT FUNCTIONING            @VA04301 01039100
+         TM    VMTLEVEL,VMRON IS THIS A REAL TIMER             @VA01688 01040000
+         BZ    SETCPU         NO, STAMP CPU TIMER              @VA01688 01041000
+         TM    VMTLEVEL,VMSTMPI INTERVAL TIMER REQUEST?        @VA01688 01042000
+         BO    SETCPU         NO, STAMP CPU TIMER              @VA01688 01043000
+         OI    VMTLEVEL,VMSTMPI    FLAG LOCATION 80 TIMER STAMPED       01044000
+         SR    R0,R0          FOR HIGHORDER REGISTER ADJUST             01045000
+         L     R1,VMTRQBLK    POINT TO TIMER REQUEST BLOK               01046000
+         USING TRQBLOK,R1     ADDRESSABILITY                            01047000
+         LM    R4,R5,TEMPSAVE GET CURRENT TOD VALUE            @VA02049 01048000
+         STM   R4,R5,TRQBTOD  AND STORE IN TRQBLOK             @VA02049 01049000
+         SR    R4,R4          CLEAR R4 JUST IN CASE            @VA02049 01050000
+         LCTL  C1,C1,VMSEG    GET CORRECT STO                  @VA07222 01051100
+         LRA   R6,TIMER-PSA   VIRT. LOC. 80 AVAILABLE?         @VA07222 01051200
+         BZ    *+8            YES, USE VIRT. LOC. 80           @VA07222 01051300
+         LA    R6,VMTIMER     NO, POINT AT ACTIVE COPY         @VA07222 01051400
+         L     R5,0(,R6)      PICK UP TIMER VALUE              @VA07222 01051500
+         LTR   R5,R5          CURRENTLY NEGATIVE  ??                    01052000
+         BNM   CVTMS          NO --                                     01053000
+         SL    R5,=XL4'80000000'   GET TIME TILL IT WRAPS               01054000
+         AL    R5,=XL4'7FFFFFFF'   GET TIME TILL IT AGAIN GOES NEGATIVE 01055000
+         LA    R0,13          FOR HIGH ORDER REG ADJUSTMENT    @VA01872 01056000
+         SPACE                                                          01057000
+CVTMS    M     R4,=F'13'         CONVERT TO MICROSECONDS                01058000
+         ALR   R4,R0          ADJUST HIGH ORDER REGISTER                01059000
+         SLDL  R4,12          GET TOD CLOCK UNITS              @VA02049 01060000
+         AL    R5,TRQBTOD+4   GET TOD FOR INTERRUPT                     01061000
+         BC    12,*+8         ..                                        01062000
+         AL    R4,F1          ..                                        01063000
+         AL    R4,TRQBTOD     ..                                        01064000
+         STM   R4,R5,TRQBVAL  AND STORE IN TRQBLOK                      01065000
+         BAL   R14,SETIMER    GO SET TOD CLOCK COMPARATOR REQUEST       01066000
+SETCPU   EQU   *                                               @VA01688 01067000
+         TM    VMPSTAT,VMV370R          EC MODE ALLOWED                 01068000
+         BCR   8,R3           NO -- EXIT                                01069000
+         TM    VMTLEVEL,VMSTMPT CPU TIMER REQUEST?             @VA01688 01070000
+         BOR   R3             NO, EXIT                         @VA01688 01071000
+         OI    VMTLEVEL,VMSTMPT    FLAG CPU TIMER STAMPED               01072000
+         L     R2,VMECEXT     POINT TO EXTENDED CONTROL BLOK            01073000
+         L     R1,EXTCPTRQ-ECBLOK(,R2)  GET TRQBLOK FOR CPU TIMER       01074000
+         LM    R4,R5,TEMPSAVE GET CURRENT TOD VALUE            @VA02049 01075000
+         STM   R4,R5,TRQBTOD  AND STORE IN TRQBLOK             @VA02049 01076000
+         LM    R6,R7,EXTCPTMR-ECBLOK(R2) GET CPUTIMER VALUE    @VA02049 01077000
+         TM    VMTLEVEL,VMCPUTMR DOES USER CPU TIMER = REAL    @VA02049 01078000
+*                             TIMER?                                    01079000
+         BZ    ADDCPTOD       NO, GO ADD TO T-O-D VALUE        @VA02049 01080000
+         LM    R4,R5,VMTMOUTQ GET TIME LEFT IN QUEUE           @VA04063 01081100
+         LTR   R4,R4          HAS IT GONE NEGATIVE?            @VA04063 01081200
+         BNM   *+8            NO....OK TO USE                  @VA04063 01081300
+         LM    R4,R5,ZEROES   CAN'T USE NEGATIVE NUMBER        @VA04063 01081400
+         SLR   R7,R5          FIGURE DIFFERENCE BETWEEN        @VA04063 01081500
+         BC    11,*+6         ORIGINAL CPUTIMER VALUE          @VA04063 01081600
+         BCTR  R6,0           AND CURRENT VALUE                @VA04063 01081700
+         SLR   R6,R4                                           @VA04063 01081800
+         LTR   R6,R6          IF EXTCPTMR IS NEGATIVE          @VA07016 01081830
+         BM    ECVALNEG       LEAVE TRQBQUE AS IS              @VA07016 01081860
+         LM    R4,R5,TRQBQUE  GET ORIGINAL TIME SLICE VALUE    @VA04063 01081900
+         SLR   R5,R7          DECREMENT THIS VALUE             @VA04063 01082000
+         BC    11,*+6         BY THE CALCULATED                @VA04063 01082100
+         BCTR  R4,0           DIFFERENCE (AMOUNT USED UP)      @VA04063 01082200
+         SLR   R4,R6                                           @VA04063 01082300
+         STM   R4,R5,TRQBQUE  UPDATE T/S TO CURRENT VALUE      @VA04063 01082400
+ECVALNEG EQU   *                                               @VA07016 01082450
+         LM    R4,R5,TRQBTOD  GET CURRENT T-O-D AGAIN          @VA04063 01082500
+         LM    R6,R7,VMTMOUTQ NOW, GET TIME LEFT IN QUEUE      @VA04063 01082600
+         STM   R6,R7,EXTCPTMR-ECBLOK(R2) UPDATE CPUTIMER VALUE @VA02049 01083000
+         LTR   R6,R6          HAS IT GONE NEGATIVE?            @VA02049 01084000
+         BNM   ADDCPTOD       NO, GO ADD IT TO T-O-D VALUE     @VA02049 01085000
+         B     SETCOMP        SET UP FOR TIMER INTERRUPT       @VA02049 01086000
+ADDCPTOD EQU   *                                               @VA02049 01087000
+         LA    R8,1           CONSTANT                                  01088000
+         ALR   R5,R7          GET TIME                                  01089000
+         BC    12,*+6         FOR CPU TIMER INTERRUPT                   01090000
+         ALR   R4,R8          ..                                        01091000
+         ALR   R4,R6          ..                                        01092000
+         BC    12,*+8         BRANCH IF NO OVERFLOW                     01093000
+         L     R4,FFS         LARGE NUMBER IF TIMER WRAPS               01094000
+SETCOMP  EQU   *                                               @VA02049 01095000
+         STM   R4,R5,TRQBVAL  SET VALUE FOR CLOCK COMPARATOR            01096000
+         BAL   R14,SETIMER    AND GO SET TIMER REQUEST                  01097000
+         BR    R3             RETURN TO CALLER                 @V200820 01098000
+         EJECT                                                          01099000
+*.                                                                      01100000
+* OPERATION -                                                           01101000
+*                                                                       01102000
+*     E. REAL TIMER UNSTAMP                                             01103000
+*        1. RESET THE PENDING TRQBLOK REQUEST                           01104000
+*        2. CALCULATE THE ELAPSED TIME SPENT IN USER-REQUESTED WAIT     01105000
+*           STATE AND SUBTRACT IT FROM THE APPROPRIATE TIMER            01106000
+*        3. IF THE TIMER HAS GONE NEGATIVE, POST A PENDING INTERRUPT    01107000
+*.                                                                      01108000
+         SPACE 2                                                        01109000
+RSTMPOFF EQU   *  STOP A RUNNING REAL TIMER --                          01110000
+         STCK  TEMPSAVE       SAVE TOD CLOCK                   @VA01553 01111000
+         BC    3,DOWNWEGO     CLOCK NOT FUNCTIONING            @VA04301 01111100
+         TM    VMTLEVEL,VMSTMPI    LOCATION 80 TIMER STAMPED ?          01112000
+         BZ    CPTOFF         NO -- GO UNSTAMP CPU TIMER                01113000
+         NI    VMTLEVEL,255-VMSTMPI     UNSTAMP INTERVAL TIMER @V200820 01114000
+         L     R1,VMTRQBLK    POINT TO TIMER REQUEST BLOK               01115000
+         BAL   R14,RESETIMR   AND GO CANCEL TIMER REQUEST               01116000
+         LM    R4,R5,TRQBTOD  GET TOD AT REQUEST                        01117000
+         LM    R0,R1,TEMPSAVE GET TOD NOW                               01118000
+         SPACE                                                          01119000
+         SLR   R1,R5          GET ELAPSED TIME                          01120000
+         BC    11,*+6         ...                                       01121000
+         BCTR  R0,R0          ...                              @VA01553 01122000
+         SLR   R0,R4          ...                                       01123000
+         SRDL  R0,12          CONVERT TO MICROSECONDS                   01124000
+*        R6 POINTS TO ACTIVE VIRT. LOC. 80 TIMER               @VA07222 01124100
+         LCTL  C1,C1,VMSEG    GET CORRECT STO                  @VA07222 01124200
+         LRA   R6,TIMER-PSA   VIRT. LOC. 80 AVAILABLE?         @VA07222 01124300
+         BZ    *+8            YES, USE VIRT. LOC. 80           @VA07222 01124400
+         LA    R6,VMTIMER     NO, POINT AT ACTIVE COPY         @VA07222 01124500
+         LTR   R0,R0          IS IT A BIG NUMBER?              @VA02792 01125000
+         BZ    NORMAL         NO...REGULAR ROUTINE WILL DO     @VA02792 01126000
+         D     R0,=F'3328'    CONVERT TO 3.3MS UNITS           @VA02792 01127000
+         SLL   R1,8           SHIFT TO BIT POS. 23             @VA02792 01128000
+         L     R2,0(,R6)      PICK UP TIMER VALUE              @VA07222 01129100
+         LTR   R2,R2          SET COND. CODE IF NEG            @VA03848 01130000
+         BNM   MAYHAP         NOT NEG. NOW...BUT MAY GO NEG.   @VA03848 01130100
+         SLR   R2,R1          SUBTR. FROM INTV. TIMER          @VA03848 01130200
+         ST    R2,0(,R6)      SAVE INTERIM VALUE               @VA07222 01130310
+         LTR   R5,R0          SAVE REMAINDER IN R5 (IF ANY)    @VA03848 01130400
+         BZ    NOINT          IF NO REMAINDER...EXIT           @VA03848 01130500
+         B     DOREST         OTHERWISE DO THE REST OF IT      @VA03848 01130600
+MAYHAP   SLR   R2,R1          SUBTR. FROM INTV. TIMER          @VA03848 01130700
+         LTR   R2,R2          SET COND CODE IF NEG. NOW        @VA03848 01130800
+         ST    R2,0(,R6)      SAVE INTERIM VALUE               @VA07222 01131100
+         LR    R5,R0          SAVE REMAINDER IN REG 5          @VA02792 01132000
+         BC    11,*+8         NO INTERRUPT JUST YET            @VA02792 01133000
+         BAL   R9,INTINT      SET INTERVAL TIMER INTERRUPT     @VA02792 01134000
+         LTR   R5,R5          ANY REMAINDER?                   @VA02792 01135000
+         BZ    NOINT          NO, ALL SET                      @VA02792 01136000
+DOREST   EQU   *                                               @VA03848 01136500
+         LR    R1,R5          REMAINDER INTO REG 1             @VA02792 01137000
+         SLR   R0,R0          CLEAR REG 0                      @VA02792 01138000
+NORMAL   EQU   *              AND CONTINUE                     @VA02792 01139000
+         D     R0,=F'13'      CONVERT TO TIMER UNITS                    01140000
+         L     R2,0(,R6)      GET VIRTUAL TIMER VALUE          @VA07222 01141100
+         LTR   R2,R2          SET COND. CODE IF NEGATIVE       @VA03848 01142100
+         BNM   MAYBE          NOT NEG. NOW....BUT MAY GO NEG.  @VA03848 01142200
+         SLR   R2,R1          SUBTR. FROM INTV. TIMER          @VA03848 01142300
+         ST    R2,0(,R6)      STORE VIRTUAL TIMER VALUE        @VA07222 01142410
+         B     NOINT          NO INTERRUPT THIS TIME           @VA03848 01142500
+MAYBE    SLR   R2,R1          SUBTR. FROM INTV. TIMER          @VA03848 01142600
+         LTR   R2,R2          SET COND. CODE IF NEG. NOW       @VA03848 01142700
+         ST    R2,0(,R6)      STORE VIRTUAL TIMER VALUE        @VA07222 01143100
+         BC    11,NOINT       NO INTERRUPT                              01144000
+         BAL   R9,INTINT      SET INTERVAL TIMER INTERRUPT     @V200198 01145000
+NOINT    EQU   *                                                        01146000
+         TM    VMPSTAT,VMV370R EC MODE ALLOWED                 @VA0861  01147000
+         BCR   8,R3           NO -- EXIT                                01148000
+         TM    VMTLEVEL,VMSTMPT    CPU TIMER STAMPED ?                  01149000
+         BCR   8,R3           NO -- EXIT                                01150000
+CPTOFF   EQU   *                                                        01151000
+         NI    VMTLEVEL,X'FF'-VMSTMPT   UNFLAG CPU TIMER STAMP          01152000
+         L     R2,VMECEXT     GET EXTENDED CONTROL BLOK                 01153000
+         L     R1,EXTCPTRQ-ECBLOK(,R2)  POINT TO TRQBLOK                01154000
+         BAL   R14,RESETIMR   AND CANCEL TIMER REQUEST                  01155000
+         LM    R4,R5,TRQBTOD  GET TOD AT TIMER REQUEST                  01156000
+         LM    R0,R1,TEMPSAVE AND CURRENT TOD                           01157000
+         SLR   R1,R5          GET ELAPSED TIME                          01158000
+         BC    11,*+6         ...                                       01159000
+         BCTR  R0,R0          ...                              @VA01553 01160000
+         SLR   R0,R4          ...                                       01161000
+         LM    R4,R5,EXTCPTMR-ECBLOK(R2)     GET CPU TIMER              01162000
+         SLR   R5,R1          GET NEW TIMER VALUE                       01163000
+         BC    11,*+6         ...                                       01164000
+         BCTR  R4,R0          ...                              @VA01553 01165000
+         SLR   R4,R0          ...                                       01166000
+         TM    VMTLEVEL,VMCPUTMR TRACKING VIRTUAL IN REAL?     @VA04063 01166050
+         BNO   EXIT           NO - JUST SAVE IT FOR LATER      @VA04063 01166100
+         LTR   R4,R4          HAS IT GONE NEGATIVE?            @VA04063 01166150
+         BNM   EXIT           NO - OK TO SAVE                  @VA04063 01166200
+         NI    VMTLEVEL,X'FF'-VMCPUTMR NO LONGER TRACKING      @VA04063 01166250
+         L     R2,VMECEXT     POINT TO ECBLOK                  @VA04063 01166300
+         L     R1,EXTCPTRQ-ECBLOK(,R2) POINT TO TRQBLOK AGAIN  @VA04063 01166350
+         LM    R0,R1,TRQBQUE  PUT CURRENT TIME SLICE...        @VA04063 01166400
+         STM   R0,R1,VMTMOUTQ ...VALUE BACK                    @VA04063 01166450
+         STM   R4,R5,EXTCPTMR-ECBLOK(R2) SAVE TIMER IN ECBLOK  @VA04063 01166500
+         L     R7,=X'10500000' CPU TIMER COLLATING VALUE       @VA04063 01166550
+         L     R8,=X'10050400' CPU TIMER INTERRUPT CODE        @VA04063 01166600
+         BAL   R9,CPTINT      SET CPU TIMER INTERRUPT          @VA04063 01166650
+         BR    R3             EXIT                             @VA04063 01166700
+EXIT     EQU   *                                               @VA04063 01166750
+         STM   R4,R5,EXTCPTMR-ECBLOK(R2)     AND SAVE IN ECBLOK         01167000
+         BR    R3             AND EXIT                         @V200820 01168000
+         EJECT                                                          01169000
+*.                                                                      01170000
+* OPERATION -                                                           01171000
+*                                                                       01172000
+*     F. INTERRUPT PROCESSING FOR REAL TIMERS                           01173000
+*        1. FOR THE REAL LOCATION 80 TIMER, SET A VALUE OF -1 INTO      01174000
+*           THE USER'S VIRTUAL TIMER SLOT IN THE VMBLOK, POST A PENDING 01175000
+*           EXTERNAL INTERRUPT, AND EXIT                                01176000
+*        2. FOR THE REAL CPU TIMER, ADD THE ELAPSED TIME TO THE CURRENT 01177000
+*           VALUE OF THE TIMER AND TEST THE SIGN.  IF IT IS NEGATIVE,   01178000
+*           FLAG A CPU TIMER INTERRUPT PENDING AND EXIT.  IF            01179000
+*           IT IS POSITIVE, UNFLAG ANY PENDING INTERRUPT AND EXIT.      01180000
+*.                                                                      01181000
+         SPACE 2                                                        01182000
+DMKSCH80 EQU   *  IRA FOR REAL TIMER INTERRUPT                          01183000
+         USING *,R12          TEMPORARY ADDRESSABILITY                  01184000
+         DROP  R13                                             @V407577 01185100
+         LM    R12,R13,ASCHDL MAIN ROUTINE BASE REG            @V407577 01185200
+         USING DMKSCHDL,R12,R13 ADDRESSABILITY                 @V407577 01185300
+         BAL   R9,INTINT      SET INTERVAL TIMER INTERRUPT     @V200198 01187000
+         SR    R0,R0          GET TIMER VALUE                           01188000
+         BCTR  R0,0           OF -1                                     01189000
+* R2 POINTS TO ACTIVE VIRTUAL LOC. 80 TIMER                             01190100
+         LCTL  C1,C1,VMSEG    CORRECT ST0                      @VA06414 01190200
+         LRA   R2,TIMER-PSA   VIRTUAL TIMER LOCATION?          @VA06414 01190300
+         BZ    *+8            OK                               @VA06414 01190400
+         LA    R2,VMTIMER     NOT THERE, USE ALTERNATE         @VA06414 01190500
+         ST    R0,0(,R2)      SET NEW VALUE                    @VA06414 01190600
+         NI    VMTLEVEL,X'FF'-VMSTMPI   UNSTAMP LOC. 80 TIMER           01191000
+         GOTO  DMKDSPCH       AND TO RE-DISPATCH                        01195000
+         EJECT                                                          01195050
+DMKSCHAE EQU   *              IRA FOR FAVORED PERCENTAGE USER  @VA04341 01195100
+         USING *,R12          TEMPORARY ADDRESSABILITY         @VA04341 01195150
+         DROP  R13                                             @V407577 01195210
+         LM    R12,R13,ASCHDL MAIN ROUTINE BASE REG            @V407577 01195220
+         USING DMKSCHDL,R12,R13 ADDRESSABILITY                 @V407577 01195230
+         XC    SCHBVAL,SCHBVAL DON'T FOUL UP QUEUE DROP LOGIC  @VA04341 01195300
+         BAL   R14,DROPLIST   DROP FROM RUNNABLE LIST          @VA05536 01195350
+         TM    VMDSTAT,VMINQ  USER IN A QUEUE ??               @VA05536 01195355
+         BZ    GOTODSP        NO, DON'T TRY TO DROP            @VA05536 01195360
+         BAL   R14,DROPQ      DROP USER FROM ACTIVE QUEUE      @VA05536 01195365
+         CL    R11,AVMREAL    THIS USER VIRT=REAL ??           @VA05536 01195370
+         BE    GOTODSP        YES, NO NEED TO FLUSH            @VA05536 01195375
+         L     R1,=A(DMKPTRUC) FLUSHED PAGE COUNT              @VA08286 01195380
+         L     R2,DMKSCHN1    USER IN Q1                       @VA08286 01195385
+         A     R2,DMKSCHN2    PLUS Q2                          @VA08286 01195390
+         C     R2,0(R1)       BELOW THESHOLD                   @VA08286 01195395
+         BNH   GOTODSP        NO NEED TO FLUSH                 @VA08286 01195400
+         L     R15,=A(DMKPTRRS)    RESET PAGES                 @V408246 01195410
+         BALR  R14,R15                                         @V408246 01195420
+GOTODSP  GOTO  DMKDSPCH       LET DSP CALL THE BOSS            @VA05206 01195460
+*                             AGAIN                                     01195500
+         EJECT                                                          01196000
+DMKSCHCP EQU   *  IRA FOR CPU TIMER INTERRUPTS                          01197000
+         USING *,R12          TEMPORARY ADDRESSABILITY                  01198000
+         DROP  R13                                             @V407577 01199100
+         LM    R12,R13,ASCHDL MAIN ROUTINE BASE REG            @V407577 01199200
+         USING DMKSCHDL,R12,R13 ADDRESSABILITY                 @V407577 01199300
+         NI    VMTLEVEL,X'FF'-VMSTMPT   UNFLAG CPU TIMER STAMP          01201000
+         STCK  TEMPSAVE       SAVE TOD CLOCK                            01202000
+         BC    3,DOWNWEGO     CLOCK NOT FUNCTIONING            @VA04301 01202100
+         L     R2,VMECEXT     POINT TO EXTENDED CONTROL BLOK            01203000
+         L     R1,EXTCPTRQ-ECBLOK(,R2)  POINT TO TIMER REQUEST BLOK     01204000
+         LM    R4,R5,TRQBTOD  GET TOD AT REQUEST                        01205000
+         LM    R0,R1,TEMPSAVE GET TOD NOW                               01206000
+         LA    R6,1                                                     01207000
+         SLR   R1,R5          GET ELAPSED TIME                          01208000
+         BC    11,*+6         ..                                        01209000
+         SLR   R0,R6          ..                                        01210000
+         SLR   R0,R4          ..                                        01211000
+         SPACE                                                          01212000
+         LM    R4,R5,EXTCPTMR-ECBLOK(R2)    GET CPU TIMER               01213000
+         SLR   R5,R1          GET NEW TIMER VALUE                       01214000
+         BC    11,*+6         ..                                        01215000
+         SLR   R4,R6          ..                                        01216000
+         SLR   R4,R0          ..                                        01217000
+         STM   R4,R5,EXTCPTMR-ECBLOK(R2)    AND SAVE IT                 01218000
+         LTR   R4,R4          IS TIMER NEGATIVE ??                      01219000
+         L     R7,=X'10500000' GET CPU TIMER COLLATING VALUE   @V200198 01220000
+         BM    CPTPEND                                         @V200198 01221000
+         LA    R1,VMPXINT                                      @V200198 01222000
+CPTLOOP  LR    R2,R1                                           @V200198 01223000
+         L     R1,XINTNEXT-XINTBLOK(,R2)                       @V200198 01224000
+         LTR   R1,R1                                           @V200198 01225000
+         BZ    CPTLEND                                         @V200198 01226000
+         C     R7,XINTSORT-XINTBLOK(,R1)                       @V200198 01227000
+         BH    CPTLOOP                                         @V200198 01228000
+         BL    CPTLEND                                         @V200198 01229000
+         L     R0,XINTNEXT-XINTBLOK(,R1)                       @V200198 01230000
+         ST    R0,XINTNEXT-XINTBLOK(,R2)                       @V200198 01231000
+         LA    R0,XINTSIZE                                     @V200198 01232000
+         CALL  DMKFRET                                         @V200198 01233000
+         B     CPTLEND                                         @V200198 01234000
+CPTPEND  L     R8,=X'10050400' CPU TIMER INTERRUPT CODE        @V200198 01235000
+         BAL   R9,CPTINT      SET CPU TIMER INTERRUPT          @V200198 01236000
+         TM    VMTLEVEL,VMCPUTMR TRACKING VIRTUAL IN REAL?     @VA04063 01236100
+         BNO   CPTLEND        NO...GO TO DISPATCH              @VA04063 01236200
+         NI    VMTLEVEL,X'FF'-VMCPUTMR NO LONGER TRACKING      @VA04063 01236300
+         L     R2,VMECEXT     POINT TO ECBLOK                  @VA04063 01236400
+         L     R1,EXTCPTRQ-ECBLOK(,R2) POINT TO TRQBLOK AGAIN  @VA04063 01236500
+         LM    R7,R8,TRQBQUE  PUT CURRENT TIME SLICE...        @VA04063 01236600
+         STM   R7,R8,VMTMOUTQ ...VALUE BACK                    @VA04063 01236700
+CPTLEND  GOTO  DMKDSPCH       GO TO DISPATCH                   @V200198 01237000
+         SPACE 1                                                        01238000
+INTINT   SLR   R7,R7          ZERO                             @V200198 01239000
+         L     R8,=X'00800080'                                 @V200198 01240000
+CPTINT   LA    R2,VMPXINT                                      @V200198 01241000
+INTLOOP  LR    R4,R2                                           @V200198 01242000
+         L     R2,XINTNEXT-XINTBLOK(,R4)                       @V200198 01243000
+         LTR   R2,R2                                           @V200198 01244000
+         BZ    INTADD                                          @V200198 01245000
+         C     R7,XINTSORT-XINTBLOK(,R2)                       @V200198 01246000
+         BH    INTLOOP                                         @V200198 01247000
+         BL    INTADD                                          @V200198 01248000
+         O     R8,XINTCODE-XINTBLOK(,R2)                       @V200198 01249000
+         ST    R8,XINTCODE-XINTBLOK(,R2)                       @V200198 01250000
+         BR    R9                                              @V200198 01251000
+INTADD   LA    R0,XINTSIZE                                     @V200198 01252000
+         CALL  DMKFREE                                         @V200198 01253000
+         ST    R1,XINTNEXT-XINTBLOK(,R4)                       @V200198 01254000
+         ST    R2,XINTNEXT-XINTBLOK(,R1)                       @V200198 01255000
+         ST    R7,XINTSORT-XINTBLOK(,R1)                       @V200198 01256000
+         ST    R8,XINTCODE-XINTBLOK(,R1)                       @V200198 01257000
+         SLR   R0,R0                                           @V200198 01258000
+         ST    R0,XINTPARM-XINTBLOK(,R1)                       @V200198 01259000
+         BR    R9                                              @V200198 01260000
+.RTM2    ANOP                                                           01261000
+         EJECT                                                          01262000
+DMKSCHST EQU   *  HERE TO SET TIMER REQUEST FROM OUTSIDE DMKSCHDL       01263000
+         USING *,R15          TEMPORARY ADDRESSABILITY                  01264000
+         STM   R0,R15,BALRSAVE     SAVE CALLER'S REGISTERS              01265000
+         DROP  R13                                             @V407577 01266100
+         LM    R12,R13,ASCHDL MAIN ROUTINE BASE REG            @V407577 01266200
+         USING DMKSCHDL,R12,R13 ADDRESSABILITY                 @V407577 01266300
+         DROP  R15                                                      01268000
+         BAL   R14,SETIMER    GO SET TIMER                              01269000
+         LM    R0,R15,BALRSAVE     RESTORE REGISTERS                    01270000
+         BR    R14            AND EXIT                                  01271000
+         SPACE 3                                                        01272000
+DMKSCHRT EQU   *  HERE TO RESET TIMER FROM OUTSIDE DMKSCHDL             01273000
+         USING *,R15          TEMPORARY ADDRESSABILITY                  01274000
+         STM   R0,R15,BALRSAVE     SAVE ALL REGISTERS                   01275000
+         DROP  R13                                             @V407577 01276100
+         LM    R12,R13,ASCHDL MAIN ROUTINE BASE REG            @V407577 01276200
+         USING DMKSCHDL,R12,R13 ADDRESSABILITY                 @V407577 01276300
+         DROP  R15                                                      01278000
+         BAL   R14,RESETIMR   GO RESET REQUEST                          01279000
+         LM    R0,R15,BALRSAVE     RESTORE REGISTERS                    01280000
+         BR    R14            AND EXIT                                  01281000
+         SPACE 2                                                        01282000
+DMKSCHMD EQU   *  HERE AT MIDNIGHT TO CHANGE THE CLOCK                  01283000
+         USING *,R12          TEMPORARY ADDRESSABILITY                  01284000
+         DROP  R13                                             @V407577 01285100
+         LM    R12,R13,ASCHDL MAIN ROUTINE BASE REG            @V407577 01285200
+         USING DMKSCHDL,R12,R13 ADDRESSABILITY                 @V407577 01285300
+         CALL  DMKMIDNT       CALL DATE CHANGE ROUTINE                  01287000
+         GOTO  DMKDSPCH       AND LEAVE                                 01288000
+         EJECT                                                          01289000
+*.                                                                      01290000
+* OPERATION -                                                           01291000
+*                                                                       01292000
+*     G. TIMER REQUEST QUEUE MAINTENANCE                                01293000
+*        1. TO ESTABLISH A TOD CLOCK INTERRUPT REQUEST, CHAIN DOWN THE  01294000
+*           LIST OF PENDING REQUESTS UNTIL A TRQBLOK FOR A REQUEST WITH 01295000
+*           A CLOCK VALUE GREATER THAN OR EQUAL TO THE CURRENT ONE IS   01296000
+*           FOUND.  WHEN IT IS, INSERT THE NEW REQUEST INTO THE CHAIN   01297000
+*           AHEAD OF IT.  IF THE NEW REQUEST IS THE FIRST ONE IN THE    01298000
+*           CHAIN, ISSUE A SET CLOCK COMPARATOR INSTRUCTION FOR THE     01299000
+*           VALUE IN THE TRQBLOK                                        01300000
+*        2. TO RESET A REQUEST, REMOVE THE TRQBLOK FROM THE CHAIN.  IF  01301000
+*           THE BLOCK REMOVED WAS THE 1ST ONE, ISSUE A SET CLOCK COMP-  01302000
+*           ARATOR INSTRUCTION FOR THE VALUE IN THE FOLLOWING BLOCK     01303000
+*.                                                                      01304000
+         SPACE 2                                                        01305000
+SETIMER  EQU   *  HERE TO ESTABLISH A CLOCK COMPARATOR REQUEST          01306000
+         SPACE                                                          01307000
+         STM   R0,R3,TEMPSAVE+32   SAVE THESE REGISTERS                 01308000
+         LA    R0,DMKSCHTQ      POINT TO QUEUE OF OUTSTANDING REQUESTS  01309000
+         LR    R2,R0          SAVE ADDRESS                              01310000
+         LOCK  OBTAIN,TYPE=TR,SPIN=YES,SAVE LOCK THE TRQ CHAIN @V407577 01310100
+         SPACE                                                          01311000
+TIMELOOP L     R2,TRQBFPNT-TRQBLOK(,R2) POINT TO NEXT BLOK ON LIST      01312000
+         CLC   TRQBVAL,TRQBVAL-TRQBLOK(R2)  IS NEW REQUEST SHORTER ??   01313000
+         BH    TIMELOOP       NO --                                     01314000
+         BL    QTIME          YES - QUEUE IN FRONT             @VA06136 01314100
+         CR    R2,R0          IS IT THE END OF QUEUE ??        @VA06136 01314200
+         BNE   TIMELOOP       NO - KEEP SEARCHING              @VA06136 01314300
+         SPACE                                                          01315000
+QTIME    L     R3,TRQBBPNT-TRQBLOK(,R2) GET BACKCHAIN POINTER           01316000
+         STM   R2,R3,TRQBFPNT AND CHAIN IN NEW REQUEST                  01317000
+         ST    R1,TRQBFPNT-TRQBLOK(,R3) TO PREVIOUS                     01318000
+         ST    R1,TRQBBPNT-TRQBLOK(,R2) AND NEXT BLOK                   01319000
+         SPACE                                                          01320000
+         CR    R3,R0          FIRST BLOK                                01321000
+         BE    SETCKC         YES, SET NEW REQUEST             @V407577 01322100
+         TM    APSTAT1,APUOPER  RUNNING AN AP SYSTEM           @V407577 01322200
+         BNO   TIMEXIT        NO, NO NEED TO CHECK FURTHER     @V407577 01322300
+         L     R3,PREFIXB     POINT TO OTHER PREFIX            @V407577 01322400
+         B     FINDTRQ        GO SCAN FOR NEW ACTIVE TRQ       @V407577 01322500
+         SPACE                                                          01323000
+SETCKC   SCKC  TRQBVAL        YES -- SET NEW COMPARATOR REQUEST         01324000
+         ST    R1,ACTIVTRQ    INDICATE THE ACTIVE TRQ IN PSA   @V407577 01324100
+         SPACE                                                          01325000
+TIMEXIT  LOCK  RELEASE,TYPE=TR,SPIN=,SAVE                      @V407577 01326100
+         LM    R0,R3,TEMPSAVE+32    RESTORE REGISTERS          @V407577 01326200
+         BR    R14            AND EXIT                                  01327000
+         SPACE 2                                                        01328000
+RESETIMR EQU   *  RESET A CLOCK COMPARATOR REQUEST                      01329000
+         TM    APSTAT1,APUOPER  RUNNING AN AP SYSTEM?          @V407577 01329100
+         BO    MPRESET        YES, SPECIAL HANDLING REQUIRED   @V407577 01329200
+         SPACE                                                          01330000
+         STM   R0,R3,TEMPSAVE+32   SAVE THESE REGISTERS                 01331000
+         LA    R0,DMKSCHTQ      POINT TO QUEUE OF REQUESTS              01332000
+         LM    R2,R3,TRQBFPNT GET CHAIN POINTERS                        01333000
+         ST    R2,TRQBFPNT-TRQBLOK(,R3) UNCHAIN THIS BLOK               01334000
+         ST    R3,TRQBBPNT-TRQBLOK(,R2) --                              01335000
+         CR    R3,R0          UNCHAINING THE 1ST BLOK ??                01336000
+         BNE   TIMEXIT        NO --                                     01337000
+         LR    R1,R2          POINT TO NEW 1ST BLOK                     01338000
+         B     SETCKC         AND GO ESTABLISH REQUEST                  01339000
+MPRESET  EQU   *         CLOCK COMPARATOR RESET FOR AP SYSTEMS @V407577 01339010
+         STM   R0,R3,TEMPSAVE+32   SAVE THESE WORK REGISTERS   @V407577 01339020
+         LA    R0,DMKSCHTQ    PICK UP POINTER TO TRQ ANCHOR    @V407577 01339030
+         LOCK  OBTAIN,TYPE=TR,SPIN=YES,SAVE  AND LOCK THE CHAIN@V407577 01339040
+         LR    R2,R0                                           @V407577 01339050
+TRQSCAN  L     R2,TRQBFPNT-TRQBLOK(,R2)  POINT TO NEXT TRQBLOK @V407577 01339060
+         CR    R2,R0          BACK TO THE ANCHOR?              @V407577 01339070
+         BE    LOCKDSQ        YES, THE TRQBLOK MUST BE ON      @V407577 01339080
+*                             THE DISPATCHER QUEUE                      01339090
+         CR    R2,R1          IS THIS THE TRQBLOK BEING RESET? @V407577 01339100
+         BE    UNCHAIN        YES, GO UNCHAIN IT               @V407577 01339110
+         B     TRQSCAN        CONTINUE THE SEARCH              @V407577 01339120
+LOCKDSQ  LOCK  OBTAIN,TYPE=DS,SPIN=YES,SAVE  LOCK THE QUEUE    @V407577 01339130
+         LM    R2,R3,TRQBFPNT GET CHAIN POINTERS               @V407577 01339140
+         ST    R2,TRQBFPNT-TRQBLOK(,R3) UNCHAIN THIS BLOK      @V407577 01339150
+         ST    R3,TRQBBPNT-TRQBLOK(,R2) --                     @V407577 01339160
+         LH    R2,VMSTKCNT    PICK UP COUNT OF STACKED BLOCKS  @V407577 01339170
+         BCTR  R2,0           AND DECREMENT BY ONE             @V407577 01339180
+         STH   R2,VMSTKCNT    AND SAVE IT AWAY                 @V407577 01339190
+         LOCK  RELEASE,TYPE=DS,SPIN=,SAVE                      @V407577 01339200
+         B     TIMEXIT        EXIT...COMPARATOR IS ALREADY SET @V407577 01339210
+UNCHAIN  LM    R2,R3,TRQBFPNT GET CHAIN POINTERS               @V407577 01339220
+         ST    R2,TRQBFPNT-TRQBLOK(,R3) UNCHAIN THIS BLOK      @V407577 01339230
+         ST    R3,TRQBBPNT-TRQBLOK(,R2) --                     @V407577 01339240
+SETACTIV L     R3,PREFIXB     POINT TO THE OTHER PSA AREA      @V407577 01339250
+         L     R2,ACTIVTRQ-PSA(,R3)   POINTER TO ACTIVE TRQBLOK@V407577 01339260
+         CR    R1,R2          IS THIS TRQBLOK ACTIVE ON THE    @V407577 01339270
+*                             OTHER PROCESSOR?                          01339280
+         BNE   NOCLEAR        NO, NO NEED TO CLEAR THE POINTER @V407577 01339290
+         SR    R0,R0          CLEAR FOR THE STORE              @V407577 01339300
+         ST    R0,ACTIVTRQ-PSA(,R3)    ZIP IT OUT              @V407577 01339310
+NOCLEAR  L     R2,ACTIVTRQ    IS THE RESET TRQBLOK ACTIVE      @V407577 01339320
+         CR    R1,R2          ....ON THIS PROCESSOR?           @V407577 01339330
+         BNE   TIMEXIT        NO, THEN EXIT                    @V407577 01339340
+FINDTRQ  LA    R0,DMKSCHTQ    POINTER TO THE TRQBLOK ANCHOR    @V407577 01339350
+         LR    R2,R0          SET UP FOR THE SCAN LOOP         @V407577 01339360
+NEXTTRQ  L     R2,TRQBFPNT-TRQBLOK(,R2)  POINT TO NEXT TRQBLOK @V407577 01339370
+         CR    R2,R0          ARE WE BACK TO THE ANCHOR?       @V407577 01339380
+         BE    GOSET          YES, SET THE DISTANT FUTURE      @V407577 01339390
+         C     R2,ACTIVTRQ-PSA(,R3)  IS THIS TRQBLOK ALREADY   @V407577 01339400
+*                             ACTIVE ON THE OTHER PROCESSOR?            01339410
+         BE    NEXTTRQ        YES, CONTINUE THE SCAN           @V407577 01339420
+GOSET    LR    R1,R2          SETCKC WANTS THE POINTER IN R1   @V407577 01339430
+         B     SETCKC         AND GO SET IT                    @V407577 01339440
+         EJECT                                                          01340000
+*.                                                                      01341000
+* OPERATION -                                                           01342000
+*                                                                       01343000
+*     H. CPU UTILIZATION MAINTENANCE                                    01344000
+*        1. USING SAME TIMER REQUEST BLOCK AS CAUSED CONTROL TO BE      01345000
+*        BROUGHT HERE (INITIATED BY DMKCPI), REESTABLISH NEXT TIMER     01346000
+*        INTERRUPT 30 SECONDS FROM NOW BY CALLING DMKSCHST.             01347000
+*        2. CALCULATE TOTAL WAIT TIME IN 30 SECOND INTERVAL SINCE LAST  01348000
+*        TIME THROUGH THIS ROUTINE AND UPDATE SMOOTHED VALUE OF WAIT    01349000
+*        IN DMKSCHCU FIELD.                                             01350000
+*.                                                                      01351000
+DMKSCHTI EQU   *                                               @V2B2638 01352000
+         USING PSA,R0         LOW CORE ADDRESSABILITY          @V2B2638 01353000
+         USING TRQBLOK,R10    TIMER REQUEST BLOC ADDRESSABILITY@V2B2638 01354000
+         USING *,R12                                           @V2B2638 01355000
+         DROP  R13                                             @V407577 01357100
+         LM    R12,R13,ASCHDL MAIN ROUTINE BASE REG            @V407577 01357200
+         USING DMKSCHDL,R12,R13 ADDRESSABILITY                 @V407577 01357300
+         L     R2,PREFIXB     GET PREFIX VALUE OF OTHER PROC   @V4M0102 01357310
+         TM    CPSTATUS-PSA(R2),CPWAIT IS OTHER PROC IN WAIT?  @V4M0102 01357410
+         BNO   SETTRQ         NO, GO SET NEXT TRQ              @V4M0102 01357510
+         TM    CPSTATUS-PSA(R2),CPSUPER IS OTHER PROC IN       @V4M0102 01357610
+*                             SUPERVISOR STATE?                @V4M0102 01357710
+         BO    SETTRQ         YES, GO SET NEXT TRQ             @V4M0102 01357810
+         SIGNAL WAKEUP        WAKE UP IDLE PROCESSOR           @V4M0102 01357910
+SETTRQ   DS    0H                                              @V4M0102 01358010
+         LR    R1,R10         SET ADDR OF TRQ FOR DMKSCHST     @V4M0102 01358110
+         STCK  TRQBTOD        GET PRESENT TOD                  @V2B2638 01359000
+         BC    3,DOWNWEGO     CLOCK NOT FUNCTIONING            @VA04301 01359100
+         L     R5,DMKSCHLI    SAMPLE INTERVAL IN SECONDS       @V2B2638 01360000
+         SR    R4,R4          ZIP                              @V2B2638 01361000
+         M     R4,=F'1000000' CONVERT TO MICRO SECS            @V2B2638 01362000
+         SLDL  R4,12          ALIGN TO TOD FORMAT              @V2B2638 01363000
+         AL    R5,TRQBTOD+4   ADD IN TOD LOW ORDER BITS        @V2B2638 01364000
+         BC    12,*+8         SKIP IF NO OVERFLOW              @V2B2638 01365000
+         AL    R4,F1          ADD ONE SEC IF OVERFLOW          @V2B2638 01366000
+         AL    R4,TRQBTOD     ADD IN HIGH ORDER TOD BITS       @V2B2638 01367000
+         STM   R4,R5,TRQBVAL  NEXT INTERRUPT DUE AT THIS TIME  @V2B2638 01368000
+         CALL  DMKSCHST       TICK...TOCK...TICK               @V2B2638 01369000
+         SR    R2,R2          ZIP                              @V2B2638 01370000
+         SR    R1,R1          CLEAR FOR A CONSTANT INDEX       @V407577 01370100
+         TM    APSTAT1,PROCIO   ON THE MAIN PROCESSSOR?        @V407577 01370200
+         BO    CALCWAIT       YES, UPDATE THE CPU'S VALUES     @V407577 01370300
+PREFIX   L     R2,PREFIXB     POINT TO THE OTHER PSA           @V407577 01370400
+CALCWAIT LM    R4,R5,IDLEWAIT-PSA(R2) GET INTERVAL IDLE TIME   @V407577 01371100
+         SLDL  R4,2           TO WITHIN 4.8% OF NEAREST 1/4 SEC@V407577 01371200
+         L     R5,OLDWAIT(R1) PREVIOUS CHECKPOINT              @V407577 01371300
+         ST    R4,OLDWAIT(R1) NEW CHECKPOINT                   @V407577 01371400
+         SR    R5,R4                                           @V407577 01371500
+         LM    R6,R7,IONTWAIT-PSA(R2) COMPUTE INTERVAL IOWAIT  @V407577 01371600
+         SLDL  R6,2           TO WITHIN 4.8% OF NEAREST 1/4 SEC@V407577 01371700
+         L     R7,OLDIOWT(R1)                                  @V407577 01371800
+         ST    R6,OLDIOWT(R1)                                  @V407577 01371900
+         SR    R7,R6                                           @V407577 01372000
+         LM    R8,R9,PAGEWAIT-PSA(R2) COMPUTE INTERVAL PGWAIT  @V407577 01372100
+         SLDL  R8,2           WITHIN 4.8% OF NEAREST 1/4 SEC   @V407577 01372200
+         L     R9,OLDPWT(R1)                                   @V407577 01372300
+         ST    R8,OLDPWT(R1)                                   @V407577 01372400
+         SR    R9,R8                                           @V2B2638 01385000
+         AR    R5,R7          COMPUTE TOTAL INTERVAL WAIT      @V2B2638 01386000
+         AR    R5,R9                                           @V2B2638 01387000
+         LR    R3,R5                                           @V2B2638 01388000
+         SR    R4,R4                                           @V2B2638 01389000
+         D     R4,=F'21'      ADD 4.8% TO CORRECT ERROR        @V2B2638 01390000
+         C     R4,F10         IS REMAINDER SIGNIFICANT         @V2B2638 01391000
+         BNH   NOFIXUP        NO, NO CORRECTION TO MAKE        @V2B2638 01392000
+         LA    R5,1(,R5)      YES, ADD 1 TO 4.8% VALUE         @V2B2638 01393000
+NOFIXUP  AR    R3,R5          NOW TO NEAREST 1/4 SEC           @V2B2638 01394000
+         L     R7,DMKSCHCU(R1)   SMOOTH WAIT VALUE..TO 1/4 SEC @V407577 01395100
+         SR    R6,R6                                           @V2B2638 01396000
+         M     R6,F3                                           @V2B2638 01397000
+         ALR   R3,R7          TOTAL NEW VALUE                  @V2B2638 01398000
+         SRL   R3,2           (NEW + 3OLD)/4                   @V2B2638 01399000
+         ST    R3,DMKSCHCU(R1)   SAVE NEW VALUE                @V407577 01400050
+         TM    APSTAT1,APUOPER  RUNNING AN AP SYSTEM?          @V407577 01400100
+         BNO   OUT            NO,  ALL DONE                    @V407577 01400150
+         C     R1,F16         ARE THE APU'S VALUES UPDATED?    @V407577 01400200
+         BE    OUT            YES, ALL FINISHED                @V407577 01400250
+         L     R1,F16         BUMP THE INDEX TO POINT TO THE   @V407577 01400300
+*                             ATTACHED PROCESSOR VALUES                 01400350
+         SR    R2,R2          CLEAR THE PSA INDEX              @V407577 01400400
+         TM    APSTAT1,PROCIO  ARE WE ON THE MAIN PROCESSOR?   @V407577 01400450
+         BO    PREFIX         YES, GO POINT TO APU PSA AREA    @V407577 01400500
+         B     CALCWAIT       THIS PROCESSOR IS THE APU        @V407577 01400550
+OUT      GOTO  DMKDSPCH                                        @V2B2638 01401000
+         EJECT                                                          01402000
+*        CONSTANTS, QUEUE ANCHORS, ETC..                                01403000
+*                                                                       01404000
+ASCHDL   DC    A(DMKSCHDL,DMKSCHDL+4096)                       @V407577 01404100
+DMKSCHS1 DC    F'0'           SMOOTHED COUNT OF Q1 USERS*1024  @V2B2638 01407000
+DMKSCHS2 DC    F'0'           SMOOTHED COUNT OF Q2 USERS*1024  @V2B2638 01408000
+DMKSCHCO DC    F'0'           SMOOTHED CORE UTILIZATION * 1024 @V2B2638 01409000
+DMKSCHSC DC    F'1024'        SMOOTHED S. C. RATIO * 1024      @V2B2638 01410000
+*                                                                       01410100
+*        THE FOLLOWING EIGHT WAIT SAVE AREAS MUST BE CONTIGUOUS         01410200
+*                                                                       01410300
+DMKSCHCU DC    F'120'         SMOOTHED WAIT TIME VALUE TO 1/4  @V407577 01410400
+*                             SEC ( CPU VALUE )                         01410500
+OLDWAIT  DC    X'FFFFFFFF'    WORK AREA                        @V2B2638 01411000
+OLDIOWT  DC    X'FFFFFFFF'    INITIAL VALUE OF I/OWAIT         @V2B2638 01412000
+OLDPWT   DC    X'FFFFFFFF'    INITIAL VALUE OF PAGE WAIT       @V2B2638 01413000
+DMKSCHCA DC    F'120'         SMOOTHED WAIT TIME VALUE TO 1/4  @V407577 01413100
+*                             SEC ( APU VALUE )                         01413200
+OLDWAITA DC    X'FFFFFFFF'    WORK AREA (APU )                 @V407577 01413300
+OLDIOWTA DC    X'FFFFFFFF'    INITIAL VALUE OF I/OWAIT (APU)   @V407577 01413400
+OLDPWTA  DC    X'FFFFFFFF'    INITIAL VALUE OF PAGE WAIT (APU) @V407577 01413500
+DMKSCHLI DC    F'30'          WAIT TIME SAMPLING INTERVAL IN   @V2B2638 01414000
+*                             SECS                                      01415000
+*                                                                       01416000
+         SPACE 2                                                        01417000
+DMKSCHTQ DS    0D             DUMMY TIMER REQUEST BLOK                  01418000
+         DC    2F'-1'         LARGE REQUEST IF QUEUE EMPTY              01419000
+         DC    2A(DMKSCHTQ)     REQUEST QUEUE ANCHOR                    01420000
+         SPACE 2                                                        01421000
+DMKSCHRL DC    2A(DMKSCHRL)    LIST OF DISPATCHABLE VMBLOKS             01422000
+DMKSCHEL EQU   *              ENTRY POINT FOR CPINIT AUTOLOG   @V305535 01423000
+         SPACE                                                          01424000
+WAITQ1   DC    2A(WAITQ1)     LIST OF VMBLOKS WAITING FOR Q1            01425000
+         SPACE                                                          01426000
+WAITQ2   DC    2A(WAITQ2)     LIST OF VMBLOKS WAITING FOR Q2            01427000
+DMKSCHW1 DC    H'0'           COUNT OF USERS ELIGIBLE FOR Q1            01428000
+DMKSCHW2 DC    H'0'           COUNT OF USERS ELIGIBLE FOR Q2            01429000
+         SPACE 2                                                        01430000
+DMKSCHQ1 EQU   *                                                        01431000
+QUEUE1   DC    F'0'           .2 SECOND USER IS ALLOWED TO              01432000
+         DC    X'30D40000'       STAY IN QUEUE 1.                       01433000
+DMKSCHN1 DC    F'0'           Q1 COUNT                                  01434000
+         SPACE                                                          01435000
+DMKSCHQ2 EQU   *                                                        01436000
+QUEUE2   DC    X'00000001'    2.0 SECONDS USER IS ALLOWED TO            01437000
+         DC    X'E8480000'        STAY IN QUEUE 2.                      01438000
+DMKSCHN2 DC    F'0'           Q2 COUNT                                  01439000
+         SPACE 2                                                        01440000
+PAGUSAGE DC    F'0'           SUM OF ACTIVE WORKING SETS                01441000
+         SPACE                                                          01442000
+         ENTRY DMKSCHPU       ENTRY FOR MEASUREMENT                     01443000
+DMKSCHPU EQU   PAGUSAGE                                                 01444000
+         SPACE 2                                                        01445000
+DMKSCHPG DC    F'16'          ALLOWABLE PAGING OVERHEAD                 01446000
+         SPACE                                                          01447000
+         ENTRY DMKSCHPB,DMKSCHUB,DMKSCHIB,DMKSCHPD                      01448000
+DMKSCHPB DC    H'0'           PAGING BIAS WEIGHT  FACTOR                01449000
+DMKSCHUB DC    H'1'           USER PRIORITY BIAS WEIGHT FACTOR          01450000
+DMKSCHIB DC    H'0'           INTERACTIVE USER BIAS                     01451000
+DMKSCHPD DC    H'0'           PAGING DELAY SHIFT                        01452000
+         SPACE 2                                                        01453000
+*        ASSURED EXECUTION USER CONTROL                                 01454000
+         SPACE                                                          01455000
+DMKSCHAP DC    4D'0'          CHANGED BY DMKCFS (SET FAVORED)  @VA04341 01456100
+AEXPQUE1 EQU   DMKSCHAP       QUE 1 FAVORED PERCENTAGE         @VA04341 01456200
+AEXPQUE2 EQU   DMKSCHAP+16    QUE 2 FAVORED PERCENTAGE         @VA04341 01456300
+         SPACE                                                          01457000
+DMKSCHAU DC    A(0)           A(VMBLOK) OF ASSURED PERCENTAGE USER      01458000
+         SPACE                                                          01459000
+*                                                                       01460050
+* THE FOLLOWING FIELDS ARE DEPENDENT AND MUST NOT BE                    01460100
+* ORDERED IN AND WAY.                                                   01460150
+*                                                                       01460200
+SCHBLOK  DS    0D             ALIGNMENT                        @VA04341 01460250
+DMKSCHBK EQU   *              ENTRY POINT FOR DMKTMRPT         @VA05288 01460275
+SCHBVAL  DC    D'0'           TOD CLOCK COMPARATOR VALUE FOR   @VA04341 01460300
+*                             INTERRUPT                                 01460350
+SCHBFPNT DC    F'0'           FORWARD POINTER (NOT USED)       @VA04341 01460400
+SCHBBPNT DC    F'0'           BACKWARD POINTER (NOT USED)      @VA04341 01460450
+SCHBAEXP DC    D'0'           'VMHIPRI' TIME SLICE VALUE       @VA04341 01460500
+SCHBUSER DC    F'0'           ADDRESS OF VMBLOK FOR FAVORED    @VA04341 01460550
+*                             USER                                      01460600
+SCHBIRA  DC    A(DMKSCHAE)    INTERRUPT RETURN FROM CLOCK COMP.@VA04341 01460650
+SCHBQUE  DC    D'0'           NOT USED                         @VA04341 01460700
+         SPACE 1                                                        01460750
+DMKSCHAL DC    X'00'          QUEUE DROP FLAG FOR MONITOR               01461000
+*                                                                       01462000
+* BIT DEFINED IN 'DMKSCHAL'                                             01463000
+TSEND    EQU   X'20'          USER VOLUNTARILY DROPPED FROM Q2 @V2B2638 01464000
+*                                                                       01465000
+         EJECT                                                          01466000
+*        QUEUE CONTROL BLOK DSECT                                       01467000
+         SPACE                                                          01468000
+VMQBLOK  DSECT                                                          01469000
+VMQTIME  DS    D TIME-IN-Q, DOUBLE PRECISION 2'S COMPLEMENT TOD UNITS   01470000
+VMQNUM   DS    F              NUMBER OF USERS IN THIS QUEUE             01471000
+         SPACE 2                                                        01472000
+CPAUTEL  EQU   X'80'          AUTOLOGGED ELIGIBLE USERS READY  @V305535 01473000
+         EJECT                                                          01474000
+         PSA                                                            01475000
+Q1DROP   EQU   X'40'                                                    01476000
+         COPY  VMBLOK                                                   01477000
+         COPY  XINTBLOK                                        @V200198 01478000
+         COPY  TIMER                                                    01479000
+         COPY  CORE                                                     01480000
+         COPY  EQU                                                      01481000
+         END                                                            01482000

@@ -1,0 +1,1306 @@
+PAG      TITLE 'DMKPAG     (CP)        VM/370 - RELEASE 6'              00001000
+         ISEQ  73,80          VALIDATE SEQUENCING OF INPUT              00002000
+*.                                                                      00003000
+* MODULE NAME -                                                         00004000
+*                                                                       00005000
+*        DMKPAG                                                         00006000
+*                                                                       00007000
+* FUNCTION -                                                            00008000
+*                                                                       00009000
+*        TO CONSTRUCT THE IOBLOKS AND SCHEDULE THE TASKS THAT MOVE      00010000
+*        VIRTUAL MEMORY PAGES BETWEEN AUXILIARY DASD STORAGE AND REAL   00011000
+*        MAIN STORAGE, AND TO CALCULATE TOTAL SYSTEM PAGING LOAD AT     00012000
+*        USER SPECIFIED INTERVALS                                       00013000
+*                                                                       00014000
+* ATTRIBUTES -                                                          00015000
+*                                                                       00016000
+*        SERIALLY REUSABLE, RESIDENT, ENTERED VIA GOTO                  00017000
+*                                                                       00018000
+* ENTRY POINTS -                                                        00019000
+*                                                                       00020000
+*        DMKPAGIO - ENTERED TO START PAGING OPERATIONS                  00021000
+*                                                                       00022000
+* ENTRY POINTS - NON-EXECUTABLE                                         00023000
+*                                                                       00024000
+*        DMKPAGPS - COUNT OF PAGING SIO'S                               00025000
+*        DMKPAGCC - COUNT OF CALLS TO THIS ROUTINE                      00026000
+*        DMKPAGQ  - ANCHOR FOR LIST OF CPEXBLOKS FOR IN-TRANSIT PAGES   00027000
+*        DMKPAGIC - NUMBER OF PAGING SIO'S OVER WHICH TO MEASURE LOAD   00028000
+*        DMKPAGQR - MAINTAIN PAGE I/O FOR QUERY PAGING COMMAND          00029000
+*        DMKPAGST - START OF PAGE LOAD MEASUREMENT PERIOD               00030000
+*        DMKPAGSP - END OF PAGE LOAD MEASUREMENT PERIOD                 00031000
+*        DMKPAGLO - "DMKFRELO" MINUS LENGTH OF ONE PAGING IOBLOK        00032000
+*        DMKPAGHI - "DMKFREHI"                                          00033000
+*        DMKPAGSK - ANCHOR OF AVAILABLE PAGE I/O BLOCKS                 00034000
+*        DMKPAGDP - FLAG FOR SETTING PCI ON ALL 2305 REQUESTS           00035000
+*    DMKPAGWS - SAVE AREA FOR THE PAGE WAIT TIME FOR THE ATTACHED       00036000
+*               PROCESSOR                                               00037000
+*                                                                       00038000
+* ENTRY CONDITIONS -                                                    00039000
+*                                                                       00040000
+*        THE ANCHORS DMKPTRRQ AND DMKPTRWQ ARE POINTERS TO PUSH DOWN    00041000
+*        STACKS OF CPEXBLOKS FOR PAGES TO BE MOVED.  IN EACH CPEXBLOK   00042000
+*        CPEXR0+3 CONTAINS THE DASD OP-CODE FOR THE OPERATION, CPEXR5   00043000
+*        POINTS TO THE SWPTABLE ENTRY, CPEXR7 POINTS TO THE CORTABLE    00044000
+*        ENTRY, AND CPEXR11 POINTS TO THE OWNER'S VMBLOK.               00045000
+*        GPR12 = ADDRESS OF DMKPAGIO                                    00046000
+*                                                                       00047000
+* EXIT CONDITIONS -                                                     00048000
+*                                                                       00049000
+*        NONE                                                           00050000
+*                                                                       00051000
+* CALLS TO OTHER ROUTINES -                                             00052000
+*                                                                       00053000
+*        DMKFREE  - TO OBTAIN STORAGE FOR PAGING IOBLOKS                00054000
+*        DMKIOSQR - TO SCHEDULE THE I/O OPERATION ON THE REAL DEVICE    00055000
+*        DMKDSPCH - EXIT VIA GOTO TO WAIT FOR INTERRUPTS                00056000
+*        DMKOPRWT - WRITE ERROR MESSAGE DMKPAG415E TO OPERATOR          00057000
+*        DMKCVTBH - BINARY TO HEX CONVERT ROUTINE                       00058000
+*        DMKSTKCP - TO STACK FOR EXECUTION CPEXBLOKS QUEUED ON PAGES    00059000
+*        DMKFRET  - TO RETURN PAGING IOBLOK IN DYNAMIC PAGING AREA      00060000
+*        DMKSCNRD - FIND 'CUU' DEV ADDRESS GIVEN RDEVBLOK               00061000
+*                                                                       00062000
+* EXTERNAL REFERENCES -                                                 00063000
+*                                                                       00064000
+*        DMKSYSOW - ADDRESS OF THE SYSTEM OWNED VOLUME LIST             00065000
+*        DMKPTRRQ - PAGE READ REQUEST QUEUE                             00066000
+*        DMKPTRWQ - PAGE WRITE REQUEST QUEUE                            00067000
+*        DMKPTRFF - TOTAL NUMBER OF FLUSHED PAGES                       00068000
+*        DMKPTRSS - TOTAL NUMBER OF STOLEN PAGES                        00069000
+*        DMKSLC   - HIGH END OF V=R AREA (IF ANY) - OR 0                00070000
+*                                                                       00071000
+* TABLES / WORKAREAS -                                                  00072000
+*                                                                       00073000
+*        1. SWPTABLE - ENTRIES CONTAIN DASD ADDRESSES FOR PAGES         00074000
+*                                                                       00075000
+* REGISTER USAGE -                                                      00076000
+*                                                                       00077000
+*        GPR0  = SCRATCH                                                00078000
+*        GPR1  = CPEXBLOK BASE                                          00079000
+*        GPR2  = SCRATCH                                                00080000
+*        GPR3  = SCRATCH                                                00081000
+*        GPR4  = SCRATCH                                                00082000
+*        GPR5  = SWPTABLE ENTRY BASE                                    00083000
+*        GPR7  = CORTABLE ENTRY BASE                                    00084000
+*        GPR8  = RDEVBLOK BASE                                          00085000
+*        GPR10 = IOBLOK BASE                                            00086000
+*        GPR11 = VMBLOK BASE                                            00087000
+*        GPR12 = DMKPAG BASE                                            00088000
+*        GPR14 = EXTERNAL LINKAGE                                       00089000
+*        GPR15 = EXTERNAL LINKAGE                                       00090000
+*                                                                       00091000
+* NOTES -                                                               00092000
+*                                                                       00093000
+*        NONE                                                           00094000
+*                                                                       00095000
+* OPERATION -                                                           00096000
+*                                                                       00097000
+*     A. PROCESSING FOR CALL TO DMKPAGIO                                00098000
+*        1. IF A PREFORMATTED PAGING IOBLOK EXISTS, GET ITS ADDRESS AND 00099000
+*           SKIP TO STEP 2; OTHERWISE, CALL DMKFREE FOR FREE STORAGE    00100000
+*           AND FORMAT A SKELETON IOBLOK                                00101000
+*           A. EXAMPLE OF A PAGING IOBLOK                               00102000
+*                                                                       00103000
+*              PAGESK    X'07',PAGESEEK,CC,6   SEEK CCW                 00104000
+*              PAGESS    X'23',PAGESECT,CC,1   SET SECTOR CCW           00105000
+*              PAGESRCH  X'31',PAGESEEK+2,CC,5 SEARCH ID EQUAL CCW      00106000
+*              PAGESTIC  X'08',PAGESRCH        TIC *-8 (4 BYTES)        00107000
+*              PAGEIOB   X'00000000'  POINTER TO SLOT SORTED IOBLOK     00108000
+*                        X'06'/X'05',DATA ADDRESS,CC,4096 RD/WR CCWS    00109000
+*              PAGESNS   X'04'/X'08',0,SILI+SKIP,1 SENSE CCW OR         00110000
+*                        TIC CCW TO THE NEXT SORTED IOBLOK              00111000
+*                                                                       00112000
+*        2. INSERT THE CORRECT PAGE FRAME ADDRESS AND DASD OPCODE INTO  00113000
+*           THE PAGING IOBLOK AND INSERT THE DASD ADDRESS INFORMATION   00114000
+*           FROM THE SWPTABLE ENTRY INTO THE SEEK ARGUMENT FIELD        00115000
+*        3. USE THE VOLUME INDEX IN THE COMPRESSED DASD ADDRESS TO IN-  00116000
+*           DEX INTO THE SYSTEM OWNED VOLUME LIST, LOCATE THE DEVICE    00117000
+*           INDEX AND POINT TO THE RDEVBLOK FOR THE PAGING DEVICE       00118000
+*        4. SEARCH THE QUEUE OF IOBLOKS ON THE RDEVBLOK FOR A PAGING    00119000
+*           IOBLOK FOR  THE SAME CYLINDER AS THE NEW REQUEST; IF ONE    00120000
+*           IS FOUND, GO TO STEP 5, OTHERWISE GO TO STEP 7.             00121000
+*        5. IOBLOK SORT ROUTINES BY DEVICE TYPE:                        00122000
+*                                                                       00123000
+*        5A. 2314/2319 - THE IOBLOKS FOR 2314/2319 ARE SORTED BY        00124000
+*            SLOTS, USING SLOT VALUES 0 TO 7, REPRESENTING PAGES        00125000
+*            1 TO 8, 9 TO 16, 17 TO 24, AND 25 TO 32.                   00126000
+*                                                                       00127000
+*                                SLOTS                                  00128000
+*             0      1      2      3      4      5      6      7        00129000
+*                                                                       00130000
+*TRACK/PAGE  0/1    0/2    1/3    1/4    2/5    3/6    3/7    4/8       00131000
+*            5/9    5/10   6/11   6/12   7/13   8/14   8/15   9/16      00132000
+*           10/17  10/18  11/19  11/20  12/21  13/22  13/23  14/24      00133000
+*           15/25  15/26  16/27  16/28  17/29  18/30  18/31  19/32      00134000
+*                                                                       00135000
+*             A. IOBLOKS FOR RECORDS ON THE SAME TRACK ARE CHAINED      00136000
+*                TOGATHER BY THE TIC ADDRESS IN THE PREVIOUS IOBLOK     00137000
+*                POINTING TO THE SEARCH ID EQUAL CCW OF THE             00138000
+*                NEXT IOBLOK, BYPASSING THE SEEK AND NO-OP CCWS.        00139000
+*             B. ALL OTHER IOBLOKS ARE CHAINED TOGATHER BY THE TIC      00140000
+*                ADDRESS IN THE PREVIOUS IOBLOK POINTING TO THE         00141000
+*                SEEK CCW OF THE NEXT IOBLOK.                           00142000
+*                                                                       00143000
+         EJECT                                                          00144000
+*        5B. 2305 - THE IOBLOKS FOR THE 2305-1 AND 2305-2 ARE SORTED    00145000
+*            BY SLOTS (3 SLOTS PER REVOLUTION), AND DISREGARDING        00146000
+*            CYLINDER AND TRACK/HEAD ADDRESSES.                         00147000
+*                                                                       00148000
+*             NOTE: ON 2305-1 AND 2305-2 DRUM, YOU CAN INCLUDE A SEEK   00149000
+*                (OR SEEK HEAD) BETWEEN CONSECUTIVE CCWS IN A STRING,   00150000
+*                WITHOUT AN EXTRA REVOLUTION, WHETHER THE HEAD CHANGES  00151000
+*                OR NOT. A SET SECTOR CCW BETWEEN ADJACENT RECORDS OR   00152000
+*                SLOTS WILL CAUSE AN EXTRA REVOLUTION TO BE TAKEN.      00153000
+*                                                                       00154000
+*          TRACK/        SLOTS                                          00155000
+*          HEAD     1      2      3                                     00156000
+*                                                                       00157000
+*           0       1      2      3                                     00158000
+*           1       4      5      6                                     00159000
+*           2       7      8      9                                     00160000
+*           3      10     11     12                                     00161000
+*           4      13     14     15                                     00162000
+*           5      16     17     18                                     00163000
+*           6      19     20     21                                     00164000
+*           7      22     23     24                                     00165000
+*                 |------PAGES-----|                                    00166000
+*                                                                       00167000
+*                                                                       00168000
+*             A. IOBLOKS FOR RECORDS ON THE SAME TRACK ARE CHAINED      00169000
+*                TOGATHER BY THE TIC ADDRESS IN THE PREVIOUS IOBLOK     00170000
+*                POINTING TO THE SEARCH ID EQUAL CCW OF THE NEXT IOBLOK 00171000
+*                BYPASSING THE SEEK AND SET SECTOR CCWS (EX. PAGES      00172000
+*                22,23,24).                                             00173000
+*             B. IOBLOKS WHICH ARE ADJACENT (SLOT WISE) AND NOT ON THE  00174000
+*                SAME TRACK ARE CHAINED TOGATHER BY THE TIC IN          00175000
+*                THE PREVIOUS IOBLOK POINTING TO THE SET SECTOR CCW     00176000
+*                IN THE NEXT IOBLOK. THE SET SECTOR CCW IS REPLACED BY  00177000
+*                THE SEEK CCW. (EX. PAGES 1 5 9).                       00178000
+*             C. IOBLOKS FOR THE LAST RECORD OF ONE TRACK AND THE FIRST 00179000
+*                RECORD OF AN OTHER TRACK ARE CHAINED TOGATHER BY THE   00180000
+*                TIC ADDRESS IN THE PREVIOUS IOBLOK POINTING TO THE     00181000
+*                SET SECTOR CCW IN THE NEXT IOBLOK.  THE SET SECTOR     00182000
+*                CCW IS REPLACED BY THE SEEK CCW. (EX. PAGE 3 TO 10).   00183000
+*             D. ALL OTHER IOBLOKS ARE CHAINED TOGATHER BY THE TIC      00184000
+*                ADDRESS OF PREVIOUS IOBLOK POINTING TO THE SEEK CCW    00185000
+*                OF THE NEXT IOBLOK, WITH THE SET SECTOR CCW            00186000
+*                FOLLOWING THE SEEK CCW.                                00187000
+*                (EX. PAGE 1 TO 3).                                     00188000
+*                                                                       00189000
+*             E. EXAMPLE OF CALLS TO DMKPAG FOR PAGE IO.                00190000
+*                PAGES - 57,24,20,16,8,5,3,6,43,1                       00191000
+*                SORTED BY DMKPAG --                                    00192000
+*                PAGES - 16,20,57,43,8,24,1,5,3,6                       00193000
+*                                                                       00194000
+         EJECT                                                          00195000
+*        5C. 3330 - THE IOBLOKS FOR THE 3330 AND 3330-11 ARE SORTED     00196000
+*            BY TRACK.                                                  00197000
+*                                                                       00198000
+*             NOTE: ON A 3330-1 AND 3330-11 DISK, YOU CAN NOT INCLUDE   00199000
+*                A SEEK (OR SEEK HEAD) BETWEEN THE CCWS IN A STRING     00200000
+*                (EVEN THOUGH THE HEAD NUMBER DOSEN'T CHANGE) WITHOUT   00201000
+*                IT COSTING AN EXTRA REVOLUTION. A DUMMY RECORD OF 110  00202000
+*                BYTES IS REQUIRED TO ALLOW SEEKS BETWEEN CCWS, BUT     00203000
+*                HARDWARE SPEC. LIMITS THE DUMMY RECORD SIZE TO 101     00204000
+*                BYTES.  CP DMKFMT PROGRAM FORMATS CP DISK WITH 50      00205000
+*                BYTE DUMMY RECORDS.                                    00206000
+*                                                                       00207000
+*          TRACK/    TRK RCD NUMBER      TRACK/   TRK RCD NUMBER        00208000
+*          HEAD     1      2      3      HEAD    1      2      3        00209000
+*                                                                       00210000
+*           0       1      2      3       10     31     32     33       00211000
+*           1       4      5      6       11     34     35     36       00212000
+*           2       7      8      9       12     37     38     39       00213000
+*           3       10     11     12      13     40     41     42       00214000
+*           4       13     14     15      14     43     44     45       00215000
+*           5       16     17     18      15     46     47     48       00216000
+*           6       19     20     21      16     49     50     51       00217000
+*           7       22     23     24      17     52     53     54       00218000
+*           8       25     26     27      18     55     56     57       00219000
+*           9       28     29     30            |------PAGES-----|      00220000
+*                  |------PAGES-----|                                   00221000
+*                                                                       00222000
+*             A. IOBLOKS FOR RECORDS ON THE SAME TRACK ARE CHAINED      00223000
+*                TOGATHER BY THE TIC ADDRESS IN THE PREVIOUS IOBLOK     00224000
+*                POINTING TO THE SEARCH ID EQUAL CCW OF THE NEXT IOBLOK 00225000
+*                BYPASSING THE SEEK AND SET SECTOR CCWS (EX. PAGES      00226000
+*                22 23 24).                                             00227000
+*             B. IOBLOKS FOR THE LAST RECORD OF ONE TRACK AND THE FIRST 00228000
+*                RECORD OF AN OTHER TRACK ARE CHAINED TOGATHER BY THE   00229000
+*                TIC ADDRESS IN THE PREVIOUS IOBLOK POINTING TO THE     00230000
+*                SET SECTOR CCW IN THE NEXT IOBLOK.  THE SET SECTOR     00231000
+*                CCW IS REPLACED BY THE SEEK CCW. (EX. PAGE 3 TO 10).   00232000
+*             C. ALL OTHER IOBLOKS ARE CHAINED TOGATHER BY THE TIC      00233000
+*                ADDRESS OF PREVIOUS IOBLOK POINTING TO THE SEEK CCW    00234000
+*                OF THE NEXT IOBLOK, WITH THE SET SECTOR CCW            00235000
+*                FOLLOWING THE SEEK CCW.                                00236000
+*                (EX. PAGE 1 TO 3).                                     00237000
+*                                                                       00238000
+*             D. EXAMPLE OF CALLS TO DMKPAG FOR PAGE IO.                00239000
+*                PAGES - 51,9,4,6,18,49,17,16,50,8,7                    00240000
+*                SORTED BY DMKPAG --                                    00241000
+*                PAGES - 49,50,51,7,8,9,4,6,16,17,18                    00242000
+*                                                                       00243000
+         EJECT                                                          00244000
+*        5D. 3340 - THE IOBLOKS FOR 3340 ARE SORTED BY                  00245000
+*            LOGICAL TRACKS (2 RECORDS PER LOGICAL TRACK) AND           00246000
+*            IN AN EVEN/ODD TRACK SEQUENCE.                             00247000
+*                                                                       00248000
+*             NOTE:  ON 3340 DISK, YOU CAN NOT INCLUDE A SEEK (OR SEEK  00249000
+*                HEAD) BETWEEN THE CCWS IN A STRING (EVEN THOUGH THE    00250000
+*                HEAD NUMBER DOESN'T CHANGE) WITHOUT IT COSTING AN      00251000
+*                EXTRA REVOLUTION, WITH EXCEPTION OF CCWS CROSSING      00252000
+*                INDEX POINT (HOME ADDRESS AND RECORD ZERO).            00253000
+*                                                                       00254000
+*                         | PAGE OR RECORD NUMBER  |                    00255000
+*        TRACK OR HEAD    |EVEN TRACKS | ODD TRACKS|  TRACK OR HEAD     00256000
+*              0          |  1  |  2   |  3  |  4  |        1           00257000
+*              2          |  5  |  6   |  7  |  8  |        3           00258000
+*              4          |  9  |  10  |  11 |  12 |        5           00259000
+*              6          |  13 |  14  |  15 |  16 |        7           00260000
+*              8          |  17 |  18  |  19 |  20 |        9           00261000
+*              10         |  21 |  22  |  23 |  24 |        11          00262000
+*                                                                       00263000
+*        SECTOR VALUES    |  2  |  32  |  2  |  32 |                    00264000
+*                         |LOGICAL TRK |LOGICAL TRK|                    00265000
+*                         |   ONE PHYSICAL TRACK   |                    00266000
+*                                                                       00267000
+*             IOBLOKS ARE CHAINED TOGATHER WITH TICS IN THE             00268000
+*             FOLLOWING WAY:                                            00269000
+*              A. IOBLOKS FOR RECORDS ON THE SAME LOGICAL TRACK         00270000
+*                 WILL BE CHAINED TOGATHER BY THE TIC ADDRESS IN THE    00271000
+*                 PREVIOUS IOBLOK POINTING TO THE SEARCH ID EQUAL       00272000
+*                 COMMAND OF THE NEXT IOBLOK, BYPASSING THE SEEK        00273000
+*                 AND SET SECTOR COMMANDS. (EX. PAGES - 1 2 7 8 9 10)   00274000
+*              B. IOBLOKS FOR THE LAST RECORD OF ONE EVEN/ODD TRACK     00275000
+*                 AND THE FIRST RECORD OF ANOTHER ODD/EVEN TRACK ARE    00276000
+*                 CHAINED TOGATHER BY THE TIC ADDRESS IN THE FIRST      00277000
+*                 IOBLOK POINTING TO THE SET SECTOR COMMAND IN THE      00278000
+*                 SECOND IOBLOK, AND THE SET SECTOR COMMAND OF THE      00279000
+*                 SECOND IOBLOK IS REPLACED BY A SEEK COMMAND.          00280000
+*                 (EXAMPLE - PAGE 2 TO 7   PAGE 20 TO 9).               00281000
+*              C. ALL OTHER IOBLOKS ARE CHAINED TOGATHER BY THE         00282000
+*                 TIC ADDRESS IN THE PREVIOUS IOBLOK POINTING TO THE    00283000
+*                 SEEK COMMAND OF THE NEXT IOBLOK, WITH THE SET SECTOR  00284000
+*                 COMMAND FOLLOWING THE SEEK COMMAND.                   00285000
+*                 (EX. PAGES - 1 7 9 15 18 21)                          00286000
+*              D. IOBLOKS FOR EVEN/ODD CYLINDERS ON THE 3340 70MB       00287000
+*                 DATA MODULE ARE TREATED AS SAME CYLINDER FOR THE SORT 00288000
+*                 (EXAMPLE-(0,1),(2,3),(4,5),(6,7),(694,695),(696,697)) 00289000
+*              E. EXAMPLE OF CALLS TO DMKPAGIO FOR PAGE IO.             00290000
+*                 PAGES - 2 11 16 15 9 17 12 10 1 (6 REVOLUTIONS)       00291000
+*                 SORTED BY DMKPAG --                                   00292000
+*                 PAGES - 1 2 11 12 9 10 15 16 17 (2.24 REVOLUTIONS)    00293000
+         EJECT                                                          00294000
+*        6. FOR REQUESTS FOR THE SAME SLOT, SORT BY REQUEST             00295000
+*           PRIORITY.                                                   00296000
+*                                                                       00297000
+*             REQUEST         PRIORITY                                  00298000
+*           Q1, READ             0                                      00299000
+*           Q2, READ             2                                      00300000
+*           Q1, WRITE            4                                      00301000
+*           Q2, WRITE            6                                      00302000
+*           E1, READ             8                                      00303000
+*           ^E1, READ            10                                     00304000
+*           E1, WRITE            12                                     00305000
+*           ^E1, WRITE           14                                     00306000
+*                                                                       00307000
+*        6A. CONTINUE WITH STEP 8.                                      00308000
+*        7. CALL DMKIOSQR TO INITIATE THE I/O                           00309000
+*        8. DECREMENT AND TEST THE PAGEIO COUNT; IF IT IS ZERO, BAL TO  00310000
+*           THE OVERHEAD CALCULATION SUBROUTINE DESCRIBED BELOW IN      00311000
+*           SECTION C.                                                  00312000
+*        9. GET THE NEXT CPEXBLOK ON THE QUEUE. IF ONE EXISTS, RESTART  00313000
+*           WITH STEP 1; OTHERWISE, EXIT VIA A GOTO TO DISPATCH         00314000
+*                                                                       00315000
+*        5E. 3350 - THE IOBLOKS FOR THE 3350  ARE SORTED BY SLOTS       00316000
+*            (4 SLOTS PER REVOLUTION) WITHIN A CYLINDER.                00317000
+*                                                                       00318000
+*             NOTE: ON 3350 DISK, YOU CAN INCLUDE A SEEK HEAD COMMAND   00319000
+*                BETWEEN CONSECUTIVE CCWS IN A STRING, WITHOUT THE LOSS 00320000
+*                OF A DISK REVOLUTION WHEN A HEAD SWITCH OCCURS.        00321000
+*                                                                       00322000
+*          TRACK/         SLOTS           TRACK/       SLOTS            00323000
+*          HEAD    1     2     3     4   HEAD    1     2     3     4    00324000
+*                                                                       00325000
+*            0     1     2     3     4    15    61    62    63    64    00326000
+*            1     5     6     7     8    16    65    66    67    68    00327000
+*            2     9    10    11    12    17    69    70    71    72    00328000
+*            3    13    14    15    16    18    73    74    75    76    00329000
+*            4    17    18    19    20    19    77    78    79    80    00330000
+*            5    21    22    23    24    20    81    82    83    84    00331000
+*            6    25    26    27    28    21    85    86    87    88    00332000
+*            7    29    30    31    32    22    89    90    91    92    00333000
+*            8    33    34    35    36    23    93    94    95    96    00334000
+*            9    37    38    39    40    24    97    98    99   100    00335000
+*           10    41    42    43    44    25   101   102   103   104    00336000
+*           11    45    46    47    48    26   105   106   107   108    00337000
+*           12    49    50    51    52    27   109   110   111   112    00338000
+*           13    53    54    55    56    28   113   114   115   116    00339000
+*           14    57    58    59    60    29   117   118   119   120    00340000
+*                 |-------PAGES------|         |-------PAGES-------|    00341000
+*                                                                       00342000
+*                                                                       00343000
+*             A. IOBLOKS FOR RECORDS ON THE SAME TRACK ARE CHAINED      00344000
+*                TOGETHER BY THE TIC ADDRESS IN THE PREVIOUS IOBLOK     00345000
+*                POINTING TO THE SEARCH ID EQUAL CCW OF THE NEXT IOBLOK 00346000
+*                BYPASSING THE SEEK AND SET SECTOR CCWS (EX. PAGES      00347000
+*                33,34,36).                                             00348000
+*             B. IOBLOKS WHICH ARE ADJACENT (SLOT WISE) AND NOT ON THE  00349000
+*                SAME TRACK ARE CHAINED TOGETHER BY THE TIC IN          00350000
+*                THE PREVIOUS IOBLOK POINTING TO THE SET SECTOR CCW     00351000
+*                IN THE NEXT IOBLOK. THE SET SECTOR CCW IS REPLACED BY  00352000
+*                THE SEEK CCW. (EX. PAGES 5,46,115).                    00353000
+*             C. IOBLOKS FOR THE LAST RECORD OF ONE TRACK AND THE FIRST 00354000
+*                RECORD OF AN OTHER TRACK ARE CHAINED TOGETHER BY THE   00355000
+*                TIC ADDRESS IN THE PREVIOUS IOBLOK POINTING TO THE     00356000
+*                SET SECTOR CCW IN THE NEXT IOBLOK.  THE SET SECTOR     00357000
+*                CCW IS REPLACED BY THE SEEK CCW. (EX. PAGE 72 TO 101). 00358000
+*             D. ALL OTHER IOBLOKS ARE CHAINED TOGETHER BY THE TIC      00359000
+*                ADDRESS OF PREVIOUS IOBLOK POINTING TO THE SEEK CCW    00360000
+*                OF THE NEXT IOBLOK, WITH THE SET SECTOR CCW            00361000
+*                FOLLOWING THE SEEK CCW.                                00362000
+*                (EX. PAGE 1 TO 3).                                     00363000
+*                                                                       00364000
+*             E. EXAMPLE OF CALLS TO DMKPAG FOR PAGE IO.                00365000
+*                PAGES - 103,14,40,88,5,50,3,11,70,21                   00366000
+*                SORTED BY DMKPAG --                                    00367000
+*                PAGES - 5,14,103,40,21,50,3,88,70,11                   00368000
+*                                                                       00369000
+         SPACE 1                                                        00370000
+* ERROR MESSAGE -                                                       00371000
+*                                                                       00372000
+*        DMKPAG415E CONTINUOUS PAGING ERRORS FROM DASD XXX              00373000
+*                                                                       00374000
+*              THE ABOVE MESSAGE WILL BE ISSUED IF 5 CONSECTIVE         00375000
+*              ERRORS HAVE OCCURED ON A PAGING DEVICE. THE SYSTEM       00376000
+*              WILL THEN ENTER A DISABLED WAIT STATE. (CODE 00F)        00377000
+*                                                                       00378000
+*.                                                                      00379000
+         EJECT                                                          00380000
+         COPY  OPTIONS                                                  00381000
+         COPY  LOCAL          OPTIONS                          @V306638 00382000
+         SPACE 2                                                        00383000
+DMKPAG   CSECT                                                          00384000
+         SPACE 3                                                        00385000
+         EXTRN DMKPTRRQ,DMKPTRWQ                                        00386000
+         EXTRN DMKIOSQR                                                 00387000
+         EXTRN DMKSTKCP                                                 00388000
+         EXTRN DMKSTKMP                                        @V407594 00389000
+         EXTRN DMKSTKOP                                        @V407594 00390000
+         EXTRN DMKSTKIO                                        @V408246 00391000
+         EXTRN DMKCVTBH                                                 00392000
+         EXTRN DMKSCNRD                                        @VA03787 00393000
+         EXTRN DMKSYSOW                                                 00394000
+         EXTRN DMKMCHST                                        @V407510 00395000
+         EXTRN DMKCVTAB                                        @VA04301 00396000
+         EXTRN DMKPTRSS                                        @V408246 00397000
+         EXTRN DMKSCNRU                                        @VA07455 00398000
+         ENTRY DMKPAGSK                                        @V408246 00399000
+         ENTRY DMKPAGDP                                        @V408246 00400000
+         ENTRY DMKPAGQ                                                  00401000
+         ENTRY DMKPAGIO                                                 00402000
+         ENTRY DMKPAGQR                                        @VA08859 00403000
+         ENTRY DMKPAGST                                                 00404000
+         ENTRY DMKPAGPS,DMKPAGCC                                        00405000
+         ENTRY DMKPAGWS                                        @VMH0012 00406000
+         ENTRY DMKPAGLO                                                 00407000
+         ENTRY DMKPAGHI                                                 00408000
+         EJECT                                                          00409000
+         USING PSA,R0                                                   00410000
+         USING CPEXBLOK,R1                                              00411000
+         USING SWPFLAG,R5                                               00412000
+         USING CORTABLE,R7                                              00413000
+         USING RDEVBLOK,R8                                              00414000
+         USING IOBLOK,R10                                               00415000
+         USING VMBLOK,R11                                               00416000
+         SPACE                                                          00417000
+         USING *,R12                                                    00418000
+         SPACE                                                          00419000
+DMKPAGIO EQU   *              ENTERED VIA GOTO                          00420000
+         AIF   (NOT &AP).NOAP1                                 **AIF*** 00421000
+         TM    APSTAT1,APUOPER  RUNNING AS AP                  @V407594 00422000
+         BZ    NOUNLK         NO                               @V407594 00423000
+         CL    R11,LASTUSER   IS THIS LASTUSER                 @V407594 00424000
+         BE    NOUNLK         YES, DO NOT UNLOCK               @V407594 00425000
+         CLC   VMLOCK+2(2),LPUADDR  LOCKED BY THIS PROCESSOR   @V407594 00426000
+         BNE   NOUNLK         NO, BYPASS UNLOCK                @V407594 00427000
+         LR    R1,R11         VMBLOK TO R1 FOR UNLOCK          @V407594 00428000
+         LOCK  RELEASE,TYPE=VMBLOK  UNLOCK R11 AT ENTRY        @V407594 00429000
+NOUNLK   DS    0H                                              @V407594 00430000
+.NOAP1   ANOP                                                  **ANOP** 00431000
+         L     R13,=A(DMKPTRRQ)    POINT TO Q OF PAGE READ REQUESTS     00432000
+GETQ     L     R1,PREFIXA     ACCESS ABSOLUTE PSA              @V407594 00433000
+         CLI   XTNDLOCK-PSA(R1),0  SYSTEM EXTENDING            @V407594 00434000
+         BE    CKQ            NO -- PROCEED AS USUAL                    00435000
+         L     R13,=A(DMKPTRWQ)    POINT TO WRITE QUEUE                 00436000
+         L     R1,0(,R13)     GET 1ST REQUEST                           00437000
+         LTR   R1,R1          ANY ??                                    00438000
+         BNP   EXITX          NO -- ONE COMING SOON, HOPEFULLY          00439000
+         B     DOIO           YES -- START IT OUT --                    00440000
+         SPACE                                                          00441000
+CKQ      L     R1,0(,R13)     GET NEXT REQUEST                          00442000
+         LTR   R1,R1          ANYTHING THERE                            00443000
+         BP    DOIO           YES -- SET UP FOR I/O                     00444000
+         BM    EXITX          END OF THE LINE -- EXIT NOW               00445000
+         LA    R13,4(,R13)    FINISHED WITH THIS QUEUE - TEST NEXT      00446000
+         B     GETQ           ....                                      00447000
+         SPACE                                                          00448000
+DOIO     EQU   *              START UP I/O FOR THIS PAGE                00449000
+         L     R2,DMKPAGCC    COUNT PAGE I/O REQUESTS                   00450000
+         AL    R2,F1          ...                                       00451000
+         ST    R2,DMKPAGCC    ..                                        00452000
+         L     R0,CPEXFPNT    POINT TO NEXT QUEUED REQUEST              00453000
+         ST    R0,0(,R13)     AND MAKE IT 1ST IN LINE                   00454000
+         CHARGE SWITCH,CPEXR11  CHARGE I/O TO CORRECT USER     @V407594 00455000
+         L     R2,DMKPAGQ     POINT TO FIRST ENTRY IN IN-TRANSIT QUEUE  00456000
+         LA    R3,DMKPAGQ     POINT TO QUEUE ANCHOR                     00457000
+         ST    R1,DMKPAGQ     MAKE NEW ENTRY FIRST ON QUEUE             00458000
+         ST    R1,CPEXBPNT-CPEXBLOK(,R2)  UPDATE BACKCHAIN OF OLD 1ST E 00459000
+         STM   R2,R3,CPEXFPNT PLACE NEW ENTRY IN CHAIN                  00460000
+         SLR   R0,R0          CLEAR OUT                                 00461000
+         ST    R0,CPEXMISC    RELATED TASK CHAIN                        00462000
+         L     R10,IOBSTACK   GET A PREFORMATTED IOBLOK                 00463000
+         LTR   R10,R10        HAVE ANY ??                               00464000
+         BNP   GETIOBLK       NO -- MAKE UP A NEW ONE          @V2A2029 00465000
+         LM    R5,R6,MODELSS  GET MODEL SET SECTOR CCW         @V2A2029 00466000
+         ALR   R5,R10         ADJUST DATA ADDRESS              @V2A2029 00467000
+         STM   R5,R6,PAGESS   AND STORE IN PAGE IOBLOK         @V2A2029 00468000
+         B     SETRWCCW       GO SET UP READ/WRITE CCW         @V2A2029 00469000
+         DROP  R10            NO -- MAKE UP A NEW ONE                   00470000
+         EJECT                                                          00471000
+GETIOBLK LR    R10,R1         SAVE ADDRESS OF CPEXBLOK         @V2A2029 00472000
+         LA    R0,PAGESIZE    FIRST, GET SOME                           00473000
+         CALL  DMKFREE        FREE STORAGE                              00474000
+         LR    R14,R1         AND USE R14 FOR TEMPORARY                 00475000
+         USING IOBLOK,R14     ADDRESSABILITY                            00476000
+         LR    R15,R10        SAVE ADDRESS OF CPEXBLOK ..               00477000
+         XC    IOBLOK(IOBSIZE*8),IOBLOK CLEAR ENTIRE IOBLOK             00478000
+         LA    R4,WAITPAGE    GET ADDRESS FOR IOBIRA                    00479000
+         LA    R5,PAGECCWS    GET ADDRESS OF CHANNEL PROGRAM FOR IOBCAW 00480000
+         ST    R4,IOBIRA      SET UP IRA RETURN ADDRESS                 00481000
+         ST    R5,IOBCAW      STORE CAW ADDRESS FOR PAGING CHAN. PROG.  00482000
+         ST    R14,IOBLINK    IN CASE NEW IOB GETS CHAINED 1ST @V407438 00483000
+         SPACE                                                          00484000
+         LM    R0,R11,MODELCCW     GET PROTOTYPE PAGING CCWS            00485000
+         ALR   R0,R14         ADJUST ADDRESS IN SEEK                    00486000
+         ALR   R2,R14         IN SET SECTOR                             00487000
+         ALR   R4,R14         IN SEARCH                                 00488000
+         ALR   R6,R14         AND IN TIC                                00489000
+         STM   R0,R11,PAGECCWS     AND SAVE IN IOBLOK EXTENSION         00490000
+         LR    R1,R15         RESTORE ADDRESSABILITY FOR CPEXBLOK       00491000
+         L     R11,CPEXR11    AND FOR USER'S VMBLOK                     00492000
+         DROP  R14            ABANDON TEMPORARY ADDRESSABILITY          00493000
+         LR    R10,R14        AND REESTABLISH STANDARD                  00494000
+         USING IOBLOK,R10                                               00495000
+         EJECT                                                          00496000
+SETRWCCW EQU   *  HERE DIRECTLY TO SET UP CCW IN FORMATTED IOBLOK       00497000
+         L     R5,CPEXR5      GET ADDRESS OF SWPTABLE ENTRY             00498000
+         L     R7,CPEXR7      AND OF CORTABLE ENTRY                     00499000
+         OI    SWPFLAG,SWPTRANS    FLAG VIRTUAL PAGE IN TRANSIT         00500000
+         L     R0,IOBMISC     GET NEXT IOBLOK IN STACK                  00501000
+         ST    R0,IOBSTACK    AND MAKE IT FIRST                         00502000
+         ST    R1,IOBMISC     SAVE POINTER TO TRANSIT CPEXBLOK          00503000
+         SL    R7,ACORETBL    GET PAGE FRAME ADDRESS/256                00504000
+         SLL   R7,8           GET PAGE FRAME ADDRESS                    00505000
+         ICM   R7,B'1000',CPEXR0+3 GET DASD OP-CODE FROM SAVED GPR0     00506000
+         ST    R7,PAGERW      AND SET 1ST HALF OF R/W CCW               00507000
+         MVI   PAGERW+4,CC    MAKE SURE FLAGS ARE CORRECT      @V408246 00508000
+         MVC   IOBUSER,ASYSVM CHARGE IOB UNSTACK TO SYSTEM     @VA07397 00509000
+         SLR   R0,R0          CLEAR OUT                                 00510000
+         ST    R0,IOBRADD     ADDRESS, FLAGS AND STATUS                 00511000
+         OI    IOBFLAG,IOBPAG+IOBCP     FLAG AS PAGING IOBLOK           00512000
+         ST    R0,IOBCYL      CLEAR CYLINDER AND RETRY COUNT            00513000
+         SLR   R8,R8          CLEAR DEVICE REGISTER            @V408246 00514000
+         IC    R8,SWPCODE     GET VOLUME CODE                  @V408246 00515000
+         SLL   R8,3           CONVERT TO INDEX FOR OWNDLIST    @V408246 00516000
+         AL    R8,=A(DMKSYSOW) INDEX TO CORRECT ENTRY          @V408246 00517000
+         LH    R8,OWNDRDEV-OWNDLIST(,R8) GET INDEX TO RDEVBLOK @V408246 00518000
+         LTR   R8,R8          IS IT STILL THERE?               @V408246 00519000
+         BNM   CHKWRIT        YES                              @V408246 00520000
+         MVI   IOBSTAT,IOBFATAL+IOBCC3 NO, FLAG FATAL I/O      @V408246 00521000
+         OI    SWPFLAG,SWPRECMP BYPASS SYSTEM FALURE           @V408246 00522000
+         SR    R0,R0                                           @V408246 00523000
+         ST    R0,PAGEIOB     CLEAR CHAINING FIELD             @V408246 00524000
+         LR    R1,R10         GET IOBLOK POINTER               @V408246 00525000
+         CALL  DMKSTKIO       AND STACK BLOCK                  @V408246 00526000
+         B     GETQ           LOOK FOR MORE REQUESTS           @V408246 00527000
+         SPACE 3                                                        00528000
+CHKWRIT  DS    0H                                              @V408246 00529000
+         MVI   PAGEPRI,0      INITIALIZE PRIORITY              @V408246 00530000
+         CLI   PAGERW,X'05'   PAGE WRITE ??                             00531000
+         BNE   GETRDEV        NO --                                     00532000
+         L     R3,PAGESOUT    COUNT PENDING SWAPS                       00533000
+         LA    R3,1(,R3)      ...                                       00534000
+         ST    R3,PAGESOUT    ...                                       00535000
+         OI    PAGEPRI,4      SET-UP WRITE PRIORITY            @V408246 00536000
+         SPACE                                                          00537000
+GETRDEV  EQU   *                                                        00538000
+         TM    VMQLEVEL,VMQ1  FOR Q1?                          @V408246 00539000
+         BO    *+8            YES                              @V408246 00540000
+         OI    PAGEPRI,2      NO, ADD IN Q2 PRIORITY           @V408246 00541000
+         TM    VMDSTAT,VMINQ  IN-Q?                            @V408246 00542000
+         BO    *+8            YES                              @V408246 00543000
+         OI    PAGEPRI,8      NO, ADD IN NOT IN-Q PRIORITY     @V408246 00544000
+         SLL   R8,3(0)        CONVERT TO BYTE INDEX            @V200820 00545000
+         AL    R8,ARIODV      POINT TO CORRECT RDEVBLOK                 00546000
+         AIF   (NOT &AP).NOAP2                                 **AIF*** 00547000
+         LA    R1,RDEVIOBL    POINT TO RDEV LOCK WORD          @V407594 00548000
+         LOCK  OBTAIN,TYPE=PRIVATE,SPIN=YES  LOCK RDEVBLOK     @V407594 00549000
+.NOAP2   ANOP                                                  **ANOP** 00550000
+         SPACE                                                          00551000
+         SR    R3,R3          CLEAR INDEX REGISTER                      00552000
+         IC    R3,SWPDPAGE    AND GET PAGE NUMBER                       00553000
+         SR    R2,R2          CLEAR FOR DIVIDE                          00554000
+         BCTR  R3,0           AND GET PAGE NUMBER-1                     00555000
+         CLI   RDEVTYPE,TYP2314 PAGING ON 2314/2319 ?          @VM01167 00556000
+         BE    PAG2314        YES --                                    00557000
+         SPACE                                                          00558000
+         CLI   RDEVTYPE,TYP3340 PAGING ON 3340 ?               @VM01167 00559000
+         BE    PAG3340        YES - BRANCH                     @V2A2029 00560000
+         SPACE                                                          00561000
+         CLI   RDEVTYPE,TYP3350 PAGING ON 3350 ?               @V304498 00562000
+         BE    PAG3350        YES, CALCULATE HEAD NUMBER       @V304498 00563000
+         SPACE                1                                         00564000
+         D     R2,F3          CALCULATE HEAD NUMBER                     00565000
+         LA    R1,SECT3330    SECTOR TABLE FOR 3330            @VM01167 00566000
+         CLI   RDEVTYPE,TYP2305    IS IT A 2305                         00567000
+         BNE   GETSECTR       NO -- GO CALCULATE SECTOR                 00568000
+         LA    R1,SEC23052    SECTOR TABLE FOR 2305 M2         @VM01167 00569000
+         CLI   RDEVMDL,MODEL1      2305 MODEL 1 ??                      00570000
+         BNE   GETSECTR       NO -- TO CALCULATE SECTOR        @VM01167 00571000
+         LA    R1,SEC23051    SECTOR TABLE FOR 2305 M1         @VM01167 00572000
+         B     GETSECTR       GO SET SECTOR                    @V2A2029 00573000
+         SPACE                                                          00574000
+PAG3340  D     R2,F2          CALCULATE HEAD NUMBER            @V2A2029 00575000
+         LA    R1,SECT3340    SECTOR TABLE FOR 3340            @VM01167 00576000
+         LA    R14,ONE        SLOT NUMBER FOR 1ST EVEN HEAD    @VM01167 00577000
+         TM    SWPDPAGE,BIT6+BIT7 IS THIS A EVEN HEAD NUMBER ? @VM01167 00578000
+         BM    SORTSLOT       YES - LEAVE AS ONE               @VM01167 00579000
+         AR    R14,R14        SET SLOT NUMBER FOR 1ST ODD HEAD @V2A2029 00580000
+SORTSLOT STC   R14,PAGESRCD   AND SAVE FOR SORTING             @VM01167 00581000
+         B     GETSECTV       GET SECTOR VALUE                 @VM01167 00582000
+         SPACE                                                          00583000
+PAG3350  D     R2,F4          CALCULATE HEAD NUMBER            @V304498 00584000
+         LA    R1,SECT3350    SECTOR TABLE 3350                @V304498 00585000
+         SPACE                1                                         00586000
+GETSECTR LA    R9,1(,R2)      GET SLOT NUMBER                  @VA04482 00587000
+         STC   R9,PAGESRCD    AND SAVE FOR SORTING             @VM01167 00588000
+GETSECTV SLL   R3,16          HEAD NUMBER TO HIGH BYTES        @VM01167 00589000
+         IC    R3,0(R2,R1)    GET SECTOR VALUE FOR THIS RECORD @VM01167 00590000
+         ICM   R3,B'0010',SWPDPAGE INSERT RECORD NUMBER                 00591000
+         B     SETADDR        GO JOIN COMMON CODE BELOW                 00592000
+         SPACE                                                          00593000
+PAG2314  EQU   *  HERE FOR 2314 CHANNEL PROGRAM                         00594000
+         MVI   PAGESS,NOPCODE NOP THE SET SECTOR COMMAND       @VM01167 00595000
+         LA    R1,HDTABLE(R3) POINT TO HEAD NUMBER FOR PAGE             00596000
+         D     R2,F8          GET SLOT NUMBER (REMAINDER IN GPR 2)      00597000
+         LR    R3,R2          SAVE IN GPR3                              00598000
+         ICM   R3,B'0100',0(R1)    INSERT HEAD NUMBER IN BYTE 1         00599000
+         ICM   R3,B'0010',SWPDPAGE INSERT RECORD NUMBER IN BYTE 2       00600000
+         SPACE                                                          00601000
+SETADDR  LH    R2,SWPCYL      GET CYLINDER NUMBER                       00602000
+         STM   R2,R3,PAGESEEK STORE SEEK ADDRESS IN TASK                00603000
+         STH   R2,IOBCYL      SET CYLINDER IN IOBLOK                    00604000
+         CLI   RDEVTYPE,TYP3340 PAGING ON 3340 ?               @VM01167 00605000
+         BNE   CK2305         NO, CHECK 2305                   @VM01167 00606000
+         TM    RDEVFTR,FTR70MB 2 LOGICAL CYLINDERS/PHYSICAL ?  @VM01167 00607000
+         BZ    SLOTSORT       NO, MUST BE 35MB                 @VM01167 00608000
+         NI    IOBCYL+1,X'FF'-BIT7 FORCE SORT ON EVEN CYLINDERS@VM01167 00609000
+         B     SLOTSORT       GO LOCATE IOBLOK FOR THIS CYL    @VM01167 00610000
+CK2305   CLI   RDEVTYPE,TYP2305 PAGING ON 2305?                @VA03430 00611000
+         BNE   SLOTSORT       NO -- DO CYLINDER ORIENTED SLOT SORT      00612000
+         SLR   R1,R1          FORCE CYLINDER 0                          00613000
+         STH   R1,IOBCYL      ...                                       00614000
+         SPACE                                                          00615000
+SLOTSORT LR    R2,R8          SAVE ADDRESS OF RDEVBLOK                  00616000
+         LH    R1,IOBCYL      GET CYLINDER NUMBER FOR COMPARE HALF      00617000
+         SPACE                                                          00618000
+FINDIOB  L     R3,IOBFPNT-IOBLOK(,R2)   LOOK FOR AN IOBLOK FOR SAME CYL 00619000
+         CR    R3,R8          ANY MORE ON CHAIN                         00620000
+         BE    QUEUEIO        NO -- NEED A SEPARATE SIO                 00621000
+         TM    IOBFLAG-IOBLOK(R3),IOBPAG     PAGING I/O TASK ??         00622000
+         BZ    FINDIOB2       NO -- KEEP LOOKING                        00623000
+         TM    IOBSTAT-IOBLOK(R3),IOBMINI IS THIS A MINI IOB?  @V407438 00624000
+         BO    FINDIOB2       YES, THEN SKIP IT TOO...         @V407438 00625000
+         CH    R1,IOBCYL-IOBLOK(,R3)    IO FOR SAME CYLINDER ??         00626000
+         BE    SORTIT         YES -- GO DO SLOT SORTING                 00627000
+         BL    QUEUEIO        NO -- LOOK NO FARTHER                     00628000
+FINDIOB2 LR    R2,R3          SAVE BACK CHAIN POINTER                   00629000
+         B     FINDIOB        AND KEEP LOOKING                          00630000
+         SPACE                                                          00631000
+SORTIT   SR    R2,R2          CLEAR BACKCHAIN POINTER                   00632000
+         SR    R6,R6          CLEAR OLD BACK POINTER           @V408246 00633000
+         CLI   RDEVTYPE,TYP2305 2305 DEVICE TYPE ?             @VM01167 00634000
+         BE    PAGE2305       YES -                            @VM01167 00635000
+         CLI   RDEVTYPE,TYP3350 3350 DEVICE ?                  @V304498 00636000
+         BE    SORT3350       YES, SLOT SORT WITHIN CYLINDER(S)@V304498 00637000
+         CLI   RDEVTYPE,TYP3330 3330 DEVICE TYPE ?             @VM01167 00638000
+         BE    PAGE3330       YES -                            @VM01167 00639000
+         CLI   RDEVTYPE,TYP3340 3340 DEVICE TYPE ?             @VM01167 00640000
+         BE    PAGE3340       YES -                            @VM01167 00641000
+         CLI   RDEVTYPE,TYP2314 2314/2319 DEVICE TYPE ?        @VM01167 00642000
+         BNE   QUEUEIO        NO - GO QUEUE IOBLOK             @VM01167 00643000
+         LA    R15,CCW2314    YES, GET ADDRESS OF CHAIN ROUTINE@VM01167 00644000
+         B     PAGE2314       ENTER 2314 SORT ROUTINE          @VM01167 00645000
+         SPACE                                                          00646000
+*        CHAIN TIC IN IOBLOK(R2) TO CORRECT CCW IN NEXT IOBLOK(R10)     00647000
+         SPACE                                                          00648000
+CCW2314  LA    R5,PAGESRCH    ADDR OF SEARCH ID EQUAL CCW(R10) @VM01167 00649000
+         CLC   PAGEHEAD,PAGEHEAD-IOBLOK(R2) SAME TRACK/HEAD ?  @VM01167 00650000
+         BNE   SK2314         NO, MUST TIC TO SEEK             @VA03674 00651000
+         CLC   PAGERCD,PAGERCD-IOBLOK(R2) ASCENDING RECORDS?   @VA03674 00652000
+         BH    TIC2314        YES, TIC TO SEARCH ID EQUAL CCW  @VA03674 00653000
+SK2314   LA    R5,PAGESS      NO, TIC TO SET SECTOR CCW SLOT   @VA03674 00654000
+         MVC   PAGESS,PAGESK  OVERLAY SET SECTOR WITH SEEK CCW @VM01167 00655000
+TIC2314  ST    R5,PAGESNS-IOBLOK(,R2) INSERT 'TIC TO' ADDRESS  @VM01167 00656000
+         MVI   PAGESNS-IOBLOK(R2),TICOP MOVE IN TIC OP-CODE(08)@VM01167 00657000
+         BR    R14            RETURN TO CALLER                 @VM01167 00658000
+         SPACE                                                          00659000
+SORT3350 LA    R15,CCW3350    3350 CHAIN IOBLOK ROUTINE        @V304498 00660000
+         B     SORT2305       PERFORM 3350 SLOT SORT           @V304498 00661000
+PAGE2305 LA    R15,CCW2305    2305 CHAIN IOBLOK ROUTINE        @VM01167 00662000
+PAGE2314 EQU   *              2314/2319 CHAIN IOBLOK ROUTINE   @VM01167 00663000
+SORT2305 CLC   PAGESECT,PAGESECT-IOBLOK(R3) COMPARE SECTORS    @VM01167 00664000
+         BL    INIOB          LOW, SORT IN ASENDING ORDER      @VM01167 00665000
+         BE    CHKPRI         EQUAL, CHECK PRIORITY ORDER      @V408246 00666000
+         LR    R2,R3          SAVE BACKCHAIN ADDRESS           @VM01167 00667000
+         L     R3,PAGEIOB-IOBLOK(R2) GET NEXT IOBLOK           @V408246 00668000
+         LTR   R3,R3         IS THERE ONE?                     @V408246 00669000
+         BZ    ENDIOB         END OF CHAIN - INSERT HERE       @VM01167 00670000
+         CLC   PAGESECT-IOBLOK(,R2),PAGESECT-IOBLOK(R3)        @VM01167 00671000
+         BNL   INIOB          BREAK IN ORDER, INSERT IOBLOK    @VM01167 00672000
+         B     SORT2305       TRY AGAIN                        @VM01167 00673000
+         SPACE                                                          00674000
+CHKPRI   DS    0H                                              @V408246 00675000
+         CLC   PAGEPRI(1),PAGEPRI-IOBLOK(R3) BETTER PRIORITY?  @V408246 00676000
+         BNL   SKIPIT         NO                               @V408246 00677000
+         LR    R6,R3          YES, SAVE OLD BLOCK              @V408246 00678000
+         LTR   R2,R2          REORDERING 1ST REQUEST?          @V408246 00679000
+         BNZ   PRIODRA        NO                               @V408246 00680000
+         L     R3,PAGEIOB-IOBLOK(R3) NEXT POINTER              @V408246 00681000
+         LTR   R3,R3         IS THERE ONE ?                    @V408246 00682000
+         BZ    PRIODR         NONE                             @V408246 00683000
+         MVC   IOBFPNT-IOBLOK(8,R3),IOBFPNT-IOBLOK(R6) VALID   @V408246 00684000
+*                             UNCHAINING INFO                           00685000
+         B     INIOB          UNCHAIN AND RECHAIN              @V408246 00686000
+PRIODR   DS    0H             REPLACING 1ST AND ONLY REQUEST   @V408246 00687000
+         LR    R3,R6          RESTORE ONLY POINTER             @V408246 00688000
+         SR    R6,R6          CLEAR REPLACED POINTER           @V408246 00689000
+         B     INIOB          MEARGE IN                        @V408246 00690000
+PRIODRA  DS    0H                                              @V408246 00691000
+         L     R3,PAGEIOB-IOBLOK(R3) NEXT POINTER              @V408246 00692000
+         LTR   R3,R3         IS TEHERE ONE ?                   @V408246 00693000
+         BNZ   INIOB          OK, CHAIN IN                     @V408246 00694000
+         B     ENDIOB         LAST REQUEST                     @V408246 00695000
+*                                                                       00696000
+SKIPIT   LR    R2,R3          SAVE BACKCHAIN ADDRESS           @VM01167 00697000
+         L     R3,PAGEIOB-IOBLOK(R2)  GET NEXT IOBLOK          @V408246 00698000
+         LTR   R3,R3         IS THERE ONE ?                    @V408246 00699000
+         BZ    ENDIOB         END OF CHAIN - INSERT HERE       @VM01167 00700000
+         CLC   PAGESECT-IOBLOK(,R3),PAGESECT-IOBLOK(R2)        @VM01167 00701000
+         BNH   SORT2305       BREAK IN ORDER - SORT            @VM01167 00702000
+         B     SKIPIT         TRY NEXT IOBLOK                  @VM01167 00703000
+         SPACE                                                          00704000
+*        CHAIN TIC IN IOBLOK(R2) TO CORRECT CCW IN NEXT IOBLOK(R10)     00705000
+         SPACE                                                          00706000
+CCW2305  LA    R5,PAGESK      ADDRESS OF SEEK CCW              @VM01167 00707000
+         CLI   DMKPAGDP,X'FF' PCI DRUM FLAG SET ?              @VA07060 00708000
+         BE    *+8            YES                              @VA07060 00709000
+         OI    PAGESK+4,8     YES, PCI ON ALL 2305 REQUESTS    @V408246 00710000
+         CLI   PAGESRCD,ONE   IS THIS RECORD ONE ?             @VM01167 00711000
+         BE    RCDONE         YES, CHECK PREVIOUS RECORD       @VM01167 00712000
+         CLC   PAGESRCD,PAGESRCD-IOBLOK(R2) ADJACENT RECORDS   @VM01167 00713000
+         BNH   TIC2305        NO,CHAIN IN SEEK AND SECTOR CCWS @VM01167 00714000
+         CLC   PAGECYL,PAGECYL-IOBLOK(R2) SAME CYLINDER ?      @VM01167 00715000
+         BNE   SK2305         NO-ADJACENT RECORDS-DIFFERENT CYL@VM01167 00716000
+         LA    R5,PAGESRCH    ADDRESS OF SEARCH ID EQUAL CCW   @VM01167 00717000
+         CLC   PAGEHEAD-IOBLOK(,R2),PAGEHEAD SAME TRACK/HEAD ? @VM01167 00718000
+         BE    TIC2305        YES, SAME TRACK AND ADJACENT     @VM01167 00719000
+*                             RECORDS - TIC TO SEARCH ID EQUAL CCW      00720000
+         B     SK2305         CHAIN TO SEEK WITHOUT SET SECTOR @VM01167 00721000
+         SPACE                                                          00722000
+RCDONE   DS    0H                                              @V408246 00723000
+         OI    PAGESK+4,8     PCI START OF SLOT 1 REQUEST      @V408246 00724000
+         CLI   PAGESRCD-IOBLOK(R2),THREE PRIOR IOB FOR SLOT 3? @V408246 00725000
+         BNE   TIC2305        NO,CHAIN IN SEEK AND SECTOR CCWS @VM01167 00726000
+SK2305   LA    R5,PAGESS      ADDRESS OF SET SECTOR CCW        @VM01167 00727000
+         MVC   PAGESS,PAGESK  OVERLAY SET SECTOR WITH SEEK CCW @VM01167 00728000
+TIC2305  ST    R5,PAGESNS-IOBLOK(,R2) STORE 'TIC TO' ADDRESS   @VM01167 00729000
+         MVI   PAGESNS-IOBLOK(R2),TICOP MOVE IN TIC OP-CODE    @VM01167 00730000
+         BR    R14            RETURN TO CALLER                 @VM01167 00731000
+         SPACE                                                          00732000
+PAGE3330 LA    R15,CCW3330    3330 CHAIN IOBLOK ROUTINE        @VM01167 00733000
+SORT3330 CLC   PAGEHEAD,PAGEHEAD-IOBLOK(R3) SAME TRACK/HEAD ?  @VM01167 00734000
+         BE    EQ3330         YES - SORT BY RECORD NUMBER      @VM01167 00735000
+NXT3330  LR    R2,R3          SAVEBACK CHAIN ADDRESS           @VM01167 00736000
+         L     R3,PAGEIOB-IOBLOK(R2)  GET NEXT IOBLOK          @V408246 00737000
+         LTR   R3,R3         IS THERE ONE ?                    @V408246 00738000
+         BZ    ENDIOB         END OF CHAIN - INSERT            @VM01167 00739000
+         B     SORT3330       SORT WITH THIS TASK              @VM01167 00740000
+         SPACE                                                          00741000
+EQ3330   CLC   PAGERCD,PAGERCD-IOBLOK(R3) COMPARE RECORDS      @VM01167 00742000
+         BL    INIOB          LOW - INSERT IOBLOK HERE         @VM01167 00743000
+         LR    R2,R3          SAVE BACK CHAIN ADDRESS          @VM01167 00744000
+         L     R3,PAGEIOB-IOBLOK(R2)  GET NEXT IOBLOK          @V408246 00745000
+         LTR   R3,R3         IS THERE ONE ?                    @V408246 00746000
+         BZ    ENDIOB         END OF CHAIN - INSERT HERE       @VM01167 00747000
+         CLC   PAGEHEAD,PAGEHEAD-IOBLOK(R3) SAME TRACK/HEAD ?  @VM01167 00748000
+         BE    EQ3330         YES - SAME TRACK/HEAD            @VM01167 00749000
+         B     INIOB          HIGH - INSERT IOBLOK HERE        @VM01167 00750000
+         SPACE                                                          00751000
+*        CHAIN TIC IN IOBLOK(R2) TO CORRECT CCW IN NEXT IOBLOK(R10)     00752000
+         SPACE                                                          00753000
+CCW3330  LA    R5,PAGESK      ADDRESS OF SEEK CCW              @VM01167 00754000
+         OI    PAGESK+4,8     PCI START OF FOLLOWING REQUEST   @V408246 00755000
+         CLC   PAGEHEAD,PAGEHEAD-IOBLOK(R2) SAME TRACK/HEAD ?  @VM01167 00756000
+         BNE   UNEQHD         NO, CHECK FOR SLOT 3 TO SLOT 1   @VA04482 00757000
+         IC    R4,PAGERCD-IOBLOK(,R2) GET RECORD NUMBER        @VM01167 00758000
+         LA    R4,1(,R4)      UPDATE BY ONE                    @VM01167 00759000
+         CLM   R4,B'0001',PAGERCD ADJACENT RECORDS ?           @VM01167 00760000
+         BNE   TICSETS        NO, TIC TO SET SECTOR            @VA04482 00761000
+         LA    R5,PAGESRCH    YES, TIC TO SEARCH ID EQUAL CCW  @VM01167 00762000
+         B     CHAINTIC       GO STORE TIC ADDRESS             @VM01167 00763000
+UNEQHD   CLI   PAGESRCD-IOBLOK(R2),THREE PRIOR IOB FOR SLOT 3? @VA04482 00764000
+         BNE   CHAINTIC       NO - TIC TO SEEK AND SET SETOR   @VM01167 00765000
+         CLI   PAGESRCD,ONE   IS THIS REQUEST FOR SLOT 1       @VA04482 00766000
+         BNE   CHAINTIC       NO - TIC TO SEEK AND SET SECTOR  @VM01167 00767000
+         MVC   PAGESS,PAGESK  OVERLAY SET SECTOR WITH SEEK     @VM01167 00768000
+TICSETS  LA    R5,PAGESS      SET TIC ADDRESS TO SET SECTOR    @VA04482 00769000
+CHAINTIC ST    R5,PAGESNS-IOBLOK(,R2) STORE 'TIC TO' ADDRESS   @VM01167 00770000
+         MVI   PAGESNS-IOBLOK(R2),TICOP MOVE IN TIC OP-CODE(08)@VM01167 00771000
+         BR    R14            RETURN TO CALLER                 @VM01167 00772000
+         SPACE                                                          00773000
+PAGE3340 LA    R15,CCW3340    3340 CHAIN IOBLOK ROUTINE        @VM01167 00774000
+         SPACE                                                          00775000
+SORT3340 CLC   PAGESRCD,PAGESRCD-IOBLOK(R3) COMPARE            @VM01167 00776000
+*                             3340 SLOT NUMBERS                         00777000
+         BL    INIOB          LOW- SORT IN ASCENDING ORDER     @VM01167 00778000
+         BE    EQ3340         SLOT EQUAL - CHECK FOR EQUAL HEAD@V2A2029 00779000
+NXT3340  LR    R2,R3          SAVE BACKCHAIN ADDRESS           @V2A2029 00780000
+         L     R3,PAGEIOB-IOBLOK(R2) NEXT SORTED TASK          @V408246 00781000
+         LTR   R3,R3         END OF CHAIN ?                    @V408246 00782000
+         BZ    ENDIOB         END OF CHAIN - INSERT IOBLOK     @VM01167 00783000
+         B     SORT3340       TRY NEXT TASK                    @V2A2029 00784000
+         SPACE                                                          00785000
+EQ3340   CLC   PAGECYL,PAGECYL-IOBLOK(R3) SAME CYLINDER ?      @VM01167 00786000
+         BNE   UPDT3340       NO, UPDATE SLOT VALUE            @VM01167 00787000
+         CLC   PAGEHEAD,PAGEHEAD-IOBLOK(R3) COMPARE LOGICAL    @VM01167 00788000
+*                             HEADS ?                                   00789000
+         BE    EQHEADS        BRANCH - HEADS EQUAL             @V2A2029 00790000
+UPDT3340 IC    R4,PAGESRCD    GET SLOT NUMBER                  @VM01167 00791000
+         LA    R4,2(,R4)      AND UPDATE TO NEXT SLOT (PLUS 2) @V2A2029 00792000
+         STC   R4,PAGESRCD    AND SAVE                         @VM01167 00793000
+         B     NXT3340        TRY NEXT 3340 TASK               @V2A2029 00794000
+         SPACE                                                          00795000
+EQHEADS  CLC   PAGESECT,PAGESECT-IOBLOK(R3) COMPARE SECTORS    @VM01167 00796000
+         BL    INIOB          LOWER- INSERT BEFORE R3          @VM01167 00797000
+         LR    R2,R3          SAVE BACKCHAIN ADDRESS           @V2A2029 00798000
+         L     R3,PAGEIOB-IOBLOK(R2)  NEXT TASK ADDRESS        @V408246 00799000
+         LTR   R3,R3         END OF CHAIN ?                    @V408246 00800000
+         BZ    ENDIOB         END OF CHAIN - INSERT IT         @VM01167 00801000
+         B     INIOB          CORRECT SLOT - INSERT HERE       @VM01167 00802000
+         SPACE                                                          00803000
+*        CHAIN TIC IN IOBLOK(R2) TO CORRECT CCW IN NEXT IOBLOK(R10)     00804000
+         SPACE                                                          00805000
+CCW3340  DS    0H                                              @V408246 00806000
+         OI    PAGESK+4,8     PCI START OF FOLLOWING REQUEST   @V408246 00807000
+         CLC   PAGECYL(2),PAGECYL-IOBLOK(R2) SAME CYLINDER?    @V408246 00808000
+         BNE   SK3340         NO, MUST HAVE SEEK CCW           @VM01167 00809000
+         LA    R5,PAGESRCH    ADDRESS OF SEARCH ID EQUAL       @VM01167 00810000
+         CLC   PAGESRCD,PAGESRCD-IOBLOK(R2) SAME TRACK ?       @VM01167 00811000
+         BE    TIC3340        YES, SET TIC ADDRESS TO SEARCH   @V2A2029 00812000
+*                             ID EQ BYPASSING SEEK AND SET SECTOR CCWS  00813000
+SK3340   LA    R5,PAGESK      ADDRESS OF SEEK COMMAND CCW      @VM01167 00814000
+         IC    R4,PAGESRCD-IOBLOK(,R2) GET PREVIOUS SLOT       @VM01167 00815000
+         LA    R4,1(,R4)      NUMBER AND UPDATE BY ONE         @V2A2029 00816000
+         CLM   R4,B'0001',PAGESRCD IS THIS THE NEXT SLOT ?     @VM01167 00817000
+         BNE   TIC3340        NO - LEAVE SEEK AND SET SECTOR IN@V2A2029 00818000
+         CLC   PAGESECT-IOBLOK(,R2),PAGESECT RECORD 2 OF ONE   @VM01167 00819000
+*              EVEN/ODD TRACK TO RECORD ONE OF NEXT ODD/EVEN TRACK ?    00820000
+         BNH   TIC3340        NO - LEAVE SEEK AND SET SECTOR IN@V2A2029 00821000
+*              RECORD 2 VALUE (20) TO RECORD ONE VALUE (02)             00822000
+         MVC   PAGESS,PAGESK  OVERLAY SET SECTOR WITH SEEK CCW @VM01167 00823000
+         LA    R5,PAGESS      POINT TO SEEK CCW                @VM01167 00824000
+TIC3340  ST    R5,PAGESNS-IOBLOK(,R2) STORE TIC TO ADDRESS     @VM01167 00825000
+         MVI   PAGESNS-IOBLOK(R2),TICOP MOVE IN TIC OP-CODE    @VM01167 00826000
+         BR    R14            RETURN TO CALLER                 @VM01167 00827000
+         SPACE                                                          00828000
+INIOB    LTR   R2,R2          REPLACING 1ST IOBLOK ?           @VM01167 00829000
+         BNZ   TWOIOBS        NO -                             @VM01167 00830000
+         LM    R1,R2,IOBFPNT-IOBLOK(R3) UNCHAIN 1ST IOBLOK     @VM01167 00831000
+         STM   R1,R2,IOBFPNT  AND CHAIN IN NEW IOBLOK          @VM01167 00832000
+         ST    R10,IOBFPNT-IOBLOK(,R2) AND CHAIN IN            @VM01167 00833000
+         ST    R10,IOBBPNT-IOBLOK(,R1) NEW 1ST IOBLOK          @VM01167 00834000
+         B     ONEIOB         DO NOT UPDATE OLD IOBLOK         @VM01167 00835000
+         SPACE                                                          00836000
+TWOIOBS  BALR  R14,R15        UPDATE TIC ADDRESS               @VM01167 00837000
+         ST    R10,PAGEIOB-IOBLOK(,R2) CHAIN IN NEW IOBLOK     @VM01167 00838000
+ONEIOB   LR    R2,R10         NEW IOBLOK ADDRESS               @VM01167 00839000
+         LR    R10,R3         ADDRESS OF THE NEXT IOBLOK       @VM01167 00840000
+         SPACE                                                          00841000
+ENDIOB   BALR  R14,R15        ADJUST TIC ADDRESS TO NEXT IOBLOK@VM01167 00842000
+         ST    R10,PAGEIOB-IOBLOK(,R2) CHAIN IN NEW IOBLOK     @VM01167 00843000
+         LTR   R10,R6         REPLACED TASK?                   @V408246 00844000
+         BNZ   ENDIOBA        YES                              @V407594 00845000
+         AIF   (NOT &AP).NOAP3                                 **AIF*** 00846000
+         LA    R1,RDEVIOBL    PT TO RDEV LOCK                  @V407594 00847000
+         LOCK  RELEASE,TYPE=PRIVATE  UNLOCK RDEVBLOK           @V407594 00848000
+.NOAP3   ANOP                                                  **ANOP** 00849000
+         B     EXIT           DONE WITH THIS REQUEST           @V407594 00850000
+ENDIOBA  DS    0H             HERE IF REPLACED TASK            @V407594 00851000
+         MVC   PAGESNS(7),MODELNOP RESTORE SENSE               @V408246 00852000
+         LM    R2,R3,MODELSS  PROTO-TYPE SET SECTOR            @V408246 00853000
+         ALR   R2,R10         FILL IN CORRECT ADDRESS          @V408246 00854000
+         STM   R2,R3,PAGESS                                    @V408246 00855000
+         SR    R6,R6          CLEAR . .                        @V408246 00856000
+         ST    R6,PAGEIOB     . . NEXT REQUEST POINTER         @V408246 00857000
+         B     SLOTSORT       REORDER IN CHAIN                 @V408246 00858000
+         SPACE                                                          00859000
+QUEUEIO  LA    R1,RDEVIOBL    PT TO RDEV LOCK                  @V407594 00860000
+         LOCK  RELEASE,TYPE=PRIVATE  UNLOCK RDEVBLOK           @V407594 00861000
+         CALL  DMKIOSQR       SCHEDULE PAGING I/O              @V407594 00862000
+         L     R1,DMKPAGPS    ADD 1 TO COUNT OF                         00863000
+         AL    R1,F1          PAGING START I/O'S                        00864000
+         ST    R1,DMKPAGPS    AND RESTORE                               00865000
+EXIT     EQU   *  UPDATE I/O COUNT FOR OVERHEAD, AND EXIT               00866000
+         L     R15,PAGIOCTR   GET PAGE I/O COUNT                        00867000
+         BCT   R15,*+8        DECREMENT AND TEST                        00868000
+         BAL   R14,OVERHEAD   WHEN 0, GO RE-CALCULATE PAGE OVERHEAD     00869000
+         ST    R15,PAGIOCTR   UPDATE PAGE I/O COUNT                     00870000
+         L     R1,DMKPAGQR    GET PAGE I/O FOR QUERY COMMAND   @VA08859 00871000
+         AL    R1,F1          ADD 1 TO IT AND SAVE             @VA08859 00872000
+         ST    R1,DMKPAGQR    .....                            @VA08859 00873000
+         B     GETQ           GO LOOK FOR MORE REQUESTS                 00874000
+         SPACE                                                          00875000
+EXITX    CHARGE SWITCH,ASYSVM  SET R11 TO ASYSVM FOR DISPATCH  @V407594 00876000
+         GOTO  DMKDSPCH       ALL DONE -- LEAVE                @V407594 00877000
+         SPACE                                                          00878000
+         PRINT DATA                                                     00879000
+HDTABLE  DS    0H             TABLE OF HEAD NUMBERS FOR 2314 PAGES      00880000
+         DC    AL1(00,00,01,01,02,03,03,04)                             00881000
+         DC    AL1(05,05,06,06,07,08,08,09)                             00882000
+         DC    AL1(10,10,11,11,12,13,13,14)                             00883000
+         DC    AL1(15,15,16,16,17,18,18,19)                             00884000
+         PRINT NODATA                                                   00885000
+CCW3350  LA    R5,PAGESK      ADDRESS OF SEEK CCW              @V304498 00886000
+         OI    PAGESK+4,8     PCI START OF FOLLOWING REQUEST   @V408246 00887000
+         CLI   PAGESRCD,ONE   IS THIS SLOT ONE?                @VA04482 00888000
+         BE    RCDON50        YES, CHECK PREVIOUS SLOT         @VA04482 00889000
+         IC    R4,PAGESRCD-IOBLOK(R2) GET PRIOR IOB SLOT NO.   @VA04482 00890000
+         LA    R4,1(R4)       BUMP SLOT NUMBER BY ONE          @VA04482 00891000
+         CLM   R4,B'0001',PAGESRCD ADJACENT SLOTS?             @VA04482 00892000
+         BNE   TIC3350        NO, CHAIN TO SEEK AND SET SECTOR @VA04482 00893000
+         CLC   PAGECYL,PAGECYL-IOBLOK(R2) SAME CYLINDER ?      @V304498 00894000
+         BNE   SK3350         NO-ADJACENT RECORDS-DIFFERENT CYL@V304498 00895000
+         LA    R5,PAGESRCH    ADDRESS OF SEARCH ID EQUAL CCW   @V304498 00896000
+         CLC   PAGEHEAD-IOBLOK(,R2),PAGEHEAD SAME TRACK/HEAD ? @V304498 00897000
+         BE    TIC3350        YES, SAME TRACK AND ADJACENT     @V304498 00898000
+*                             RECORDS - TIC TO SEARCH ID EQUAL          00899000
+         B     SK3350         CHAIN TO SEEK WITHOUT SET SECTOR @V304498 00900000
+         SPACE                                                          00901000
+RCDON50  CLI   PAGESRCD-IOBLOK(R2),FOUR PRIOR IOB FOR SLOT 4?  @VA04482 00902000
+         BNE   TIC3350        NO,CHAIN IN SEEK AND SECTOR CCWS @V304498 00903000
+SK3350   LA    R5,PAGESS      ADDRESS OF SET SECTOR CCW        @V304498 00904000
+         MVC   PAGESS,PAGESK  OVERLAY SET SECTOR WITH SEEK CCW @V304498 00905000
+TIC3350  ST    R5,PAGESNS-IOBLOK(,R2) STORE 'TIC TO' ADDRESS   @V304498 00906000
+         MVI   PAGESNS-IOBLOK(R2),TICOP MOVE IN TIC OP-CODE    @V304498 00907000
+         BR    R14            RETURN TO CALLER                 @V304498 00908000
+         SPACE                                                          00909000
+         EJECT                                                          00910000
+*.                                                                      00911000
+*     B. OPERATION OF THE PAGING INTERRUPT HANDLER -                    00912000
+*        1. LOCATE THE CPEXBLOK FOR THE TASK THAT INITIATED THE PAGING  00913000
+*           OPERATION AND UNCHAIN IT FROM THE INTRANSIT QUEUE           00914000
+*        2. IF NO ERRORS OCCURED FOR THE OPERATION, CALL DMKSTKCP TO    00915000
+*           STACK THE DEFERED REQUESTS FOR EXECUTION, RETURN THE USED   00916000
+*           IOBLOK TO THE STACK, AND EXIT VIA A GOTO TO DMKDSPCH        00917000
+*        3. IF ERRORS OCCURED IN A CHANNEL PROGRAM, FLAG THE CPEXBLOKS  00918000
+*           TO BE UNSTACKED SO THAT DMKDSPCH WILL TRANSFER CONTROL TO   00919000
+*           TO THE CALLING ROUTINE WITH A CONDITION CODE OF 4           00920000
+*        4. IF 5 CONSECTIVE ERRORS OCCUR ON A PAGING DEVICE; ERROR      00921000
+*           MESSAGE DMKPAG415E WILL BE ISSUED TO THE SYSTEMS OPERATOR   00922000
+*           AND THE SYSTEM WILL THEN ENTER A DISABLED WAIT STATE.       00923000
+*.                                                                      00924000
+         SPACE                                                          00925000
+WAITPAGE EQU   *                                                        00926000
+         USING *,R12          ADDRESSABILITY ON ENTRY                   00927000
+         L     R12,=A(DMKPAG) STANDARD ADDRESSABILITY                   00928000
+         USING DMKPAG,R12                                               00929000
+         SPACE                                                          00930000
+         SR    R6,R6          CLEAR PCI SWITCH                 @V408246 00931000
+         SLR   R9,R9          CLEAR ERROR SWITCH                        00932000
+         TM    IOBCSW+5,IL    INCORRECT LENGTH ERROR           @VM08726 00933000
+         BO    WTPGERR        YES, FORCE FATAL ERROR CONDITION @V408246 00934000
+CKPARM   EQU   *                                               @VA06111 00935000
+         TM    IOBSTAT,IOBFATAL UNRECOVERABLE ERROR ?          @VM08726 00936000
+         BO    WTPGERR        YES, ANYLIZE FURTHER             @V408246 00937000
+         STC   R9,PGERCTR     ZERO PAGE ERROR COUNT            @V408246 00938000
+         TM    IOBCSW+4,X'FF'-(CUE+CE+DE)  MUST BE ZERO        @V408246 00939000
+         BNZ   WTPGERR       ERROR                             @V408246 00940000
+         TM    IOBCSW+4,CE+DE  MUST BE ONE                     @V408246 00941000
+         BO    GETCPEX       YES,OK                            @V408246 00942000
+         CLI   IOBCSW+5,PCI  JUST PCI?                         @V408246 00943000
+         BNE   WTPGERR       NO,ASSUME ERRORS THEN             @V408246 00944000
+         L     R6,IOBCSW                                       @V408246 00945000
+         LA    R6,0(,R6)      LAST CCW POINTER                 @V408246 00946000
+         LR    R1,R10         SAVE COPIED IOBLOK               @V408246 00947000
+         L     R10,IOBCAW     POINT TO PAGECCWS                @V408246 00948000
+         SH    R10,=Y(PAGECCWS-IOBLOK) BACK-UP TO START OF     @V408246 00949000
+*                             ORIGINAL                                  00950000
+         LA    R0,IOBSIZE     GET RID OF COPIED BLOCK          @V408246 00951000
+         CALL  DMKFRET                                         @V408246 00952000
+GETCPEX  DS    0H             PROCESS NEXT IOBLOK              @V408246 00953000
+         LTR   R6,R6          PCI?                             @V408246 00954000
+         BZ    GETCPEXA       NO                               @V408246 00955000
+         LA    R1,PAGESK      1ST CCW                          @V408246 00956000
+         CR    R6,R1          IN THIS TASK?                    @V408246 00957000
+         BL    GETCPEXA       NO                               @V408246 00958000
+         LA    R1,PAGESNS+8   LAST CCW                         @V408246 00959000
+         CR    R6,R1          IN THIS TASK?                    @V408246 00960000
+         BNH   WTPGXIT        YES, DONE                        @V408246 00961000
+GETCPEXA DS    0H                                              @V408246 00962000
+         CLI   PAGERW,X'05'   PAGE WRITE ??                             00963000
+         BNE   UNTRANS        NO ---                                    00964000
+         L     R2,PAGESOUT    GET PENDING WRITE COUNT                   00965000
+         BCTR  R2,0           DECREMENT                                 00966000
+         ST    R2,PAGESOUT    AND SAVE                                  00967000
+         SPACE                                                          00968000
+UNTRANS  EQU   *                                                        00969000
+         L     R4,PAGEIOB     SAVE NEXT POINTER                @V408246 00970000
+         ICM   R1,B'1111',IOBMISC ANY STACKED REQUESTS?        @V408246 00971000
+         BZ    UNSTCKA        NO (PCI MUST HAVE CLEARED)       @V408246 00972000
+         XC    IOBMISC,IOBMISC YES, MAKE SURE CLEARED NOW      @V408246 00973000
+         OI    PAGERW+4,SKIP  AVOID ANY PROBLEMS WITH RETRY    @V408246 00974000
+         LM    R2,R3,CPEXFPNT AND UNCHAIN CPEXBLOK FROM TRANSIT QUEUE   00975000
+         ST    R2,CPEXFPNT-CPEXBLOK(,R3)     ---                        00976000
+         ST    R3,CPEXBPNT-CPEXBLOK(,R2)     ---                        00977000
+         SPACE 2                                                        00978000
+UNSTACK  L     R3,CPEXMISC    SAVE POINTER TO NEXT CPREQUEST            00979000
+         AIF   (NOT &AP).NOAP4                                 **AIF*** 00980000
+         CLI   CPEXADD,0      DID DMKPTR INDICATE AFFINITY     @V407594 00981000
+         BE    CALLSTK        NO, STACK FOR EITHER PROCESSOR   @V407594 00982000
+         CLC   CPEXADD(1),LPUADDR+1  AFFINITY FOR THIS PROC'R  @V407594 00983000
+         STC   R9,CPEXADD     INSERT POSSIBLE ERROR FLAG       @V407594 00984000
+         BNE   STKOTHER       NO- STACK FOR OTHER PROCESSOR    @V407594 00985000
+         CALL  DMKSTKMP       STACK FOR CURRENT PROCESSOR ONLY @V407594 00986000
+         B     NXTSTK         LOOK FOR CHAINED CPEXBLOK        @V407594 00987000
+STKOTHER CALL  DMKSTKOP       STACK FOR OTHER PROCESSOR ONLY   @V407594 00988000
+         B     NXTSTK         LOOK FOR CHAINED CPEXBLOK        @V407594 00989000
+CALLSTK  DS    0H             STACK CPEXBLOCK FOR EITHER PROCR @V407594 00990000
+.NOAP4   ANOP                                                  **ANOP** 00991000
+         STC   R9,CPEXADD     INSERT POSSIBLE ERROR FLAG                00992000
+         CALL  DMKSTKCP        STACK THE CURRENT BLOK                   00993000
+NXTSTK   DS    0H                                              @V407594 00994000
+         LTR   R1,R3          ANY MORE BLOKS ??                         00995000
+         BNZ   UNSTACK        YES -- GO UNSTACK THEM                    00996000
+UNSTCKA  DS    0H                                              @V408246 00997000
+         LTR   R6,R6          PCI?                             @V408246 00998000
+         BNZ   UNSTACK2       YES, FOREGO RELEASE UNTIL END    @V408246 00999000
+UNSTACK1 L     R0,IOBSTACK    GET TOP OF IOBLOK STACK                   01000000
+         ST    R10,IOBSTACK   AND PUSH IT                               01001000
+         ST    R0,IOBMISC     DOWN                                      01002000
+         LM    R2,R3,MODELNOP CLEAR OUT                                 01003000
+         STM   R2,R3,PAGESNS  THE TIC                          @VM01167 01004000
+         ST    R1,PAGEIOB     CLEAR POINTER TO SLOT-SORTED IOBLOKS      01005000
+         MVI   PAGESK+4,CC    MAKE SURE PCI IS CLEARED         @V408246 01006000
+UNSTACK2 LTR   R10,R4         WERE THERE ANY SLOT-SORTED IOBLOK(S) ?    01007000
+         BNZ   GETCPEX        YES -- GO PROCESS                         01008000
+WTPGXIT  DS    0H                                              @V408246 01009000
+         GOTO  DMKDSPCH       OTHERWISE, LEAVE                          01010000
+         EJECT                                                          01011000
+*                                                                       01012000
+*        HANDLE SERIOUS PAGING I/O ERRORS                               01013000
+*                                                                       01014000
+*                                                                       01015000
+WTPGERR  DS    0H                                              @V408246 01016000
+         CLC   IOBCSW+4(2),=AL1(0,PCI+IL) LAST INTERRUPT       @V408246 01017000
+         BNE   WTPGERRX       YES                              @V408246 01018000
+         LA    R0,IOBSIZE     NO, IGNORE FOR NOW               @V408246 01019000
+         LR    R1,R10         COPIED IOBLOCK                   @V408246 01020000
+         CALL  DMKFRET                                         @V408246 01021000
+         B     WTPGXIT        EXIT                             @V408246 01022000
+WTPGERRX DS    0H                                              @V408246 01023000
+         ICM   4,B'1111',PAGEIOB CHAINED PAGE REQUEST POINTER  @V408246 01024000
+         BZ    WTPGERRB       NONE                             @V408246 01025000
+         L     R1,IOBMISC     GET CPEXBLOK POINTER             @VA08404 01026000
+         L     R5,CPEXR5      THEN GET SWPTABLE ENTRY          @VA08404 01027000
+         SR    R8,R8          CLEAR REG 8                      @VA08404 01028000
+         IC    R8,SWPCODE     GET VOLUME CODE                  @VA08404 01029000
+         SLL   R8,3           MAKE IT INDEX FOR OWNED LIST     @VA08404 01030000
+         AL    R8,=A(DMKSYSOW) POINT TO PROPER ENTRY           @VA08404 01031000
+         LH    R8,OWNDRDEV-OWNDLIST(,R8) GET RDEVBLOK INDEX    @VA08404 01032000
+         SLL   R8,3           CONVERT IT TO BYTES              @VA08404 01033000
+         AL    R8,ARIODV      NOW POINT TO THE RDEVBLOK        @VA08404 01034000
+WTPGERRA DS    0H                                              @VA08404 01035000
+         MVC   PAGESNS(7),MODELNOP NOP CCW                     @V408246 01036000
+         MVI   PAGESS,NOPCODE CHANGE POSSIBLE SK,SK TO SK,NOP  @V408246 01037000
+         NI    PAGESK+4,255-8 RESET POSSIBLE PCI FLAG          @V408246 01038000
+         NI    PAGESS+4,255-8 . .                              @V408246 01039000
+         NI    IOBSTAT,255-IOBFATAL RESET FATAL FLAG           @V408246 01040000
+         ST    R9,PAGEIOB                                      @V408246 01041000
+         CALL  DMKIOSQR       AND RESCHEDULE INDIVIDUALLY      @V408246 01042000
+         LTR   R10,R4         NEXT ON CHAIN?                   @V408246 01043000
+         BZ    WTPGXIT        NONE                             @V408246 01044000
+         L     R4,PAGEIOB     SAVE CHAIN POINTER               @V408246 01045000
+         B     WTPGERRA       REPEAT UNTIL END OF CHAIN        @V408246 01046000
+WTPGERRB DS    0H                                              @V408246 01047000
+         L     R1,IOBMISC     CPEXBLOK POINTER FOR REQUEST     @V408246 01048000
+         L     R5,CPEXR5      SWAPTABLE POINTER                @V408246 01049000
+         TM    SWPFLAG,SWPRECMP NORMAL PAGING AREA?            @V408246 01050000
+         BNZ   WTPGERRC       NO, BYPASS FATAL SYSTEM ERROR    @V408246 01051000
+*                             TESTING                                   01052000
+         IC    R9,PGERCTR     INCREMENT                        @V408246 01053000
+         LA    R9,1(,R9)      FATAL PAGE I/O COUNTER           @V408246 01054000
+         STC   R9,PGERCTR                                      @V408246 01055000
+         C     R9,F5          HAVE FIVE CONSECATIVE ERRORS     @V408246 01056000
+*                             OCCURED?                                  01057000
+         BH    PERMERR        YES - ISSUE DMKPAG415E MESSAGE   @V408246 01058000
+WTPGERRC DS    0H                                              @V408246 01059000
+         SLR   R9,R9          SET-UP I/O ERROR INDICATOR FOR   @V408246 01060000
+*                             RETURN                                    01061000
+         BCTR  R9,0           I/O ERROR RETURN = -1            @V408246 01062000
+         B     GETCPEX        REJOIN NORMAL CODE               @V408246 01063000
+*                                                                       01064000
+*        UNACCEPTABLE PAGING I/O ERROR ACTIVITY                         01065000
+*                                                                       01066000
+*        HERE IF PERMANENT PAGING ERROR CONDITION                       01067000
+*        ASSUME THAT INFO. IN 'IOBRADD' IS NOT VALID                    01068000
+PERMERR  EQU   *                                               @VA03787 01069000
+         L     R1,IOBMISC     GET CPEXBLOK POINTER             @VA03787 01070000
+         L     R5,CPEXR5      THEN GET SWPTABLE ENTRY          @VA03787 01071000
+         SR    R8,R8          CLEAR REG 8                      @VA03787 01072000
+         IC    R8,SWPCODE     GET VOLUME CODE                  @VA03787 01073000
+         SLL   R8,3           MAKE IT INDEX FOR OWNED LIST     @VA03787 01074000
+         AL    R8,=A(DMKSYSOW)     POINT TO PROPER ENTRY       @VA03787 01075000
+         LH    R8,OWNDRDEV-OWNDLIST(,R8)     GET RDEVBLOK INDEX@VA03787 01076000
+         SLL   R8,3           CONVERT IT TO BYTES              @VA03787 01077000
+         AL    R8,ARIODV      NOW POINT TO THE RDEVBLOK        @VA03787 01078000
+         CALL  DMKSCNRD       GO FIND 'CUU' ADDRESS            @VA03787 01079000
+         CALL  DMKCVTBH       CONVERT IT TO HEX                         01080000
+         STCM  R1,B'0111',PAGEDEV  PUT DEVICE ADDR. IN THE MESSAGE      01081000
+         LA    R0,MSG415LN    SIZE OF MESSAGE INTO R0                   01082000
+         LA    R1,MSG415      ADDRESS OF MESSAGE INTO R1                01083000
+         LA    R2,PSW415      GET PAG WAIT STATE CODE          @V407510 01084000
+         GOTO  DMKMCHST       TERMINATE SYSTEM                 @V407510 01085000
+         EJECT                                                          01086000
+*.                                                                      01087000
+*     C. OPERATION OF THE PAGING LOAD CALCULATOR                        01088000
+*        1. STORE TOD CLOCK AND COMPUTE LENGTH OF RECORDING INTERVAL    01089000
+*        2. CONVERT THE TIME TO MICROSECONDS, INSURING THAT IT FITS IN  01090000
+*           ONE WORD (31 BITS PLUS SIGN)                                01091000
+*        3. OBTAIN PAGE-WAIT TIME OVER THE INTERVAL                     01092000
+*        4. PROJECT PAGE-WAIT PERCENTAGE FOR NEXT INTERVAL              01093000
+*        5. CALCULATE THE PAGING RATE IN PAGES/SECOND, SAVE IN PSA      01094000
+*        6. CALCULATE THE RATIO OF STOLEN TO FLUSHED PAGES, AND STORE   01095000
+*           IN PGSRATIO IN DMKPSA.                                      01096000
+*        7. RESET COUNTERS AND VALUES FOR THE START OF A NEW MEASURE-   01097000
+*           MENT INTERVAL, AND RETURN TO MAINLINE CODE                  01098000
+*.                                                                      01099000
+         SPACE 2                                                        01100000
+OVERHEAD EQU   *              HERE TO RE-CALCULATE PAGING OVERHEAD      01101000
+         STM   R10,R13,PAGSAVRG SAVE REGS                      @VM40121 01102000
+         STCK  DMKPAGSP       REMEMBER END OF RECORDING PERIOD          01103000
+         BC    3,DOWNWEGO     CLOCK NOT FUNCTIONING            @VA04301 01104000
+         LM    R0,R3,DMKPAGST GET START AND END OF RECORDING PERIOD     01105000
+         LA    R4,1           GET CONSTANT FOR ARITHMETIC               01106000
+         SR    R6,R6          CLEAR SHIFT COUNTER                       01107000
+         LA    R7,100         GET CONSTANT FOR PERCENTAGE CALCULATIONS  01108000
+         SLR   R3,R1          CALCULATE LENGTH OF RECORDING PERIOD      01109000
+         BC    11,*+6         ...                                       01110000
+         SLR   R2,R4          ...                                       01111000
+         SLR   R2,R0          ...                                       01112000
+         SRDL  R2,12          AND CONVERT TO MICROSECONDS               01113000
+         LR    R0,R2          SAVE THE ELAPSED TIME                     01114000
+         LR    R1,R3          ...                                       01115000
+         D     R0,=F'10000'   CONVERT TO 1/100'S OF A SECOND            01116000
+         LTR   R15,R1         SAVE AND TEST THE RESULT                  01117000
+         BP    *+8            OK TO USE --                              01118000
+         LA    R15,1          SET MAXIMUM RATE                          01119000
+         L     R1,DMKPAGIC    GET NUMBER OF PAGIO'S DONE                01120000
+         MR    R0,R7          TIMES 100                                 01121000
+         DR    R0,R15         AND GET PAGING RATE                       01122000
+         L     R15,PREFIXA    OBTAIN CURRENT REAL PSA VALUE    @VM40121 01123000
+         STH   R1,PAGERATE(R15) PAGE RATE TO ABSOLUTE 0        @V4M0121 01124000
+         BAL   R15,SHIFTER    MAKE SURE THAT IT FITS IN ONE REGISTER    01125000
+         SR    R10,R10        INDEX TO MAIN PROC WAITSAVE VALUE@V4M0121 01126000
+         SR    R11,R11        PREFIX VALUE FOR REAL PSA        @V4M0121 01127000
+         LA    R13,1          COUNTER - ONE FOR UP MODE        @V4M0121 01128000
+         TM    APSTAT1,APUOPER APU OPERATIONAL ?               @V4M0121 01129000
+         BNO   COMPSTAT       NO - ONLY 1 PASS THRU CODE BELOW @V4M0121 01130000
+         LA    R13,2          YES - MAKE 2 PASSES THRU CODE    @V4M0121 01131000
+*                             BELOW TO COMPUTE STATISTICS FOR           01132000
+*                             BOTH PROCESSORS.                          01133000
+         TM    APSTAT1,PROCIO MAIN PROCESSOR ?                 @V4M0121 01134000
+         BO    COMPSTAT       YES - COMPUTE PAGING STATISTICS  @V4M0121 01135000
+         LA    R10,8          NO - BEFORE COMPUTE PAGEING STATS@V4M0121 01136000
+*                             SET INDEX TO AP WORKSAVE VALUE.           01137000
+COMPSTAT EQU   *                                               @V4M0121 01138000
+         L     R0,DMKPAGWS(R10) 1ST WORD OF SAVED PG WT TIME   @VMH0012 01139000
+         L     R1,DMKPAGWS+N4(R10) 2ND WD OF SAVED PG WT TIME  @VMH0012 01140000
+         L     R8,PAGEWAIT(R11) 1ST WORD OF CURRENT PG WT TOTAL@V4M0121 01141000
+         L     R9,PAGEWAIT+N4(R11) 2ND WORD OF PAGE WAIT TOTAL @V4M0121 01142000
+         ST    R8,DMKPAGWS(R10) SAVE PAGEWAIT FOR              @VMH0012 01143000
+         ST    R9,DMKPAGWS+N4(R10) NEXT TIME                   @VMH0012 01144000
+         SPACE                                                          01145000
+         SLR   R1,R9          COMPUTE PAGE WAIT OVER INTERVAL           01146000
+         BC    8+2+1,*+6      ...                                       01147000
+         SLR   R0,R4          ..                                        01148000
+         SLR   R0,R8          .                                         01149000
+         SRDL  R0,12          AND CONVERT TO MICROSECONDS               01150000
+         SPACE                                                          01151000
+         LTR   R1,R1          REMEMBER SETTING OF HIGH ORDER            01152000
+         BALR  R15,R0         BIT IN LOW ORDER REGISTER                 01153000
+         SPACE                                                          01154000
+         N     R1,=XL4'7FFFFFFF'   CLEAR HIGH ORDER BIT                 01155000
+         LR    R5,R0          SAVE HIGH ORDER WORD                      01156000
+         MR    R0,R7          MULTIPLY BY 100 FOR PERCENTAGE            01157000
+         MR    R4,R7          MULTIPLY HIGH ORDER WORD                  01158000
+         ALR   R0,R5          AND ADD IN OVERFLOW                       01159000
+         SPM   R15            WAS HIGH ORDER BIT ON ?                   01160000
+         BNM   ALIGN          NO --                                     01161000
+         SRL   R7,1           ALIGN MULTIPLIER WITH MISSING BIT         01162000
+         ALR   R0,R7          AND ADD IN PARTIAL SUM                    01163000
+ALIGN    SRDL  R0,0(R6)       ALIGN WITH DIVISOR                        01164000
+         DR    R0,R3          GET PAGING OVERHEAD PERCENTAGE            01165000
+         LH    R0,PAGELOAD(R11) GET PREVIOUS PAGE LOAD VALUE.  @V4M0121 01166000
+         ALR   R0,R0          TIMES 2                                   01167000
+         AH    R0,PAGELOAD(R11) TIMES 3                        @V4M0121 01168000
+         ALR   R1,R0          PLUS RECENT LOAD                          01169000
+         SRL   R1,2           /4 FOR SMOOTHED AVERAGE                   01170000
+         STH   R1,PAGELOAD(R11) AND SAVE IN EACH REAL PSA.     @V4M0121 01171000
+         X     R10,F08        INVERT WAITSAVE INDEX            @V4M0121 01172000
+         L     R11,PREFIXB    ADDR OF OTHER PREFIX AREA        @V4M0121 01173000
+         BCT   R13,COMPSTAT   COMPUTE PAGEING STATISTICS FOR   @V4M0121 01174000
+*                             THE OTHER PROCESSOR.                      01175000
+         LM    R10,R13,PAGSAVRG RESTORE CALLERS REQUIRED REGS  @V4M0121 01176000
+         SR    R0,R0          CLEAR OUT                                 01177000
+         STCK  DMKPAGST       REMEMBER START OF NEXT RECORDING PERIOD   01178000
+         BC    12,CLOCKOK     IS CLOCK FUNCTIONING?            @VA04301 01179000
+DOWNWEGO GOTO  DMKCVTAB       CLOCK DAMAGED...ABEND CVT001     @VA04301 01180000
+CLOCKOK  EQU   *                                               @VA04301 01181000
+         L     R15,DMKPAGIC   GET NEXT RECORDING PERIOD                 01182000
+         BR    R14            AND RETURN TO CALLER                      01183000
+         SPACE                                                          01184000
+SHIFTER  EQU   *              HERE TO TRUNCATE DIVISOR TO ONE WORD      01185000
+         LTR   R2,R2          ANY DATA IN HIGH ORDER WORD ??            01186000
+         BZ    SHIFTER1       NO - INSURE NON-NEGATIVE                  01187000
+         SRDL  R2,1           SHIFT ONE                                 01188000
+         ALR   R6,R4          AND COUNT NUMBER OF SHIFTS                01189000
+         B     SHIFTER        CONTINUE                                  01190000
+SHIFTER1 LTR   R3,R3          INSURE NON-NEGATIVE VALUE --              01191000
+         BCR   11,R15         IF NOT MINUS, EXIT                        01192000
+         SRL   R3,1           OTHERWISE, SHIFT ONE MORE                 01193000
+         ALR   R6,R4          BUMP SHIFT COUNT                          01194000
+         BR    R15            AND EXIT                                  01195000
+         SPACE                                                          01196000
+PAGSAVRG DS    4F             OVERHEAD REG SAVEAREA            @V4M0121 01197000
+F08      DC    F'08'          BIT TO INVERT WAITSAVE INDEX     @V4M0121 01198000
+         SPACE                                                          01199000
+DMKPAGWS DS    0F                                              @VMH0012 01200000
+         DC    X'7FFFFFFF'    WAITSAVE VALUE FOR MAIN PROC     @V4M0121 01201000
+         DC    X'FFFFF000'                                     @V4M0121 01202000
+         DC    X'7FFFFFFF'    WAITSAVE VALUE FOR THE APU       @V4M0121 01203000
+         DC    X'FFFFF000'                                     @V4M0121 01204000
+         EJECT                                                          01205000
+MODELCCW DS    0D             PROTOTYPE PAGING CCWS                     01206000
+         CCW   7,PAGESEEK-IOBLOK,CC,6   SEEK                            01207000
+MODELSS  CCW   35,PAGESECT-IOBLOK,CC,1 SET SECTOR              @V2A2029 01208000
+         CCW   49,PAGESEEK+2-IOBLOK,CC,5     SEARCH ID EQUAL            01209000
+         CCW   8,PAGESRCH-IOBLOK,0,0    TIC *-8                         01210000
+MODELRD  CCW   0,0,CC,4096    READ/NOP PROTOTYPES                       01211000
+MODELNOP CCW   4,0,SILI+SKIP,1     DUMMY SENSE TO END THE CHAIN         01212000
+         SPACE                                                          01213000
+* NOTE THAT A SENSE IS USED INSTEAD OF A NOP SO THAT RPS DEVICES WILL   01214000
+* NOT LOSE TRACK OF THE SECTOR                                          01215000
+         SPACE                                                          01216000
+MSG415   DC    C'DMKPAG415E CONTINUOUS PAGING ERRORS FROM DASD XXX'     01217000
+MSG415LN EQU   *-MSG415       LENGTH OF MESSAGE                         01218000
+         ORG   *-3                                                      01219000
+PAGEDEV  DC    X'000000'      DASDI DEVICE CAUSING THE ERROR CONDITION  01220000
+         ORG                                                            01221000
+PGERCTR  DC    X'00'          PAGE ERROR COUNTER.                       01222000
+         DS    0D                                                       01223000
+PSW415   EQU   X'0F'          PAG WAIT STATE CODE              @V407510 01224000
+         SPACE                                                          01225000
+         SPACE 3                                                        01226000
+MODEL1   EQU   X'01'          2305 MODEL 1                              01227000
+MODEL2   EQU   X'02'          2305 MODEL 2                              01228000
+PAGCYL24 EQU   24             24 PAGES PER CYLINDER (2305/3340)@VM01167 01229000
+PAGCYL32 EQU   32             32 PAGES PER CYLINDER (2314/2319)@VM01167 01230000
+PAGCYL57 EQU   57             57 PAGES PER CYLINDER (3330)     @VM01167 01231000
+ONE      EQU   1                                               @VM01167 01232000
+THREE    EQU   3                                               @VM01167 01233000
+FOUR     EQU   4                                               @V304498 01234000
+NOPCODE  EQU   3                                               @VM01167 01235000
+TICOP    EQU   8                                               @VM01167 01236000
+BIT7     EQU   X'01'                                           @VM01167 01237000
+BIT6     EQU   X'02'                                           @VM01167 01238000
+N4       EQU   4              INDEX TO 2ND WORD                @V4M0121 01239000
+         SPACE 2                                                        01240000
+DMKPAGQ  DC    2A(DMKPAGQ)    QUEUE OF CPEXBLOKS FOR IN-TRANSIT PAGES   01241000
+         SPACE 3                                                        01242000
+         SPACE                                                          01243000
+DMKPAGST DC    D'0'           START OF PAGE LOAD MEASUREMENT PERIOD     01244000
+DMKPAGSP DC    D'0'           END OF PAGE LOAD MEASUREMENT PERIOD       01245000
+         SPACE                                                          01246000
+DMKPAGQR DC    F'0'           PAGE I/O COUNT FOR QUERY COMMAND @VA08859 01247000
+DMKPAGIC DC    F'200'         NUMBER OF PAGE I/O'S TO MEASURE           01248000
+PAGIOCTR DC    F'200'      NUMBER OF PAGE IO'S LEFT IN CURRENT PERIOD   01249000
+DMKPAGPS DC    F'0'           COUNT OF PAGING START I/O'S               01250000
+DMKPAGCC DC    F'0'           COUNT OF CALLS TO DMKPAG                  01251000
+         SPACE                                                          01252000
+IOBSTACK DC    A(0)           STACK OF PRE-FORMATTED IOBLOKS            01253000
+DMKPAGSK EQU   IOBSTACK       ALLOW LOG-OFF TO REDUCE NUMBERS  @V408246 01254000
+DMKPAGDP DC    X'FF'          SWITCH FOR PCI ON ALL 2305       @VA07060 01255000
+*                             REQUESTS                                  01256000
+         SPACE                                                          01257000
+DYNFRET  DC    F'0'           NO OF CALLS TO DMKFRET FOR IOBLOKS        01258000
+*                             WHICH WERE IN THE DYNAMIC PAGING AREA     01259000
+         SPACE                                                          01260000
+DMKPAGLO DC    A(*-*)      "DMKFRELO" MINUS LENGTH OF ONE PAGING IOBLOK 01261000
+DMKPAGHI DC    A(*-*)      "DMKFREHI"                                   01262000
+         SPACE                                                          01263000
+PAGESOUT DC    F'0'           COUNT OF PENDING PAGE WRITES              01264000
+SEC23051 DC    AL1(2,32,62)   SECTOR VALUES FOR 2305 M1        @VM01167 01265000
+SEC23052 DC    AL1(3,57,111)  SECTOR VALUES FOR 2305 M2        @VM01167 01266000
+SECT3330 DC    AL1(2,44,86)   SECTOR VALUES FOR 3330           @VM01167 01267000
+SECT3340 DC    AL1(2,32)      SECTOR VALUES FOR 3340           @VM01167 01268000
+SECT3350 DC    AL1(2,33,63,94) SECTOR VALUES FOR 3350          @V304498 01269000
+         EJECT                                                          01270000
+         LTORG                                                          01271000
+         EJECT                                                          01272000
+         COPY  IOBLOKS                                                  01273000
+         COPY  RBLOKS                                                   01274000
+         COPY  CORE                                                     01275000
+         COPY  SAVE                                                     01276000
+         COPY  ALLOC                                                    01277000
+IOBLOK   DSECT CONTINUE THE DSECT                                       01278000
+*        ANY CHANGES IN PAGESIZE MUST ALSO BE REFLECTED                 01279000
+*        IND DMKUSO                                                     01280000
+         ORG   ,              MAKE SURE WE'RE AT THE END       @V200820 01281000
+PAGECCWS DS    6D             SPACE FOR PAGING CCWS                     01282000
+         ORG   PAGECCWS       CCW DEFINITIONS                           01283000
+PAGESK   DS    D              SPACE FOR SEEK                            01284000
+PAGESS   DS    D              SPACE FOR SET SECTOR                      01285000
+PAGESRCH DS    D              SPACE FOR SEARCH                          01286000
+PAGESTIC DS    F              SPACE FOR TIC                    @V2A2029 01287000
+PAGEIOB  DS    F              POINTER TO SLOT SORTED IOBLOK             01288000
+PAGERW   DS    D              SPACE FOR READ/WRITE                      01289000
+PAGEPRI  EQU   PAGERW+5       SPACE FOR REQUEST PRIORITY       @V408246 01290000
+PAGESNS  DS    D              SPACE FOR SENSE/TIC              @VM01167 01291000
+         ORG   PAGESNS+7                                       @VM01167 01292000
+PAGESRCD DS    X              SPACE FOR SLOT NUMBER            @VA04482 01293000
+PAGESEEK DS    D              SPACE FOR SEEK ARGUMENT AND SECTOR        01294000
+         ORG   PAGESEEK+2                                      @VM01167 01295000
+PAGECYL  DS    H              SPACE FOR CYLINDER ADDRESS       @VM01167 01296000
+PAGEHEAD DS    H              SPACE FOR HEAD ADDRESS           @VM01167 01297000
+PAGERCD  DS    X              SPACE FOR RECORD NUMBER          @VM01167 01298000
+PAGESECT DS    X              SECTOR NUMBER                             01299000
+PAGESIZE EQU   (*-IOBLOK)/8   SIZE OF EXTENDED IOBLOK IN DOUBLE WORDS   01300000
+         EJECT                                                          01301000
+         PSA                                                            01302000
+         COPY  VMBLOK                                                   01303000
+         COPY  DEVTYPES                                                 01304000
+         COPY  EQU                                                      01305000
+         END                                                            01306000

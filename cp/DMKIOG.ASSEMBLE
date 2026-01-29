@@ -1,0 +1,1634 @@
+IOG      TITLE 'DMKIOG     (CP)        VM/370 - RELEASE 6'              00001000
+         ISEQ  73,80                                                    00002000
+*.                                                                      00003000
+*        MODULE NAME - DMKIOG                                           00004000
+*                                                                       00005000
+*                                                                       00006000
+*        FUNCTION -                                                     00007000
+*              PAGABLE ERROR RECORDING MODULE. CALLED AT INITIALIZATION 00008000
+*              TIME TO LOCATE THE ERROR RECORDING DEVICE,LOCATE THE     00009000
+*              LAST RECORDINGS MADE ON THE CYLINDERS,                   00010000
+*              AND SET THE IN-CORE POINTERS TO THE PROPER VALUES.       00011000
+*              INITIALIZATION FOR 'RMS' FUNCTIONS IS PERFORMED          00012000
+*              AFTER FIRST MAKING A TEST TO DETERMINE IF WE ARE         00013000
+*              CP RUNNING UNDER CP. RMS FUNCTIONS WILL NOT BE           00014000
+*              ACTIVATED FOR A VIRTUAL CP ENVIRONMENT.                  00015000
+*              THE MODULE IS ALSO USED TO ERASE THE RECORDING AREAS.    00016000
+*                                                                       00017000
+*        ATTRIBUTES -                                                   00018000
+*              PAGABLE,SERIAL-REUSABLE,CALLED VIA SVC.                  00019000
+*                                                                       00020000
+*                                                                       00021000
+*        ENTRY POINTS -                                                 00022000
+*                                                                       00023000
+*              DMKIOGF1 - INITIALIZATION ENTRY, RMS INIT AND            00024000
+*                        LOCATOR FOR STARTING PAGE ON RECORDING         00025000
+*              DMKIOGAP - INITIALIZATION ENTRY, RMS INIT                00026000
+*                         FOR ATTACHED PROCESSOR                        00027000
+*              DMKIOGF2 - TO ERASE EITHER THE ERROR RECORDS OR          00028000
+*                         BOTH THE ERROR AND FRAME RECORDS FROM         00029000
+*                         THE ERROR RECORDING AREA.                     00030000
+*              DMKIOGFR - TO READ FRAMES FROM THE SRF DEVICE OF         00031000
+*                         A 3033/3032/3031 PROCESSOR AND FORMAT         00032000
+*                         THEM AS RECORDS ON THE RECORDING CYLS         00033000
+*                                                                       00034000
+*        ENTRY CONDITIONS -                                             00035000
+*              DMKIOGF1 -NONE                                           00036000
+*              DMKIOGAP -NONE                                           00037000
+*              DMKIOGF2 - GPR2 = ERASE REQ PARAMATER.                   00038000
+*              DMKIOGFR - NONE                                          00039000
+*                                                                       00040000
+*        EXIT CONDITIONS -  RETURN TO CALLER.                           00041000
+*                                                                       00042000
+*        CALLS TO OTHER ROUTINES -                                      00043000
+*              DMKPGTVG - TO GET VIRTUAL PAGES.                         00044000
+*              DMKPGTVR - TO RELEASE VIRTUAL PAGES.                     00045000
+*              DMKSCNRU - TO GET IPL DEV. RDEVBLOK ADDRESS.             00046000
+*              DMKQCNWT - TO WRITE MSGS. TO THE OPERATOR.               00047000
+*              DMKRPAGT - TO READ A PAGE INTO CORE.                     00048000
+*              DMKRPAPT - TO WRITE A PAGE TO RECORDING CYLINDER.        00049000
+*              DMKERMSG - TO WRITE OUT ERROR MESSAGES                   00050000
+*              DMKPTRLK - TO LOCK A PAGE.                               00051000
+*              DMKPTRUL - TO UNLOCK A PAGE.                             00052000
+*                                                                       00053000
+*        EXTERNAL REFERENCES -                                          00054000
+*              DMKIOERP - 'RECORDING IN PROCESS' SWITCH.                00055000
+*              DMKIOEEP - RECORDING AREA IN-CORE POINTER (CCP).         00056000
+*              DMKIOEMX - MAXIMUM NO. OF PAGES PER CYL .                00057000
+*              DMKIOENI - 90 FULL PAGE CNT ON IPL DEV TYP.              00058000
+*              DMKIOEES - 'RECORDING AREA FULL' FLAG.                   00059000
+*              DMKIOEHS - DASD START OF ERROR RECORDS ON                00060000
+*                         RECORDING CYLINDERS (CCPD FORMAT).            00061000
+*              DMKIOEFR - 'FRAME RECORDS ON CYLINDERS' FLAG.            00062000
+*                                                                       00063000
+*        REGISTER USAGE -                                               00064000
+*              GPR0-1   SCRATCH                                         00065000
+*              GPR2     ERASE PARAMATERS                                00066000
+*              GPR3-9   SCRATCH                                         00067000
+*              GPR 10    IOBLOK POINTER                                 00068000
+*              GPR11    VMBLOK POINTER                                  00069000
+*              GPR12    BASE                                            00070000
+*              GPR13    SAVE AREA POINTER                               00071000
+*              GPR14-15 LINK REGS                                       00072000
+*                                                                       00073000
+*        NOTES -                                                        00074000
+*              IF THE ERROR RECORDING CYLINDERS ARE FOUND TO BE         00075000
+*              UNFORMATTED AT IPL TIME, A MSG IS SENT TO THE            00076000
+*              OPERATOR AND THE CYLINDERS ARE FORMATTED .               00077000
+*                                                                       00077100
+*              IF THE PROCESSOR IS A 4331 OR 4341, THEN THERE ARE       00077200
+*              NO EXTENDED LOGOUT AREAS OR REGION CODE.                 00077300
+*                                                                       00078000
+*        OPERATION - DMKIOGF1                                           00079000
+*              1. DETERMINE IF WE ARE RUNNING AS A VIRTUAL CP, IF WE    00080000
+*                 ARE PUT 'WAIT' BIT ON IN THE MCH NEW PSW AND SKIP     00081000
+*                 TO STEP 4.                                            00082000
+*              2. CALL DMKFREE TO RESERVE CORE STORAGE FOR LOGOUT,      00083000
+*                 MCHAREA, AND CPEXBLOK FOR EACH PROCESSOR.             00084000
+*              3. INITIALIZE THE MCH LOGOUT POINTERS AND CONTROL        00085000
+*                 REGISTERS 14 AND 15.                                  00086000
+*              4. FIND STARTING CYL FOR ERROR RECORDING SPECIFIED       00087000
+*                 AT SYSGEN IN DMKSYSER.                                00088000
+*              5. DETERMINE THE IPL DEVICE (SYSIPLDV).                  00089000
+*              6. CALL DMKSCNRU TO GET RDEVBLOK ADDRESS FOR IPL DEVICE  00090000
+*              7. SET THE VALUES FOR 'MAXPAGES' AND 'NINETY PRCNT FULL' 00091000
+*                 AS DETERMINED FROM  RDEVTYPE.                         00092000
+*              8. CALL DMKPGTVG TO GET A VIRTUAL PAGE.                  00093000
+*              9. CALL DMKRPAGT TO READ A PAGE INTO CORE.               00094000
+*              10.IF THE FORMAT OF THE PAGE IS NOT VALID, GO TO         00095000
+*                 STEP 14.                                              00096000
+*              11. IF THE PAGE IS NOT FULL, GO TO THE NEXT STEP. IF     00097000
+*                  IT IS FULL, BUMP THE PAGE NUMBER IN THE CCPD TO      00098000
+*                  THE NEXT PAGE. IF END OF THE RECORDING CYLS          00099000
+*                  IS REACHED, GO TO STEP 19. IF NOT, READ IN           00100000
+*                  THE PAGE & REPEAT THIS STEP UNTIL A USABLE           00101000
+*                  PAGE IS FOUND OR END OF REC. AREA IS REACHED         00102000
+*              12. SET THE PAGE IN USE FLAG AND WRITE THE PAGE BACK     00103000
+*                  OUT TO THE DASD.                                     00104000
+*                 SET UP THE IN-STORAGE POINTERS AND EXIT.              00105000
+*              14. SET UP THE FLAGS IN THE FIRST PAGE TO INDICATE A     00106000
+*                  FORMAT IS IN PROCESS AND WRITE THE FIRST PAGE        00107000
+*                  BACK TO THE DASD.                                    00108000
+*              15. READ IN THE REST OF THE PAGES FROM REC. CYLS         00109000
+*                  INITIALIZE, AND WRITE BACK OUT.                      00110000
+*              16. READ THE FIRST PAGE BACK IN AND INITIALIZE WITH THE  00111000
+*                  NORMAL FORMAT, AND WRITE BACK OUT TO THE DASD.       00112000
+*              17. IF THIS IS A 'CLEARF' OPERATION, OR IF THIS          00113000
+*                  IS INITIAL FORMATTING WHEN INITIALIZING A            00114000
+*                  3033/3032/3031 PROCESSOR, CALL DMKIOGFR TO           00115000
+*                  FORMAT FRAME RECORDS.                                00116000
+*              18. IF THIS IS A CLEAR OPERATION, GO TO STEP 3           00117000
+*                  IN THE DESCRIPTION FOR DMKIOGF2. IF NOT,             00118000
+*                  SET UP THE IN STORAGE POINTERS AND EXIT.             00119000
+*                  AND EXIT.                                            00120000
+*              19. SET UP RECORDING AREA FULL MSG;CALL DMKQCNWT         00121000
+*                  TO SEND THE MSG. SET THE AREA FULL FLAG              00122000
+*                  IN DMKIOE. EXIT.                                     00123000
+*                                                                       00124000
+*        OPERATION - DMKIOGAP                                           00125000
+*              1. CALL DMKFREE TO RESERVE CORE STORAGE FOR LOGOUT,      00126000
+*                 MCHAREA, AND CPEXBLOK FOR EACH PROCESSOR.             00127000
+*              2. INITIALIZE THE MCH LOGOUT POINTERS AND CONTROL        00128000
+*                 REGISTERS 14 AND 15.                                  00129000
+*                                                                       00130000
+*                                                                       00131000
+*        OPERATION - DMKIOGF2                                           00132000
+*                                                                       00133000
+*              1. CHECK THE PARAMETERS. IF THEY ARE NOT VALID, EXIT.    00134000
+*              2. SET UP THE CCPD FOR THE 1ST PAGE OF RECORDING         00135000
+*                  AREA AND READ IT IN. FLAG THE PAGE TO                00136000
+*                  INDICATE A FORMAT IN PROCESS AND WRITE IT            00137000
+*                  BACK OUT. IF 'CLEAR' WAS SPECIFIED, USER             00138000
+*                  MEANS TO CLEAR ONLY ERROR RECORDS FROM THE           00139000
+*                  RECORDING CYLINDERS. CHECK FOR FRAME RECORDS         00140000
+*                  ON THE CYLS; IF SO, READ PAGES LOOKING FOR           00141000
+*                  1ST RECORDING PAGE WHICH DOES NOT CONTAIN            00142000
+*                  FRAME RECORDS. WHEN SUCH A PAGE IS FOUND,            00143000
+*                  OR IF 'CLEARF' HAD BEEN SPECIFIED,                   00144000
+*                  GO TO STEP 15 OF THE DESCRIPTION OF DMKIOGF1 TO      00145000
+*                  FORMAT THE REST OF THE CYLINDER.                     00146000
+*              3. TURN OFF 'FORMATTING' FLAG IN 1ST RECORDING           00147000
+*                 PAGE; SET UP IN-STORAGE POINTERS AND EXIT.            00148000
+*                                                                       00149000
+*                                                                       00150000
+*        OPERATION - DMKIOGFR                                           00151000
+*                                                                       00152000
+*              1. CALL DMKFREE TO OBTAIN SPACE FOR AN IOBLOK            00153000
+*                 PLUS CCW'S, AND INITIALIZE THE IOBLOK.                00154000
+*              2. ISSUE 'ENABLE' COMMAND TO THE SRF. IF THE SRF         00155000
+*                 IS INACCESSIBLE (OR IF IT WAS NOT SYS GEN'ED)         00156000
+*                 WRITE ERROR MESSAGE TO THE OPERATOR, FRET THE         00157000
+*                 SPACE GOTTEN IN STEP 1, AND RETURN TO                 00158000
+*                 DMKIOGF1 AT STEP 18.                                  00159000
+*              3. IF THE SRF IS AVAILABLE, PREPARE TO READ              00160000
+*                 FRAMES:                                               00161000
+*                   - CALL DMKFREE TO OBTAIN SPACE FOR A 2K             00162000
+*                     BUFFER                                            00163000
+*                   - BUILD A STANDARD RECORD HEADER TO BE USED         00164000
+*                     IN CONSTRUCTING ALL FRAME RECORDS                 00165000
+*              4. CALL DMKPGTVG TO OBTAIN A VIRTUAL PAGE TO USE         00166000
+*                 IN CONSTRUCTING BLOCKED FRAME RECORDS.                00167000
+*              5. CALL DMKRPAGT AND DMKPTRLK TO BRING THE 1ST           00168000
+*                 RECORDING PAGE INTO STORAGE AND LOCK IT THERE         00169000
+*                 IF AN ERROR OCCURS ON THIS READ OPERATION,            00170000
+*                 DISABLE RECORDING AND RETURN TO DMKIOGF1.             00171000
+*              6. ISSUE A 'VERBAGE' COMMAND TO THE SRF TO               00172000
+*                 INDICATE THAT CPU FRAMES ARE TO BE READ,              00173000
+*                 FOLLOWED BY A 'RDVERB' COMMAND TO OBTAIN THE          00174000
+*                 FIRST CPU FRAME.                                      00175000
+*              7. MOVE THE FRAME TO THE RECORDING PAGE AS               00176000
+*                 FOLLOWS:                                              00177000
+*                   - MOVE THE LENGTH OF THE FRAME RECORD               00178000
+*                     (LENGTH OF HEADER + LENGTH OF FRAME) INTO         00179000
+*                     THE 1ST FULLWORD OF THE RECORD                    00180000
+*                   - MOVE THE 24-BYTE STANDARD RECORD HEADER           00181000
+*                   - MOVE THE FRAME                                    00182000
+*                   - UPDATE THE INDEX IN THE PAGE HEADER TO            00183000
+*                     THE NEXT AVAILABLE FREE SPACE IN THE PAGE         00184000
+*                 WHEN THE PAGE IS FULL, WRITE IT BACK TO THE           00185000
+*                 RECORDING CYLINDERS, AND READ IN THE NEXT             00186000
+*                 RECORDING PAGE TO CONTINUE THE FRAME RECORD           00187000
+*                 CONSTRUCTION.                                         00188000
+*              8. CONTINUE READING FROM THE SRF UNTIL ONE OF            00189000
+*                 THE FOLLOWING OCCURS:                                 00190000
+*                   (A) CHANNEL END, DEVICE END, UNIT EXCEPTION         00191000
+*                       STATUS RECEIVED - END OF CPU FRAMES; GO         00192000
+*                       TO STEP 9 TO READ DIRECTOR FRAMES NOW.          00193000
+*                   (B) MORE THAN 50 CPU FRAMES READ - WRITE            00194000
+*                       ERROR MESSAGE TO OPERATOR; CONTINUE TO          00195000
+*                       FORMAT AS IF ONLY 50 FRAMES READ.               00196000
+*                   (C) ERROR STATUS (NON-CE,DE) RECEIVED FROM          00197000
+*                       RDVERB - IF ANY FRAME RECORDS ARE ON            00198000
+*                       THE RECORDING CYLS, TURN ON FRMLAST IN          00199000
+*                       LAST FRAME RECORD WRITTEN, SET DMKIOEFR         00200000
+*                       TO INDICATE FRAMES PRESENT, AND GO TO           00201000
+*                       STEP 11 TO CLEAN UP AND RETURN TO               00202000
+*                       DMKIOGF1. IF NO FRAME RECORDS HAVE BEEN         00203000
+*                       WRITTEN TO THE RECORDING CYLS, GO TO            00204000
+*                       STEP 11.                                        00205000
+*              9. ISSUE A 'VERBAGE' COMMAND TO THE SRF TO               00206000
+*                 RETRIEVE DIRECTOR FRAMES. PROCEED AS IN STEPS         00207000
+*                 6-8, EXCEPT WHEN CE,DE,UE STATUS IS DETECTED,         00208000
+*                 GO TO STEP 10.                                        00209000
+*              10. TURN ON 'LAST FRAME' FLAG IN THE LAST FRAME          00210000
+*                 RECORD WRITTEN, INDICATE THIS RECORDING PAGE          00211000
+*                 IS FULL (TO PREVENT ERROR RECORDS FROM BEING          00212000
+*                 PLACED ON THE SAME PAGE WITH FRAME RECORDS),          00213000
+*                 AND WRITE THE PAGE BACK TO THE RECORDING              00214000
+*                 CYLINDERS. SET DMKIOEFR TO INDICATE FRAME             00215000
+*                 RECORDS EXIST ON THE RECORDING CYLINDERS.             00216000
+*              11. ISSUE A 'DISABLE' COMMAND TO DETACH FROM             00217000
+*                 THE SRF.                                              00218000
+*              12. CALCULATE DMKIOEHS VALUE FOR USE BY CPEREP           00219000
+*                 PROCESSING. THIS FIELD IS THE DASD START OF           00220000
+*                 THE ERROR RECORDS (I.E., FIRST RECORDING PAGE         00221000
+*                 AFTER ALL FRAME RECORDS) IN CCPD FORMAT.              00222000
+*              13. CALL DMKPGTVR TO FREE THE VIRTUAL PAGE               00223000
+*                 GOTTEN IN STEP 4.                                     00224000
+*              14. CALL DMKFRET TO RELEASE THE IOBLOK, CCW'S,           00225000
+*                 AND 2K BUFFER SPACE.                                  00226000
+*              15. RETURN TO DMKIOGFR AT STEP 18.                       00227000
+*                                                                       00228000
+*                                                                       00229000
+*        MESSAGES -                                                     00230000
+*                                                                       00231000
+*        DMKIOG551E  ERROR RECORDING AREA FULL; RUN CPEREP              00232000
+*                                                                       00233000
+*        DMKIOG552I  FORMATTING ERROR RECORDING AREA                    00234000
+*                                                                       00235000
+*        DMKIOG553I  ERROR RECORDING AREA CLEARED; USER 'USER'          00236000
+*                                                                       00237000
+*        DMKIOG558I FATAL I/O ERROR; ERROR RECORDING DISABLED           00238000
+*                                                                       00239000
+*        DMKIOG550I  ERROR RECORDING AREA 90 PERCENT FULL; RUN CPEREP   00240000
+*                                                                       00241000
+*        DMKIOG559W  SRF NOT ACCESSIBLE; FRAMES NOT ON ERROR            00242000
+*                    CYLINDERS                                          00243000
+*                                                                       00244000
+*        DMKIOG560W  SRF ERRORS; FRAMES NOT ON ERROR CYLINDERS          00245000
+*                                                                       00246000
+*        DMKIOG561W  MORE THAN 50 MCH OR CCH FRAMES WERE READ           00247000
+*                    FROM THE SRF                                       00248000
+*                                                                       00249000
+*.                                                                      00250000
+         COPY  OPTIONS                                         @V407510 00251000
+         EJECT                                                          00252000
+DMKIOG   CSECT                                                          00253000
+MODULEID DC    CL8'DMKIOG'                                              00254000
+         EXTRN DMKSCNRU,DMKPGTVG                                        00255000
+         EXTRN DMKPGTVR,DMKRPAPT,DMKRPAGT                               00256000
+         EXTRN DMKIOERP                                                 00257000
+         EXTRN DMKERMSG                                        @V305435 00258000
+         EXTRN DMKIOEFR                                        @V5088AA 00259000
+         EXTRN DMKIOECT                                        @V5088AA 00260000
+         EXTRN DMKIOEES                                        @V5088AA 00261000
+         EXTRN DMKIOEHS                                        @V5088AA 00262000
+         EXTRN DMKIOEEP                                        @V5088AA 00263000
+         EXTRN DMKSYSCT                                        @V5088AA 00264000
+         EXTRN DMKRIOSF                                        @V5088AA 00265000
+         EXTRN DMKRIODV                                        @V5088AA 00266000
+         EXTRN DMKPTRLK                                        @V5088AA 00267000
+         EXTRN DMKIOETY                                                 00268000
+         EXTRN DMKIOEMX                                                 00269000
+         EXTRN DMKIOENI                                                 00270000
+         EXTRN DMKSIX60                                                 00271000
+         EXTRN DMKSEV70                                                 00272000
+         EXTRN DMKEIG80                                                 00273000
+         EXTRN DMKCCHCF                                                 00274000
+         EXTRN DMKCCH60                                                 00275000
+         EXTRN DMKCCHSZ                                                 00276000
+         EXTRN DMKCCHMX                                                 00277000
+         EXTRN DMKPTRAN                                        @V407510 00278000
+         EXTRN DMKIOSQR                                        @V5088AA 00279000
+         EXTRN DMKPTRUL                                        @V5088AA 00280000
+         EXTRN DMKCVTAB                                        @V5088AA 00281000
+         USING VMBLOK,R11                                               00282000
+         USING PSA,R0                                                   00283000
+         USING SAVEAREA,R13                                             00284000
+         USING *,R12                                                    00285000
+         SPACE 3                                                        00286000
+**********************************************************************  00287000
+*                                                                    *  00288000
+*        ROUTINE TO LOCATE LAST RECORDING ON CE CYLINDER             *  00289000
+*        AND SET THE IN-CORE POINTERS TO PROPER VALUES.              *  00290000
+*         IF THE ERROR RECORDING AREA IS NOT PROPERLY FORMATTED@V5088AA 00291000
+*        A MSG. WILL BE SENT TO THE OPERATOR AND THE AREA WILL @V5088AA 00292000
+*        BE FORMATTED. THE FIRST EIGHT BYTES OF EACH BLOCK CONTAIN   *  00293000
+*        THE CONTROL INFO AND ARE THE ONLY BYTES FORMATTED.          *  00294000
+*        RECORDING IS DONE IN 4096 BYTE BLOCKS. RECORDS ARE VARIABLE *  00295000
+*        LENGTH WITHIN THE BLOCK.                                    *  00296000
+*                                                                    *  00297000
+*        CALLED BY DMKCPI                                            *  00298000
+*                                                                    *  00299000
+*                                                                    *  00300000
+**********************************************************************  00301000
+         SPACE 2                                                        00302000
+DMKIOGF1 RELOC                                                          00303000
+         STIDP CPUID          SAVE THE CPU MODEL AND SERIAL NO.         00304000
+         CLI   CPUVERSN,X'FF' IS THIS A VIRTUAL MACHINE ?               00305000
+         BNE   NOTVIRT        NO, LETS GET ON WITH IT          @V508690 00306000
+         OI    MCNPSW+1,WAIT  TURN ON THE WAIT BIT IN          @V508690 00307000
+*                             MACHINE CHECK NEW PSW.                    00308000
+NOTVIRT  EQU   *                                               @V508690 00309000
+         LA    R5,16          SETUP TO EXERCISE 15 CHANNELS             00310000
+ISSUEINS EQU   *                                                        00311000
+         LR    R4,R5          R5 IS CHANNEL NUMBER PLUS 1 ...  @VMD0103 00312000
+         BCTR  R4,0           AND R4 IS CHANNEL NUMBER.        @VMD0103 00313000
+         LA    R7,0(R4,R4)    CHANNEL NUMBER * 2.              @VMD0103 00314000
+         A     R7,ARIOCT      R7 IS INDEX INTO CHANNEL TABLE.  @VMD0103 00315000
+         LH    R7,0(0,R7)     PICK UP HALFWD OFFSET TO RCHBLOK.@VMD0103 00316000
+         LTR   R7,R7          OFFSET INDICATES NO RCHBLOK?     @VMD0103 00317000
+         BM    NORCH1         NO RCHBLOK.                      @VMD0103 00318000
+         A     R7,ARIOCH      OFFSET + ORIGIN = RCHBLOK ADDR.  @VMD0103 00319000
+NORCH1   EQU   *              FROM HERE ON, R7 IS ADDR OF      @VMD0103 00320000
+*                             RCHBLOK OR IS -1.                         00321000
+         LA    R6,CONF(R4)    GET THE PTR TO THE CHANNEL TABLE.@VMD0103 00322000
+         MVI   0(R6),X'FF'    TENTATIVELY SET NO CHANL SUPPORT.@VMD0103 00323000
+         L     R0,FFS         TENTATIVELY SET FLAG INDICATING  @VMD0103 00324000
+*                             STIDC FAILS.                              00325000
+         SLL   R4,8           ADJUST CHANL NUMBER FOR STIDC.   @VMD0103 00326000
+         STIDC 0(R4)          STORE CHANNEL IDENTIFICATION.    @VMD0103 00327000
+         SRL   R4,8           CHANNEL AGAIN IN LOW ORDER BYTE. @VMD0103 00328000
+         BNZ   STIDCSAV       STIDC FAILED, LEAVE FFS IN R0.   @VMD0103 00329000
+         L     R0,CHANID      GET CHANNEL ID LEFT BY STIDC.    @VMD0103 00330000
+         IC    R8,CHANID      GET THE CHANNEL TYPE                      00331000
+         IC    R9,CHANID+1    GET THE CHANNEL MODEL                     00332000
+         N     R8,=X'000000F0'       CLEAR ALL BITS EXCEPT TYPE         00333000
+         N     R9,=X'0000000F'       CLEAR ALL BITS EXCEPT MODEL        00334000
+         AR    R8,R9          GET THE INDEX VALUE FOR TABLE             00335000
+         LA    R8,CHAN(R8)    GET CHANNEL TYPE ID.                      00336000
+         MVC   0(1,R6),0(R8)  SAVE THE CHANNEL TYPE ID.                 00337000
+         CLI   0(R8),X'F5'    IS THIS A 2860 SELECTOR ?                 00338000
+         BNE   TEST2880       NO, GO TEST FOR 2880                      00339000
+         OI    TYPEM,X'40'    INDICATE 2860 SUPPORT                     00340000
+         B     RESET370            GO RESET 370 CHANNEL FLAG            00341000
+TEST2880 EQU   *                                                        00342000
+         CLI   0(R8),X'F8'    IS THIS A 2880 SELECTOR ?                 00343000
+         BNE   TEST2881       NO, GO TEST FOR 2880                      00344000
+         OI    TYPEM,X'80'    INDICATE 2880 SUPPORT                     00345000
+TEST2881 EQU   *                                                        00346000
+         CLI   0(R8),X'F7'    IS THIS A 2880 BLOCK MULTIPLEX ?          00347000
+         BNE   TEST2870       NO, GO TEST FOR 2870                      00348000
+         OI    TYPEM,X'80'    INDICATE 2880 SUPPORT                     00349000
+TEST2870 EQU   *                                                        00350000
+         CLI   0(R8),X'F6'    IS THIS A 2870 BYTE MULTIPLEX ?           00351000
+         BNE   STIDCSAV       NO.                              @VMD0103 00352000
+         OI    TYPEM,X'20'    INDICATE 2870 SUPPORT                     00353000
+RESET370 LTR   R7,R7          DOES THE RCHBLOK EXIST?          @VMD0103 00354000
+         BM    NORCH2         NO, NO RCHBLOK.                  @VMD0103 00355000
+         USING RCHBLOK,R7                                      @VMD0103 00356000
+         NI    RCHTYPE,X'FF'-RCH370  RESET THE CHANNEL'S 370   @VMD0103 00357000
+*                                    INSTRUCTION FLAG.                  00358000
+STIDCSAV LTR   R7,R7          DOES THE RCHBLOK EXIST?          @VMD0103 00359000
+         BM    NORCH2         NO, NO RCHBLOK.                  @VMD0103 00360000
+         ST    R0,RCHSTIDC    PUT ID FROM STIDC OR F'S INTO    @VMD0103 00361000
+*                             RCHBLOK.                                  00362000
+         DROP  R7                                              @VMD0103 00363000
+NORCH2   EQU   *                                               @VMD0103 00364000
+CHANGEID EQU   *                                                        00365000
+         BCT   R5,ISSUEINS    GO GET NEXT CHANNEL                       00366000
+         MVZ   CONF(16),CONF-1 CHANGE THE HIGH ORDER FOUR BITS          00367000
+         L     R4,=V(DMKCCHCF) GET THE POINTER TO THE CONFIGURATION     00368000
+*                             TABLE POINTER                             00369000
+         MVC   0(16,R4),CONF  SAVE THE CHANNEL ID. TYPES IN             00370000
+*                             CCH CONTROL PROGRAM                       00371000
+         MVI   PARMSAVE,X'00' WILL BE USED TO INDICATE WHETHER @V5088AA 00372000
+*                             FRAME RECORDS REQUIRE INIT'ZATION@V5088AA 00373000
+         BAL   R7,IOGMCHIN    INITIALIZE MACHINE CHECK AREA    @V407510 00374000
+*                             FOR MAIN PROCESSOR               @V407510 00375000
+*                             CHECK HANDLER COMMUNICATION AREA          00376000
+         L     R6,=V(DMKCCHMX) GET THE ADDRESS OF THE CCH RECORD LENGTH 00377000
+*                             SAVE AREA                                 00378000
+         B     MCH004(R3)     GO TO MODEL DEPENDED CODE                 00379000
+         B     PASTDAVE       GO INITIALIZE CP                          00380000
+MCH004   EQU   *                                                        00381000
+         B     MC158155       GO GET SPACE FOR CCH RECORD      @V407510 00382000
+         B     MC135138       GO TO THE 135/138 SUPPORT        @V386298 00383000
+         B     MC145148       GO TO THE 145/148 SUPPORT        @V386298 00384000
+         B     MC158155       GO TO THE 155 & 158 SUPPORT               00385000
+         B     MC168165       GO TO THE 165 & 168 SUPPORT               00386000
+         B     MC303X           GOTO THE COMMON 3033/3032/3031 @V5088AA 00387000
+*                               SUPPORT ROUTINE                @V5088AA 00388000
+         B     MC331341       GO TO 4331/4341 PROCESSING       @V60A6B6 00388100
+MC135138 EQU   *              SUPPORT FOR 135/138              @V386298 00389000
+         LA    R0,X'6C'         LENGTH OF THE CCH RECORD       @V5088AA 00390000
+         STH   R0,0(R6)       SAVE LENGTH                      @V5088AA 00391000
+*                             AND I/O EXTENDED LOGOUT AREA              00392000
+         LA    R1,X'100'      GET THE ADDRESS OF THE I/O EXTENDED       00393000
+*                             LOGOUT AREA                               00394000
+         LA    R4,22          GET THE LENGTH OF THE I/O LOGOUT AREA     00395000
+         B     INTECSW        GO INITIALIZE THE ECSW                    00396000
+MC145148 EQU   *              SUPPORT FOR THE 145/148          @V386298 00397000
+         LA    R0,X'B4'         LENGTH OF THE CCH RECORD       @V5088AA 00398000
+         STH   R0,0(R6)       SAVE LENGTH                      @V5088AA 00399000
+*                             AND I/O EXTENDED LOGOUT AREA              00400000
+         LA    R0,96          GET THE LENGTH OF THE EXTENDED LOGOUT     00401000
+         BAL   R3,FREE        GO GET THE SPACE FOR THE LOGOUT           00402000
+         B     INTECSW        GO INITIALIZE THE ECSW                    00403000
+MC158155 EQU   *                                                        00404000
+         LA    R0,X'54'         LENGTH OF THE CCH RECORD       @V5088AA 00405000
+         STH   R0,0(R6)       SAVE LENGTH                      @V5088AA 00406000
+         SR    R1,R1          CLEAR THE I/O EXTENDED LOGOUT POINTER     00407000
+         B     INTECSW          GO INITIALIZE THE ECSW         @V5088AA 00408000
+MC303X   EQU   *                COMMON 3033/3032/3031 SUPPORT  @V5088AA 00409000
+         LA    R0,X'2D4'        LENGTH OF THE CCH RECORD       @V5088AA 00410000
+         STH   R0,0(R6)         SAVE LENGTH                    @V5088AA 00411000
+         LA    R0,640           GET LENGTH OF EXTENDED LOGOUT  @V5088AA 00412000
+         BAL   R3,FREE          GO GET SPACE FOR LOGOUT AREA   @V5088AA 00413000
+         OI    PARMSAVE,INITYES FRAMES NEED TO BE INITIALIZED  @V5088AA 00414000
+INTECSW  EQU   *                                                        00415000
+         MVI   ECSWLOG,X'FF'  INITIALIZE THE ECSW                       00416000
+         B     PASTDAV1       GO SAVE THE I/O EXTENDED LOGOUT POINTER   00417000
+MC168165 EQU   *                                                        00418000
+         TM    TYPEM,X'80'    IS THIS A 2880 CHANNEL ?                  00419000
+         BZ    C287060        NO, GO TO 2870 &2860 SUPPORT              00420000
+         LA    R0,X'C0'         LENGTH OF THE CCH RECORD + IOEL@V5088AA 00421000
+         STH   R0,0(R6)         SAVE LENGTH                    @V5088AA 00422000
+         LA    R0,112         GET THE LENGTH OF THE I/O EXTENDED        00423000
+*                             LOGOUT AREA                               00424000
+         BAL   R3,FREE        GO GET THE SPACE THE THE I/O EXTENDED     00425000
+*                             LOGOUT                                    00426000
+         B     PASTDAV1       GO SAVE THE I/O EXTENDED LOGOUT POINTER   00427000
+MC331341 EQU   *             PROCESS 4331/4341                 @V60A6B6 00427100
+         MVI   ECSWLOG,X'FF'  INITIALIZE THE ECSW              @V60A6B6 00427200
+         B     PASTDAVE       GO SETUP RECORDING CYLINDERS     @V60A6B6 00427300
+         SPACE 2                                                        00428000
+**********************************************************************  00429000
+FREE     EQU   *                                                        00430000
+         LR    R4,R0          SAVE THE LENGTH OF THE AREA               00431000
+         A     R0,F7          PUT LENGTH ON A DOUBLEWORD       @VA00881 00432000
+*                             BOUNDARY                                  00433000
+         SRL   R0,3           DIVIDE BY 8                               00434000
+         CALL  DMKFREE        GO GET THE STORAGE                        00435000
+         BR    R3             RETURN TO IN LINE CODE                    00436000
+**********************************************************************  00437000
+         EJECT                                                          00438000
+***************************************************************@V407510 00439000
+*                                                              @V407510 00440000
+*        ROUTINE TO OBTAIN STORAGE FOR MACHINE CHECK           @V407510 00441000
+*        RECORD, EXTENDED LOGOUT AREA, AND CPEXBLOK.           @V407510 00442000
+*        THE MACHINE CHECK COMMUNICATION AREA IS ALSO          @V407510 00443000
+*        INITIALIZED.                                          @V407510 00444000
+*                                                              @V407510 00445000
+***************************************************************@V407510 00446000
+IOGMCHIN DS    0H             MACHINE CHECK INITIALIZATION     @V407510 00447000
+         USING MCHAREA,R5     SETUP ADDRESSABILITY FOR MACHINE @V407510 00448000
+*                             CHECK HANDLER COMMUNICATION AREA @V407510 00449000
+         LH    R9,CPUMCELL    GET THE LENGTH OF THE EXTENDED   @V407510 00450000
+*                             LOGOUT AREA                      @V407510 00451000
+         LA    R6,MCHLEN1     GET LN OF DAMAGE ASSESSMENT AREA @V407510 00452000
+         LA    R0,MCHFIX(R9,R6) CALCULATE THE TOTAL LENGTH     @V407510 00453000
+         BAL   R3,FREE        GO GET THE SPACE FOR THE RECORD  @V407510 00454000
+         SLL   R0,X8          MULTIPLY LENGTH BY 8             @V407510 00455000
+         LR    R2,R1          SET UP STARTING ADDRESS          @V407510 00456000
+         LR    R3,R0          SET UP LENGTH                    @V407510 00457000
+         LR    R4,R2          SET UP FOR OVERLAP               @V407510 00458000
+         SR    R5,R5          SET UP TO ZERO STORAGE           @V407510 00459000
+         MVCL  R2,R4          CLEAR STORAGE JUST OBTAINED      @V407510 00460000
+         LA    R5,MCHFIX(R9,R1) GET ADDRESS OF DAMAGE          @V407510 00461000
+*                             ASSESSMENT AREA                  @V407510 00462000
+         ST    R5,AMCHAREA    SAVE ADDRESS OF DAMAGE           @V407510 00463000
+*                             ASSESSMENT AREA                  @V407510 00464000
+         STH   R6,MCHDAMLN      SAVE LENGTH OF DAMAGE          @V407510 00465000
+*                               ASSESSMENT AREA                @V407510 00466000
+         MVC   MCHPROCA,IPUADDR SAVE PROCESSOR ADDRESS         @V407510 00467000
+         LTR   R9,R9          ANY EXTENDED LOGOUT AREA?        @V407510 00468000
+         BZ    LOGOUT         NO, SET ADDRESS TO ZERO          @V407510 00469000
+         LA    R9,MCHFIX(R1)  GET THE BEGINNING ADDRESS OF     @V407510 00470000
+*                             THE EXTENDED LOGOUT AREA WILL    @V407510 00471000
+LOGOUT   DS    0H                                              @V407510 00472000
+         ST    R9,SAVEWRK7    SAVE THE BEGINNING ADDRESS       @V407510 00473000
+         LCTL  R15,R15,SAVEWRK7 RESTORE CONTROL REGISTER 15    @V407510 00474000
+         ST    R1,MCHREC      SAVE THE POINTER TO THE MACHINE C@V407510 00475000
+*                             RECORD                           @V407510 00476000
+         LA    R0,8*CPEXSIZE  GET THE SIZE OF THE CPEXBLOK     @V407510 00477000
+         BAL   R3,FREE        GO GET THE SPACE FOR THE CPEXBLOK@V407510 00478000
+         SLL   R0,X8          MULTIPLY LENGTH BY 8             @V407510 00479000
+         LR    R2,R0          GET LENGTH                       @V407510 00480000
+         BCTR  R2,0           SUBTRACT ONE FROM LENGTH         @V407510 00481000
+         EX    R2,CLEAR       CLEAR CPEXBLOK                   @V407510 00482000
+         ST    R1,MCHCPEX     SAVE THE CPEXBLOK POINTER        @V407510 00483000
+         LH    R2,CPUMODEL    GET THE MODEL NUMBER             @V407510 00484000
+         SR    R3,R3          CLEAR REGISTER 3                 @V407510 00485000
+         LH    R4,NOTSUPPD    GET THE ID STOPPER               @V407510 00486000
+MCH002   EQU   *                                               @V407510 00487000
+         CH    R2,MODMODEL(R3)       COMPARE MODEL NUMBER WITH @V407510 00488000
+         BE    MCH003         YES, GO SAVE MODEL ID            @V407510 00489000
+         LA    R3,TABSZ(R3)   UPDATE MODEL NUMBER TABLE PTR    @V407510 00490000
+         CH    R4,MODMODEL(R3) COMPARE MODEL NO. WITH STOPPER  @V407510 00491000
+         BNE   MCH002         NO, GO COMPARE NEXT MODEL NO.    @V407510 00492000
+MCH003   EQU   *                                               @V407510 00493000
+         LH    R3,MODMODID(R3)       GET THE MODEL ID.         @V407510 00494000
+         STC   R3,MCHMODEL    SAVE THE MODEL ID IN THE MACHINE @V407510 00495000
+*                             CHECK HANDLER COMMUNICATION AREA @V407510 00496000
+         CH    R2,MO155       IS THIS MODEL 155?               @V407510 00497000
+         BE    SETMODE        YES, RECORD SOFT ERRORS          @V407510 00498000
+         CH    R2,MO165       IS THIS MODEL 165?               @V407510 00499000
+         BNE   IOGMCHEX       NO, DO NOT RECORD SOFT ERRORS    @V407510 00500000
+SETMODE  DS    0H             RECORD SOFT ERRORS               @V407510 00501000
+         OI    APSTAT2,RECMODE SET INDICATOR IN PSA FOR RECORD @V407510 00502000
+IOGMCHEX DS    0H                                              @V407510 00503000
+         BR    R7             RETURN TO CALLER                 @V407510 00504000
+CLEAR    XC    ZERO(ZERO,R1),ZERO(R1)  CLEAR STORAGE           @V407510 00505000
+ZERO     EQU   0              CONSTANT OF 0                    @V407510 00506000
+TABSZ    EQU   4              SIZE OF MODEL NO. ENTRIES        @V407510 00507000
+X8       EQU   3              SHIFT VALUE TO MULTIPLY BY 8     @V407510 00508000
+***************************************************************@V407510 00509000
+         SPACE                                                          00510000
+***************************************************************@V407510 00511000
+*                                                              @V407510 00512000
+*        THIS ENTRY POINT IS INVOKED TO INITIALIZE             @V407510 00513000
+*        THE MACHINE CHECK RECORD, EXTENDED LOGOUT AREA,       @V407510 00514000
+*        CPEXBLOK, AND MCHAREA FOR THE ATTACHED PROCESSOR.     @V407510 00515000
+*                                                              @V407510 00516000
+***************************************************************@V407510 00517000
+DMKIOGAP RELOC                                                 @V407510 00518000
+         STIDP CPUID          SAVE THE CPU MODEL & SERIAL NO.  @V407510 00519000
+         BAL   R7,IOGMCHIN    INITIALIZE MACHINE CHECK AREA    @V407510 00520000
+*                             FOR ATTACHED PROCESSOR           @V407510 00521000
+         LM    R0,R11,SAVEREGS          RESTORE CALLERS REGS   @V407510 00522000
+         SVC   RETURN         EXIT                             @V407510 00523000
+RETURN   EQU   12             RETURN SVC NUMBER                @V407510 00524000
+         SPACE                                                          00525000
+C287060  EQU   *                                                        00526000
+         SR    R1,R1          CLEAR THE I/O EXTENDED LOGOUT POINTER     00527000
+         TM    TYPEM,X'60'    IS THIS A 2860 OR 2870 CHANNEL ?          00528000
+         BZ    PASTDAV1       NO, GO SAVE I/O EXTENDED LOGOUT POINTER   00529000
+         MVI   0(R6),X'68'    SAVE THE LENGTH OF THE CCH RECORD AND     00530000
+*                             I/O EXTENDED LOGOUT AREA                  00531000
+         LA    R1,X'130'      GET THE POINTER TO THE I/O EXTENDED       00532000
+*                             LOGOUT                                    00533000
+         LA    R4,22          GET THE LENGTH OF THE I/O LOGOUT AREA     00534000
+PASTDAV1 EQU   *                                                        00535000
+         ST    R1,IOELPNTR    SAVE THE POINTER TO THE I/O EXTENDED      00536000
+         LTR   R1,R1          IS THE ADDRESS ZERO ?                     00537000
+         BZ    PASTDAV2       YES, GO GET DEPENDENT MODULE              00538000
+         L     R15,=V(DMKCCHSZ) GET ADDRESS OF IOEL SIZE FIELD @V5088AA 00539000
+         STH   R4,0(,R15)     SAVE I/O EXTENDED LOGOUT LENGTH  @V5088AA 00540000
+         LR    R2,R1            'TO' ADDRESS (IOEL)            @V5088AA 00541000
+         LR    R3,R4            LENGTH TO MOVE                 @V5088AA 00542000
+         LR    R4,R2            'FROM' ADDRESS FOR MOVE        @V5088AA 00543000
+         L     R5,F255          PAD CHARACTER                  @V5088AA 00544000
+         SLL   R5,24            PAD CHAR. = X'FF'; LENGTH=0    @V5088AA 00545000
+         MVCL  R2,R4            PROPAGATE X'FF'S THRUOUT IOEL  @V5088AA 00546000
+         L     R5,AMCHAREA      RESTORE MCH AREA BASE          @V5088AA 00547000
+PASTDAV2 EQU   *                                                        00548000
+         CLI   MCHMODEL,MODEL165     IS THIS A 165 OR 168 ?             00549000
+         BNE   PASTDAVE       NO, GO FIND STARTING CYL FOR RECORDING    00550000
+         L     R3,=V(DMKCCH60) GET THE ADDRESS OF THE SAVE AREA FOR     00551000
+*                             CHANNEL ADDRESSES                         00552000
+         LA    R6,3           SETUP COUNT VALUE                         00553000
+         SR    R4,R4          CLEAR WORK REGISTER                       00554000
+INTERG   EQU   *                                                        00555000
+         L     R1,MOD1658C(R4)       GET ADDRESS OF CHANNEL MODULE      00556000
+         LTR   R1,R1          IS THERE AN ADDRESS FOR CHANNEL MODULE ?  00557000
+         BZ    CCHCHAN        NO, GO GET NEXT ADDRESS                   00558000
+*                             GET CHANNEL SUPPORT MODULE       @V407510 00559000
+         TRANS 2,1,OPT=(BRING,LOCK,DEFER,SYSTEM),AFFINITY      @V407510 00560000
+         ST    R2,0(R4,R3)    SAVE THE ADDRESS IN CCH CONTROL           00561000
+*                             ROUTINE                                   00562000
+CCHCHAN  EQU   *                                                        00563000
+         LA    R4,4(R4)       UPDATE THE SAVE AREA                      00564000
+         BCT   R6,INTERG      GO GET NEXT MODULE                        00565000
+         DROP  R5             DROP THE BASE REGISTER FOR MCH            00566000
+         B     PASTDAVE            GO SET UP RECORDING CYLINDERS        00567000
+         SPACE                                                          00568000
+PASTDAVE L     R15,=V(DMKSYSER)    FIND STARTING CYL FOR RECORDING      00569000
+         LH    R15,0(R15)     ERRORS.                                   00570000
+         STH   R15,CECYL      SET RECORDING AREA IN-CORE PTR   @V5088AA 00571000
+         LH     R1,SYSIPLDV    PICK UP IPL DEV ADDRESS FROM PSA         00572000
+         CALL  DMKSCNRU       CALLSCANNER TO GET RDEVBLOK PTR           00573000
+**********************************************************************  00574000
+*        SCANNER RETURNS PTR TO RDEVBLOK IN GPR8                     *  00575000
+**********************************************************************  00576000
+         USING RDEVBLOK,R8                                              00577000
+         LH    R15,RDEVCODE   R8 POINTS TO RDEVBLOK-PICK UP RDEVCODE    00578000
+         STC   R15,CECYLTYP         ONLY 1 BYTE IS USED AT PRESENT.     00579000
+         STC   R15,WORKTYP                                              00580000
+         CLI   RDEVTYPE,TYP3330     IS IT A 3330 ?                      00581000
+         BE    SET3330        YES                                       00582000
+         CLI   RDEVTYPE,TYP3350 IS IT A 3350 ?                 @V304498 00583000
+         BE    SET3350        YES -                            @V304498 00584000
+         CLI   RDEVTYPE,TYP2305     IS IT A 2305 ?                      00585000
+         BE    SET2305        YES                                       00586000
+         CLI   RDEVTYPE,TYP3340 IS IT A 3340 ?                 @V2A2029 00587000
+         BE    SET3340        YES -                            @V2A2029 00588000
+         MVI   MAXPAGE,MAX2314     SET MAX NO. PAGES PER CYL 2314/2319  00589000
+         B     NINETYPC                                        @V5088AA 00590000
+SET3350  MVI   MAXPAGE,MAX3350 SET MAX NO. PAGES PER CYL 3350  @V304498 00591000
+         B     NINETYPC                                        @V5088AA 00592000
+SET3330  MVI   MAXPAGE,MAX3330    SET MAX NO. PAGES PER CYL 3330        00593000
+         B     NINETYPC                                        @V5088AA 00594000
+SET3340  EQU   *              SET MAX NO. PAGES PER CYL 3340   @V2A2029 00595000
+SET2305  MVI   MAXPAGE,MAX2305     SET MAX NO. PAGES PER CYL 2305       00596000
+         EJECT                                                          00597000
+NINETYPC EQU   *                                               @V5088AA 00598000
+         L     R2,=V(DMKSYSCT)  COUNT OF RECORDING CYLINDERS   @V5088AA 00599000
+         LH    R2,0(R2)       RETRIEVE COUNT OF RECORDING CYLS @V5088AA 00600000
+         L     R4,=V(DMKIOECT)  ADDRESS TO SAVE CYL COUNT      @V5088AA 00601000
+         STH   R2,0(R4)       SAVE CYLINDER COUNT              @V5088AA 00602000
+         LR    R4,R2          MOVE COUNT FOR MANIPULATION      @V5088AA 00603000
+         AH    R4,CECYL       ADD START CYL OF RECORDING AREA  @V5088AA 00604000
+         BCTR  R4,0           SUBTRACT ONE FOR END ADDRESS     @V5088AA 00605000
+         STH   R4,MAXCYL      SAVE END 'CC' OF RECORDING AREA  @V5088AA 00606000
+         STH   R4,LASTCYL     SAVE ENDING 'CC' FOR 90% CHECK   @V5088AA 00607000
+         SRDL  R2,32          PREPARE FOR MULTIPLICATION       @V5088AA 00608000
+         SLR   R4,R4          CLEAR THE REGISTER               @V5088AA 00609000
+         IC    R4,MAXPAGE     NUMBER OF PAGES PER CYLINDER +1  @V5088AA 00610000
+         BCTR  R4,0           SUBTRACT 1 FOR NO. PAGES PER CYL @V5088AA 00611000
+         MR    R2,R4          MULTIPLY PAGES/CYL BY NO. OF CYLS@V5088AA 00612000
+         LA    R4,10          FIND 10% OF TOTAL NO. OF PAGES   @V5088AA 00613000
+         DR    R2,R4          DIVIDE TOTAL NUMBER OF PAGES IN  @V5088AA 00614000
+*                             RECORDING AREA BY 10             @V5088AA 00615000
+         LTR   R2,R2          IS REMAINDER ZERO?               @V5088AA 00616000
+         BZ    *+8            IF YES, OK                       @V5088AA 00617000
+         LA    R3,1(R3)       IF NOT, ROUND UP THE 10% VALUE   @V5088AA 00618000
+         IC    R4,MAXPAGE     NO. OF PAGES ON ONE CYLINDER     @V5088AA 00619000
+         SR    R4,R3          SUBTRACT IN ORDER TO GET THE     @V5088AA 00620000
+*                             PAGE WHICH, ON THE LAST RECORDING@V5088AA 00621000
+*                             CYL, WILL MEAN AREA IS 90% FULL. @V5088AA 00622000
+         STC   R4,PAGE90PC    SAVE FOR USE BY RECORDING RTNS   @V5088AA 00623000
+FINDIOR  LA    R4,SETOBRS     ADDRESS OF 'FIND' RETURN POINT   @V5088AA 00624000
+         ST    R4,FINDRET     SET RETURN POINT FROM SEARCH              00625000
+         MVC   WORKCYL(3),CECYL    PUT IO-OBR PARMS IN WORK AREA        00626000
+         DROP  R8                                                       00627000
+         SPACE 2                                                        00628000
+**********************************************************************  00629000
+*        LOCATE THE FIRST RECORD ON DESIGNATED RECORDING CYLINDER    *  00630000
+*        AND CHECK THAT IT IS IN THE CORRECT FORMAT                  *  00631000
+**********************************************************************  00632000
+         SPACE 1                                                        00633000
+FINDREC  EQU   *                                                        00634000
+         CALL  DMKPGTVG       GET A VIRTUAL MEMORY PAGE ADDRESS         00635000
+**********************************************************************  00636000
+*              ADDRESS WILL BE RETURNED IN REG 1                     *  00637000
+**********************************************************************  00638000
+         ST    R1,IOEVMPAD              SAVE VIRT MEM PAGE ADDRESS      00639000
+FIND2    EQU   *                                                        00640000
+         BAL   R14,FMTREAD    GO READ A 4096 BYTE RECORD                00641000
+**********************************************************************  00642000
+*                                                                    *  00643000
+*        ON RETURN REGISTER 2 CONTAINS REAL ADDRESS OF BUFFER        *  00644000
+*                                                                    *  00645000
+**********************************************************************  00646000
+         ST    R2,IOEREALA        SAVE REAL ADDRESS OF BUFFER           00647000
+         USING RECPAG,R2                                                00648000
+         CLC   WORKCYL(4),RECCCPD  CORRECT CCPD FOR PAGE ??             00649000
+         BNE   FORMAT              IF NOT - GO FORMAT                   00650000
+         TM    RECFLAG2,RECPAGFM   IN A FORMAT OPERATION                00651000
+         BO    FORMAT              YES - DO IT ALL OVER AGAIN           00652000
+         TM    RECFLAG1,RECPAGIU+RECPAGFR+RECPAGFL     SHOULD HAVE ONE  00653000
+         BZ    FORMAT              CAUSE IF WE DON'T , WE FORMAT        00654000
+         MVI   INFOFLAG,X'00' CLEAR OUT FLAG BYTE              @VD00160 00655000
+         TM    RECFLAG1,RECPAGFA ARE FRAME RECORDS ON THIS PAGE@VD00160 00656000
+         BZ    FINDLOOP       OK IF NOT                        @VD00160 00657000
+         OI    INFOFLAG,YESFRAME REMEMBER FRAMES ARE PRESENT   @VD00160 00658000
+         MVC   SAVELAST,WORKCYL SAVE THIS FIRST CCPD VALUE     @VA07861 00658100
+         SPACE                                                          00659000
+FINDLOOP EQU   *                                                        00660000
+         TM    INFOFLAG,YESFRAME WERE FRAME RECORDS FOUND ON   @VD00160 00665000
+*                             THE RECORDING CYLINDERS?                  00666000
+         BZ    FIND3          NO --CONTINUE                    @VD00160 00667000
+         TM    RECFLAG1,RECPAGFA ARE THERE FRAMES ON THIS PAGE?@VD00160 00668000
+*                             (WE ARE LOOKING FOR THE FIRST             00669000
+*                             NON-FRAME RECORD IN ORDER TO FILL         00670000
+*                             IN DMKIOEHS.)                             00671000
+         BNZ   FIND3          YES -- THEN THIS IS NOT A PAGE   @VD00160 00672000
+*                             THAT CONTAINS ERROR RECORDS.              00673000
+         L     R2,=V(DMKIOEFR) ADDRESS OF FRAME INDICATOR      @VD00160 00674000
+         MVI   0(R2),YESFRAME INDICATE FRAMES ARE ON REC. CYLS @VD00160 00675000
+         L     R2,=V(DMKIOEHS) ADDRESS OF CCPD OF 1ST ERROR REC@VD00160 00676000
+         MVC   0(4,R2),SAVELAST SAVE CCPD OF LAST FRAME RECORD @VA07861 00677100
+*                             (EREP WILL USE THIS TO READ THE 1ST       00678100
+*                             ERROR RECORD.)                            00678125
+         MVI   INFOFLAG,X'00'  TURN OFF FLAG SO THAT WE DON'T  @VD00160 00679000
+*                             COME THROUGH HERE AGAIN.                  00680000
+         L     R2,IOEREALA    LOAD REAL PAGE ADDRESS           @VA08278 00680050
+FIND3    TM    RECFLAG1,RECPAGFR  CLEARED PAGE?                @VA07861 00680100
+         BO    FINDEXIT       YES - LET'S USE IT               @VA07861 00680120
+         TM    RECFLAG1,RECPAGFL  IN USE BUT NOT FULL?         @VA07861 00680140
+         BZ    FINDEXIT       YES - OK TO USE THIS ONE         @VA07861 00680160
+         SLR   R2,R2          ZERO REGISTER 2                  @VA07861 00681100
+         ICM   R2,B'0111',WORKCYL LOAD LAST CYL & PAGE NUMBER  @V5088AA 00682000
+         STCM  R2,B'0111',SAVELAST SAVE THIS CCPD - IT MAY BE  @VA07861 00682100
+*                             THE LAST PAGE TO CONTAIN FRAME RECORDS.   00682125
+         LA    R2,1(R2)       BUMP PAGE NUMBER BY ONE          @V5088AA 00683000
+         STC   R2,WORKPAGE         AND STORE IT                         00684000
+         CLC   WORKPAGE(1),MAXPAGE HAVE WE REACHED THE END              00685000
+         BL    FINDREAD       OK--NOT AT END OF CYLINDER       @V5088AA 00686000
+         CLC   WORKCYL(3),MAXCYL ARE WE AT END OF LAST CYL?    @V5088AA 00687000
+         BNL   CYLFULL        YES, RECORDING AREA IS FULL      @V5088AA 00688000
+         SRL   R2,8           ISOLATE 'CC' PART OF CURRENT ADDR@V5088AA 00689000
+         LA    R2,1(R2)       INCREMENT CYL NUMBER             @V5088AA 00690000
+         STH   R2,WORKCYL     STORE UPDATED WORK ADDRESS       @V5088AA 00691000
+         MVI   WORKPAGE,X'01' RESET 'P' TO 1ST PAGE ON NEW CYL @V5088AA 00692000
+FINDREAD BAL   R14,FMTREAD    READ PAGE IN                     @V5088AA 00693000
+         B     FINDLOOP            GO BACK AND LOOK AT THIS ONE         00694000
+         SPACE                                                          00695000
+FINDEXIT EQU   *                                                        00696000
+         MVI   RECFLAG1,RECPAGIU   SET PAGE IN USE                      00697000
+         BAL   R3,FMTWRITE         OUTPUT THE PAGE                      00698000
+         L     R3,FINDRET          LOAD RETURN ADDRESS                  00699000
+         BR    R3                  AND GO BACK                          00700000
+         SPACE                                                          00701000
+**********************************************************************  00702000
+*                                                                    *  00703000
+*        SET RECORDING AREA STARTING CYLINDER AND PAGE         @V5088AA 00704000
+*        CECYL POINTS TO FIRST AVAILABLE ERROR RECORD 'CCP'    @V5088AA 00705000
+*                                                                    *  00706000
+**********************************************************************  00707000
+         SPACE 2                                                        00708000
+SETOBRS  MVC   CECYL(3),WORKCYL    LET IT BE DONE                       00709000
+         B     IOEXIT         ALL DONE                                  00710000
+         EJECT                                                          00711000
+**********************************************************************  00712000
+*                                                                    *  00713000
+*        FORMAT WILL WRITE A 12 BYTE CONTROL FIELD AS THE FIRST 12   *  00714000
+*        BYTES IN EVERY 4096 BYTE BLOCK.                             *  00715000
+*              BYTES 1-2=CYLINDER                                    *  00716000
+*              BYTE  3  =PAGE NO. (BLOCK OR PHYSICAL RECORD NUMBER)  *  00717000
+*              BYTE  4  =DEVICE CODE                                 *  00718000
+*              BYTE  5-6=NEXT AVAIL. SPACE THAT CAN BE USED IN BLOCK *  00719000
+*              BYTE  7  =PAGE 'IN-USE' IND (00=EMPTY, 80=IN-USE@V5088AA 00720000
+*              BYTE  8  = PAGE SKIPPED INDICATOR.                    *  00721000
+*              BYTES 9-12=LAST RECORD IND OR SIZE OF VARIABLE RECORD *  00722000
+*                                                                    *  00723000
+*                                                                    *  00724000
+**********************************************************************  00725000
+         SPACE 2                                                        00726000
+FORMAT   EQU   *                                                        00727000
+         MVI   RECFLAG2,RECPAGFM   SET FORMATTING FLAG                  00728000
+         MVC   RECCCPD(4),WORKCYL  SET CCPD                             00729000
+         MVC   RECNXT(2),INITFMT   PAGE ONE STUFF                       00730000
+         MVI   RECFLAG1,0          ZIP USE FLAGS                        00731000
+         SLR   R0,R0          NO VARIABLE MESSAGE TEXT         @V5088AA 00732000
+         SLR   R1,R1          NO VARIABLE MESSAGE TEXT         @V5088AA 00733000
+         LA    R2,552         MESSAGE DMKIOG552I               @V305435 00734000
+         ICM   R2,B'0100',=C'I' INFORMATION MESSAGE            @V305435 00735000
+FORMSGOK BAL   R3,CALLERM     CALL MESSAGE WRITTER             @V305435 00736000
+         LA    R14,FMTFINI    GET RETURN ADDRESS               @V305435 00737000
+         ST    R14,FMTEXIT    SAVE IT                          @V305435 00738000
+         B     FMTWRTPG       OUTPUT FIRST PAGE                @V305435 00739000
+         SPACE 3                                                        00740000
+**********************************************************************  00741000
+*                                                                    *  00742000
+*        ROUTINE TO FORMAT ERROR RECORDING AREA                @V5088AA 00743000
+*                                                                    *  00744000
+**********************************************************************  00745000
+         SPACE 2                                                        00746000
+FMTLOOP  MVC   0(4,R2),WORKCYL     MOVE IN CCPD                         00747000
+         MVC   4(8,R2),INITFMT     MOVE IN THE GOODIES                  00748000
+         BAL   R3,FMTWRITE   WRITE IT OUT                               00749000
+FMTPGINC EQU   *                                                        00750000
+         ICM   R2,B'0111',WORKCYL PICK UP CYL AND PAGE POINTER @V5088AA 00751000
+         LA    R2,1(R2)       BUMP IT BY 1                              00752000
+         STC   R2,WORKPAGE    SAVE PTR                                  00753000
+         CLC   WORKPAGE(1),MAXPAGE DID WE HIT END OF CYL ?              00754000
+         BNE   FMTRD          NOT AT END OF A CYLINDER         @V5088AA 00755000
+         CLC   WORKCYL(3),MAXCYL AT END OF LAST CYLINDER?      @V5088AA 00756000
+         BE    FMTOUT         YES, AT END OF RECORDING AREA    @V5088AA 00757000
+         SRL   R2,8           ISOLATE 'CC' PART OF CURRENT ADDR@V5088AA 00758000
+         LA    R2,1(R2)       INCREMENT CYLINDER TO NEXT ONE   @V5088AA 00759000
+         STH   R2,WORKCYL     STORE UPDATED CYLINDER NUMBER    @V5088AA 00760000
+         MVI   WORKPAGE,X'01' UPDATE 'P' TO 1ST PAGE ON NEW CYL@V5088AA 00761000
+FMTRD    BAL   R14,FMTREAD    GO READ ANOTHER PAGE             @V5088AA 00762000
+         B     FMTLOOP        FORMAT THIS PAGE                          00763000
+         SPACE 5                                                        00764000
+**********************************************************************  00765000
+*                                                                    *  00766000
+*        RETURN HERE WHEN FORMAT OF AREA IS COMPLETE           @V5088AA 00767000
+*                                                                    *  00768000
+**********************************************************************  00769000
+FMTOUT   L     R2,=V(DMKIOEFR) ADDR. OF FRAME RECORD INDICATOR @V5088AA 00770000
+         MVI   0(R2),NOFRAMES  NO FRAME RECS ARE IN REC. AREA  @V5088AA 00771000
+         TM    PARMSAVE,INITYES MUST WE INITIALIZE FRAME RECS? @V5088AA 00772000
+         BZ    EXITFMT        NO, DONE WITH FORMATTING         @V5088AA 00773000
+         L     R15,=V(DMKIOEHS) ADDRESS OF HDRSTART FIELD --   @V5088AA 00774000
+*                             SLOT FOR FIRST ERROR RECORD TO GO@V5088AA 00775000
+         MVC   0(4,R15),F0    ZERO THIS FIELD--WILL BE UPDATED @V5088AA 00776000
+*                             BY DMKIOGFR AS APPROPRIATE       @V5088AA 00777000
+         CALL  DMKIOGFR       GO INITIALIZE FRAME RECORDS      @V5088AA 00778000
+EXITFMT  L     R14,FMTEXIT    CALLER'S RETURN ADDRESS          @V5088AA 00779000
+         BR    R14                                                      00780000
+*                                                                       00781000
+FMTFINI  EQU   *                                                        00782000
+         L     R3,=V(DMKSYSER) ADDR. OF START OF REC. AREA     @V5088AA 00783000
+*                             NOTE: MUST USE DMKSYSER VALUE    @V5088AA 00784000
+*                             SINCE CECYL MAY HAVE BEEN UPDATED@V5088AA 00785000
+*                             BY DMKIOGFR AND IF WE CHANGE IT  @V5088AA 00786000
+*                             THEN DMKIOEEP WILL BE WRONG.     @V5088AA 00787000
+         LH    R3,0(R3)       RETRIEVE 'CC' PART OF ADDRESS    @V5088AA 00788000
+         STH   R3,WORKCYL     UPDATE CURRENT 'CC' ADDRESS      @V5088AA 00789000
+         MVI   WORKPAGE,X'01'      RESET PAGE NUMBER TO ONE             00790000
+         BAL   R14,FMTREAD         READ PAGE ONE IN                     00791000
+         TM    RECFLAG1,RECPAGFA ARE FRAME RECS ON THIS PAGE?  @V5088AA 00792000
+         BZ    FMTPAGDN       NO, GO INITIALIZE PAGE HDR       @V5088AA 00793000
+         MVI   RECFLAG2,RECPAGDN  TURN OFF 'FORMATTING' FLAG.  @V5088AA 00794000
+*                             THE REST OF THE HDR WAS INIT.    @V5088AA 00795000
+*                             BY DMKIOGFR.                     @V5088AA 00796000
+         B     *+10                                            @V5088AA 00797000
+FMTPAGDN MVC   RECNXT(8),INITFMT SET FLAGS AND FENCE           @V5088AA 00798000
+         BAL   R3,FMTWRITE         WRITE IT BACK OUT                    00799000
+         DROP  R2                                                       00800000
+IOEXIT   SR    R0,R0                                                    00801000
+         ST    R0,IOEREALA                                              00802000
+         ST    R0,IOEVMPAD                                              00803000
+         SR    R2,R2         CLEAR PARM REG                             00804000
+         CALL  DMKRPAGT,PARM=SYSTEM    CLEAR PAGE REF                   00805000
+         CALL  DMKPGTVR       RELEASE THE VIRTUAL MEMORY SPACE          00806000
+         L     R4,=V(DMKIOEEP) GET RECORDING ADDRESS CCPD      @V5088AA 00807000
+         MVC   0(4,R4),CECYL  MOVE CYL, PAGE, AND TYPE FOR     @V5088AA 00808000
+*                             RECORDING AREA 1ST AVAIL. SPACE  @V5088AA 00809000
+         L     R4,=V(DMKIOEMX)     PICK UP MAX PAGE PTR IN RES CODE     00810000
+         MVC   0(1,R4),MAXPAGE     MOVE IN MAX NO. OF PAGES FOR DEV     00811000
+         L     R4,=V(DMKIOENI)     PICK UP 90 FULL LIMIT IN RES COD     00812000
+         MVC   0(1,R4),PAGE90PC    MOVE IN CORRECT COUNT                00813000
+         EXIT                 RETURN TO CALLER                 @V305435 00814000
+         SPACE 1                                                        00815000
+FMTREAD  ST    R14,SAVE14                                               00816000
+         L     R0,WORKCYL     SET RECORD CCPD                           00817000
+         CALL  DMKRPAGT,PARM=SYSTEM+BRING,AFFINITY             @V407510 00818000
+         L     R14,SAVE14                                               00819000
+         BC    8,0(R14)       RETURN IF OK                              00820000
+GIVENEWS SLR   R0,R0          INDICATE NO VARIBLE DATA         @V305435 00821000
+         SLR   R1,R1          ...                              @V305435 00822000
+         LA    R2,558         MESSAGE DMKIOG558I               @V305435 00823000
+         ICM   R2,B'0100',=C'I' INFORMATION MESSAGE            @V305435 00824000
+         BAL   R3,CALLERM     OUTPUT THE ERROR MESSAGE         @V305435 00825000
+         B     LIGHTOUT       TURN OFF RECORDING AND EXIT.              00826000
+*             DMKFREE  - TO OBTAIN A BLOCK OF STORAGE                   00827000
+FMTWRITE EQU  *                                                         00828000
+         L     R1,IOEVMPAD                                              00829000
+         L     R0,WORKCYL                                               00830000
+         CALL  DMKRPAPT,PARM=SYSTEM,AFFINITY                   @V407510 00831000
+         BC    8,0(R3)       RETURN IF NO ERRORS                        00832000
+         B     GIVENEWS                GO SEND ERROR MSG                00833000
+*                                                                       00834000
+CYLFULL  SLR   R0,R0          NO VARIABLE MESSAGE TEXT         @V5088AA 00835000
+         SLR   R1,R1          NO VARIABLE MESSAGE TEXT         @V5088AA 00836000
+         LA    R2,551         MESSAGE DMKIOG551E               @V305435 00837000
+         ICM   R2,B'0100',=C'E' ERROR MESSAGE                  @V5088AA 00838000
+         L     R4,=V(DMKIOEES) I/O SWITCH                      @V305435 00839000
+CYLMSGOK BAL   R3,CALLERM     CALL MESSAGE WRITTER             @V305435 00840000
+         MVI   0(R4),X'FF'    TURN OFF (OBR|MCH) SWITCH        @V305435 00841000
+         B     IOEXIT         NO - RETURN TO CALLER            @V305435 00842000
+         SPACE                                                          00843000
+FMTWRTPG EQU   *                                                        00844000
+         BAL   R3,FMTWRITE    OUTPUT PAGE ONE                           00845000
+         B     FMTPGINC       NOW GO DO THE REST                        00846000
+         EJECT                                                          00847000
+**********************************************************************  00848000
+*                                                                    *  00849000
+*        THIS ENTRY POINT IS INVOKED TO RESET OR CLEAR THE ERROR     *  00850000
+*        RECORDING CYLINDERS TO CONTAIN BYTE COUNTS OF RESET VALUES. *  00851000
+*        AN IN-CORE POINTER IS THEN UPDATED TO POINT TO THE          *  00852000
+*        START OF THE RECORDING AREAS.                               *  00853000
+*                                                                    *  00854000
+*        PARAMETER IS PASSED TO THIS ROUTINE IN REGISTER 2.          *  00855000
+*        R2=01    ERROR RECORDS ONLY                           @V5088AA 00856000
+*        R2=02    ERROR RECORDS AND FRAME RECORDS              @V5088AA 00857000
+*                                                                    *  00858000
+**********************************************************************  00859000
+         SPACE 2                                                        00860000
+DMKIOGF2 RELOC                                                          00861000
+         SWITCH                                                @V407510 00862000
+         STC   R2,PARMSAVE              SAVE PARAMETERS (01=OBR,02=MCH) 00863000
+         TM    PARMSAVE,CLR+CLEARF VALID ERASE PARAMETER?      @V5088AA 00864000
+         BNZ   ERASE          YES                              @V5088AA 00865000
+         LM    R0,R11,SAVEREGS     RESTORE CALLERS REGS                 00866000
+         SVC   12             EXIT                                      00867000
+         SPACE 1                                                        00868000
+**********************************************************************  00869000
+*        SET SWITCH 'RECORDING IN PROCESS' IS ON WHILE ERASE IS      *  00870000
+*        BEING DONE TO ELIMINATE LOST RECORDINGS.                    *  00871000
+*        THIS WILL ALLOW ERRORS TO BE QUED UNTIL ERASE IS COMPLETE   *  00872000
+**********************************************************************  00873000
+ERASE    L     R10,=V(DMKIOEFR) ADDRESS OF FRAME INDICATOR     @V5088AA 00874000
+         IC    R10,0(R10)     PICK UP THE IOEFR VALUE          @V5088AA 00875000
+         STC   R10,IOEFRSAV   SAVE THE PRESENT INDICATION      @V5088AA 00876000
+         L     R10,=V(DMKSYSER) ADDR. OF START OF REC. AREA    @V5088AA 00877000
+         LH    R10,0(R10)     RETRIEVE 'CC' PART OF ADDRESS    @V5088AA 00878000
+         STH   R10,CECYL      START OF ERROR RECORDING AREA    @V5088AA 00879000
+         MVI   CEPAGE,X'01'   INITIALIZE THE CURRENT 'P'       @V5088AA 00880000
+         MVC   WORKCYL(3),CECYL INITIALIZE THE CURRENT 'CC'    @V5088AA 00881000
+         BAL   R10,ERASINIT                                             00882000
+         LA    R14,ERASDONE   PICK UP RETURN ADDRESS           @V5088AA 00883000
+         ST    R14,FMTEXIT    STOW IT                                   00884000
+         B     FMTLOOP                                                  00885000
+**********************************************************************  00886000
+*                                                                    *  00887000
+*                                                                    *  00888000
+*        RECORDING CYLINDERS ARE FORMATTED AT THIS POINT       @V5088AA 00889000
+*                                                                    *  00890000
+*                                                                    *  00891000
+**********************************************************************  00892000
+ERASDONE TM    INFOFLAG,FULLNOW IS AREA FILLED WITH FRAME RECS?@V5088AA 00893000
+         BO    FMTFINI        DON'T CLEAR 'FULL' FLAG IF SO    @V5088AA 00894000
+         TM    PARMSAVE,CLR   WAS THIS A 'CLEAR' OPERATION?    @V5088AA 00895000
+         BZ    CLRIOEES                                                 00896000
+         L     R4,=V(DMKIOEFR) ADDRESS OF FRAME INDICATOR      @V5088AA 00897000
+         MVC   0(1,R4),IOEFRSAV IF THIS IS A 'CLEAR' OPERATION,@V5088AA 00898000
+*                             THEN THERE MAY STILL BE FRAMES   @V5088AA 00899000
+*                             ON THE REC. CYLS. RESTORE FRAME  @V5088AA 00900000
+*                             INDICATOR TO ITS VALUE AT ENTRY  @V5088AA 00901000
+*                             TO 'CLEAR' FUNCTION.             @V5088AA 00902000
+CLRIOEES EQU   *                                               @V5088AA 00903000
+         L     R4,=V(DMKIOEES)    PICK UP SWITCH                        00904000
+         MVI   0(R4),X'00'        CLEAR CYL FULL INDICATOR              00905000
+         XC    SAVEWRK2(L'SAVEWRK2*2),SAVEWRK2 CLEAR MSG. AREA @VMD0156 00906000
+         LA    R0,L'SAVEWRK2*2  LENGTH OF VARIABLE MSG. TEXT   @V5088AA 00907000
+         LA    R1,SAVEWRK2    AND ITS ADDRESS                  @V305435 00908000
+         LA    R2,553         MESSAGE DMKIOG553I               @V305435 00909000
+         ICM   R2,B'0100',=C'I' INFORMATION MESSAGE            @V305435 00910000
+         MVC   SAVEWRK2(L'SAVEWRK2*2),VMUSER SHOW WHO CLEARED  @V5088AA 00911000
+         BAL   R3,CALLERM     WRITE OUT MESSAGE                @V305435 00912000
+         B     FMTFINI        FINISH UP FORMATTING             @V5088AA 00913000
+         SPACE 3                                                        00914000
+         SPACE 4                                                        00915000
+ERASINIT CALL  DMKPGTVG       GET A VIRTUAL MEMORY PAGE ADDRESS.        00916000
+**********************************************************************  00917000
+*                                                                    *  00918000
+*        ADDRESS RETURNED IN REGISTER 1                              *  00919000
+*                                                                    *  00920000
+**********************************************************************  00921000
+         ST    R1,IOEVMPAD    SAVE IT                                   00922000
+         BAL   R14,FMTREAD                                              00923000
+**********************************************************************  00924000
+*                                                                    *  00925000
+*        REGISTER 2 CONTAINS ADDRESS OF BUFFER ON RETURN FROM READ.  *  00926000
+*                                                                    *  00927000
+**********************************************************************  00928000
+         ST    R2,IOEREALA    SAVE IT                                   00929000
+         USING RECPAG,R2      BASE ADDRESS FOR RECORDING PAGE  @V5088AA 00930000
+         MVC   RECCCPD(4),WORKCYL  PAGE ONE CCPD                        00931000
+         MVI   RECFLAG2,RECPAGFM   FLAG CYLINDER FORMATTING             00932000
+         TM    PARMSAVE,CLR   CLEAR ONLY ERROR RECORDS?        @V5088AA 00933000
+         BNO   ERASFRMS       NO, CLEAR ALL RECORDS            @V5088AA 00934000
+         TM    RECFLAG1,RECPAGFA REQUEST IS TO CLR ERR. RECS-- @V5088AA 00935000
+*                             ARE FRAMES IN THIS 1ST PAGE?     @V5088AA 00936000
+         BO    ERASWRT        YES, DON'T DESTROY RECFLAG1      @V5088AA 00937000
+ERASFRMS MVI   RECFLAG1,X'00' ZIP THE USE FLAGS. EITHER WE ARE @V5088AA 00938000
+*                             CLEARING ALL RECORDS OR THERE    @V5088AA 00939000
+*                             WERE NO FRAME RECS. ON CYL ANYWAY@V5088AA 00940000
+         MVC   RECNXT(2),INITFMT   AND INITIALIZE THE REST              00941000
+ERASWRT  BAL   R3,FMTWRITE    NOW WRITE IT OUT                 @V5088AA 00942000
+         MVI   WORKPAGE,X'02'      POINT TO PAGE TWO                    00943000
+         BAL   R14,FMTREAD         AND READ IT IN                       00944000
+         TM    PARMSAVE,CLEARF  CLEARF SPECIFIED?              @V5088AA 00945000
+         BOR   R10            YES, START FORMAT WITH 2ND PAGE  @V5088AA 00946000
+*                                                              @V5088AA 00947000
+*     WE ARE HERE IF 'CLEAR' WAS SPECIFIED. LEAVE ANY FRAME    @V5088AA 00948000
+*     RECORDS ON RECORDING CYLINDERS INTACT. ANY PAGES WHICH   @V5088AA 00949000
+*     CONTAIN FRAME RECORDS WILL NOT CONTAIN ERROR RECORDS--   @V5088AA 00950000
+*     DMKIOEFR SEES TO THAT. SO FIND 1ST PAGE WHICH DOESN'T    @V5088AA 00951000
+*     CONTAIN FRAME RECORDS AND START FORMAT THERE.            @V5088AA 00952000
+ERASLOOP TM    RECFLAG1,RECPAGFA ANY FRAMES ON THIS 1ST PAGE?  @V5088AA 00953000
+*                             (IF NOT, NONE ON RECORDING CYLS.)@V5088AA 00954000
+         BZR   R10            START FORMATTING WITH THIS PAGE  @V5088AA 00955000
+         ICM   R0,B'0111',WORKCYL  GET CURRENT 'CCP' VALUE     @V5088AA 00956000
+         A     R0,F1          INCREMENT 'P' NUMBER             @V5088AA 00957000
+         STC   R0,WORKPAGE    SAVE IN CURRENT PAGE VALUE       @V5088AA 00958000
+         CLC   WORKPAGE(1),MAXPAGE ON LAST PAGE OF A CYLINDER? @V5088AA 00959000
+         BL    ERASRD         NO, OK GO READ THIS CURRENT PAGE @V5088AA 00960000
+         CLC   WORKCYL(3),MAXCYL ON LAST PAGE OF LAST CYLINDER?@V5088AA 00961000
+         BE    CYLFULL        PUT OUT AREA FULL MESSAGE        @V5088AA 00962000
+         SRL   R0,8           ISOLATE 'CC' PART OF ADDRESS     @V5088AA 00963000
+         A     R0,F1          INCREMENT TO NEXT CYLINDER       @V5088AA 00964000
+         STH   R0,WORKCYL     SAVE IN CURRENT 'CC' VALUE       @V5088AA 00965000
+         MVI   WORKPAGE,X'01' SET CURRENT 'P' TO 1ST PG. OF CYL@V5088AA 00966000
+ERASRD   BAL   R14,FMTREAD    GO READ THIS CURRENT PAGE        @V5088AA 00967000
+         MVC   CECYL(3),WORKCYL UPDATE CECYL VALUE TO POINT TO @V5088AA 00968000
+*                             PAST THE FRAME RECORDS           @V5088AA 00969000
+         B     ERASLOOP       CHECK FOR FRAMES ON THIS PAGE    @V5088AA 00970000
+         DROP  R2                                              @V5088AA 00971000
+         SPACE 1                                                        00972000
+CALLERM  ICM   R2,B'1000',ERMPARMS PARMS=OPERATOR+ALARM+RETURN @V305435 00973000
+         ICM   R0,B'1110',MODULEID+3 MODULE IDENTIFIER         @V305435 00974000
+         CALL  DMKERMSG,AFFINITY  CALL MESSAGE WRITTER         @V407510 00975000
+         L     R2,IOEREALA    RESTORE REAL PAGE ADDRESS        @V305435 00976000
+         L     R1,IOEVMPAD    RESTORE VIRTUAL PAGE ADDRESS     @V305435 00977000
+         BR    R3             RETURN TO LINE CODE              @V305435 00978000
+         SPACE 1                                                        00979000
+LIGHTOUT L     R4,=V(DMKIOEES) ADDR. OF RECORDING AREA FULL FLG@V5088AA 00980000
+         MVI   0(R4),X'FF'   TURN OFF OBR RECORDING                     00981000
+         B     IOEXIT                                                   00982000
+         EJECT                                                          00983000
+**************************************************************          00984000
+*        DMKIOGFR IS THE FRAME RECORD INITIALIZATION ROUTINE.* @V5088AA 00985000
+*        IT WILL READ FRAMES FROM THE SRF DEVICE, FORMAT THEM* @V5088AA 00986000
+*        AS RECORDS, BLOCK THEM IN 4096-BYTE BLOCKS, AND WRITE @V5088AA 00987000
+*        THEM TO THE BEGINNING OF THE ERROR RECORDING AREA.  * @V5088AA 00988000
+**************************************************************          00989000
+         SPACE 2                                                        00990000
+DMKIOGFR RELOC                                                 @V5088AA 00991000
+         L     R10,AMCHAREA   ADDRESS OF MCH AREA              @V5088AA 00992000
+         USING MCHAREA,R10    ADDRESSABILITY FOR MCH AREA      @V5088AA 00993000
+         CLI   MCHMODEL,MOD3033  ARE WE PROCESSING ON A 3033/  @V5088AA 00994000
+*                             3032/3031 PROCESSOR? (WE COULD   @V5088AA 00995000
+*                             HAVE GOTTEN HERE IF A CLEARF WAS @V5088AA 00996000
+*                             SPECIFIED ON A PROCESSOR OTHER   @V5088AA 00997000
+*                             THAN A 303X.)                    @V5088AA 00998000
+         BE    MOD303X        CONTINUE IF ON A 303X PROCESSOR  @V5088AA 00999000
+         EXIT                 RETURN TO CALLER                 @V5088AA 01000000
+         DROP  R10                                             @V5088AA 01001000
+MOD303X  LA    R0,BLOKSIZE    SIZE OF IOBLOK AND CCW'S         @V5088AA 01002000
+         CALL DMKFREE         GET SPACE FOR IOBLOK AND CCW'S   @V5088AA 01003000
+         LR    R10,R1         SAVE ADDRESS IN IOBLOK BASE      @V5088AA 01004000
+         L     R1,=V(DMKRIOSF) ADDRESS OF SRF RDEVBLOK PTR.    @VMD0148 01005000
+         LTR   R1,R1          IS THERE AN SRF RDEVBLOK?        @VMD0148 01006000
+         BZ    NOSRF          NO, ERROR -- SRF NOT GEN'ED      @V5088AA 01007000
+         LH    R8,0(R1)       OFFSET OF SRF'S RDEVBLOK FROM    @VMD0148 01008000
+*                             DMKRIODV                         @V5088AA 01009000
+         LTR   R8,R8          DOES A RDEVBLOK EXIST?           @V5088AA 01010000
+         BZ    SRFZERO        NO,DISPLACEMENT IS ZERO          @VA08745 01011000
+         B     SRFCONT        YES,RDEVBLOK EXISTS ,SKIP        @VA08745 01011010
+SRFZERO  EQU   *                                               @VA08745 01011020
+* HERE,IF DISPLACEMENT FOR SRF RDEVBLOK IS ZERO.                        01011030
+* CHECK IF IT IS THE FIRST RDEVBLOK IN THE TABLE                        01011040
+         L     R2,=V(DMKRIODV) ADDR OF RDEVBLOK TABLE          @VA08745 01011050
+         CLC   0(2,R2),2(R1)  IS SRF FIRST RDEVBLOK ?          @VA08745 01011060
+         BNE   NOSRF          NO,SRF NOT GEN'ED                @VA08745 01011070
+         CLC   6(2,R2),=X'0204' CORRECT DEVICE TYPE ?          @VA08745 01011080
+         BNE   NOSRF          NO,SRF NOT GEN'ED                @VA08745 01011090
+         SPACE                                                          01011100
+SRFCONT  EQU   *              SRF AVAILABLE , CONTINUE         @VA08745 01011110
+         SLL   R8,3           MULTIPLY VALUE FROM DMKRIOSF BY 8@V5088AA 01012000
+         L     R2,=V(DMKRIODV)  ADDRESS OF RDEVBLOK TABLE      @V5088AA 01013000
+         AR    R8,R2          ADD OFFSET OF SRF'S RDEVBLOK TO  @V5088AA 01014000
+*                             START OF RDEVBLOKS. R8 NOW HAS   @V5088AA 01015000
+*                             ADDRESS OF SRF'S RDEVBLOK.       @V5088AA 01016000
+         USING IOBLOK,R10                                      @V5088AA 01017000
+         XC    IOBLOK(IOBSIZE*8),IOBLOK CLEAR WHOLE IOBLOK     @V5088AA 01018000
+         LH    R2,2(R1)       SRF DEVICE ADDRESS               @VMD0148 01019000
+         STH   R2,IOBRADD     SAVE SRF ADDRESS IN IOBLOK       @VMD0148 01020000
+         LA    R2,ENABRTRN    RETURN ADDRESS FROM 'ENABLE'     @V5088AA 01021000
+         ST    R2,IOBIRA      SAVE RETURN ADDR. IN IOBLOK      @V5088AA 01022000
+         MVC   ENABLE(8),ENABCCW MOVE 'ENABLE' COMMAND INTO    @V5088AA 01023000
+*                             CHANNEL PROGRAM                  @V5088AA 01024000
+         LA    R2,ENABLE      ADDRESS OF CHANNEL PROGRAM       @V5088AA 01025000
+         ST    R2,IOBCAW      SAVE IN IOBLOK                   @V5088AA 01026000
+         ST    R10,IOBLINK    IN CASE NEW IOB GETS CHAINED 1ST @V5088AA 01027000
+         ST    R11,IOBUSER    CURRENT VMBLOK ADDRESS           @VMD0148 01028000
+         L     R2,=V(DMKSYSER) ADDRESS OF START OF REC. AREA   @V5088AA 01029000
+         LH    R2,0(R2)       GET 'CC' PART OF AREA ADDRESS    @V5088AA 01030000
+         STH   R2,WORKCYL     SAVE IN CURRENT 'CC' VALUE       @V5088AA 01031000
+         MVI   WORKPAGE,X'01' WANT 1ST PAGE OF RECORDING AREA  @V5088AA 01032000
+         MVI   FIRSTRET,X'00' INITIALIZE RETURN COUNTER TO 0   @V5088AA 01033000
+         ST    R11,IOSSAVE    SAVE VMBLOK ADDRESS              @V5088AA 01034000
+         STM   R13,R9,IOSSAVE+4 SAVE REGS ACROSS CALL TO IOSQR @V5088AA 01035000
+         CALL  DMKIOSQR       GO ISSUE 'ENABLE' TO SRF         @V5088AA 01036000
+         GOTO DMKDSPCH        GO 'WAIT' FOR ENABLE TO COMPLETE @V5088AA 01037000
+ENABRTRN EQU   *                                               @V5088AA 01038000
+         USING *,R12                                           @V5088AA 01039000
+         SL    R12,=A(*-DMKIOG) RE-ESTABLISH ADDRESSABILITY--  @V5088AA 01040000
+*                             R12 CONTAINS ADDRESS OF IOBIRA   @V5088AA 01041000
+         USING DMKIOG,R12                                      @V5088AA 01042000
+         L     R11,IOSSAVE    RESTORE VMBLOK ADDRESS           @V5088AA 01043000
+         LM    R13,R9,IOSSAVE+4 RESTORE REGISTER VALUES        @V5088AA 01044000
+         TM    IOBSTAT,IOBFATAL+IOBCC2 FATAL I/O ERROR, OR CC2?@V5088AA 01045000
+         BNZ   NOSRF          SRF NOT AVAILABLE IF SO          @V5088AA 01046000
+         TM    IOBCSW+4,X'D3' IS CE (OR CE+CUE) ON BY ITSELF?  @V5088AA 01047000
+         BNZ   NOSRF          NO, MUST BE SOME EXCEPTION       @V5088AA 01048000
+         CLI   IOBCSW+5,X'00' IS THERE ANY BAD CHANNEL STATUS? @V5088AA 01049000
+         BNE   NOSRF          ERROR IF SO                      @V5088AA 01050000
+         TM    IOBCSW+4,CE+DE CHANNEL END & DEVICE END?        @V5088AA 01051000
+         BO    ENABOK         YES, GOOD                        @V5088AA 01052000
+         CLI   FIRSTRET,X'00' FIRST RETURN FROM DISPATCHER?    @V5088AA 01053000
+         BNE   ENRTRN2        NO, GO SEE IF DEVICE END NOW     @V5088AA 01054000
+         MVI   FIRSTRET,X'01' INDICATE THIS IS FIRST RETURN    @V5088AA 01055000
+         LR    R1,R10         ADDRESS OF COPIED IOB TO FRET    @V5088AA 01056000
+         LA    R0,IOBSIZE     LENGTH OF COPIED IOB TO FRET     @V5088AA 01057000
+         CALL DMKFRET         FREE UP THE COPIED IOBLOK        @V5088AA 01058000
+         GOTO DMKDSPCH        GO WAIT FOR UNIT STATUS          @V5088AA 01059000
+ENRTRN2  TM    IOBCSW+4,DE    DEVICE END RECEIVED?             @V5088AA 01060000
+         BO    ENABOK         GOOD-- HAVE RECEIVED BOTH CE & DE@V5088AA 01061000
+NOSRF    EQU   *                                               @V5088AA 01062000
+         LA    R2,559         'SRF UNAVAILABLE' MESSAGE        @V5088AA 01063000
+         ICM   R2,B'0100',=C'W'  WARNING MESSAGE               @V5088AA 01064000
+         BAL   R5,FRERRMSG    GO WRITE MESSAGE                 @V5088AA 01065000
+         LR    R1,R10         GET ADDRESS OF IOBLOK + CCW'S    @V5088AA 01066000
+         LA    R0,BLOKSIZE    SIZE OF AREA TO FRET             @V5088AA 01067000
+         CALL  DMKFRET        FREE IOBLOK + CCW'S              @V5088AA 01068000
+         EXIT                 RETURN TO CALLER                 @V5088AA 01069000
+************************************************************** @V5088AA 01070000
+*        SRF IS AVAILABLE. SET UP TO READ FRAMES.            * @V5088AA 01071000
+************************************************************** @V5088AA 01072000
+ENABOK   EQU   *                                               @V5088AA 01073000
+         LA    R2,VERBAGE     ADDRESS OF VERBAGE CCW           @V5088AA 01074000
+         ST    R2,IOBCAW      SAVE IN IOBLOK                   @V5088AA 01075000
+         LA    R2,VRBAGRET    RETURN FROM 1ST VERBAGE/RDVERB   @V5088AA 01076000
+         ST    R2,IOBIRA      SAVE IN IOBLOK                   @V5088AA 01077000
+         LA    R0,FRAMSIZE    SIZE OF 2K BUFFER IN D'WORDS     @V5088AA 01078000
+         CALL  DMKFREE        GET A 2K BUFFER TO READ FRAMES   @V5088AA 01079000
+         MVC   VERBAGE(16),VERBRDV MOVE VERBAGE/RDVERB COMMANDS@V5088AA 01080000
+         STCM  R1,B'0111',RDVBUFF SAVE BUFFER @ IN RDVERB CCW  @V5088AA 01081000
+         LA    R3,CPUFRAME    ADDR. OF 1-BYTE BUFFER           @V5088AA 01082000
+         STCM  R3,B'0111',VERBBUFF SAVE IN VERBAGE CCW         @V5088AA 01083000
+************************************************************** @V5088AA 01084000
+*        BUILD A STANDARD RECORD HEADER TO BE USED FOR ALL   * @V5088AA 01085000
+*        FRAME RECORDS.                                      * @V5088AA 01086000
+************************************************************** @V5088AA 01087000
+         LA    R3,STDHDR      ADDRESS OF STANDARD RECORD HDR   @V5088AA 01088000
+         USING FRAMEHDR,R3                                     @V5088AA 01089000
+         MVI   FRMTYPE,CPUTYPE RECORD TYPE IS CPU RECORD       @V5088AA 01090000
+         MVI   FRMCNT,X'00'   INITIALIZE RECORD SEQUENCE NUMBER@VA07860 01090100
+*                                                              @V5088AA 01091000
+*        GET DATE AND TIME VALUE. ALL FRAME RECORDS MUST HAVE  @V5088AA 01092000
+*        THE SAME DATE AND TIME IN THEIR HEADERS.              @V5088AA 01093000
+         STCK  OSDATE         GET DATE AND TIME VALUES         @V5088AA 01094000
+         BC    12,CLOCKOK     CLOCK FUNCTIONING OK             @V5088AA 01095000
+         GOTO  DMKCVTAB       CLOCK DAMAGED--ABEND CVT001      @V5088AA 01096000
+CLOCKOK  LM    R4,R5,OSDATE   GET CLOCK VALUE                  @V5088AA 01097000
+         SRDL  R4,12          SHIFT DOWN FOR ADJUST            @V5088AA 01098000
+         L     R14,=V(DMKSYSTZ) @ OF GMT DIFFERENCE            @V5088AA 01099000
+         L     R15,0(,R14)    GET GMT DIFFERENCE               @V5088AA 01100000
+         LCR   R15,R15        MAKE VALUE POSITIVE              @V5088AA 01101000
+         SR    R14,R14        CLEAR WORK REGISTER              @V5088AA 01102000
+         M     R14,=F'1000000' CONVERT GMT DIFF. TO MICROSECS. @V5088AA 01103000
+         SLR   R5,R15         ADJUST TIME VALUE                @V5088AA 01104000
+         BC    11,*+8         BRANCH NOT MINUS                 @V5088AA 01105000
+         SL    R4,F1                                           @V5088AA 01106000
+         SLR   R4,R14         GET TIME VALUE                   @V5088AA 01107000
+         SLDL  R4,12          SHIFT IT BACK                    @V5088AA 01108000
+         STM   R4,R5,FRMDATE  SAVE CLOCK VALUE IN HEADER       @V5088AA 01109000
+         MVC   FRMCPID(8),CPUID CPU ID AND MCEL LENGTH         @V5088AA 01110000
+         DROP  R3                                              @V5088AA 01111000
+         CALL DMKPGTVG        GET A VIRTUAL PAGE ADDRESS       @V5088AA 01112000
+         ST    R1,IOEVMPAG    SAVE THE VIRTUAL PAGE ADDRESS    @V5088AA 01113000
+         L     R0,WORKCYL     'CCPD' OF RECORD                 @V5088AA 01114000
+         CALL DMKRPAGT,PARM=(SYSTEM+BRING),AFFINITY BRING IN   @V5088AA 01115000
+*                             FIRST PAGE                       @V5088AA 01116000
+         BC    8,REALRDOK     NO ERROR-- CONTINUE              @V5088AA 01117000
+         BAL   R9,DISABREC    ERROR--GO DISABLE RECORDING      @V5088AA 01118000
+         B     FINISH2        CLEAN UP AND RETURN              @V5088AA 01119000
+REALRDOK CALL DMKPTRLK        LOCK PAGE IN                     @V5088AA 01120000
+         ST    R2,IOEREALP    SAVE REAL ADDRESS OF PAGE        @V5088AA 01121000
+         USING RECPAG,R2      BASE FOR RECORDING PAGE          @V5088AA 01122000
+         MVI   RECFLAG1,RECPAGFA THIS PAGE CONTAINS FRAME RECS.@V5088AA 01123000
+         DROP  R2                                                       01124000
+         XC    FRAMECTR(2),FRAMECTR INITIALIZE COUNTER TO 0    @V5088AA 01125000
+         MVI   INFOFLAG,X'00' INITIALIZE INDICATORS TO 0       @V5088AA 01126000
+************************************************************** @V5088AA 01127000
+*        END OF INITIALIZATION. BEGIN TO READ FROM THE SRF.  * @V5088AA 01128000
+************************************************************** @V5088AA 01129000
+FRMLOOP  EQU   *                                               @V5088AA 01130000
+         XC    IOBCSW(8),IOBCSW CLEAR OUT THE CSW FOR RE-USE   @V5088AA 01131000
+         MVI   FIRSTRET,X'00' INITIALIZE RETURN COUNTER        @V5088AA 01132000
+         ST    R11,IOSSAVE    SAVE VMBLOK ADDRESS              @V5088AA 01133000
+         STM   R13,R9,IOSSAVE+4 SAVE REGS ACROSS CALL TO IOSQR @V5088AA 01134000
+         CALL DMKIOSQR        GO ISSUE VERBAGE/RDVERB TO SRF   @V5088AA 01135000
+         GOTO  DMKDSPCH       GO 'WAIT' FOR I/O TO COMPLETE    @V5088AA 01136000
+READRTRN EQU   *                                               @V5088AA 01137000
+         USING *,R12                                           @V5088AA 01138000
+         SL    R12,=A(*-DMKIOG) RE-ESTABLISH ADDRESSABILITY -- @V5088AA 01139000
+*                             R12 CONTAINS IOBIRA ADDRESS      @V5088AA 01140000
+         USING DMKIOG,R12                                      @V5088AA 01141000
+         L     R11,IOSSAVE    RESTORE VMBLOK ADDRESS           @V5088AA 01142000
+         LM    R13,R9,IOSSAVE+4 RESTORE REGISTER VALUES        @V5088AA 01143000
+         TM    IOBSTAT,IOBFATAL+IOBCC2 FATAL I/O ERROR, OR CC2?@V5088AA 01144000
+         BNZ   SRFERR         SRF ERRORS IF SO                 @V5088AA 01145000
+         TM    IOBCSW+4,CE+DE+UE CHANNEL END, DEVICE END, AND  @V5088AA 01146000
+*                             UNIT EXCEPTION MEAN END OF FRAMES@V5088AA 01147000
+         BO    DIRFRAMS       GO READ DIRECTOR FRAMES NOW      @V5088AA 01148000
+         CLI   FIRSTRET,X'00' FIRST RETURN FROM DISPATCHER?    @V5088AA 01149000
+         BNE   RDRTRN2        IF NOT, SEE IF DE OR DE+UE ALONE @V5088AA 01150000
+         MVI   FIRSTRET,X'01' SET COUNTER TO FIRST RETURN      @V5088AA 01151000
+         TM    IOBCSW+4,X'D3' CE (OR CE+CUE) ON BY ITSELF?     @V5088AA 01152000
+         BNZ   SRFERR         ERROR IF SOME EXCEPTION ALSO     @V5088AA 01153000
+         CLI   IOBCSW+5,X'00' CHECK CHANNEL STATUS FOR ERRORS  @V5088AA 01154000
+         BNE   SRFERR         ERROR IF ANY ON                  @V5088AA 01155000
+         TM    IOBCSW+4,CE+DE DID READ COMPLETE OK?            @V5088AA 01156000
+         BO    COUNTCHK       HAVE WE READ TOO MANY FRAMES?    @V5088AA 01157000
+         LR    R1,R10         ADDRESS OF COPIED IOB TO FRET    @V5088AA 01158000
+         LA    R0,IOBSIZE     SIZE OF COPIED IOB TO FRET       @V5088AA 01159000
+         CALL  DMKFRET        FRET THE COPIED IOBLOK           @V5088AA 01160000
+         GOTO  DMKDSPCH       GO WAIT FOR UNIT STATUS          @V5088AA 01161000
+RDRTRN2  TM    IOBCSW+4,X'D2' ANYTHING BESIDES DE,UE,OR CUE?   @V5088AA 01162000
+         BNZ   SRFERR         ERROR IF SOME EXCEPTION          @V5088AA 01163000
+         TM    IOBCSW+4,DE+UE DEVICE END + UNIT EXCEPTION?     @V5088AA 01164000
+         BO    DIRFRAMS       YES, END OF THIS TYPE OF FRAMES  @V5088AA 01165000
+         TM    IOBCSW+4,DE    DEVICE END RECEIVED?             @V5088AA 01166000
+         BO    COUNTCHK       YES, READ COMPLETED OK           @V5088AA 01167000
+SRFERR   LA    R2,560         ERROR IF NOT CE AND DE           @V5088AA 01168000
+         ICM   R2,B'0100',=C'W' WARNING MESSAGE                @V5088AA 01169000
+         BAL   R5,FRERRMSG    GO WRITE ERROR MESSAGE           @V5088AA 01170000
+         LA    R3,STDHDR      STANDARD RECORD HEADER ADDRESS   @V5088AA 01171000
+         USING FRAMEHDR,R3                                     @V5088AA 01172000
+         SR    R4,R4          CLEAR OUT REGISTER FOR COMPARE   @V5088AA 01173000
+         CLM   R4,B'0001',FRMCNT IS SEQUENCE NUMBER OF CURRENT @V5088AA 01174000
+*                             RECORD EQUAL TO ZERO?            @V5088AA 01175000
+         BNE   FRFINISH       NO, SOME FRAMES ARE ON CYLS. GO  @V5088AA 01176000
+*                             TURN ON 'FRAMES' INDICATION AND  @V5088AA 01177000
+*                             'LAST FRAME' FLG BEFORE RETURNING@V5088AA 01178000
+         CLI   FRMTYPE,CPUTYPE HAVE WE JUST READ CPU FRAMES?   @V5088AA 01179000
+         BE    FINISH1        IF SO, AND SEQUENCE NUMBER IS 0, @V5088AA 01180000
+*                             NO FRAMES ARE ON CYLS. CLEAN UP  @V5088AA 01181000
+*                             AND RETURN TO CALLER.            @V5088AA 01182000
+         B     FRFINISH       IF SEQ. NO. IS 0 BUT WE JUST READ@V5088AA 01183000
+*                             DIRECTOR FRAMES, THEN CPU FRAMES @V5088AA 01184000
+*                             ARE ON CYLS. TURN ON 'LAST' FLAG.@V5088AA 01185000
+COUNTCHK LH    R4,FRAMECTR    RETRIEVE COUNT OF FRAMES READ    @V5088AA 01186000
+         LA    R4,1(R4)       INCREMENT BY ONE                 @V5088AA 01187000
+         STH   R4,FRAMECTR    SAVE COUNT OF FRAMES READ        @V5088AA 01188000
+         CLI   FRAMECTR+1,MAXFRAME HAVE WE READ MORE THAN 50?  @V5088AA 01189000
+         BNH   KEEPON         IF NOT, CONTINUE                 @V5088AA 01190000
+         LA    R2,561         ERROR IF MORE THAN 50 FRAMES READ@V5088AA 01191000
+*                             JUST FORMAT THE 1ST 50 FRAMES ON @V5088AA 01192000
+*                             THE RECORDING CYLINDERS.         @V5088AA 01193000
+         ICM   R2,B'0100',=C'W' WARNING MESSAGE                @V5088AA 01194000
+         BAL   R5,FRERRMSG    GO WRITE MESSAGE                 @V5088AA 01195000
+         B     DIRFRAMS       GO READ DIRECTOR FRAMES NOW      @V5088AA 01196000
+KEEPON   EQU   *                                               @V5088AA 01197000
+         LA    R3,STDHDR      POINT TO STANDARD RECORD HEADER  @V5088AA 01198000
+         IC    R4,FRMCNT      SEQUENCE NUMBER OF THE RECORD    @V5088AA 01199000
+         LA    R4,1(R4)       INCREMENT FOR THIS RECORD        @V5088AA 01200000
+         STC   R4,FRMCNT      STORE UPDATED SEQUENCE NO. IN HDR@V5088AA 01201000
+         BAL   R4,MOVEREC     GO MOVE FRAME INTO RECORDING PAGE@V5088AA 01202000
+         B     FRMLOOP        CONTINUE TO READ FRAMES          @V5088AA 01203000
+DIRFRAMS EQU   *                                               @V5088AA 01204000
+         LA    R3,STDHDR      ADDRESS OF STANDARD RECORD HDR   @V5088AA 01205000
+         CLI   FRMTYPE,CPUTYPE DID WE JUST READ CPU FRAMES?    @V5088AA 01206000
+         BNE   FRFINISH       IF NOT, WE HAVE READ DIR. FRAMES @V5088AA 01207000
+*                             NOW WE WILL READ DIRECTOR FRAMES.@V5088AA 01208000
+*                             FIRST, TURN ON THE 'LAST' FLAG IN@V5088AA 01209000
+*                             THE LAST CPU RECORD WRITTEN.     @V5088AA 01210000
+         L     R2,IOEREALP    ADDRESS OF RECORDING PAGE        @V5088AA 01211000
+         USING RECPAG,R2                                       @V5088AA 01212000
+         LH    R4,RECNXT      INDEX INTO PAGE OF AVAIL. SPACE  @V5088AA 01213000
+         LA    R4,0(R2,R4)    ADDRESS OF AVAILABLE SPACE       @V5088AA 01214000
+         LA    R9,FRHDRLEN+FRRECLEN LENGTH OF LAST FRAME AND   @V5088AA 01215000
+*                             ITS HEADER                       @V5088AA 01216000
+         SR    R4,R9          BACK UP TO LAST RECORD'S HEADER  @V5088AA 01217000
+         USING FRAMEHDR,R4                                     @V5088AA 01218000
+         MVI   FRMSW0,FRMLAST INDICATE THIS IS LAST CPU RECORD @V5088AA 01219000
+         DROP  R2                                              @V5088AA 01220000
+         DROP  R4                                              @V5088AA 01221000
+         MVI   FRMTYPE,DIRTYPE RECORD TYPE IS NOW DIR. FRAMES  @V5088AA 01222000
+         MVI   FRMCNT,X'00'   RESET SEQUENCE NUMBER            @V5088AA 01223000
+         LA    R5,DIRFRAME    ADDRESS OF 1-BYTE BUFFER         @V5088AA 01224000
+         STCM  R5,B'0111',VERBBUFF PUT BUFFER @ IN VERBAGE CCW @V5088AA 01225000
+         LA    R5,VRBAGRET    RETURN FROM 1ST DIR. VB/RDVERB   @V5088AA 01226000
+         ST    R5,IOBIRA      SAVE IN IRA ADDRESS              @V5088AA 01227000
+         LA    R5,VERBAGE     ADDRESS OF VERBAGE/RDVERB CCW'S  @V5088AA 01228000
+         ST    R5,IOBCAW      SAVE @ OF CHANNEL PGM IN IOB     @V5088AA 01229000
+         XC    FRAMECTR(2),FRAMECTR RE-INITIALIZE FRAME COUNTER@V5088AA 01230000
+         B     FRMLOOP        GO READ CPU FRAMES               @V5088AA 01231000
+         DROP  R3                                              @V5088AA 01232000
+         SPACE 2                                                        01233000
+VRBAGRET EQU   *              RETURN FROM VERBAGE/RDVERB       @V5088AA 01234000
+         USING *,R12                                           @V5088AA 01235000
+         SL    R12,=A(*-DMKIOG) RE-ESTABLISH ADDRESSABILITY -- @V5088AA 01236000
+*                             R12 CONTAINS IOBIRA ADDRESS      @V5088AA 01237000
+         USING DMKIOG,R12                                      @V5088AA 01238000
+         L     R11,IOSSAVE    RESTORE VMBLOK ADDRESS           @V5088AA 01239000
+         LM    R13,R9,IOSSAVE+4 RESTORE REGISTER VALUES        @V5088AA 01240000
+         TM    IOBCSW+4,X'D3' IS STATUS ANYTHING BUT CE,CUE,DE?@V5088AA 01241000
+         BNZ   SRFERR         VERBAGE ERROR IF SO              @V5088AA 01242000
+         LA    R2,READRTRN    ADDRESS OF RDVERB RETURN POINT   @V5088AA 01243000
+         ST    R2,IOBIRA      STORE IN THE IOBLOK FOR NEXT RDVB@V5088AA 01244000
+         LA    R2,RDVERB      RDVERB CCW ADDRESS               @V5088AA 01245000
+         ST    R2,IOBCAW      CHANNEL PROGRAM ADDRESS--DON'T   @V5088AA 01246000
+*                             ISSUE VERBAGE MORE THAN ONCE FOR @V5088AA 01247000
+*                             A PARTICULAR TYPE OF FRAME.      @V5088AA 01248000
+         B     FRMLOOP        GO ISSUE RDVERB                  @V5088AA 01249000
+         SPACE 2                                                        01250000
+************************************************************** @V5088AA 01251000
+*        THIS ROUTINE WILL FORMAT THE FRAME JUST READ INTO A * @V5088AA 01252000
+*        STANDARD RECORD AND MOVE IT INTO THE CURRENT        * @V5088AA 01253000
+*        RECORDING PAGE.                                     * @V5088AA 01254000
+************************************************************** @V5088AA 01255000
+MOVEREC  EQU   *                                               @V5088AA 01256000
+         SPACE 1                                                        01257000
+*        CHECK FOR ENOUGH ROOM ON CURRENT RECORDING PAGE       @V5088AA 01258000
+         SPACE 1                                                        01259000
+         L     R2,IOEREALP    GET ADDRESS OF RECORDING PAGE    @V5088AA 01260000
+         USING RECPAG,R2                                       @V5088AA 01261000
+         LH    R5,RECNXT      INDEX TO NEXT AVAILABLE SPACE    @V5088AA 01262000
+         LA    R6,4095-L'INITFMT MAX. SPACE ON RECORDING PAGE  @V5088AA 01263000
+         LA    R5,4(R5)       UPDATE INDEX FOR LENGTH FIELD    @V5088AA 01264000
+         SR    R6,R5          GET SPACE REMAINING              @V5088AA 01265000
+         LA    R7,FRHDRLEN+FRRECLEN LENGTH REQUIRED            @V5088AA 01266000
+         CR    R7,R6          CAN FRAME RECORD FIT ON THIS PAGE@V5088AA 01267000
+         BNH   FILLPAGE       YES, GO MOVE IT                  @V5088AA 01268000
+         OI    RECFLAG1,RECPAGFL TURN ON 'PAGE FULL' FLAG      @V5088AA 01269000
+         MVC   SAVECCP(3),WORKCYL SAVE CURRENT CCP             @V5088AA 01270000
+*                             WE WILL WRITE FULL PAGE OUT LATER@V5088AA 01271000
+*                             AFTER WE HAVE MADE SURE THAT THE @V5088AA 01272000
+*                             AREA IS NOT FULL. THIS IS SO THAT@V5088AA 01273000
+*                             IF WE HAVE FILLED THE LAST PAGE, @V5088AA 01274000
+*                             WE CAN TURN ON THE 'LAST' FRAME  @V5088AA 01275000
+*                             FLAG IN THE LAST RECORD ON THIS  @V5088AA 01276000
+*                             PAGE BEFORE WE WRITE IT OUT.     @V5088AA 01277000
+UPPAG    ICM   R14,B'0111',WORKCYL RETRIEVE CURRENT PAGE 'CCP' @V5088AA 01278000
+         LA    R14,1(R14)     INCREMENT TO NEXT PAGE           @V5088AA 01279000
+         STC   R14,WORKPAGE   SAVE UPDATED PAGE NUMBER         @V5088AA 01280000
+         CLM   R14,B'0111',AREA90PC IS AREA 90% FULL?          @V5088AA 01281000
+         BNE   UPPAGMAX       NO, CHECK FOR AREA FULL          @V5088AA 01282000
+         LA    R2,550         '90% FULL' MESSAGE               @V5088AA 01283000
+         ICM   R2,B'0100',=C'E'  ERROR MESSAGE                 @V5088AA 01284000
+         BAL   R5,FRERRMSG    GO WRITE MESSAGE                 @V5088AA 01285000
+         B     UPPAGOK        GO READ IN THIS PAGE             @V5088AA 01286000
+UPPAGMAX CLC   WORKPAGE(1),MAXPAGE LAST PAGE ON A CYLINDER?    @V5088AA 01287000
+         BNE   UPPAGOK        NO, READ IN THIS PAGE            @V5088AA 01288000
+         CLC   WORKCYL(3),MAXCYL ON LAST RECORD OF LAST CYL?   @V5088AA 01289000
+         BNE   UPCYL          NO, INCREMENT TO NEXT CYL NUMBER @V5088AA 01290000
+         SPACE                                                          01291000
+*        ERROR RECORDING AREA IS FULL ALREADY                  @V5088AA 01292000
+         SPACE                                                          01293000
+CYLSFULL L     R2,=V(DMKIOEES) ADDRESS OF 'AREA FULL' FLAG     @V5088AA 01294000
+         OI    0(R2),X'FF'    INDICATE AREA FULL               @V5088AA 01295000
+         OI    INFOFLAG,FULLNOW FRAMES HAVE FILLED WHOLE AREA  @V5088AA 01296000
+         LA    R2,551         'RECORDING AREA FULL' MESSAGE    @V5088AA 01297000
+         ICM   R2,B'0100',=C'E'  ERROR MESSAGE                 @V5088AA 01298000
+         SLR   R0,R0          INDICATE NO VARIABLE TEXT        @V5088AA 01299000
+         SLR   R1,R1          NO VARIABLE TEXT                 @V5088AA 01300000
+         BAL   R3,CALLERM     GO WRITE MESSAGE                 @V5088AA 01301000
+         MVC   WORKCYL(3),SAVECCP RESTORE THE UN-UPDATED CCP   @V5088AA 01302000
+*                             SO THAT WE WILL WRITE OUT THE    @V5088AA 01303000
+*                             CORRECT PAGE.                    @V5088AA 01304000
+         B     FRFINISH       CLEAN UP AND RETURN              @V5088AA 01305000
+UPCYL    SRL   R14,8          ISOLATE 'CC' PART OF ADDRESS     @V5088AA 01306000
+         LA    R14,1(R14)    INCREMENT TO NEXT CYLINDER        @V5088AA 01307000
+         STH   R14,WORKCYL    SAVE UPDATED 'CC' POINTER        @V5088AA 01308000
+         MVI   WORKPAGE,X'01' WANT 1ST PAGE ON NEW CYLINDER    @V5088AA 01309000
+UPPAGOK  EQU   *                                               @V5088AA 01310000
+         ICM   R3,B'0111',WORKCYL SAVE UPDATED WORKCYL VALUE   @V5088AA 01311000
+         MVC   WORKCYL(3),SAVECCP RESTORE UN-UPDATED CCP VALUE @V5088AA 01312000
+         BAL   R9,REALWRIT    GO WRITE OUT THE FULL PAGE       @V5088AA 01313000
+         TM    INFOFLAG,WRITERR DID ERROR OCCUR ON WRITE?      @V5088AA 01314000
+         BO    DISABREC       YES, GO DISABLE RECORDING        @V5088AA 01315000
+         STCM  R3,B'0111',WORKCYL  RESTORE UPDATED CCP VALUE   @V5088AA 01316000
+         L     R0,WORKCYL     RETRIEVE CURRENT PAGE 'CCPD'     @V5088AA 01317000
+         L     R1,IOEVMPAG    GET VIRTUAL ADDRESS OF PAGE      @V5088AA 01318000
+         CALL  DMKRPAGT,PARM=(SYSTEM+BRING),AFFINITY           @V5088AA 01319000
+         BC    8,PAGRDOK      NO ERROR--CONTINUE               @V5088AA 01320000
+         BAL   R9,DISABREC    ERROR--GO DISABLE RECORDING      @V5088AA 01321000
+         MVC   WORKCYL(3),SAVECCP RESTORE UN-UPDATED CCP VALUE @V5088AA 01322000
+*                             SO WE WILL WRITE OUT CORRECT PAGE@V5088AA 01323000
+         L     R0,WORKCYL     GET CCPD OF PAGE JUST WRITTEN OUT@V5088AA 01324000
+         L     R1,IOEVMPAG    RESTORE VIRTUAL ADDRESS OF PAGE  @V5088AA 01325000
+         CALL  DMKRPAGT,PARM=(SYSTEM+BRING),AFFINITY GO REREAD @V5088AA 01326000
+*                             THE LAST PAGE TO BE WRITTEN ON   @V5088AA 01327000
+*                             THE RECORDING CYLS. SINCE FRAME  @V5088AA 01328000
+*                             RECORDS EXIST ON THIS PAGE, WE   @V5088AA 01329000
+*                             MUST TURN ON THE 'LAST FRAME'    @V5088AA 01330000
+*                             FLAG IN THE LAST RECORD ON THIS  @V5088AA 01331000
+*                             PAGE.                            @V5088AA 01332000
+         BC    7,FINISH2      ERROR -- CLEAN UP AND RETURN     @V5088AA 01333000
+         CALL  DMKPTRLK       LOCK THE PAGE IN STORAGE         @V5088AA 01334000
+         ST    R2,IOEREALP    SAVE REAL ADDRESS OF PAGE        @V5088AA 01335000
+         B     FRFINISH       GO CLEAN UP AND RETURN           @V5088AA 01336000
+PAGRDOK  CALL  DMKPTRLK       LOCK PAGE IN STORAGE             @V5088AA 01337000
+         ST    R2,IOEREALP    SAVE REAL ADDRESS OF PAGE        @V5088AA 01338000
+         MVI   RECFLAG1,RECPAGFA FRAMES ARE IN THIS PAGE       @V5088AA 01339000
+FILLPAGE LH    R5,RECNXT      GET INDEX TO 1ST AVAILABLE SPACE @V5088AA 01340000
+         AR    R5,R2                                                    01341000
+         LA    R7,FRHDRLEN+FRRECLEN LENGTH OF HEADER + FRAME   @V5088AA 01342000
+         ST    R7,0(R5)       SAVE LENGTH OF RECORD IN 1ST     @V5088AA 01343000
+*                             FULLWORD OF SPACE                @V5088AA 01344000
+         LA    R5,4(R5)       UPDATE PAST LENGTH FIELD         @V5088AA 01345000
+         MVC   0(FRHDRLEN,R5),STDHDR MOVE STD HDR INTO RECORD  @V5088AA 01346000
+         LA    R5,FRHDRLEN(R5) UPDATE AVAILABLE SPACE POINTER  @V5088AA 01347000
+         ICM   R6,B'0111',RDVBUFF FRAME RECORD BUFFER ADDRESS  @V5088AA 01348000
+         LA    R7,FRRECLEN    LENGTH OF FRAME RECORD           @V5088AA 01349000
+         LR    R14,R5         'TO' ADDRESS FOR MOVE            @V5088AA 01350000
+         LR    R15,R7         LENGTH TO MOVE                   @V5088AA 01351000
+         MVCL  R14,R6         MOVE FRAME TO RECORD             @V5088AA 01352000
+         LA    R5,FRRECLEN(R5) ADD RECORD LENGTH TO AVAILABLE  @V5088AA 01353000
+*                             SPACE POINTER                    @V5088AA 01354000
+         SR    R5,R2          SUBTRACT START ADDRESS           @V5088AA 01355000
+         STH   R5,RECNXT      SAVE UPDATED PTR TO AVAIL.SPACE  @V5088AA 01356000
+         BR    R4             RETURN TO INLINE CODE            @V5088AA 01357000
+         SPACE 1                                                        01358000
+************************************************************** @V5088AA 01359000
+*        WRITE A RECORDING PAGE BACK TO THE RECORDING CYLINDERS@V5088AA 01360000
+************************************************************** @V5088AA 01361000
+REALWRIT EQU   *                                               @V5088AA 01362000
+         L     R1,IOEVMPAG    GET VIRTUAL ADDRESS OF PAGE      @V5088AA 01363000
+         L     R0,WORKCYL     DASD 'CCPD' OF PAGE              @V5088AA 01364000
+         CALL DMKRPAPT,PARM=SYSTEM,AFFINITY GO WRITE PAGE      @V5088AA 01365000
+         BC    8,*+8          ERROR? GO DISABLE RECORDING      @V5088AA 01366000
+         OI    INFOFLAG,WRITERR REMEMBER ERROR                 @V5088AA 01367000
+         L     R2,IOEREALP    REAL ADDRESS OF PAGE             @V5088AA 01368000
+         CALL DMKPTRUL        UNLOCK THE VIRTUAL PAGE          @V5088AA 01369000
+         SR    R0,R0          FORCE SWAP CCPD ENTRY TO ZERO    @V5088AA 01370000
+         CALL  DMKRPAGT,PARM=SYSTEM RELEASE BACK-UP PAGE       @V5088AA 01371000
+         BR    R9             RETURN TO INLINE CODE            @V5088AA 01372000
+         SPACE 1                                                        01373000
+DISABREC EQU   *                                               @V5088AA 01374000
+         LA    R2,558         'RECORDING DISABLED' MESSAGE     @V5088AA 01375000
+         ICM   R2,B'0100',=C'I' INFORMATION MESSAGE            @V5088AA 01376000
+         BAL   R5,FRERRMSG    GO WRITE ERROR MESSAGE           @V5088AA 01377000
+         L     R2,=V(DMKIOEES) ADDR. OF AREA FULL FLAG         @V5088AA 01378000
+         MVI   0(R2),X'FF'    TURN AREA FULL FLAG ON           @V5088AA 01379000
+         OI    INFOFLAG,FULLNOW DON'T LET LATER PROCESSING     @V5088AA 01380000
+*                             CLEAR OUT THE 'AREA FULL' FLAG   @V5088AA 01381000
+         TM    INFOFLAG,WRITERR DID WE COME BECAUSE OF AN      @V5088AA 01382000
+*                             ERROR IN REALWRIT ROUTINE?       @V5088AA 01383000
+         BO    FINISH2        YES, GO CLEAN UP AND RETURN      @V5088AA 01384000
+         BR    R9             RETURN TO IN-LINE CODE           @V5088AA 01385000
+         SPACE 1                                                        01386000
+FRERRMSG EQU   *                                               @V5088AA 01387000
+         SLR   R0,R0          INDICATE NO VARIABLE TEXT        @V5088AA 01388000
+         SLR   R1,R1          NO VARIABLE MESSAGE TEXT         @V5088AA 01389000
+         BAL   R3,CALLERM     GO WRITE MESSAGE                 @V5088AA 01390000
+         BR    R5             RETURN TO IN-LINE CODE           @V5088AA 01391000
+         SPACE 1                                                        01392000
+FRFINISH EQU   *                                               @V5088AA 01393000
+         L     R4,=V(DMKIOEFR) ADDRESS FRAME INDICATOR         @V5088AA 01394000
+         MVI   0(R4),YESFRAME INDICATE FRAMES EXIST ON ERROR   @V5088AA 01395000
+*                             RECORDING CYLINDERS. THIS WILL BE@V5088AA 01396000
+*                             USED BY CPEREP PROCESSING.       @V5088AA 01397000
+         L     R2,IOEREALP    ADDRESS OF RECORDING PAGE        @V5088AA 01398000
+         LH    R4,RECNXT      INDEX INTO PAGE OF AVAIL. SPACE  @V5088AA 01399000
+         LA    R4,0(R2,R4)    ADDRESS OF AVAILABLE SPACE       @V5088AA 01400000
+         LA    R9,FRHDRLEN+FRRECLEN LENGTHS OF LAST RECORD AND @V5088AA 01401000
+*                             ITS HEADER                       @V5088AA 01402000
+         SR    R4,R9          BACK UP TO LAST RECORD'S HEADER  @V5088AA 01403000
+         USING FRAMEHDR,R4                                     @V5088AA 01404000
+         MVI   FRMSW0,FRMLAST INDICATE THIS IS LAST FRAME REC. @V5088AA 01405000
+         DROP  R4                                              @V5088AA 01406000
+FINISH1  L     R2,IOEREALP    REAL ADDRESS OF PAGE             @V5088AA 01407000
+         OI    RECFLAG1,RECPAGFL INDICATE THE LAST PAGE IS FULL@V5088AA 01408000
+*                             DO THIS EVEN IF THE PAGE IS NOT  @V5088AA 01409000
+*                             FULL, SO THAT ERROR RECORDS ARE  @V5088AA 01410000
+*                             NOT PUT ON THE SAME PAGE AS FRAME@V5088AA 01411000
+*                             RECORDS (EASIER TO CLEAR).       @V5088AA 01412000
+         BAL   R9,REALWRIT    GO WRITE LAST PAGE TO REC. CYLS. @V5088AA 01413000
+         TM    INFOFLAG,WRITERR DID ERROR OCCUR ON WRITE?      @V5088AA 01414000
+         BO    DISABREC       GO DISABLE RECORDING IF SO       @V5088AA 01415000
+FINISH2  MVC   DISABLE(8),DISABCCW MOVE DISABLE CCW TO CHANNEL @V5088AA 01416000
+*                             PROGRAM AREA                     @V5088AA 01417000
+         LA    R4,DISABLE     ADDRESS OF DISABLE CCW           @V5088AA 01418000
+         ST    R4,IOBCAW      SAVE IN IOBLOK                   @V5088AA 01419000
+         LA    R4,DISABRTN    RETURN POINT FROM DISABLE        @V5088AA 01420000
+         ST    R4,IOBIRA      SAVE IN IOBLOK                   @V5088AA 01421000
+         XC    IOBCSW(8),IOBCSW CLEAR CSW FOR RE-USE           @V5088AA 01422000
+         ST    R11,IOSSAVE    SAVE VMBLOK ADDRESS              @V5088AA 01423000
+         STM   R13,R9,IOSSAVE+4 SAVE REGS ACROSS CALL TO IOSQR @V5088AA 01424000
+         CALL DMKIOSQR        GO ISSUE DISABLE TO SRF          @V5088AA 01425000
+         GOTO  DMKDSPCH       GO 'WAIT' FOR DISABLE TO COMPLETE@V5088AA 01426000
+DISABRTN EQU   *                                               @V5088AA 01427000
+         USING *,R12                                           @V5088AA 01428000
+         SL    R12,=A(*-DMKIOG) RE-ESTABLISH ADDRESSABILITY -- @V5088AA 01429000
+*                             R12 CONTAINS IOBIRA ADDRESS      @V5088AA 01430000
+         USING DMKIOG,R12                                      @V5088AA 01431000
+         L     R11,IOSSAVE    RESTORE VMBLOK ADDRESS           @V5088AA 01432000
+         LM    R13,R9,IOSSAVE+4 RESTORE REGISTER VALUES        @V5088AA 01433000
+         MVC   CECYL(3),WORKCYL UPDATE CECYL TO LAST RECORD    @V5088AA 01434000
+SETIOEHS L     R4,=V(DMKIOEHS)                                 @V5088AA 01451000
+         MVC   0(4,R4),WORKCYL  THIS IS THE ADDRESS            @V5088AA 01452000
+*                             FOR THE FIRST ERROR RECORD ON THE@V5088AA 01453000
+*                             RECORDING CYLINDERS. THE VALUE   @V5088AA 01454000
+*                             WILL BE FILLED INTO THE PSEUDO   @V5088AA 01455000
+*                             LOGREC HEADER SET UP FOR EREP    @V5088AA 01456000
+*                             PROCESSING, AND IT WILL BE USED  @V5088AA 01457000
+*                             DURING EREP'S SEQUENTIAL READ OF @V5088AA 01458000
+*                             THE RECORDING AREA. (THE ADDRESS @V5088AA 01459000
+*                             ACTUALLY POINTS TO THE LAST REC. @V5088AA 01460000
+*                             BEFORE THE ERROR RECORDS, SINCE  @V5088AA 01461000
+*                             EREP READS WITH COUNT, KEY, AND  @V5088AA 01462000
+*                             DATA.)                           @V5088AA 01463000
+         L     R1,IOEVMPAG    GET VIRTUAL ADDRESS OF PAGE      @V5088AA 01464000
+         CALL DMKPGTVR        RELEASE VIRTUAL PAGE             @V5088AA 01465000
+         ICM   R1,B'0111',RDVBUFF   ADDRESS OF 2K BUFFER       @V5088AA 01466000
+         LA    R0,FRAMSIZE    LENGTH OF AREA TO FRET           @V5088AA 01467000
+         CALL DMKFRET         FRET THE 2K BUFFER               @V5088AA 01468000
+         LA    R0,BLOKSIZE    SIZE OF AREA TO FRET             @V5088AA 01469000
+         LR    R1,R10         ADDRESS OF IOBLOK + CCW'S        @V5088AA 01470000
+         CALL DMKFRET         FREE IOBLOK + CCW'S              @V5088AA 01471000
+         SPACE 1                                                        01472000
+         EXIT                 RETURN TO CALLER OF DMKIOGFR     @V5088AA 01473000
+         EJECT                                                          01474000
+         DS    0F                                                       01475000
+INITFMT  DC    X'00084000FFFFFFFF' COUNT OF 8 AND PAGE FREE             01476000
+FMTEXIT  DS    1F                                                       01477000
+FINDRET  DS    1F                                                       01478000
+IOEVMPAD DS    1F                                                       01479000
+IOEREALA DS    1F                                                       01480000
+CECYL    DC    H'00'                                                    01481000
+CEPAGE   DC    X'01'                                                    01482000
+CECYLTYP DC    X'00'                                                    01483000
+WORKCYL  DC    H'00'                                                    01484000
+WORKPAGE DC    X'01'                                                    01485000
+WORKTYP  DC    X'00'                                                    01486000
+SAVE14   DS    1F                                                       01487000
+SAVELAST DC    F'0'   SAVE AREA FOR LAST CCPD-USED TO DETERMINE@VA07861 01487100
+*                             CCPD OF LAST FRAME RECORD                 01487150
+MAXREC   DC    H'126'                                                   01488000
+MODMODEL DS    H                                                        01489000
+MODMODID DS    H                                                        01490000
+         ORG   MODMODEL                                                 01491000
+MO135    DC    X'0135',AL2(MODEL135) MODEL NUMBER AND ID FOR 135        01492000
+MO138    DC    X'0138',AL2(MODEL138) MOD NUMBER AND ID FOR 138 @V386298 01493000
+MO145    DC    X'0145',AL2(MODEL145) MODEL NUMBER AND ID FOR 145        01494000
+MO148    DC    X'0148',AL2(MODEL148)  MOD NO. AND ID FOR 148   @V386298 01495000
+MO155    DC    X'0155',AL2(MODEL155) MODEL NUMBER AND ID FOR 155        01496000
+MO158    DC    X'0158',AL2(MODEL158) MODEL NUMBER AND ID FOR 158        01497000
+MO165    DC    X'0165',AL2(MODEL165) MODEL NUMBER AND ID FOR 165        01498000
+MO168    DC    X'0168',AL2(MODEL168) MODEL NUMBER AND ID FOR 168        01499000
+MO3031   DC    X'3031',AL2(MOD3031) MODEL NO. AND ID FOR 3031  @V5088AA 01500000
+MO3032   DC    X'3032',AL2(MOD3032) MODEL NO. AND ID FOR 3032  @V5088AA 01501000
+MO3033   DC    X'3033',AL2(MOD3033) MODEL NO. AND ID FOR 3033  @V5088AA 01502000
+MO4331   DC    X'4331',AL2(MOD4331) MOD NO AND ID FOR 4331     @V60A6B6 01502200
+MO4341   DC    X'4341',AL2(MOD4341) MOD NO. AND ID FOR 4341    @V60A6B6 01502300
+NOTSUPPD DC    H'-1',AL2(NOMODEL)  NO MACHINE SUPPORT                   01503000
+*        NOTE: LASTCYL AND PAGE90PC MUST REMAIN CONTIGUOUS     @V5088AA 01504000
+*        AS THEY ARE REFERENCED AS A UNIT                      @V5088AA 01505000
+AREA90PC DS    0X                                              @V5088AA 01506000
+LASTCYL  DC    H'0000'        ENDING 'CC' OF RECORDING AREA    @V5088AA 01507000
+PAGE90PC DC    X'00'                                                    01508000
+*        NOTE: MAXCYL AND MAXPAGE MUST REMAIN CONTIGUOUS AS    @V5088AA 01509000
+*        THEY ARE REFERENCED AS A UNIT                         @V5088AA 01510000
+MAXCYL   DC    H'0000'        ENDING 'CC' OF RECORDING AREA    @V5088AA 01511000
+MAXPAGE  DC    X'00'                                                    01512000
+PARMSAVE DC    X'00'                                                    01513000
+TYPEM    DC    X'00'          INDICATE DEPENDENT CHANNEL MODULES        01514000
+MVZINST  DC    X'00'     ONLY USE FOR THE MVZ INSTR.                    01515000
+CONF     DC    XL17'0'        SAVE CHANNEL IDENTIFICATION               01516000
+         SPACE 2                                                        01517000
+**********************************************************************  01518000
+CHAN     DC    X'F2F5FFF8FFFFFFFFFFFFFAFFFFFFFFFF'                      01519000
+         DC    X'F1FFF6FFFFFFFFFFFFFFFFFFFFFFFFFF'                      01520000
+         DC    X'F3FFFFF7FFFFFFFFFFFFFFFFFFFFFFFF'                      01521000
+         DC    X'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF'                      01522000
+**********************************************************************  01523000
+         SPACE 2                                                        01524000
+**********************************************************************  01525000
+MOD1658C DC    A(DMKSIX60)    GET THE ADDRESS OF THE 2860 CHANNEL       01526000
+*                             MODULE                                    01527000
+         DC    A(DMKSEV70)    GET THE ADDRESS OF THE 2870 CHANNEL       01528000
+*                             MODULE                                    01529000
+         DC    A(DMKEIG80)    GET THE ADDRESS OF THE 2880 CHANNEL       01530000
+*                             MODULE                                    01531000
+**********************************************************************  01532000
+IOSSAVE  DS    XL56           SAVE AREA FOR REGS 11 AND 13-9   @V5088AA 01533000
+FIRSTRET DS    XL1            FLAG FOR RETURNS FROM DSPCH      @V5088AA 01534000
+SAVECCP  DS    XL3            SAVE AREA FOR CURRENT WORKCYL    @V5088AA 01535000
+IOEFRSAV DS    XL1            SAVE AREA FOR DMKIOEFR VALUE     @V5088AA 01536000
+INFOFLAG DC    X'00'          AREA FILLED WITH FRAME RECORDS   @V5088AA 01537000
+FULLNOW  EQU   X'80'          INDICATES AREA FILLED WITH FRAMES@V5088AA 01538000
+WRITERR  EQU   X'40'          ERROR OCCURRED CALLING DMKRPAPT  @V5088AA 01539000
+INITYES  EQU   X'02'          INITIALIZE FRAME RECORDS         @V5088AA 01540000
+CLR      EQU   X'01'          'CLEAR' SPECIFIED                @V5088AA 01541000
+CLEARF   EQU   X'02'          'CLEARF' SPECIFIED               @V5088AA 01542000
+NOFRAMES EQU   X'00'          NO FRAME RECS. ON RECORDING CYLS @V5088AA 01543000
+YESFRAME EQU   X'20'          FRAME RECORDS ARE ON REC. CYLS   @V5088AA 01544000
+ERMPARMS DC    X'B0'          PARMS= OPERATOR+ALARM+RETURN     @V305435 01545000
+MAX2314  EQU   X'21'                                                    01546000
+MAX2305  EQU   X'19'                                                    01547000
+MAX3330  EQU   X'3A'                                                    01548000
+MAX3350  EQU   X'79'          3350 MAX PAGES (PLUS 1) = 121    @V304498 01549000
+NIN2314  EQU   X'1C'                                                    01550000
+NIN2305  EQU   X'15'                                                    01551000
+NIN3330  EQU   X'33'                                                    01552000
+ENABCCW  DS    0D             ENABLE CCW FOR SRF               @V5088AA 01553000
+         DC    X'A300000020000001'                             @V5088AA 01554000
+VERBRDV  DS    0D             VERBAGE & RDVERB CCWS FOR SRF    @V5088AA 01555000
+         DC    X'6900000020000001'                             @V5088AA 01556000
+         DC    X'3200000020000780'                             @V5088AA 01557000
+DISABCCW DS    0D             DISABLE CCW FOR SRF              @V5088AA 01558000
+         DC    X'C300000020000001'                             @V5088AA 01559000
+OSDATE   DC    XL4'00000000',XL2'0006',PL2'1' AREA FOR STCK    @V5088AA 01560000
+IOEVMPAG DS    1F             VIRTUAL ADDRESS OF PAGE          @V5088AA 01561000
+IOEREALP DS    1F             REAL ADDRESS OF PAGE             @V5088AA 01562000
+FRAMECTR DC    X'0000'        COUNTER OF NO. OF FRAMES READ    @V5088AA 01563000
+DIRFRAME DC    X'01'          1-BYTE BUFFER FOR VERBAGE CCW    @V5088AA 01564000
+CPUFRAME DC    X'02'          1-BYTE BUFFER FOR VERBAGE CCW    @V5088AA 01565000
+STDHDR   DS    0F             STANDARD LOGREC RECORD HEADER    @V5088AA 01566000
+         DC    XL2'0065'      SYSTEM/RELEASE INFO.             @V5088AA 01567000
+         DC    XL1'80'        MORE RECORDS FOLLOW THIS ONE     @V5088AA 01568000
+         DC    XL21'0'                                         @V5088AA 01569000
+FRHDRLEN EQU   24             LENGTH OF FRAME RECORD HEADER    @V5088AA 01570000
+FRRECLEN EQU   1920           LENGTH OF A SRF FRAME            @V5088AA 01571000
+DIRTYPE  EQU   X'B0'          DIRECTOR FRAME RECORD TYPE       @V5088AA 01572000
+CPUTYPE  EQU   X'A0'          CPU FRAME RECORD TYPE            @V5088AA 01573000
+MAXFRAME EQU   50             MAXIMUM NO. OF FRAMES OF ANY ONE @V5088AA 01574000
+*                             TYPE WHICH SHOULD BE READ        @V5088AA 01575000
+FRAMSIZE EQU   2048/8         2K BUFFER SIZE IN D'WORDS        @V5088AA 01576000
+         SPACE 1                                                        01577000
+         LTORG                                                          01578000
+         EJECT                                                          01579000
+         COPY  MCHAREA                                                  01580000
+         COPY  EQU                                                      01581000
+         COPY  RBLOKS                                                   01582000
+         PSA                                                            01583000
+         COPY  SAVE                                                     01584000
+         COPY  IOBLOKS                                         @V306638 01585000
+         COPY  VMBLOK                                                   01586000
+         COPY  DEVTYPES                                                 01587000
+         COPY  IOER                                                     01588000
+         COPY  RECPAG                                                   01589000
+IOBLOK DSECT                                                   @V5088AA 01590000
+         ORG   ,                                               @V5088AA 01591000
+FRAMCCWS DS    4D                                              @V5088AA 01592000
+         ORG   FRAMCCWS                                        @V5088AA 01593000
+ENABLE   DS    D                                               @V5088AA 01594000
+VERBAGE  DS    D                                               @V5088AA 01595000
+         ORG   *-7                                             @V5088AA 01596000
+VERBBUFF DS    3X             ADDRESS OF 2K BUFFER FOR RDVERB  @V5088AA 01597000
+         ORG   *+4                                             @V5088AA 01598000
+RDVERB   DS    D                                               @V5088AA 01599000
+         ORG   *-7                                             @V5088AA 01600000
+RDVBUFF  DS    3X             ADDRESS OF 1-BYTE BUFFER FOR     @V5088AA 01601000
+*                             VERBAGE CCW                      @V5088AA 01602000
+         ORG   *+4                                             @V5088AA 01603000
+DISABLE  DS    D                                               @V5088AA 01604000
+BLOKSIZE EQU   (*-IOBLOK)/8   SIZE IN D'WORDS OF IOBLOK + CCWS @V5088AA 01605000
+         SPACE 5                                                        01606000
+FRAMEHDR DSECT                                                 @V5088AA 01607000
+FRMTYPE  DS    X              TYPE OF RECORD                   @V5088AA 01608000
+FRMSYS   DS    X              SYSTEM/RELEASE LEVEL             @V5088AA 01609000
+FRMSW0   DS    X              RECORD INDEPENDENT SWITCHES      @V5088AA 01610000
+FRMMORE EQU    X'80'          MORE RECORDS FOLLOW              @V5088AA 01611000
+FRMLAST  EQU   X'00'          LAST FRAME RECORD                @V5088AA 01612000
+FRMSW1   DS    3X             LENGTH OF FRAME DATA             @V5088AA 01613000
+FRMCNT   DS    X              RECORD COUNT                     @V5088AA 01614000
+         DS    X              RESERVED                         @V5088AA 01615000
+FRMDATE  DS    4X             SYSTEM DATE                      @V5088AA 01616000
+FRMTIME  DS    4X             SYSTEM TIME                      @V5088AA 01617000
+FRMCPID  DS    X              MACHINE VERSION CODE             @V5088AA 01618000
+FRMCSER  DS    3X             CPU SERIAL NUMBER                @V5088AA 01619000
+FRMMDL   DS    2X             CPU MODEL NUMBER                 @V5088AA 01620000
+FRMMCEL  DS    2X             CPU MCEL LENGTH                  @V5088AA 01621000
+         END                                                            01622000

@@ -1,0 +1,739 @@
+LOK      TITLE 'DMKLOK     (CP)        VM/370 - RELEASE 6'              00001000
+         ISEQ  73,80                                                    00002000
+* MODULE NAME -                                                         00003000
+*        DMKLOK                                                         00004000
+*                                                                       00005000
+* FUNCTION -                                                            00006000
+*        THE FUNCTION OF THIS ROUTINE IS TO PROVIDE A CENTRALIZED       00007000
+*        PLACE FOR ALL LOCKING MANIPULATIONS.  ALL LOCKING FUNCTIONS    00008000
+*        REQUIRED WHEN A LOCK IS NOT OBTAINED OR RELEASED ON THE        00009000
+*        FIRST ATTEMPT ARE DIRECTED TO THIS MODULE.  THIS ROUTINE       00010000
+*        WILL ALSO SERVE AS A CENTRAL SPIN FUNCTION FOR THE SYSTEM.     00011000
+*        ALL OBTAIN REQUESTS FOR THE VMBLOK LOCK WILL BE                00012000
+*        DIRECTED TO THIS MODULE.                                       00013000
+*                                                                       00014000
+* ATTRIBUTES -                                                          00015000
+*        RESIDENT, BALR CALLED                                          00016000
+*                                                                       00017000
+* ENTRY POINTS -                                                        00018000
+*        DMKLOKDF - PROCESS AN OBTAIN, DEFER LOCK REQUEST               00019000
+*                                                                       00020000
+*        DMKLOKVM - PROCESS AN OBTAIN, DEFER REQUEST FOR VMBLOK         00021000
+*                                                                       00022000
+*        DMKLOKSP - PROCESS AN OBTAIN, SPIN LOCK REQUEST.               00023000
+*                                                                       00024000
+*        DMKLOKPS - PROCESSOR SPIN ROUTINE.                             00025000
+*                                                                       00026000
+*        DMKLOKSW - PROCESS AN OBTAIN AND RELEASE REQUEST FOR VMBLOK    00027000
+*                   REQUESTED BY SWTCHVM MACRO                          00028000
+*                                                                       00029000
+* ENTRY CONDITIONS -                                                    00030000
+*        GPR0  - PROCESSOR ADDRESS                                      00031000
+*        GPR1  - ADDRESS OF LOCKWORD                                    00032000
+*        GPR14 - RETURN ADDRESS                                         00033000
+*        GPR15 - ENTRY POINT ADDRESS                                    00034000
+*                                                                       00035000
+* EXIT CONDITIONS -                                                     00036000
+*        NORMAL -  CONDITION CODE SET                                   00037000
+*                  CC=0  LOCK OBTAINED                                  00038000
+*                  CC=1  LOCK HELD BY OTHER PROCESSOR                   00039000
+*                                                                       00040000
+*        ERROR -   SYSTEM ABEND                                         00041000
+*                  LOK001 - AN OBTAIN REQUEST MADE FOR LOCK ALREADY     00042000
+*                            HELD BY THE REQUESTING PROCESSOR.          00043000
+*                  CVT001 - STCK FAILED.                                00044000
+*                                                                       00045000
+* CALLS TO OTHER ROUTINES -                                             00046000
+*        DMKVMASW - TO FLIP SHARED SYSTEM SEGMENT POINTERS              00047000
+*        DMKCVTAB - ABEND IF STCK FAILS                                 00048000
+*        DMKSTKSW - STACK A PRIORITY CPEXBLOK                           00049500
+*                                                                       00051000
+* EXTERNAL REFERENCES -                                                 00052000
+*        LOCK MACRO REFERENCES:                                         00053000
+*              PSA-                                                     00054000
+*                  LPUADDR,LPUADDRX -LOGICAL PROCESSOR ADDRESS          00055000
+*                  LOCKSAV -4 WORD SAVE AREA FOR REGS 14 - 1            00056000
+*                                                                       00057000
+*        DMKLOK EXTERNAL REFERENCES -                                   00058000
+*              PSA-                                                     00059000
+*                  CPSYSLK - INDICATOR THAT A PROCESSOR IS SPINNING     00060000
+*                            ON SYSTEM LOCK.                            00061000
+*                                                                       00062000
+*                  CPLOKFL - INDICATOR THAT DMKLOK HAS OPENED WINDOW    00063000
+*                            BUT DOES NOT EXPECT RETURN ON INTERRUPT.   00064000
+*                            DMKEXTSL MUST CLEAN UP FOR DMKLOK.         00065000
+*                            DMKLOKSI, CPSYSLK, AND CPLOKFL MUST BE     00066000
+*                            CLEARED.                                   00067000
+*                                                                       00068000
+* TABLES/WORKAREAS -                                                    00069000
+*        LOKSAVE  - DMKLOK SAVE AREA FOR REGS UPON ENTRY                00070000
+*        LOKSAV2  - DMKLOKSW SAVE AREA FOR REGS UPON ENTRY              00071000
+*                                                                       00072000
+* MACROS -                                                              00073000
+*        TRACE - TRACE ALL SPIN CONDITIONS                              00074000
+*        ABEND - TERMINATE THE SYSTEM IN ERROR SITUATIONS.              00075000
+*        CHARGE - SWITCH THE TIMER                                      00076000
+*                                                                       00077000
+* COPY FILES -                                                          00078000
+*        PSA -                                                          00079000
+*        CPEXBLOK -                                                     00080000
+*        VMBLOK -                                                       00081000
+*                                                                       00082000
+* REGISTER USAGE -                                                      00083000
+*        GPR0 - PROCESSOR ADDRESS                                       00084000
+*        GPR1 - LOCKWORD ADDRESS                                        00085000
+*        GPR2 -                                                         00086000
+*        GPR3 -                                                         00087000
+*        GPR4 -                                                         00088000
+*        GPR5 -                                                         00089000
+*        GPR6 -                                                         00090000
+*        GPR7 -                                                         00091000
+*        GPR8 -                                                         00092000
+*        GPR9 -                                                         00093000
+*        GPR10-                                                         00094000
+*        GPR11- VMBLOK ADDRESS                                          00095000
+*        GPR12- BASE REG                                                00096000
+*        GPR13-                                                         00097000
+*        GPR14-                                                         00098000
+*        GPR15-                                                         00099000
+*                                                                       00100000
+* OPERATION -                                                           00101000
+*        SEE ENTRY POINT PROLOGUES                                      00102000
+*                                                                       00103000
+* ERROR MESSAGES -                                                      00104000
+*        NONE.                                                          00105000
+*                                                                       00106000
+         EJECT                                                          00107000
+         COPY OPTIONS                                          @V407510 00108000
+         COPY LOCAL OPTIONS                                    @V407510 00109000
+         EJECT                                                          00110000
+DMKLOK   CSECT                                                          00111000
+         SPACE 3                                               @V407510 00112000
+         ENTRY DMKLOKDF                                        @V407510 00113000
+         ENTRY DMKLOKVM                                        @V407510 00114000
+         ENTRY DMKLOKSP                                        @V407510 00115000
+         ENTRY DMKLOKPS                                        @V407510 00116000
+         ENTRY DMKLOKSW                                        @V407510 00117000
+         ENTRY DMKLOKSY                                        @V407510 00118000
+         ENTRY DMKLOKFR                                        @V407510 00119000
+         ENTRY DMKLOKRL                                        @V407510 00120000
+         ENTRY DMKLOKTR                                        @V407510 00121000
+         ENTRY DMKLOKDS                                        @V407510 00122000
+         ENTRY DMKLOKCT                                        @V407510 00123000
+         ENTRY DMKLOKSI                                        @V407510 00124000
+         SPACE                                                          00125000
+         EXTRN DMKVMASW       SWITCH SEGMENT POINTERS          @V407510 00126000
+         EXTRN DMKCVTAB       ABEND CVT001                     @V407510 00127000
+         EXTRN DMKSTKSW       STACK A PRIORITY CPEXBLOK        @VA07402 00128500
+         SPACE                                                          00130000
+         USING PSA,0                                           @V407510 00131000
+         USING VMBLOK,R11                                      @V407510 00132000
+         USING LOCKWORD,R1                                     @V407510 00133000
+         EJECT                                                          00134000
+* SUBROUTINE NAME -                                                     00135000
+*        DMKLOKDF                                                       00136000
+*                                                                       00137000
+* FUNCTION -                                                            00138000
+*        THE FUNCTION OF THIS ENTRY POINT IS TO HANDLE THE OBTAIN,      00139000
+*        SPIN=NO REQUEST FOR A LOCK AND THE ATTEMPT TO OBTAIN THE       00140000
+*        LOCK FAILED.                                                   00141000
+*                                                                       00142000
+* MACRO CALL FORMAT -                                                   00143000
+*        LOCK OBTAIN,TYPE=SYS,SPIN=NO                                   00144000
+*        LOCK OBTAIN,TYPE=VMBLOK,SPIN=NO,OPTION=NOUPDT                  00145000
+*        LOCK OBTAIN,TYPE=SVMBLOK,SPIN=NO,OPTION=NOUPDT                 00146000
+*                                                                       00147000
+* ENTRY CONDITIONS -                                                    00148000
+*        GPR0 - PROCESSOR ADDRESS                                       00149000
+*        GPR1 - LOCKWORD ADDRESS                                        00150000
+*        GPR14- RETURN ADDRESS                                          00151000
+*        GPR15- ENTRY POINT ADDRESS                                     00152000
+*                                                                       00153000
+* EXIT CONDITIONS -                                                     00154000
+*        NORMAL -                                                       00155000
+*              CONDITION CODE 1 - LOCK HELD BY OTHER PROCESSOR          00156000
+*                                                                       00157000
+*        ERROR -                                                        00158000
+*              LOK001 ABEND - LOCK ALREADY HELD BY REQUESTING           00159000
+*                            PROCESSOR                                  00160000
+*                                                                       00161000
+* REGISTER USAGE -                                                      00162000
+*        SEE MAIN PROLOGUE                                              00163000
+*                                                                       00164000
+* OPERATION -                                                           00165000
+*        1.    IF LOCK ALREADY HELD, ABEND LOK001                       00166000
+*        2.    IF LOCK NOT ALREADY HELD, SET CC=1                       00167000
+*        3.    RETURN TO CALLER.                                        00168000
+*                                                                       00169000
+DMKLOKDF DS    0H             DEFER OBTAIN ENTRY POINT         @V407510 00170000
+         USING *,R15          SET UP TEMPORARY ADDRESSABILITY  @V407510 00171000
+         CH    R0,LKPROCA     LOCK ALREADY HELD?               @V407510 00184000
+         BNE   VALIDRQ        NO, OTHER PROCESSOR OWNS LOCK    @V407510 00185000
+LOKAB1   DS    0H             ABEND LOK01                      @V407510 00186000
+         ABEND 01             ABEND LOK01, LOCK ALREADY HELD   @V407510 00187000
+VALIDRQ  DS    0H             UPDATE COUNTER AND SET           @V407510 00188000
+*                             CONDITION CODE                   @V407510 00189000
+         C     R1,=A(DMKLOKSY)  REQUEST FOR SYSTEM LOCK?       @V407510 00190000
+         BE    UPDSYSCT       YES, UPDATE SYSTEM COUNTER       @V407510 00191000
+         L     R1,LOKVMCT     COUNT OF VMBLOK DEFERS           @VA08310 00192100
+         AL    R1,F1          PLUS ONE                         @VA08310 00192200
+         ST    R1,LOKVMCT                                      @VA08310 00192300
+         LCR   R0,R0          SET CC=1                         @VA08310 00192400
+         BR    R14            EXIT                             @VA08310 00192500
+UPDSYSCT DS    0H                                              @V407510 00200000
+         L     R1,LOKSYSCT    COUNT OF SUPVRLOCK DEFERS        @VA08310 00201100
+         AL    R1,F1          PLUS ONE                         @VA08310 00201200
+         ST    R1,LOKSYSCT                                     @VA08310 00201300
+         LCR   R0,R0          SET CC=1                         @VA08310 00201400
+         BR    R14            EXIT                             @VA08310 00201500
+         EJECT                                                          00203000
+* SUBROUTINE NAME -                                                     00204000
+*        DMKLOKVM                                                       00205000
+*                                                                       00206000
+* FUNCTION -                                                            00207000
+*        THE FUNCTION OF THIS ENTRY POINT IS TO HANDLE THE OBTAIN,      00208000
+*        SPIN=NO REQUEST FOR A VMBLOK LOCK.                             00209000
+*                                                                       00210000
+* MACRO CALL FORMAT -                                                   00211000
+*        LOCK OBTAIN,TYPE=VMBLOK,SPIN=NO                                00212000
+*                                                                       00213000
+* ENTRY CONDITIONS -                                                    00214000
+*        GPR0 - PROCESSOR ADDRESS                                       00215000
+*        GPR1 - VMBLOK ADDRESS                                          00216000
+*        GPR14- RETURN ADDRESS                                          00217000
+*        GPR15- ENTRY POINT ADDRESS                                     00218000
+*                                                                       00219000
+* EXIT CONDITIONS -                                                     00220000
+*        NORMAL -                                                       00221000
+*              CONDITION CODE 0 - LOCK OBTAINED                         00222000
+*              CONDITION CODE 1 - LOCK HELD BY OTHER PROCESSOR          00223000
+*                                                                       00224000
+*        ERROR -                                                        00225000
+*              LOK001 ABEND - LOCK ALREADY HELD BY REQUESTING           00226000
+*                            PROCESSOR                                  00227000
+*                                                                       00228000
+* REGISTER USAGE -                                                      00229000
+*        SEE MAIN PROLOGUE                                              00230000
+*                                                                       00231000
+* OPERATION -                                                           00232000
+*        1.    SAVE REGISTERS                                           00233000
+*        2.    ATTEMPT TO OBTAIN LOCK                                   00234000
+*        3.    IF LOCK OBTAINED AND VIRTUAL MACHINE NOT USING           00235000
+*              SHARED SYSTEMS OR VIRTUAL MACHINE WAS LAST               00236000
+*              DISPATCHED ON THIS PROCESSOR, SET CC=0 AND               00237000
+*              GO TO STEP 8.                                            00238000
+*        4.    IF LOCK OBTAINED AND VIRTUAL MACHINE IS USING            00239000
+*              SHARED SYSTEMS AND WAS NOT LAST DISPATCHED ON            00240000
+*              THIS PROCESSOR, CALL DMKVMASW TO FLIP SHARED             00241000
+*              SEGMENT POINTERS, SET CC=0, AND GO TO STEP 8.            00242000
+*        5.    IF LOCK ALREADY HELD, ABEND LOK001                       00243000
+*        6.    IF LOCK NOT ALREADY HELD, SET CC=1, AND                  00244000
+*              GO TO STEP 8.                                            00245000
+*        7.    RESTORE REGISTERS AND RETURN TO CALLER                   00246000
+*                                                                       00247000
+DMKLOKVM DS    0H             VMBLOK OBTAIN ENTRY POINT        @V407510 00248000
+         USING *,R15          SET UP TEMPORARY ADDRESSABILITY  @V407510 00249000
+         ST    R14,LOKSAVE+14*4 SAVE R14                       @VA08310 00250100
+         LH    R0,LPUADDR     LOAD PROCESSOR ADDRESS           @VA08310 00250200
+         DROP  R11            SWITCH VMBLOK BASE               @VA08310 00250300
+         USING VMBLOK,R1                                       @VA08310 00250400
+         SR    R14,R14        CLEAR FOR CS INSTRUCTION         @VA08310 00250500
+         C     R14,VMLOCK     LOCK AVAILABLE?                  @VA08310 00250600
+         BNE   LOKDF          NO                               @VA08310 00250700
+         CS    R14,R0,VMLOCK  TRY FOR LOCK                     @VA08310 00250800
+         BZ    LOKVM1         OBTAINED LOCK                    @VA08310 00250900
+LOKDF    DS    0H             COULD NOT OBTAIN LOCK            @VA08310 00251000
+         CH    R0,VMLOCK+(LKPROCA-LKLOCK) DO WE HOLD LOCK      @VA08310 00251100
+         BNE   LOKDF2         NO                               @VA08310 00251200
+         ABEND 1              THIS PROCESSOR OWNS LOCK         @VA08310 00251300
+LOKDF2   DS    0H                                              @VA08310 00251400
+         L     R14,LOKVMCT    VMBLOK DEFER TOTAL               @VA08310 00251500
+         AL    R14,F1         PLUS ONE                         @VA08310 00251600
+         ST    R14,LOKVMCT                                     @VA08310 00251700
+         L     R14,LOKSAVE+14*4 RESTORE R14                    @VA08310 00251800
+         LCR   R0,R0          SET CC=1                         @VA08310 00251900
+         BR    14             EXIT                             @VA08310 00252000
+LOKVM1   DS    0H                                              @VA08310 00252100
+         ST    R12,VMLOCKER   SAVE R12 OF CALLER FOR DEBUGGING @VA08310 00252200
+         TM    VMOSTAT,VMSHR  RUNNING SHARED SEGMENTS          @VA08310 00252300
+         BZ    LOKCC0         NO                               @VA08310 00252400
+         CLC   VMSHRPRC,LPUADDR+1 SHARED SEGS CORRECT?         @VA08310 00252500
+         BE    LOKCC0         YES                              @VA08310 00252600
+         LR    R0,R11         SAVE CALLER'S R11                @VA08310 00252700
+         LR    R11,R1         SET R11 FOR CALL                 @VA08310 00252800
+         CALL  DMKVMASW       ADJUST SEGMENT TABLE             @VA08310 00252900
+         LR    R11,R0         RESTORE CALLER'S R11             @VA08310 00253000
+LOKCC0   SR    R0,R0          SET CC=0                         @VA08310 00253100
+         L     R14,LOKSAVE+14*4 RESTORE R14                    @VA08310 00253200
+         BR    R14            EXIT                             @VA08310 00253300
+         DROP  R1             RESTORE VMBLOK BASE              @VA08310 00253400
+         USING VMBLOK,R11                                      @VA08310 00253500
+         USING LOCKWORD,R1    RESTORE LOCKWORD BASE            @VA08310 00253600
+         SPACE 1                                                        00253700
+SETCC0   DS    0H                                              @V407510 00272000
+         SR    R0,R0          SET CONDITION CODE TO ZERO       @V407510 00273000
+LOKEXIT  DS    0H             COMMON EXIT POINT                @V407510 00274000
+         LM    R0,R15,LOKSAVE RESTORE REGISTERS                @V407510 00275000
+         BR    R14            RETURN TO CALLER                 @V407510 00276000
+         EJECT                                                          00277000
+* SUBROUTINE NAME -                                                     00278000
+*        DMKLOKSW                                                       00279000
+*                                                                       00280000
+* FUNCTION -                                                            00281000
+*        THE FUNCTION OF THIS ENTRY POINT IS TO HANDLE THE RELEASE      00282000
+*        AND OBTAIN REQUEST FOR VMBLOKS SPECIFIED BY SWTCHVM MACRO      00283000
+*                                                                       00284000
+* MACRO CALL FORMAT -                                                   00285000
+*        SWTCHVM                                                        00286000
+*        SWTCHVM UNLOCK                                                 00287000
+*        SWTCHVM STAY                                                   00288000
+*        SWTCHVM NOUPDT                                                 00289000
+*        SWTCHVM OPT=(STAY,NOUPDT)                                      00290000
+*                                                                       00291000
+* ENTRY CONDITIONS -                                                    00292000
+*        GPR0 - OPTION BYTE                                             00293000
+*        GPR1 - VMBLOK ADDRESS TO BE LOCKED                             00294000
+*        GPR11- VMBLOK ADDRESS TO BE UNLOCKED                           00295000
+*        GPR14- RETURN ADDRESS                                          00296000
+*        GPR15- ENTRY POINT ADDRESS                                     00297000
+*                                                                       00298000
+* EXIT CONDITIONS -                                                     00299000
+*        NORMAL -                                                       00300000
+*              SWITCH OF VMBLOKS MADE, R11 POINTING TO OLD R1           00301000
+*                                                                       00302000
+*              CPEXBLOK STACKED TO GIVE CONTROL TO RETURN ADDRESS       00303000
+*                                                                       00304000
+*        ERROR -                                                        00305000
+*              LOK003 ABEND - LOCK NOT HELD BY REQUESTING               00306000
+*                            PROCESSOR                                  00307000
+*                                                                       00308000
+* REGISTER USAGE -                                                      00309000
+*        SEE MAIN PROLOGUE                                              00310000
+*                                                                       00311000
+* OPERATION -                                                           00312000
+*        1.    SAVE REGISTERS                                           00313000
+*        2.    IF SVMUNLOK SPECIFIED OR R1 IS LASTUSER OR               00314000
+*              R1 IS ASYSVM, GO TO STEP 7.                              00315000
+*        3.    IF R1 AND R11 ARE THE SAME, RETURN TO CALLER.            00316000
+*        4.    TRY TO OBTAIN LOCK FOR R1 USER                           00317000
+*        5.    IF LOCK OBTAINED BUT DEFERRED TASK PENDING,              00318000
+*              RELEASE LOCK AND GO TO STEP 11                           00319000
+*        6.    IF LOCK OBTAINED, CALL DMKVMASW IF NECESSARY             00320000
+*        7.    SWITCH THE TIMER.                                        00321000
+*        8.    IF R11 IS LASTUSER OR ASYSVM, RETURN TO CALLER.          00322000
+*        9.    RELEASE LOCK FOR R11.                                    00323000
+*        10.   RETURN TO CALLER.                                        00324000
+*        11.   OBTAIN STORAGE FOR CPEXBLOK AND SET UP TO GIVE           00325000
+*              CONTROL TO RETURN ADDRESS.                               00326000
+*        12.   STACK CPEXBLOK                                           00327000
+*        13    GO TO LOCKED ENTRY OF DISPATCHER- DMKDSPCH               00328000
+*                                                                       00329000
+DMKLOKSW DS    0H             SWITCH VMBLOK ENTRY POINT        @V407510 00330000
+         USING *,R15          SET UP TEMPORARY ADDRESSABILITY  @V407510 00331000
+         STM   R0,R15,LOKSAV2 SAVE REGS IN SWTCHVM SAVE AREA   @V4M0193 00332000
+         L     R12,LOKBASE    LOAD COMMON BASE REGISTER        @V407510 00333000
+         DROP  R15            DROP TEMPORARY BASE REG          @V407510 00334000
+         USING DMKLOK,R12     SET UP COMMON BASE REG           @V407510 00335000
+         TM    LOKSAV2+RG0B3,SVMUNLOK  UNLOCK SPECIFIED?       @V4M0193 00336000
+         BO    NOVMA          YES, ONLY UNLOCK R11             @V407510 00337000
+         CR    R1,R11         SAME VMBLOKS SPECIFIED?          @V407510 00338000
+         BE    LKSWEXIT       YES, RETURN TO CALLER            @V4M0193 00339000
+         C     R1,LASTUSER    R1 = LASTUSER?                   @V407510 00340000
+         BE    NOVMA          YES, UNLOCK CURRENT R11          @V407510 00341000
+         C     R1,ASYSVM      R1 = SYSTEM VMBLOK?              @V407510 00342000
+         BE    NOVMA          YES, UNLOCK CURRENT R11          @V407510 00343000
+         LH    R0,LPUADDR     GET CURRENT PROCESSOR ADDRESS    @V407510 00344000
+         SLR   R14,R14        CLEAR REG FOR C&S                @V407510 00345000
+         C     R14,VMLOCK-VMBLOK(,R1) LOCK AVAILABLE?          @V4M0173 00346000
+         BNE   STACK          NO, STACK CPEXBLOK               @V4M0173 00347000
+         TM    VMPEND-VMBLOK(R1),VMDEFSTK DEFERRED TASK?       @V4M0173 00348000
+         BO    STACK          YES, STACK A CPEXBLOK            @VA07906 00349100
+         CS    R14,R0,VMLOCK-VMBLOK(R1)  TRY TO OBTAIN LOCK    @V407510 00350000
+         BNZ   STACK          UNSUCCESSFUL, STACK CPEXBLOK     @V407510 00351000
+         TM    VMPEND-VMBLOK(R1),VMDEFSTK  DEFERRED TASK ?     @V407510 00352000
+         BNO   UPDATE         NO, CHECK FOR UPDATE             @V407510 00353000
+         ST    R14,VMLOCK-VMBLOK(,R1)  FREE LOCK               @V4M0173 00354000
+STACK    DS    0H             STACK CPEXBLOK, LOCK IN USE      @V407510 00355000
+         C     R0,VMLOCK-VMBLOK(R1) LOCK ALREADY HELD?         @V4M0231 00356000
+         BE    LOKAB1         YES, ABEND LOK001                @V4M0231 00357000
+         LA    R0,CPEXSIZE    GET SIZE OF CPEXBLOK             @V407510 00358000
+         CALL  DMKFREE        GET STORAGE FOR CPEXBLOK         @V407510 00359000
+         USING CPEXBLOK,R6    SET UP ADDRESSABILITY            @V407510 00360000
+         LR    R6,R1          SET UP FOR CPEXBLOK              @V407510 00361000
+         MVC   CPEXREGS(RGLN),LOKSAV2  STORE REGS IN CPEXBLOK  @V4M0193 00362000
+         L     R2,CPEXR1      GET OLD REG 1                    @V407510 00363000
+         ST    R2,CPEXR11     MAKE OLD R1 NEW R11              @V407510 00364000
+         L     R2,CPEXR14     GET OLD R14                      @V407510 00365000
+         ST    R2,CPEXADD     RETURN TO CALLER WHEN CPEXBLOK   @V407510 00366000
+*                             IS UNSTACKED                     @V407510 00367000
+         CALL  DMKSTKSW       STACK A PRIORITY CPEXBLOK        @VA07402 00367100
+         TM    LOKSAV2+RG0B3,SVMSTAY  STAY ON THIS PROCESSOR?  @V4M0193 00368000
+         BNO   STKCP          NO, RESET PROCESSOR ID           @VA07402 00369100
+         MVC   CPEXPROC,LPUADDR YES, RESET ID TO THIS PROCESSOR@VA07402 00369600
+         B     DSPXT          EXIT TO DISPATCHER               @V407510 00371000
+STKCP    DS    0H             STACK FOR ANY PROCESSOR          @V407510 00372000
+         XC    CPEXPROC,CPEXPROC ZERO PROCESSOR ID             @VA07402 00373100
+DSPXT    DS    0H             DISPATCHER EXIT                  @V407510 00374000
+         GOTO  DMKDSPCH       GO TO LOCKED ENTRY OF DMKDSP     @V407510 00375000
+         DROP  R6             CPEXBLOK NO LONGER NEEDED        @V407510 00376000
+UPDATE   DS    0H             CHECK UPDATE OPTION              @V407510 00377000
+         L     R14,LOKSAV2+REG12 GET R12 VALUE OF CALLER       @V4M0193 00378000
+         ST    R14,VMLOCKER   SAVE R12 VALUE                   @V4M0193 00379000
+         ST    R14,VMLOCKER-VMBLOK(R1) SAVE R12 VALUE          @VA08379 00379010
+         TM    LOKSAV2+RG0B3,SVMNOUPD NOUPDATE SPECIFIED?      @V4M0193 00380000
+         BNO   NOVMA          YES, SKIP CALL TO DMKVMA         @V407510 00381000
+         LR    R11,R1         SET UP R11 FOR DMKVMA            @V407510 00382000
+         TM    VMOSTAT,VMSHR  RUNNING SHARED SYSTEMS?          @V407510 00383000
+         BZ    SWITCH         NO, SKIP CALL TO VMA             @V407510 00384000
+         CLC   VMSHRPRC,LPUADDR+ONE  POINTING TO CURRENT       @V407510 00385000
+*                                   PROCESSOR SEGMENT TABLES?  @V407510 00386000
+         BE    SWITCH         YES, SKIP CALL TO DMKVMA         @V407510 00387000
+         CALL  DMKVMASW       NO, CALL DMKVMA TO SET UP        @V407510 00388000
+*                             POINTERS FOR CURRENT PROCESSOR   @V407510 00389000
+SWITCH   DS    0H             RESTORE R11 TO INPUT VALUE       @V407510 00390000
+         L     R11,LOKSAV2+RG11  RESTORE R11                   @V4M0193 00391000
+NOVMA    DS    0H             UNLOCK CURRENT R11 USER          @V407510 00392000
+         CHARGE SWITCH,1      SWITCH THE TIMER                 @V407510 00393000
+*                             R11 NOW POINTS TO NEW USER       @V407510 00394000
+         L     R1,LOKSAV2+RG11  SET R1 TO OLD R11              @V4M0193 00395000
+         C     R1,LASTUSER    OLD R11 = LASTUSER?              @V407510 00397000
+         BE    LKSWEXIT       YES, RETURN TO CALLER            @V4M0193 00398000
+         C     R1,ASYSVM      OLD R11 = SYSTEM VMBLOK?         @V407510 00399000
+         BE    LKSWEXIT       YES, RETURN TO CALLER            @V4M0193 00400000
+         LH    R0,LPUADDR     GET CURRENT PROCESSOR ADDRESS    @V407510 00401000
+         LA    R1,VMLOCK-VMBLOK(R1)  ADDRESS OF LOCKWORD       @V407510 00402000
+         CH    R0,LKPROCA     LOCK OWNED BY THIS PROCESSOR?    @V407510 00403000
+         BNE   LOKAB3         NO, ABEND LOK003                 @V407510 00404000
+         SLR   R14,R14        CLEAR REG TO ZERO                @V4M0173 00405000
+         ST    R14,LKLOCK     RELEASE VMBLOK LOCK              @V4M0173 00406000
+LKSWEXIT DS    0H                                              @V4M0193 00407000
+         LM    R0,R10,LOKSAV2                                  @VA08434 00408100
+         LM    R12,R15,LOKSAV2+REG12                           @VA08434 00408200
+         BR    R14            RETURN TO CALLER                 @V4M0193 00409000
+LOKAB3   DS    0H                                              @V407510 00410000
+         ABEND 03             ABEND LOK003                     @V407510 00411000
+         EJECT                                                          00412000
+* SUBROUTINE NAME -                                                     00413000
+*        DMKLOKSP                                                       00414000
+*                                                                       00415000
+* FUNCTION -                                                            00416000
+*        THE FUNCTION OF THIS ENTRY POINT IS TO HANDLE THE OBTAIN,      00417000
+*        SPIN=YES REQUEST FOR A LOCK AND THE ATTEMPT TO OBTAIN THE      00418000
+*        LOCK FAILED.                                                   00419000
+*                                                                       00420000
+* MACRO CALL FORMAT -                                                   00421000
+*        LOCK  OBTAIN,TYPE=XXX,SPIN=YES                                 00422000
+*                                                                       00423000
+* ENTRY CONDITIONS -                                                    00424000
+*        GPR0 - PROCESSOR ADDRESS                                       00425000
+*        GPR1 - LOCKWORD ADDRESS                                        00426000
+*        GPR14- RETURN ADDRESS                                          00427000
+*        GPR15- ENTRY POINT ADDRESS                                     00428000
+*                                                                       00429000
+* EXIT CONDITIONS -                                                     00430000
+*        NORMAL -                                                       00431000
+*              CONDITION CODE 0 - LOCK OBTAINED.                        00432000
+*                                                                       00433000
+*        ERROR -                                                        00434000
+*              LOK001 ABEND - LOCK ALREADY HELD BY REQUESTING           00435000
+*                            PROCESSOR.                                 00436000
+*                                                                       00437000
+* REGISTER USAGE -                                                      00438000
+*        SEE MAIN PROLOGUE                                              00439000
+*                                                                       00440000
+* OPERATION -                                                           00441000
+*        1.    SAVE REGS IN LOKSAVE                                     00442000
+*        2.    ESTABLISH COMMON ADDRESSABILITY                          00443000
+*        3.    IF LOCK ALREADY OWNED, ABEND LOK001                      00444000
+*        4.    IF REQUEST FOR SYSTEM LOCK, SET CPSYSLK                  00445000
+*              AND CPLOKFL.                                             00446000
+*        5.    CALL LOKSPIN                                             00447000
+*        6.    CLEAR CPSYSLK IF REQUEST WAS FOR SYSTEM LOCK.            00448000
+*        7.    SET CONDITION CODE = 0                                   00449000
+*        8.    RESTORE REGS                                             00450000
+*        9.    RETURN TO CALLER                                         00451000
+*                                                                       00452000
+*                                                                       00453000
+DMKLOKSP DS    0H             SPIN OBTAIN ENTRY POINT          @V407510 00454000
+         USING *,R15          SET UP TEMPORARY ADDRESSABILITY  @V407510 00455000
+         STM   R0,R15,LOKSAVE SAVE REGISTERS IN PSA            @V407510 00456000
+         L     R12,LOKBASE    LOAD COMMON BASE REGISTER        @V407510 00457000
+         DROP  R15            DROP TEMPORARY BASE REG          @V407510 00458000
+         USING DMKLOK,R12     SET UP COMMON BASE REG           @V407510 00459000
+         CH    R0,LKPROCA     LOCK ALREADY OWNED?              @V407510 00460000
+         BE    LOKAB1         YES, ABEND LOK01                 @V407510 00461000
+         C     R1,=A(DMKLOKSY)  REQUEST FOR SYSTEM LOCK?       @V407510 00462000
+         BNE   LOKSPIN0       NO, SKIP FLAG SETTINGS           @V407510 00463000
+         OI    APSTAT4,CPLOKFL  INDICATE ENABLING FOR EXTERNAL @VA07615 00464100
+*                             INTERRUPTS                       @V4M0173 00465000
+         L     R14,PREFIXB    GET OTHER PROC PREFIX ADDRESS    @V4M0173 00466000
+         OI    APSTAT3-PSA(R14),CPSYSLK  TELL OTHER PROC'R THE @VA07615 00467000
+*                             SYSTEM LOCK IS NEEDED            @V4M0173 00468000
+         BAL   R14,LOKSPIN    BRANCH TO SPIN ROUTINE           @V407510 00469000
+         MVC   LKLOCKER,LOKSAVE+REG12  SAVE LOCKER R12         @V407510 00470000
+         L     R14,PREFIXB    GET OTHER PROC PREFIX ADDRESS    @V4M0173 00471000
+         NI    APSTAT3-PSA(R14),X'FF'-CPSYSLK  TURN OFF FLAG   @VA07615 00472000
+*                             IN OTHER PROCESSOR'S PSA         @V4M0173 00473000
+         B     SETCC0         BRANCH TO SET CONDITION CODE 0   @V407510 00474000
+LOKSPIN0 DS    0H                                              @V407510 00475000
+         BAL   R14,LOKSPIN    BRANCH TO SPIN ROUTINE           @V407510 00476000
+         L     R14,LOKSAVE+REG12  GET R12 VALUE OF CALLER      @V4M0173 00477000
+         ST    R14,LKLOCKER   SAVE R12 VALUE                   @V4M0173 00478000
+         B     SETCC0         BRANCH TO SET CONDITION CODE 0   @V407510 00479000
+         EJECT                                                          00480000
+* SUBROUTINE NAME -                                                     00481000
+*        DMKLOKPS                                                       00482000
+*                                                                       00483000
+* FUNCTION -                                                            00484000
+*        THE FUNCTION OF THIS ENTRY POINT IS TO HANDLE ALL SPIN         00485000
+*        REQUESTS FOR THE SYSTEM.                                       00486000
+*                                                                       00487000
+* ENTRY CONDITIONS -                                                    00488000
+*              CALLED BY DMKDSP FOR EXTEND PROCESSING                   00489000
+*              CALLED BY DMKMCT FOR SYSTEM TERMINATION                  00490000
+*                                                                       00491000
+*        GPR0 - CONDITION FOR END-OF-SPIN                               00492000
+*        GPR1 - SPIN LOCKWORD ADDRESS                                   00493000
+*        GPR15- ENTRY POINT ADDRESS                                     00494000
+*                                                                       00495000
+* EXIT CONDITIONS -                                                     00496000
+*        ERROR -                                                        00497000
+*                                                                       00498000
+* REGISTER USAGE -                                                      00499000
+*        SEE MAIN PROCESSOR.                                            00500000
+*                                                                       00501000
+* OPERATION -                                                           00502000
+*        1. SAVE REGS IN LOKSAVE                                        00503000
+*        2. ESTABLISH COMMON ADDRESSABILITY                             00504000
+*        3. IF SPINNING ON EXTEND INDICATOR, SET CPLOKFL.               00505000
+*        4. CALL LOKSPIN                                                00506000
+*        5. RESTORE REGS                                                00507000
+*        6. RETURN TO CALLER.                                           00508000
+*                                                                       00509000
+DMKLOKPS DS    0H             PROCESSOR SPIN ENTRY POINT       @V407510 00510000
+         USING *,R15          SET UP TEMPORARY ADDRESSABILITY  @V407510 00511000
+         STM   R0,R15,LOKSAVE SAVE REGISTERS IN PSA            @V407510 00512000
+         L     R12,LOKBASE    LOAD COMMON BASE REGISTER        @V407510 00513000
+         DROP  R15            DROP TEMPORARY BASE REG          @V407510 00514000
+         USING DMKLOK,R12     SET UP COMMON BASE REG           @V407510 00515000
+         L     R2,PREFIXA     GET OWN PREFIX REG               @V407510 00516000
+         LA    R2,XTNDLOCK-PSA(,R2)  ADDR OF EXTEND LOCK       @V407510 00517000
+         LA    R3,0(,R1)      CLEAR HIGH ORDER BYTE            @V407510 00518000
+         CR    R2,R3          SPINNING ON EXTEND LOCK?         @V407510 00519000
+         BNE   LOKSPIN0       NO, DO NOT SET FLAG              @V407510 00520000
+         OI    APSTAT4,CPLOKFL  SET SPECIAL LOK INDICATOR      @VA07615 00521100
+         B     LOKSPIN0       JOIN COMMON CODE TO CALL SPIN    @V407510 00522000
+         EJECT                                                          00523000
+* SUBROUTINE NAME -                                                     00524000
+*        LOKSPIN -                                                      00525000
+*                                                                       00526000
+* FUNCTION -                                                            00527000
+*        THE FUNCTION OF THIS ENTRY POINT IS TO SPIN ON A               00528000
+*        PARTICULAR CONDITION.  A WINDOW MUST BE OPENED DURING THE      00529000
+*        SPIN TO ALLOW MALFUNCTION ALERT AND EMERGENCY INTERRUPT        00530000
+*        SIGNALS TO BE RECEIVED.                                        00531000
+*                                                                       00532000
+*        NOTE:                                                          00533000
+*              LOKSAVE + 24 IS USED AS A DATAAREA SO THAT THIS ROUTINE  00534000
+*              IS REENTRANT. REGS 6-9 ARE NOT USED IN THIS ROUTINE OR   00535000
+*              DMKLOKPS OR DMKLOKSP.                                    00536000
+*              REGS6-9 ARE RESTORED IN LOKSAVE BEFORE EXITING SO THAT   00537000
+*              COMMON EXIT LOGIC CAN BE USED.                           00538000
+*                                                                       00539000
+* ENTRY CONDITIONS -                                                    00540000
+*        GPR 0 - CONDITION TO END SPIN                                  00541000
+*        GPR 1 - SPIN LOCKWORD ADDRESS                                  00542000
+*        GPR14- RETURN ADDRESS                                          00543000
+*        GPR15- ENTRY POINT ADDRESS                                     00544000
+*                                                                       00545000
+* EXIT CONDITIONS -                                                     00546000
+*        ERROR -                                                        00547000
+*              CVT001 ABEND - STCK FAILED                               00548000
+*                                                                       00549000
+* REGISTER USAGE -                                                      00550000
+*        SEE MAIN PROLOGUE.                                             00551000
+*                                                                       00552000
+* OPERATIONS -                                                          00553000
+*        1.    ESTABLISH TRACE ENTRY                                    00554000
+*        2.    START TIMER.                                             00555000
+*        3.    IF SPIN CONDITION SATISFIED, GOTO STEP 9.                00556000
+*              IF SPINNING FOR A LOCK, C&S LOCKWORD.                    00557000
+*              IF SPINNING ON A BYTE, COMPARE BYTE WITH                 00558000
+*              VALUE IN REGISTER 0.                                     00559000
+*        4.    OPEN WINDOW FOR MFA.                                     00560000
+*        5.    CLOSE WINDOW FOR MFA.                                    00561000
+*        6.    IF SPINNING ON SYSTEM LOCK, OPEN WINDOW                  00562000
+*              FOR EMERGENCY SIGNAL.                                    00563000
+*              CLOSE WINDOW FOR EMERGENCY SIGNAL.                       00564000
+*        7.    GOTO STEP 4.                                             00565000
+*        8.    TURN OFF CPLOKFL.                                        00566000
+*        9.    CALCULATE TIME SPENT SPINNING.                           00567000
+*       10.    RETURN TO CALLER.                                        00568000
+*                                                                       00569000
+LOKSPIN  DS    0H             COMMON SPIN ROUTINE              @V407510 00570000
+         AIF   (NOT &TRACE(9)).TR1                                      00571000
+         TM    TRACFLG2,TRAC12  TRACING ACTIVE?                @V407510 00572000
+         BZ    NOTRACE        NO, SKIP TRACING                 @V407510 00573000
+         TRACE CODE=TRCLOK,R2,R3,R4                            @V407510 00574000
+         USING TRACE,R2       SET UP ADDRESSABILITY FOR TRACE  @V407510 00575000
+*                             ENTRY                            @V407510 00576000
+         MVC   TRACEVM(AL3),LOKSAVE+REG11B1  R11 VALUE UPON    @V407510 00577000
+*                                              ENTRY           @V407510 00578000
+         ST    R1,TRACELKW    LOCKWORD ADDRESS                 @V407510 00579000
+         MVC   TRACERTN,LOKSAVE+REG14B0   RETURN ADDRESS OF    @V407510 00580000
+*                                         REQUESTOR            @V407510 00581000
+         MVC   TRACELK,0(R1)  CONTENTS OF LOCKWORD             @V407510 00582000
+NOTRACE  DS    0H                                              @V407510 00583000
+.TR1     ANOP                                                           00584000
+         STCK  LOKTIMER       STORE CLOCK TO TIME SPIN         @V407510 00585000
+         BC    CLKBAD,CLOCKBAD    BRANCH IF CLOCK SICK         @V407510 00586000
+         MVC   LOKCTLRG,CPCREG0 USE CONTROL REG 0              @V4M0173 00587000
+         XC    MPMASK(LN2),MPMASK  TURN OFF ALL MP MASKS       @V407510 00588000
+         TM    APSTAT4,CPLOKFL  OPENING WINDOW FOR EMS & MFA   @VA07615 00589100
+         BNO   ENMFA          NO, SKIP EMERGENCY SIGNAL        @V407510 00590000
+         OI    MPMASK,EMSMASK ENABLE FOR EMERGENCY SIGNAL      @V407510 00591000
+ENMFA    DS    0H                                              @V407510 00592000
+         OI    MPMASK,MFAMASK ENABLE FOR MALFUNCTION ALERT     @V407510 00593000
+         LCTL  C0,C0,LOKCTLRG   ENABLE FOR MFA ( & EMS )       @V407510 00594000
+         LA    R2,LPCTL       SET UP LOOP CONTROL              @V407510 00595000
+SPINLOOP DS    0H             LOOP FOR SPINNING                @V407510 00596000
+         LTR   R1,R1          SPINNING ON BYTE?                @V407510 00597000
+         BM    SPINBYTE       YES, BRANCH                      @V407510 00598000
+         SR    R3,R3          CLEAR REGISTER FOR C&S           @V407510 00599000
+         C     R3,0(,R1)      LOCK AVAILABLE?                  @V4M0160 00600000
+         BNE   WINDOW         NO, CONTINUE SPIN                @V4M0160 00601000
+         CS    R3,R0,0(R1)    TRY TO OBTAIN LOCK               @V407510 00602000
+         BZ    SPINEND        SUCCESSFUL, END SPIN             @V407510 00603000
+WINDOW   DS    0H             OPEN WINDOW                      @V407510 00604000
+         BCT   R2,SPINLOOP    ONLY OPEN WINDOW EVERY SO OFTEN  @V407510 00605000
+         STOSM SYSMASK,EXTINT   ENABLE FOR EXTERNALS           @V407510 00606000
+         STNSM SYSMASK,OFF-EXTINT   DISABLE FOR EXTERNALS      @V407510 00607000
+         LA    R2,LPCTL       RESET LOOP CONTROL               @V407510 00608000
+         B     SPINLOOP       LOOP UNTIL LOCK OBTAINED         @V407510 00609000
+SPINBYTE DS    0H             SPINNING ON A BYTE               @V407510 00610000
+         CLC   0(ONE,R1),LOKSAVE+RG0B3    READY TO STOP        @V407510 00611000
+*                                         SPINNING             @V407510 00612000
+         BNE   WINDOW         NO, LOOP                         @V407510 00613000
+SPINEND  DS    0H             FINISHED SPINNING                @V407510 00614000
+         LA    R1,0(,R1)      GET GOOD ADDRESS OF LOCKWORD     @V407510 00615000
+         LCTL  C0,C0,CPCREG0  RESET CREG 0                     @V407510 00616000
+         LM    R2,R3,LOKTIMER LOAD TIMER VALUE INTO REGS       @V407510 00617000
+         STCK  LOKTIMER       GET NEW TIMER VALUE              @V407510 00618000
+         BC    CLKBAD,CLOCKBAD    BRANCH IF CLOCK SICK         @V407510 00619000
+         LM    R4,R5,LOKTIMER LOAD TIMER VALUE INTO REGS       @V407510 00620000
+         SRDL  R2,BIT51       SHIFT TO MICROSECONDS            @V405510 00621000
+         SRDL  R4,BIT51       SHIFT TO MICROSECONDS            @V405510 00622000
+         SLR   R5,R3          GET ELAPSED TIME                 @V407510 00623000
+         C     R1,LOCKSBEG    LOCKWORD IN DMKLOK?              @V407510 00624000
+         BL    SPECLOCK       NO, USE SPECIAL TIMER            @V407510 00625000
+         C     R1,LOCKSEND    LOCKWORD IN DMKLOK?              @V407510 00626000
+         BNH   UPTIMER        YES, UPDATE TIMER                @V407510 00627000
+SPECLOCK DS    0H                                              @V407510 00628000
+         LA    R1,DMKLOKSI    USE COMMON TIMER ACCUMULATOR     @V407510 00629000
+UPTIMER  DS    0H                                              @V407510 00630000
+         A     R5,LKTIMER     ADD PREVIOUS ACCUMULATED TIME    @V407510 00631000
+         ST    R5,LKTIMER     STORE TOTAL SPIN TIME            @V407510 00632000
+         L     R2,COUNTER     LOAD COUNT OF SPINS              @V407510 00633000
+         LA    R2,ONE(,R2)    INCREMENT COUNTER BY ONE         @V407510 00634000
+         ST    R2,COUNTER     STORE NEW COUNT                  @V407510 00635000
+         NI    APSTAT4,X'FF'-CPLOKFL  TURN OFF CPLOKFL         @VA07615 00636100
+         STM   R6,R9,SPECSAVE  RESTORE LOKSAVE TO INPUT REGS   @V407510 00637000
+         BR    R14            RETURN TO CALLER                 @V407510 00638000
+CLOCKBAD DS    0H             STCK FAILED                      @V407510 00639000
+         GOTO  DMKCVTAB       ABEND                            @V407510 00640000
+         EJECT                                                          00641000
+*              DATA AREAS AND EQUATES                                   00642000
+*                                                                       00643000
+***************************************************************@V407510 00644000
+*                                                              @V407510 00645000
+*              THE FOLLOWING AREAS ARE DEFINED ON LOKSAVE+24   @V407510 00646000
+*              THE ACTUAL EQUATES ARE FOLLOWING THE PSA        @V407510 00647000
+*                                                              @V407510 00648000
+*LOKTIMER DC    1D'0'          TIMER VALUE FOR SPINNING        @V407510 00649000
+*LOKCTLRG DC    1F'0'          SAVE CONTROL REG 0              @V407510 00650000
+*MPMASK   EQU   LOKCTLRG+2     MASK FOR MP OPERATIONS          @V407510 00651000
+*SYSMASK  DC    X'00'          SYSTEM MASK FROM STOSM & STNSM  @V407510 00652000
+*SPECSAVE DC    4F            SAVE REGS 6-9                    @V407510 00653000
+*                                                              @V407510 00654000
+***************************************************************@V407510 00655000
+LOKBASE  DC    A(DMKLOK)      COMMON BASE REGISTER FOR DMKLOK  @V407510 00656000
+         SPACE 2                                                        00657000
+***************************************************************@V407510 00658000
+LOCKSBEG DC    A(*)           BEGINNING OF LOCKWORDS           @V407510 00659000
+DMKLOKSY DC    4F'0'          SYSTEM LOCKWORD                  @V407510 00660000
+DMKLOKFR DC    4F'0'          DMKFRE LOCKWORD                  @V407510 00661000
+DMKLOKRL DC    4F'0'          RUNLIST LOCKWORD                 @V407510 00662000
+DMKLOKTR DC    4F'0'          TIMER REQUEST LOCKWORD           @V407510 00663000
+DMKLOKDS DC    4F'0'          DISPATCHER QUEUES LOCKWORD       @V407510 00664000
+LOCKSEND DC    A(*)           END OF LOCKWORDS                 @V407510 00665000
+DMKLOKSI DC    4F'0'          SPIN INDICATOR LOCKWORD          @V407510 00666000
+*                             COUNTER AND TIMER WILL BE USED   @V407510 00667000
+*                             TO ACCUMULATE TIME SPINNING FOR  @V407510 00668000
+*                             DMKLOKPS ENTRIES FOR BYTE        @V407510 00669000
+*                             MANIPULATIONS AND DMKLOKSP       @V407510 00670000
+*                             ENTRIES FOR NON DMKLOK LOCKS     @V407510 00671000
+***************************************************************@V407510 00672000
+DMKLOKCT DC    2F'0'          COUNTERS FOR MONITOR             @V407510 00673000
+LOKSYSCT EQU   DMKLOKCT       COUNT OF SYSTEM LOCK DEFERS      @V407510 00674000
+LOKVMCT  EQU   DMKLOKCT+4     COUNT OF VMBLOK LOCK DEFERS      @V407510 00675000
+         EJECT                                                          00676000
+*                             EQUATES                          @V407510 00677000
+         SPACE 2                                                        00678000
+EXTINT   EQU   X'01'          EXTERNAL INTERRUPT MASK IN PSW   @V407510 00679000
+WS014    EQU   X'14'          014 WAIT STATE                   @V407510 00680000
+BIT51    EQU   63-51          SHIFT VALUE TO GET BIT 51 IN     @V407510 00681000
+*                             BIT POSITION 31 OF FULLWORD      @V407510 00682000
+*                             BIT51 OF CLOCK IS 1 MICROSECOND  @V407510 00683000
+THISPROC EQU   1              CURRENT PROCESSOR ADDRESS        @V407510 00684000
+HIGHBYTE EQU   8              MASK FOR HIGH ORDER BYTE         @V407510 00685000
+REG0B3   EQU   11             MASK IS IN LOW BYTE OF           @V407510 00686000
+*                             ORIGINAL REG 0                   @V407510 00687000
+OFF      EQU   X'FF'           MASK TO TURN OFF CPSYSLK        @V407510 00688000
+REG11B1  EQU   11*4+1         REG11 UPON ENTRY                 @V407510 00689000
+REG14B0  EQU   14*4           REG14 UPON ENTRY                 @V407510 00690000
+REG12    EQU   12*4           REG 12 UPON ENTRY                @V407510 00691000
+AL3      EQU   3              LENGTH OF 3 BYTE ADDRESS AREA    @V407510 00692000
+ONE      EQU   1              INCREMENT OR LENGTH OF 1         @V407510 00693000
+ZERO     EQU   0                                               @V407510 00694000
+RG0B3    EQU   3              STOP BYTE SPIN                   @V407510 00695000
+LN2      EQU   2              2 BYTES OF CREG0 FOR MP MASKS    @V407510 00696000
+LPCTL    EQU   10             LOOP CONTROL FOR OPENING WINDOW  @V407510 00697000
+CLKBAD   EQU   3              BRANCH MASK FOR STCK             @V407510 00698000
+*                             CC=0 & CC=1 OK                   @V407510 00699000
+RG11     EQU   11*4           DISPLACEMENT FOR REG11           @V407510 00700000
+RGLN     EQU   16*4           LENGTH OF SAVEAREA               @V407510 00701000
+         EJECT                                                          00702000
+*              LOCKWORD DSECT                                  @V407510 00703000
+LOCKWORD DSECT                                                 @V407510 00704000
+LKLOCK   DS    1F             ADDR OF PROCESSOR HOLDING LOCK   @V407510 00705000
+LKPROCA  EQU   LKLOCK+2       PROCESSOR ADDRESS ONLY HALFWORD  @V407510 00706000
+LKLOCKER DS    1F             R12 VALUE OF ROUTINE THAT        @V407510 00707000
+*                             OBTAINED LOCK                    @V407510 00708000
+LKTIMER  DS    1F             TIME SPENT SPINNING ON LOCK      @V407510 00709000
+COUNTER  DS    1F             TOTAL NUMBER OF SPINS FOR LOCK   @V407510 00710000
+         SPACE 3                                                        00711000
+*              TRACE ENTRY DSECT                               @V407510 00712000
+TRACE    DSECT                                                 @V407510 00713000
+TRACEID  DS    1X             ENTRY IDENTIFIER                 @V407510 00714000
+TRACEVM  DS    AL3            R11 ADDRESS UPON ENTRY TO DMKLOK @V407510 00715000
+TRACELKW DS    1F             LOCKWORD ADDRESS                 @V407510 00716000
+TRACERTN DS    1F             RETURN ADDRESS OF REQUESTOR      @V407510 00717000
+TRACELK  DS    1F             CONTENTS OF LOCKWORD             @V407510 00718000
+         EJECT                                                          00719000
+         PSA                                                            00720000
+***************************************************************@V407510 00721000
+*                                                              @V407510 00722000
+*              REGS 6-9 ARE NOT DESTROYED FOR DMKLOKPS AND     @V407510 00723000
+*              DMKLOKSP ENTRIES. LOKSAVE + 24 FOR 4 WORDS IS   @V407510 00724000
+*              USED AS AN INTERNAL WORK AREA                   @V407510 00725000
+LOKTIMER EQU   LOKSAVE+4*6    TIMER VALUE FOR SPINNING         @V407510 00726000
+LOKCTLRG EQU   LOKSAVE+4*8    SAVE CONTROL REG 0               @V407510 00727000
+MPMASK   EQU   LOKCTLRG+2     MASK FOR MP OPERATIONS           @V407510 00728000
+SYSMASK  EQU   LOKSAVE+4*9    SYSTEM MASK FROM STOSM & STNSM   @V407510 00729000
+SPECSAVE EQU   LOKSAVE+6*4    SAVE REGS 6-9                    @V407510 00730000
+*                                                                       00731000
+***************************************************************@V407510 00732000
+         COPY  EQU                                             @V407510 00733000
+         COPY  VMBLOK                                          @V407510 00734000
+         COPY  SAVE                                            @V407510 00735000
+         END                                                            00736000

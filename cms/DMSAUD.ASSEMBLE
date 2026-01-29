@@ -1,0 +1,447 @@
+AUD      TITLE 'DMSAUD     (CMS)       VM/370 - RELEASE 6'              00001000
+         SPACE 2                                                        00002000
+*.                                                                      00003000
+*                                                                       00004000
+*                                                                       00005000
+*                                                                       00006000
+*                                                                       00007000
+* MODULE NAME:                                                          00008000
+*                                                                       00009000
+*      DMSAUD                                                           00010000
+*                                                                       00011000
+* SUBROUTINE NAME:                                                      00012000
+*                                                                       00013000
+*        DMSAUDK   (UPDISK)                                             00014000
+*                                                                       00015000
+* FUNCTION:                                                             00016000
+*                                                                       00017000
+*        TO RESERVE SPACE ON DISK FOR  REWRITING A NEW COPY OF          00018000
+*        THE USER  FILE DIRECTORY (UFD)  ON DISK, AND  THEN TO          00019000
+*        UPDATE THE UFD ON DISK.                                        00020000
+*                                                                       00021000
+* ATTRIBUTES:                                                           00022000
+*                                                                       00023000
+*        NUCLEUS RESIDENT, REENTRANT                                    00024000
+*                                                                       00025000
+* ENTRY POINTS:                                                         00026000
+*                                                                       00027000
+*        DMSAUD                                                         00028000
+*                                                                       00029000
+* ENTRY CONDITIONS:                                                     00030000
+*                                                                       00031000
+*        L     R15,AUPDISK     WHERE AUPDISK = V(DMSAUD)                00032000
+*        BALR  R14,R15                                                  00033000
+*                                                                       00034000
+*        1. TO UPDATE UFD WHEN AN OUTPUT FILE IS CLOSED:                00035000
+*                                                                       00036000
+*             R0 MUST POINT TO ACTIVE DISK TABLE                        00037000
+*             R1 MUST BE POSITIVE AND NONZERO (ANY VALUE)               00038000
+*                                                                       00039000
+*        2. TO RESERVE RECORDS VIA DMSTRKA FOR FUTURE USE:              00040000
+*                                                                       00041000
+*             R0 MUST POINT TO ACTIVE DISK TABLE                        00042000
+*             R1 = ZERO                                                 00043000
+*                                                                       00044000
+*        3. TO   UPDATE  UFD   WHEN   RECORDS  WERE   RESERVED          00045000
+*             PREVIOUSLY:                                               00046000
+*                                                                       00047000
+*             R0 MUST POINT TO ACTIVE DISK TABLE                        00048000
+*             R1 MUST BE NEGATIVE (ANY VALUE)                           00049000
+*                                                                       00050000
+*        EXIT CONDITIONS:                                               00051000
+*                                                                       00052000
+*        SUCCESSFUL UPDATE OF UFD                                       00053000
+*                                                                       00054000
+*           R15 = 0              (AND CONDITION-CODE = 0)               00055000
+*                                                                       00056000
+*        FAILURE UPDATING UFD                                           00057000
+*                                                                       00058000
+*           TRANSFER OF CONTROL TO DMSFNSD - SEE OPERATION FOR DETAILS. 00059000
+*                                                                       00060000
+* CALLS TO OTHER ROUTINES:                                              00061000
+*                                                                       00062000
+*      DMSFREE, DMSFRET, DMSTRKA, DMSTRKX, DMSDIOW, DMSFNSD             00063000
+*                                                                       00064000
+* EXTERNAL REFERENCES:                                                  00065000
+*                                                                       00066000
+*      ADTSECT, FVSECT                                                  00067000
+*                                                                       00068000
+* TABLES/WORKAREAS:                                                     00069000
+*                                                                       00070000
+*        800 BYTE MFD AREA                                              00071000
+*                                                                       00072000
+* REGISTER USAGE:                                                       00073000
+*                                                                       00074000
+*        R13   FVSECT                                                   00075000
+*        R11   ADTSECT                                                  00076000
+*        R12   BASE                                                     00077000
+*        REST  WORK                                                     00078000
+*                                                                       00079000
+* OPERATION:                                                            00080000
+*                                                                       00081000
+*        DMSAUD  IS THE  ROUTINE THAT  UPDATES  THE USER  FILE          00082000
+*        DIRECTORY FOR A  GIVEN DISK.  IT IS CALLED  IN ONE OF          00083000
+*        TWO  WAYS:  WHEN  DMSFNSA HAS  CLOSED  THE LAST  OPEN          00084000
+*        OUTPUT  FILE FOR  A GIVEN  DISK, IT  CALLS THE  FIRST          00085000
+*        ENTRY TO  UPDATE THE UFD  FOR THAT DISK;  WHEN DMSERS          00086000
+*        FINDS A FILE                                                   00087000
+*        TO  BE ERASED  IT  FIRST CALLS  THE  SECOND ENTRY  TO          00088000
+*        RESERVE SOME TRACKS, THEN  DOES ITS ERASING FUNCTION,          00089000
+*        THEN CALLS  THE THIRD ENTRY TO  WRITE THE NEW  UFD ON          00090000
+*        DISK.                                                          00091000
+*                                                                       00092000
+*        THIS LOGIC  MAKES POSSIBLE WHAT  IS CALLED  A "DOUBLE          00093000
+*        DIRECTORY" SCHEME,  WHEREIN THE  OLD DIRECTORY  STILL          00094000
+*        EXISTS  ON  DISK  UNTIL THE  MFD  ITSELF  IS  FINALLY          00095000
+*        REWRITTEN ON RECORD 4 OF THE DISK, COMPLETING THE NEW          00096000
+*        DIRECTORY.  IF THE  SYSTEM IS INTERRUPTED IN  ANY WAY          00097000
+*        IN THE  MIDDLE OF THE  PROCESS, THE OLD  DIRECTORY IS          00098000
+*        STILL INTACT,  AND ANY OLD  FILES POINTED  TO THEREBY          00099000
+*        ARE STILL INTACT.                                              00100000
+*                                                                       00101000
+*        DMSAUD, THEN, HAS  BASICALLY TWO STEPS.  ENTRY  (2) -          00102000
+*        CALLED ONLY  BY DMSERS  - DOES  ONLY THE  FIRST STEP;          00103000
+*        ENTRY (3)  - ALSO  CALLED BY DMSERS  - DOES  ONLY THE          00104000
+*        SECOND STEP.                                                   00105000
+*                                                                       00106000
+*        THE ACTION TAKEN BY EACH STEP IS AS FOLLOWS:                   00107000
+*                                                                       00108000
+*        STEP 1:  AN 800-BYTE BUFFER FOR THE CONSTRUCTING OF A          00109000
+*        NEW MFD IS OBTAINED FROM  FREE STORAGE, AND THE FIRST          00110000
+*        600 BYTES ARE CLEARED.  AVAILABLE DISK-ADDRESSES               00111000
+*        ARE OBTAINED FROM DMSTRKA FOR EACH FST HYPERBLOCK AND          00112000
+*        STORED IN THE MFD, JUST OBTAINED,                              00113000
+*        IN SEQUENTIAL HALFWORDS.  THEN, IF  THERE ARE NO MORE          00114000
+*        THAN  215  BYTES  OF SIGNIFICANT  DATA  IN  THE  QMSK          00115000
+*        BITMASK, A  SENTINEL OF  X'FFFF' IS  STORED FOLLOWING          00116000
+*        THESE, AND STEP 1 IS COMPLETE.  IF THE QMSK IS LARGER          00117000
+*        THAN 215  BYTES IN  LENGTH AND  THERE IS  SIGNIFICANT          00118000
+*        DATA  PAST   THE  215TH  BYTE,   HOWEVER,  ADDITIONAL          00119000
+*        DISK-ADDRESSES ARE OBTAINED (AS  MANY AS ARE NEEDED),          00120000
+*        AND  STORED FOLLOWING  A  SENTINEL  OF X'FFFD'.   ALL          00121000
+*        NEEDED DISK-ADDRESSES FOR  THE NEW MFD HAVE  NOW BEEN          00122000
+*        OBTAINED AND  STORED, WITHOUT AFFECTING ANY  OLD DATA          00123000
+*        ON DISK.                                                       00124000
+*                                                                       00125000
+*        IF ENTRY (2)  WAS CALLED BY DMSERS,  DMSAUD EXITS  AT          00126000
+*        THIS POINT.                                                    00127000
+*                                                                       00128000
+*        STEP 2: NOW  WE CONTINUE  IN LINE,  OR ENTER  HERE IF          00129000
+*        ENTRY (3) IS CALLED BY DMSERS.                                 00130000
+*                                                                       00131000
+*        DMSAUD NOW CYCLES THROUGH THE                                  00132000
+*        OLD MFD (IF ANY) LEFT IN  CORE BY THE FILE MANAGEMENT          00133000
+*        PROGRAMS,  AND RETURNS  OLD DISK-ADDRESSES  CONTAINED          00134000
+*        THEREIN BY CALLING                                             00135000
+*        DMSTRKX                                                        00136000
+*        TO RETURN  THEM TO  THE QMSK TABLE.   THE OLD  MFD IS          00137000
+*        THEN RETURNED TO FREE STORAGE VIA FRET.                        00138000
+*                                                                       00139000
+*        NOW  THE  FST  HYPERBLOCKS IN  CORE,  AND  ANY  PQMSK          00140000
+*        EXTENSIONS ARE  WRITTEN ON DISK, CALLING  WRTK, USING          00141000
+*        THE DISK-ADDRESSES  RESERVED ABOVE IN STEP  1.  NEXT,          00142000
+*        ALL THE DISK COUNTS (ADTNUM, ADTCYL, ETC.), THE FIRST          00143000
+*        215 BYTES (OR  LESS) OF THE QMSK, THE  QQMSK, AND THE          00144000
+*        UNIT-TYPE  BYTE ARE  MOVED TO  THE MFD,  AND THE  MFD          00145000
+*        FINALLY  WRITTEN  BACK  ON  RECORD  4  OF  THE  DISK,          00146000
+*        COMPLETING THE NEW UFD ON DISK.                                00147000
+*                                                                       00148000
+*        FINALLY, THE SIGNIFCANT PART OF THE NEW MFD, STILL IN          00149000
+*        CORE,  INCLUDING   THE  DISK-ADDRESSES  OF   THE  FST          00150000
+*        HYPERBLOCKS, THE FFFF  OR THE FFFD SENTINEL,  AND THE          00151000
+*        DISK-ADDRESSES OF THE QMSK  EXTENSION(S) ARE RETAINED          00152000
+*        IN CORE (IN THE HIGH-NUMBERED  END OF THE BUFFER THAT          00153000
+*        WAS  USED FOR  THE  NEW MFD),  AND  THE  REST OF  THE          00154000
+*        800-BYTE BUFFER GIVEN BACK TO FREE                             00155000
+*        STORAGE VIA DMSFRET.                                           00156000
+*                                                                       00157000
+*        NOTES:  IF A PERMANENT DISK  ERROR OCCURS WRITING THE          00158000
+*             NEW UFD AT ANY POINT, OR IF NECESSARY                     00159000
+*             FREE STORAGE CANNOT BE OBTAINED, THE                      00160000
+*             DMSAUD ROUTINE PURPOSELY TRANSFERS TO                     00161000
+*             THE DMSFNSD CODE, SO THAT THE OLD                         00162000
+*             DIRECTORY WILL  BE INTACT  UNTIL THE  DISK ERROR          00163000
+*             CAN BE CORRECTED, OR A LARGER VIRTUAL                     00164000
+*             MACHINE DEFINED.                                          00165000
+*                                                                       00166000
+*        SEE ALSO "DMSAUDUP" AND  "DMSAUDL", WHICH STILL SERVE          00167000
+*        A USEFUL PURPOSE, AND  ARE RETAINED FOR COMPATIBILITY          00168000
+*        WITH  EXISTING PROGRAMS.   DMSAUDUP  AND DMSAUDL  ARE          00169000
+*        INCLUDED AS ENTRY-POINTS IN THE DMSAUD ROUTINE.                00170000
+*                                                                       00171000
+* MODULE NAME:                                                          00172000
+*                                                                       00173000
+*      DMSAUD                                                           00174000
+*                                                                       00175000
+* SUBROUTINE NAME:                                                      00176000
+*                                                                       00177000
+*        DMSAUDUP   (UPUFD)                                             00178000
+*                                                                       00179000
+* FUNCTION:                                                             00180000
+*                                                                       00181000
+*        TO CLOSE ALL  CMS FILE(S), THEREBY UPDATING  THE USER          00182000
+*        FILE DIRECTORY (UFD) FOR ANY DISK(S) WHICH HAD OUTPUT          00183000
+*        FILE OPEN.                                                     00184000
+*                                                                       00185000
+* ATTRIBUTES:                                                           00186000
+*                                                                       00187000
+*        NUCLEUS RESIDENT, REENTRANT                                    00188000
+*                                                                       00189000
+*                                                                       00190000
+* ENTRY POINTS:                                                         00191000
+*                                                                       00192000
+*        DMSAUDUP                                                       00193000
+*                                                                       00194000
+* ENTRY CONDITIONS:                                                     00195000
+*                                                                       00196000
+*      L     R15,=V(DMSAUDUP)    (OR EQUIVALENT)                        00197000
+*      BALR  R14,R15                                                    00198000
+*                                                                       00199000
+*      NO REGISTER REQUIREMENTS.                                        00200000
+*                                                                       00201000
+* EXIT CONDITIONS:                                                      00202000
+*                                                                       00203000
+*      R15 = 0                                                          00204000
+*                                                                       00205000
+* CALLS TO OTHER ROUTINES:                                              00206000
+*                                                                       00207000
+*      DMSFNSA                                                          00208000
+*                                                                       00209000
+* EXTERNAL REFERENCES:                                                  00210000
+*                                                                       00211000
+*      FVSECT                                                           00212000
+*                                                                       00213000
+* TABLES/WORKAREAS:                                                     00214000
+*                                                                       00215000
+*        NONE.                                                          00216000
+*                                                                       00217000
+* REGISTER USAGE:                                                       00218000
+*                                                                       00219000
+*        R13   FVSECT                                                   00220000
+*        R11   ADTSECT                                                  00221000
+*        R12   BASE                                                     00222000
+*        REST  WORK                                                     00223000
+*                                                                       00224000
+* OPERATION:                                                            00225000
+*                                                                       00226000
+*        'FINIS * *  *' IS CALLED TO CLOSE ANY  OPEN FILES, IN          00227000
+*        THE COURSE  OF WHICH, IF  ANY OUTPUT FILES  ARE OPEN,          00228000
+*        THE FILE DIRECTORIES FOR THE APPROPRIATE DISK(S)               00229000
+*        ARE AUTOMATICALLY UPDATED BY DMSAUD.                           00230000
+*                                                                       00231000
+*        DMSAUD IS CALLED BY DMSINT  AND DMSEXT TO ENSURE THAT          00232000
+*        FILES ARE CLOSED (AND DIRECTORIES                              00233000
+*        UPDATED) IN THE  EVENT A USER PROGRAM  LEFT ANY FILES          00234000
+*        OPEN ON ITS COMPLETION.                                        00235000
+*                                                                       00236000
+*        NOTE: DMSAUDUP  IS INCLUDED WITH THE  DMSAUD ROUTINE;          00237000
+*             IT  INCLUDES CODE  COMMON TO  DMSAUDL, A  NEARLY          00238000
+*             IDENTICAL FUNCTION ALSO INCLUDED WITH DMSAUD.             00239000
+*                                                                       00240000
+*.                                                                      00241000
+         EJECT                                                          00242000
+DMSAUD   START 0                                                  P3035 00243000
+         SPACE                                                          00244000
+         ENTRY UPDISK                                             P3035 00245000
+UPDISK   EQU   DMSAUD                                             P3035 00246000
+         ENTRY DMSAUDUP                                           P3035 00247000
+         ENTRY UPUFD                                              P3035 00248000
+         SPACE                                                          00249000
+         USING NUCON,R0                                                 00250000
+         FSENTR REGSAV0       ENTER 'UPDISK' TO UPDATE DIRECTORY        00251000
+         LR    R11,R0         REFERENCE ACTIVE DISK-TABLE               00252000
+         USING ADTSECT,R11    ...                                       00253000
+         USING NUCON,R0                                                 00254000
+         OI    UFDBUSY,UPBIT  SET OUR BIT IN 'UFDBUSY' FLAG             00255000
+         LTR   R2,R1          SAVE R1 IN R2 AND CHECK IT                00256000
+         BM    UPD05          IF NEGATIVE, SKIP OBTAINING RECORDS       00257000
+         TM    ADTFLG3,ADTFUPD1 1ST HALF ALREADY BEEN CALLED ? @VA01100 00258000
+         BO    UPD04            IF YES, OMIT THE FIRST PART.   @VA01100 00259000
+         LA    R0,100         SET THE NUMBER OF DWORDS.           V0636 00260000
+         DMSFREE DWORDS=(0),TYPE=NUCLEUS,TYPCALL=BALR,ERR=ERROR25       00261000
+         ST    R1,RWMFD       SAVE CORE-ADDRESS OF NEW MFD              00262000
+         XC    0(200,R1),0(R1)     CLEAR 600 BYTES                      00263000
+         MVC   200(200,R1),0(R1)   ...                                  00264000
+         MVC   400(200,R1),0(R1)   (NOT NECESSARY TO CLEAR LAST 200)    00265000
+         LR    R3,R1          LET R3 POINT TO BEGINNING OF BLOCK        00266000
+         L     R4,ADTHBCT     R4 = NO. OF HYPERBLOCKS WE HAVE           00267000
+UPD02    BAL   R10,UPD20      GET NO. OF TRACKS NEEDED AND STORE IN MFD 00268000
+         MVC   0(2,R3),FFF    MOVE IN TENTATIVE X'FFFF' SENTINEL,       00269000
+         CLC   ADTLAST+2(2),H215+2 ARE WE ABOVE 215 BYTES ?             00270000
+         BL    UPD03          IF NOT, THAT'S ALL WE'LL NEED    @VA01100 00271000
+         MVC   0(2,R3),FFD    X'FFFD' SENTINEL INSTEAD                  00272000
+         LA    R3,2(,R3)      ADVANCE TO NEXT DISK-ADDRESS,             00273000
+         L     R4,ADTPQM2     NUMBER OF DISK-RECORDS WE'LL NEED,        00274000
+         BAL   R10,UPD20      GET MORE TRACKS FOR BIT-MASK              00275000
+UPD03    OI    ADTFLG3,ADTFUPD1 REMEMBER FIRST HALF WAS CALLED @VA01100 00276000
+UPD04    LTR   R2,R2          DID WE JUST WANT TRACKS (CALLED BY ERASE) 00277000
+         BZ    UPDEXIT        BZ IF YES (GO EXIT).                      00278000
+*                                                                       00279000
+UPD05    L     R7,ADTMFDA     GET ADDRESS OF OLD MFD                    00280000
+         LTR   R7,R7          (IF ANY)                                  00281000
+         BNP   UPD07          BNP (BZ) IF NONE THERE, FORGET IT.        00282000
+         LA    R6,UPD06       (FOR BCR'S BELOW)                         00283000
+UNLOOP   LH    R0,0(,R7)      GET DISK-ADDRESS FROM OLD MFD,            00284000
+         CH    R0,FFF         IS IT 'FFFF' ?                            00285000
+         BCR   8,R6           IF YES, WE'RE DONE.                       00286000
+         LTR   R0,R0          IF NOT, IS IT 0 ?                         00287000
+         BCR   8,R6           IF YES, WE'RE DONE.                       00288000
+         CH    R0,FFD         IF NOT, IS IT 'FFFD' ?                    00289000
+         BE    LAR727         BE IF YES, 'SKIP OVER IT'                 00290000
+         CH    R0,FFE         IF NOT, MAYBE 'FFFE' ?                    00291000
+         BCR   8,R6           IF YES, WE'RE DONE.                       00292000
+         LR    R1,R11         POINT TO ACTIVE-DISK-TABLE                00293000
+         ICM   R0,B'1100',=H'0'    ZERO THE 2 HIGH BYTES.         V0636 00294000
+         L     R15,ATRKLKPX   AND RETURN TRACK TO BIT-MASK              00295000
+         BALR  R14,R15        VIA TRKLKPX                               00296000
+LAR727   LA    R7,2(,R7)      ADVANCE TO NEXT DISK-ADDRESS IN OLD MFD   00297000
+         B     UNLOOP         AND CONTINUE GIVING BACK OLD TRACKS.      00298000
+*                                                                       00299000
+UPD06    LM    R0,R1,ADTMFDN           SET UP R0,R1                     00300000
+         DMSFRET DWORDS=(0),LOC=(1),TYPCALL=BALR GIVE BACK MFD          00301000
+         SR    R1,R1          CLEAR                                     00302000
+         ST    R1,ADTMFDA     ADTMFDA (TO BE SAFE)                      00303000
+UPD07    L     R2,ADTFDA      START WITH FIRST HYPERBLOCK               00304000
+         LA    R2,8(,R2)      SPACE OVER PRELIMINARY WORDS              00305000
+         L     R3,RWMFD       GET ADDRESS OF FIRST DISK-ADDRESS         00306000
+         LR    R9,R3          HANG ONTO INDEFINITELY IN R9              00307000
+         L     R4,ADTHBCT     NUMBER OF HYPERBLOCKS TO WRITE            00308000
+         MVC   RWCNT,F800     SET BYTE-COUNT TO 800,                    00309000
+         ST    R11,ADTADD     SET UP ADD. OF ACTIVE DISK TABLE          00310000
+         LA    R1,DSKLST      R1 POINTS TO ALL-PURPOSE LIST             00311000
+UPD08    BAL   R10,UPD22      WRITE FST HYPERBLOCK ON DISK              00312000
+         L     R2,800(,R2)    POINT TO NEXT HYPERBLOCK,                 00313000
+         LA    R3,2(,R3)      ADVANCE TO NEXT DISK-ADDRESS              00314000
+         BCT   R4,UPD08       ITERATE FOR NO. OF HYPERBLOCKS THERE      00315000
+         LM    R5,R6,ADTMSK  ADDRESS OF 'PQMSK' & 'PQQMSK' INTO R5 & R6 00316000
+UPD08A   LH    R0,0(,R3)      PICK UP NEXT DISK-ADDRESS                 00317000
+         CH    R0,FFF         IS IT 'FFFF' SENTINEL ?                   00318000
+         BE    UPD09        BE IF YES, DON'T HAVE TO WRITE ANY BIT-MASK 00319000
+         CH    R0,FFD         IF NOT, IS IT 'FFFD' SENTINEL ?           00320000
+         BNE   UPD11          TRF IF NOT - GO GIVE BACK UNUSED RECORD.  00321000
+         MVC   RWCNT,ADTPQM1  IF NOT (FFFD THEN), STORE BYTE-COUNT,     00322000
+H215     LA    R2,215(R5,0)   ADJUST CORE-ADDRESS BY 215 & INTO R2,     00323000
+         LA    R3,2(,R3)      SKIP OVER FFFD SENTINEL                   00324000
+         LA    R8,22+7(,R3)   ALLOW FOR QMASK POINTERS.           V0636 00325000
+         BAL   R10,UPD22      WRITE BIT-MASK (HOWEVER MUCH NECESSARY)   00326000
+         LA    R15,214        SET TO EX-MVC 215 BYTES                   00327000
+         B     UPD10         GO MOVE 215 BYTES OF 1ST CHUNK OF BIT-MASK 00328000
+*                                                                       00329000
+UPD11    LR    R1,R11         GIVE BACK UNUSED RECORD                   00330000
+         ICM   R0,B'1100',=H'0'    ZERO THE 2 HIGH BYTES.         V0636 00331000
+         L     R15,ATRKLKPX   (WAS AN EMPTY HYPERBLOCK FRET'D           00332000
+         BALR  R14,R15        BY ERASE DURING COMPACTING PROCESS)       00333000
+         MVC   0(256,R3),2(R3)       MOVE MFD INFO. FORWARD 2 BYTES     00334000
+         MVC   256(104,R3),258(R3)   (ALLOWING FOR WORST POSSIBLE CASE) 00335000
+         SR    R0,R0          CLEAR HALFWORD AT MFD+598 (IN CASE NOW    00336000
+         STH   R0,598(,R9)    GARBAGE FROM WORST POSSIBLE CASE)         00337000
+         LA    R1,DSKLST      RESTORE R1 TO WRTK P-LIST, AND GO CHECK   00338000
+         B     UPD08A         FOR 'FFFF' OR 'FFFD' SENTINEL AGAIN.      00339000
+*                                                                       00340000
+MOVBMSK  MVC   384(*-*,R9),0(R5) TO MOVE UP TO 1ST 215 BYTES OF BITMASK 00341000
+*                                                                       00342000
+UPD09    LA    R8,2+7(,R3)    REMEMBER HOW FAR INFO EXTENDS INTO MFD    00343000
+         L     R15,ADTLAST    ADTLAST (0-214) INTO R15 FOR EX-MVC       00344000
+*                                                                       00345000
+UPD10    EX    R15,MOVBMSK   MOVE UP TO 1ST 215 BYTES OF BITMASK TO MFD 00346000
+         MVC   364(20,R9),ADTNUM     MOVE ALL DISK COUNTS TO MFD        00347000
+         LTR   R6,R6          IS THERE A QQMASK FOR THIS DISK           00348000
+         BNP   NOQQ           NO.                                       00349000
+         MVC   600(200,R9),0(R6)   AND MOVE IN 'QQMSK' NOW              00350000
+NOQQ     L     R15,ADTDTA     ACCESS UNIT-TYPE-BYTE                     00351000
+         MVC   599(1,R9),DTADT(R15)  MOVE IT ALSO TO MFD                00352000
+         ST    R11,FVSDSKA    STORE NEEDED ADDRESS IN P-LIST,           00353000
+         LA    R1,RWMFD       POINT TO P-LIST TO WRITE MFD              00354000
+         BAL   R10,UPD24      WRITE THE MFD                             00355000
+         SR    R8,R9          NUMBER OF BYTES +7 OF INFO IN MFD         00356000
+         SRA   R8,3           NOW INTO DOUBLE WORDS                     00357000
+         LR    R0,R8          R0 = NO. OF DBL-WORDS WE'LL KEEP          00358000
+         DMSFREE DWORDS=(0),TYPE=NUCLEUS,TYPCALL=BALR,ERR=ERROR25       00359000
+         STM   R0,R1,ADTMFDN  STORE SIZE & ADDRESS OF 'NEW' MFD BLOCK   00360000
+         SLA   R8,3           DOUBLE-WORDS TO BYTES,                    00361000
+         LR    R0,R1          ADDRESS OF NEW BLOCK INTO R0,    @VM03177 00362000
+         LR    R14,R9         ADDRESS OF MFD BLOCK INTO R14,   @VM03177 00363000
+         LR    R1,R8          NUMBER OF BYTES INTO R1          @VM03177 00364000
+         LR    R15,R8         AND INTO R15                     @VM03177 00365000
+         MVCL  R0,R14         MOVE "MFD BLOCK" TO NEW BLOCK    @VM03177 00366000
+*                                                                       00367000
+         LR    R1,R9          ADDR OF MFD FROM DISK.              V0636 00368000
+         LA    R0,100         OLD MFD IS 800 BYTES.               V0636 00369000
+         DMSFRET LOC=(1),DWORDS=(0),TYPCALL=BALR GIVE BACK OLD MFD, AND 00370000
+         NI    ADTFLG3,255-ADTFUPD1 CLEAR 1ST-HALF-CALLED FLAG @VA01100 00371000
+*                                                                       00372000
+UPDEXIT  KXCHK UPBIT          CHECK FOR 'KX' WANTED...                  00373000
+         LM    R0,R14,REGSAV0 RESTORE R0-R14                            00374000
+         SR    R15,R15        SHOW NO ERRORS                            00375000
+         BR    R14            AND RETURN TO CALLER.                     00376000
+*                                                                       00377000
+ERROR25  LA    R15,25        SAY WHY WE ARE DIEING             @VA02374 00378000
+         B     MUSTDIE       AND GET OUT                       @VA02374 00379000
+         SPACE                                                          00380000
+UPD20    L     R15,ATRKLKP    A(TRKLKP) INTO R15,                       00381000
+         LR    R1,R11         R1 MUST POINT TO ACTIVE-DISK-TABLE        00382000
+         BALR  R14,R15        CALL TRKLKP                               00383000
+         N     R15,F3         ERROR-CODE FROM TRKLKP CAN BE 0 OR 4      00384000
+         BZ    UPD21          BR IF 0 OR 4                     @VA00895 00385000
+         O     R15,F40        INDICATE FROM TRK                @VA00895 00386000
+         B     MUSTDIE                                         @VA00895 00387000
+UPD21    STH   R1,0(,R3)      STORE DISK ADR JUST OBTAINED     @VA00895 00388000
+         LA    R3,2(,R3)      BUMP R3 FOR NEXT TIME                     00389000
+         BCT   R4,UPD20       ITERATE FOR 'R4' RECORDS                  00390000
+         BR    R10            EXIT TO CALLER WHEN THRU.                 00391000
+*                                                                       00392000
+UPD22    ST    R2,DSKLOC      STORE CORE-ADDRESS,                       00393000
+         ST    R3,DSKADR      AND ADDRESS OF DISK-ADDRESS               00394000
+UPD24    L     R15,AWRTK      CALL WRTK TO WRITE                        00395000
+         BALR  R14,R15        FST HYPERBLOCK OR BIT-MASK ON DISK        00396000
+         BCR   8,R10          RETURN TO CALLER IF NO DISK ERROR.        00397000
+*                             IF ERROR 3 FROM WRTK (DISK NOT ATTACHED), 00398000
+*                             DON'T ABEND IF "ADTFNOAB" FLAG IS SET:    00399000
+         CL    R15,F3         ERROR 3 ("DISK NOT ATTACHED") ?  @VM03177 00400000
+         BE    ABWNTD         YES, CHECK ABEND FLAG            @VA08383 00400300
+         CL    R15,FSIX       ERROR 6 (R/O DISK) ?             @VA08383 00400600
+         BNE   MUSTDIE        IF NOT WE "MUST DIE".            @VM03177 00401000
+ABWNTD   EQU   *                                               @VA08383 00401500
+         TM    ADTFLG3,ADTFNOAB IF SO, "NO ABEND WANTED" ?     @VM03177 00402000
+         BOR   R10            YES - JUST RETURN TO CALLER.     @VM03177 00403000
+*                             NO - CONTINUE TO "MUSTDIE" ...            00404000
+MUSTDIE  L     R14,ADISKDIE   LEAVE OLD UFD INTACT             @VA00895 00405000
+         BR    R14                                             @VA00895 00406000
+*                                                                       00407000
+         DROP  R11,R12,R13                                              00408000
+         EJECT                                                          00409000
+         USING *,R15                                              P3035 00410000
+DMSAUDUP L     R15,AFVS       A(FVS) INTO R15                     P3035 00411000
+UPUFD    EQU   DMSAUDUP                                           P3035 00412000
+         USING FVSECT,R15                                         P3035 00413000
+         STM   R0,R14,REGSAV4 SAVE R0 THRU R14                    P3035 00414000
+         DROP  R15                                                P3035 00415000
+         LR    R13,R15        REFERENCE FVS INFO                  P3035 00416000
+         USING FVSECT,R13                                         P3035 00417000
+         BALR  R12,0          OUR OWN ADDRESSABILITY              P3035 00418000
+         USING *,R12                                              P3035 00419000
+         LA    R1,FINISLST    CALL 'FINIS * * *' TO CLOSE ANY FILES     00420000
+         SVC   X'CA'          ...                                       00421000
+         DC    AL4(*+4)       ...                                       00422000
+         LM    R0,R14,REGSAV4 RESTORE REGISTERS 0-14              P3035 00423000
+         SR    R15,R15        SHOW 'NO ERROR'                           00424000
+         BR    R14            AND EXIT.                                 00425000
+         SPACE 3                                                        00426000
+*        FULLWORD CONSTANTS AND ADDRESS CONSTANTS ...                   00427000
+FSIX     DC    F'6'                                            @VA08383 00427500
+F3       DC    F'3'                                                     00428000
+F40      DC    F'64'                                           @VA00895 00429000
+*                                                                       00430000
+ADISKDIE DC    V(DISKDIE)     "DISKDIE" = ENTRY-POINT IN "FINIS".       00431000
+         SPACE                                                          00432000
+         LTORG                OTHER CONSTANTS ...              @VM03177 00433000
+         EJECT                                                          00434000
+         NUCON                                                          00435000
+         ADT                                                            00436000
+         EJECT                                                          00437000
+         FVS                                                            00438000
+*                                                                       00439000
+REGSAV4  EQU   RWFSTRG+12    LAST 15 WORDS OF RWFSTRG = GOOD SAFE PLACE 00440000
+         EJECT                                                          00441000
+         REGEQU                                                         00442000
+         END                                                            00443000

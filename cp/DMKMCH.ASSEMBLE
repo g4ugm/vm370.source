@@ -1,0 +1,1569 @@
+MCH      TITLE 'DMKMCH     (CP)        VM/370 - RELEASE 6'              00001000
+         ISEQ  73,80          VALIDATE SEQUENCEING OF INPUT    @V200820 00002000
+*.                                                                      00003000
+* MODULE NAME -                                                         00004000
+*                                                                       00005000
+*        DMKMCH                                                         00006000
+*                                                                       00007000
+*FUNCTION -                                                             00008000
+*                                                                       00009000
+*        THE FUNCTION OF THIS ROUTINE IS TO DETERMINE THE SEVERITY OF   00010000
+*        A MACHINE CHECK AND ATTEMPT TO CORRECT THE MALFUNCTION.        00011000
+*        DIAGNOSTIC MESSAGES  FOR THE SYSTEM OPERATOR, AND ERROR DATA   00012000
+*        FOR THE F.E. PERSONNEL USE WILL BE PRODUCED AS OUTPUT.         00013000
+*                                                                       00014000
+*ATTRIBUTES -                                                           00015000
+*                                                                       00016000
+*        RESIDENT,ENTERED DIRECTLY VIA MC NEW PSW                       00017000
+*                                                                       00018000
+*ENTRY POINTS-                                                          00019000
+*                                                                       00020000
+*                                                                       00021000
+*        DMKMCHIN - PROCESS A MCH INTERRUPT                             00022000
+*                                                                       00023000
+*        DMKMCHMS - ENTRY FROM SET COMMAND TO ENABLE OR DISABLE         00024000
+*                   SOFT MACHINE CHECK INTERRUPTS.                      00025000
+*                                                                       00026000
+*        DMKMCHST - TERMINATE THE SYSTEM                                00027000
+*                                                                       00028000
+*        DMKMCHSE - CONTINUE PROCESSING SOFT ERRORS WITH SYSTEM LOCK    00029000
+*                                                                       00030000
+*                                                                       00031000
+*ENTRY CONDITIONS -                                                     00032000
+*                                                                       00033000
+*        NONE                                                           00034000
+*                                                                       00035000
+*EXIT CONDITIONS-                                                       00036000
+*                                                                       00037000
+*        - RETURN TO INTERRUPTED PROGRAM ON OCCURANCE OF SOFT MACHINE   00038000
+*         CHECK (AFTER RECORDING)                                       00039000
+*                                                                       00040000
+*        - DISABLED WAIT STATE ON ERRORS THAT CAUSE SYSTEM TERMINATION  00041000
+*                                                                       00042000
+*        - TO DISPATCH ON ALL OTHER CONDITIONS                          00043000
+*                                                                       00044000
+*CALLS TO OTHER ROUTINES -                                              00045000
+*                                                                       00046000
+*        DMKIOEMC - TO RECORD FORMATTED MACHINE CHECK RECORDS           00047000
+*                   GPR6 = FORMATTED MACHINE CHECK RECORD ADDRESS       00048000
+*                   GPR7 = LENGTH OF MACHINE CHECK RECORD               00049000
+*        DMKQCNWT - TO SEND MESSAGES TO A VIRTUAL MACHINE AND THE       00050000
+*                   SYSTEM OPERATOR                                     00051000
+*        DMKPTRFT - TO PURGE DEFECTIVE PAGE IN STORAGE                  00052000
+*        DMKFREE  - TO GET STORAGE FOR CPEXBLOKS                        00053000
+*        DMKSTKOP - TO STACK A CPEXBLOK FOR THE OTHER PROCESSOR         00054000
+*        DMKPGSPO - TO RELEASE USER'S VIRTUAL STORAGE                   00055000
+*        DMKCFMBK - TO PUT USER IN CONSOLE FUNCTION MODE                00056000
+*        DMKCFPRR - TO RESET VIRTUAL MACHINE                            00057000
+*        DMKOPRWT - TO WRITE EMERGENCY MESSAGE TO SYSTEM OPERATOR       00058000
+*        DMKSCNFD - TO SCAN FOR ARGUMENT                                00059000
+*        DMKERMSG - TO SEND ERROR MESSAGE TO OPERATOR                   00060000
+*        DMKSCNRD - TO GET REAL DEVICE ADDRESS (CCU)                    00061000
+*        DMKMCTPT - TERMINATE THE AILING PROCESSOR                      00062000
+*        DMKMCTST - TERMINATE THE SYSTEM                                00063000
+*                                                                       00064000
+*EXTERNAL REFRENCES                                                     00065000
+*   PSA FIELDS                                                          00066000
+*        CPPTLBR  - PTLB REQUIRED                                       00067000
+*        CPMCHLK  - UNSTACK FIRST PROCESSOR DEPENDENT BLOCK, DONOT      00068000
+*                   DISPATCH ANY OTHER WORK.                            00069000
+*        PREFIXA  - ADDRESS OF PREFIX REGISTER FOR CURRENT PROCESSOR    00070000
+*        RECMODE  - RECORDING MODE FOR THIS PROCESSOR                   00071000
+*        INTRC     - EXTERNAL DAMAGE REASON CODE                        00071100
+*                                                                       00072000
+*TABLES AND WORK AREAS -                                                00073000
+*                                                                       00074000
+*        CORETABLE, PAGTABLE, SWPTABLE, PSA                             00075000
+*        MCHAREA,MCRECORD,VMBLOK                                        00076000
+*                                                                       00077000
+*MACROS -                                                               00078000
+*                                                                       00079000
+*        LOCK OBTAIN,TYPE=SYS,SPIN=NO                                   00080000
+*                                                                       00081000
+*        SIGNAL                                                         00082000
+*              STOP                                                     00083000
+*              START                                                    00084000
+*                                                                       00085000
+*        CALL  NAME,AFFINITY                                            00086000
+*                                                                       00087000
+*REGISTER USEAGE _                                                      00088000
+*                                                                       00089000
+*        GPR0-11 = SCRATCH                                              00090000
+*           12 = MCH BASE                                               00091000
+*           13 = SCRATCH                                                00092000
+*           14 = LINKAGE                                                00093000
+*           15 = LINKAGE                                                00094000
+*                                                                       00095000
+*NOTES -                                                                00096000
+*        WILL SUPPORT SYSTEM/370 MODEL 135, 135-3, 138, 145, 145-3,     00097000
+*        148, 155-2, 158, 158-2, 165-2, 168, AND 3033, 3032 AND         00098100
+*        3031, AND THE 4331 AND 4341 PROCESSORS.                        00098200
+*                                                                       00099000
+*OPERATION -                                                            00100000
+*                                                                       00101000
+*        DMKMCHIN                                                       00102000
+*        1. RECEIVES CONTROL WHEN A MACHINE CHECK INTERRUPT CAUSES THE  00103000
+*           MC NEW PSW TO BE LOADED                                     00104000
+*                                                                       00105000
+*        2. INITALLY DISABLES BOTH HARD AND SOFT MACHINE CHECKS WHILE   00106000
+*         DETERMINING THE SEVERITY OF THE ERROR. WHEN IT IS DETERMINED  00107000
+*         THAT THE ERROR IS NOT ONE THAT REQUIRES SYSTEM TERMINATION    00108000
+*         THEN HARD MACHINE CHECK INTERRUPTS WILL BE RE-ENABLED.        00109000
+*                                                                       00110000
+*        3. IF THE ERROR IS ONE THAT SHOULD TERMINATE SYSTEM OPERATION, 00111000
+*         AND THE SYSTEM IS IN ATTACHED PROCESSOR MODE, CONTROL WILL    00112000
+*         BE GIVEN TO DMKMCTPT, THE PROCESSOR TERMINATION ROUTINE FOR   00113000
+*         ATTACHED PROCESSING. FOR UNIPROCESSING MODE,                  00114000
+*         A DIRECT I/O OPERATION TO THE SYSTEM OPERATOR INFORMING       00115000
+*         HIM OF THE FAILURE, AND RECOMMENDED ACTION TO BE PERFORMED    00116000
+*         WILL BE DONE IF CONSOLE IS ACCESSABLE, FOLLOWED BY DMKMCH     00117000
+*         PLACING THE SYSTEM IN A DISABLED WAIT STATE.                  00118000
+*           IF THE ERROR AFFECTS ONLY THE VIRTUAL USER, THE ERROR WILL  00119000
+*         BE RECORDED AND A MESSAGE WILL BE SENT TO THE AFFECTED USER.  00120000
+*         THE VIRTUAL MACHINE WILL BE RESET AND PLACED IN               00121000
+*         CP CONSOLE FUNCTION MODE. THE VIRTUAL= REAL USER              00122000
+*         WILL BE TERMINATED AND LOGGED OFF IF A STORAGE ERROR          00123000
+*         HAS OCCURRED.                                                 00124000
+*                                                                       00125000
+*        4. BEFORE ANY SYSTEM FUNCTIONS ARE USED, THE MACHINE CHECK     00126000
+*         HANDLER WILL ATTEMPT TO GET THE GLOBAL SYSTEM LOCK. IF THE    00127000
+*         LOCK IS UNAVAILABLE, CPMCHLK WILL BE SET TO ALLOW PROCESSING  00128000
+*         TO CONTINUE WHEN THE LOCK IS AVAILABLE. DMKMCHSE WILL RECEIVE 00129000
+*         CONTROL FROM THE DISPATCHER WHEN CPMCHLK IS ON.               00130000
+*         IF ANY MACHINE CHECKS OCCUR DURING THIS PROCESSING, THEY      00131000
+*         WILL BE VIEWED AS RECURSIVE MACHINE CHECKS.                   00132000
+*         CPMCHLK PREVENTS THE DISPATCHER FROM DISPATCHING ANY          00133000
+*         NEW WORK FOR THAT PROCESSOR UNTIL THE MACHINE CHECK           00134000
+*         INTERRUPT IS HANDLED.                                         00135000
+*                                                                       00136000
+*                                                                       00137000
+*        5. ON SOFT ERRORS THE SYSTEM OPERATOR WILL BE INFORMED, A TEST 00138000
+*         WILL BE MADE TO DETERMINE IF ANY SOFT ERROR THRESHOLDS HAVE   00139000
+*         BEEN EXCEEDED, THE ERROR WILL BE RECORDED, AND CONTROL WILL   00140000
+*         BE RETURNED TO THE INTERRUPTED PROGRAM.                       00141000
+*                                                                       00142000
+*        6. ON SPF AND MULTI-BIT ECC ERRORS AN ANALYSIS WILL BE MADE TO 00143000
+*         DETERMINE IF THE DAMAGE CAN BE REFRESHED OR NOT. ADDITIONALLY 00144000
+*         A FUNCTIONAL TEST OF THE FAILING FRAME OF STORAGE WILL BE     00145000
+*         PERFORMED TO DETERMINE IF THAT FRAME SHOULD BE REMOVED FROM   00146000
+*        SYSTEMS USE.                                                   00147000
+*                                                                       00148000
+*        7. A THRESHOLD COUNT FOR ALL SOFT MACHINE CHECKS WILL          00149000
+*           BE KEPT AND WHEN THE THRESHOLD COUNT EXCEED THE             00150000
+*           MAX. VALUE, THE SOFT MACHINE CHECKS WILL BE DISABLE         00151000
+*           FOR SOFT INTERRUPTS FOR BOTH PROCESSORS.                    00152000
+*                                                                       00153000
+*        8. THE SYSTEM OPERATOR WILL BE INFORMED OF ANYTIME             00154000
+*           THE MACHINE IS DISABLED FOR SOFT MACHINE CHECKS.            00155000
+*                                                                       00156000
+*        DMKMCHMS                                                       00157000
+*                                                                       00158000
+*        THIS ROUTINE WILL ENABLE OR DISABLE ALL SOFT MACHINE           00159000
+*        CHECKS BY ISSUING THE CORRECT DIAGNOSE COMMAND AND             00160000
+*        SET THE CORRECT MASK IN CONTROL REGISTER 14.                   00161000
+*                                                                       00162000
+*MESSAGES -                                                             00163000
+*                                                                       00164000
+*        DMKMCH610I MACHINE CHECK; SUPERVISOR DAMAGE  CPUID             00165000
+*                                                                       00166000
+*        DMKMCH611I MACHINE CHECK; SYSTEM INTEGRITY LOST  CPUID         00167000
+*                                                                       00168000
+*        DMKMCH612W MACHINE CHECK; TIMING FACILITIES DAMAGE CPUID       00169000
+*                                                                       00170000
+*        DMKMCH613I SOFT MACHINE CHECK RECORDING DISABLED  CPUID        00171000
+*                                                                       00172000
+*        DMKMCH614I MACHINE CHECK; DAMAGED PAGE NOW DELETED CPUID       00173000
+*                                                                       00174000
+*        DMKMCH615I MACHINE CHECK RECORDING FAILURE   CPUID             00175000
+*                                                                       00176000
+*        DMKMCH616I MACHINE CHECK; USER XXXXXXXX TERMINATED CPUID       00177000
+*                                                                       00178000
+*        DMKMCH617I MACHINE CHECK; BUFFER OR DLAT DAMAGE CPUID          00179000
+*                                                                       00180000
+*        DMKMCH618I (INSTRUCTION RETRY) NOW IN (RECORD) MODE CPUID      00181000
+*                   (MAIN STORAGE     )        (QUIET )                 00182000
+*                                                                       00183000
+*        DMKMCH619I MACHINE CHECK; OPERATION TERMINATED CPUID           00184000
+*                                                                       00185000
+*        DMKMCH622W MACHINE CHECK; MULTIPLE CHANNEL ERRORS              00185100
+*                                                                       00185200
+*        DMKMCH003E INVALID OPTION - OPTION                             00186000
+*                                                                       00187000
+*        DMKMCH026E OPERAND MISSING OR INVALID                          00188000
+*                                                                       00189000
+* WAIT STATE CODES                                                      00190000
+*                                                                       00191000
+*        001 - UNRECOVERABLE ERROR ON MAIN PROCESSOR                    00192000
+*                                                                       00193000
+*.                                                                      00194000
+         EJECT                                                          00195000
+         COPY  OPTIONS                                                  00196000
+         COPY  LOCAL                                                    00197000
+         SPACE 3                                                        00198000
+DMKMCH   START                                                          00199000
+         SPACE                                                          00200000
+         ENTRY DMKMCHIN                                                 00201000
+         ENTRY DMKMCHSE       SOFT ERROR RETURN FROM DMKDSPCH  @V407510 00202000
+         ENTRY DMKMCHST       SYSTEM TERMINATION               @V407510 00203000
+         SPACE                                                          00204000
+         EXTRN DMKIOEMC                                                 00205000
+         EXTRN DMKPGSPP                                                 00206000
+         EXTRN DMKQCNWT                                                 00207000
+         EXTRN DMKOPRWT                                        @V200820 00208000
+         EXTRN DMKCVTBH                                                 00209000
+         EXTRN DMKDSPCH                                                 00210000
+         EXTRN DMKSTKCP                                                 00211000
+         EXTRN DMKPTRFT                                                 00212000
+         EXTRN DMKPGSPO                                                 00213000
+         EXTRN DMKCFPRR                                        @V200820 00214000
+         EXTRN DMKCFMBK                                                 00215000
+         EXTRN DMKSCNFD                                                 00216000
+         EXTRN DMKERMSG                                                 00217000
+         EXTRN DMKSCNRD                                        @VA01081 00218000
+         EXTRN DMKSTKOP                                        @V407510 00219000
+         EXTRN DMKCVTDB                                        @V407510 00220000
+         AIF   (NOT &AP).MCTST4                                         00220900
+         EXTRN DMKMCTST                                        @V407510 00221000
+         EXTRN DMKMCTPT                                        @V407510 00222000
+         EXTRN DMKDSPRU                                        @V407510 00223000
+.MCTST4  ANOP                                                           00223100
+         SPACE                                                          00224000
+         USING *,R12          SETUP ADDRESSABILITY FOR MCH HANDLER      00225000
+         USING MCHAREA,R9     SETUP ADDRESSABILITY FOR         @V407510 00226000
+*                             MCH COMMUNICATION AREA           @V407510 00227000
+         USING MCRECORD,R8    SETUP ADDRESSABILITY FOR         @V407510 00228000
+*                             MCH RECORD                       @V407510 00229000
+         USING VMBLOK,R11     SETUP ADDRESSABILITY FOR USER VMBLOK      00230000
+         USING SAVEAREA,R13   SETUP ADDRESSABILITY FOR SAVE AREA        00231000
+         USING CORTABLE,R10   SETUP ADDRESSABILITY FOR CORTABLE         00232000
+         USING PSA,R0         SETUP ADDRESSABILITY FOR PSA AREA         00233000
+         SPACE                                                          00234000
+         EJECT                                                          00235000
+DMKMCHIN DS    0D                                                       00236000
+         LM    R0,R15,C0      CLEAR BAD PARITY IN GENERAL REGISTERS     00237000
+         BALR  R15,R0         SETUP ADDRESSABILITY FOR M. C. HANDLER    00238000
+         USING *,R15          MACHINE CHECK HANDLER                     00239000
+         L     R12,MCHBASE    GET COMMON BASE REGISTER FOR MCH @V407510 00240000
+         DROP  R15            DROP ORIGINAL BASE REGISTER               00241000
+         USING DMKMCH,R12     SETUP ADDRESSABILITY FOR M. C. HANDLER    00242000
+         L     R9,AMCHAREA    GET THE ADDRESS OF MCHAREA       @V407510 00243000
+         L     R8,MCHREC      GET ADDRESS OF MCH RECORD        @V407510 00244000
+         XC    MCHRESEV(MCHLEN),MCHRESEV CLEAR THE MCHAREA     @V407510 00245000
+         LCTL  R14,R14,CR14MSK     DISABLE SOFT MACHINE CHECKS          00246000
+         LCTL  R8,R8,CPCREG8  REFLECT CP  MONITOR CALL MASK    @VA06356 00247000
+         MVC   MCFXDLOG(256),FLA   SAVE THE INDEPENDENT LOGOUT AREA     00248000
+         MVC   MCFXDLOG+256(24),FLA+256                                 00249000
+         MVC   MCOLDPW(8),MCOPSW   SAVE MACHINE CHECK OLD PSW           00250000
+         MVC   MCNPSW(8),STGSVE     SETUP SECONDARY M.C. HANDLER        00251000
+         LPSW  HARDPSW        ENABLE HARD MACHINE CHECKS                00252000
+ENBHARD  EQU   *                                                        00253000
+         NI    APSTAT2,OFF-CPPTLBR  TURN OFF PTLB PENDING      @V407510 00255000
+*                                    FOR THIS PROCESSOR        @V407510 00256000
+         PTLB                 PURGE TLB                        @VA07615 00256100
+         TM    APSTAT1,APUOPER   IN AP MODE?                   @V407510 00257000
+         BZ    CLEAR          NO, GO TO CLEAR MCHAREA          @V407510 00258000
+         L     R7,PREFIXB     GET PREFIX ADDR FOR OTHER        @V407510 00259000
+*                             PROCESSOR                        @V407510 00260000
+         OI    APSTAT2-PSA(R7),CPPTLBR  INDICATE PTLB TO BE    @V407510 00261000
+*                                  DONE FOR OTHER PROCESSOR    @V407510 00262000
+CLEAR    DS    0H                                              @V407510 00263000
+         XC    MCHRESEV(MCHLEN),MCHRESEV CLEAR THE M.C.H. FLAGS         00264000
+         L     R13,MCFXDLOG+204  GET THE ADDRESS OF THE SAVE AREA       00265000
+         LCTL  R0,R0,CPCREG0  GET CONTROL REGISTER 0           @VM08879 00266000
+         MVC   QUANTUMR,TIMER SAVE LOCATION 80 TIMER           @VM08879 00267000
+         L     R11,ASYSVM     GET ADDRESS OF SYSTEM'S VMBLOK   @VM08879 00268000
+         TM    MCOPSW+CMWP,PROBMODE  SYSTEM IN PROBLEM STATE?  @V4M0144 00269000
+         BZ    CHKWAIT        NO, CHECK FOR WAIT STATE         @V4M0144 00270000
+         OI    MCHFLAG7,MCH7OPSW SET VIRTUAL USER FLAG         @VM08879 00271000
+         L     R11,RUNUSER    GET ADDRESS OF USER'S VMBLOK     @VM08879 00272000
+         MVC   VMTMOUTQ(8),XD8 GET THE CPU TIMER VALUE         @VM08879 00273000
+         MVC   VMGPRS(64),MCFXDLOG+152  SAVE THE USER'S REGISTERS       00274000
+         MVC   VMFPRS(32),MCFXDLOG+120  SAVE FLOATING POINT REGISTERS   00275000
+         MVC   VMPSW+4(4),MCOPSW+4 MOVE ADDR. OF MC OLD PSW    @VA01435 00276000
+*                             IN VMBLOK                                 00277000
+         IC    R1,MCOPSW+2    GET CONDITION CODE & PROGRAM MASK@VA01435 00278000
+         TM    VMESTAT,VMEXTCM IS VIRTUAL MACHINE IN EC MODE   @VA01435 00279000
+         BZ    VMNONDI1       NO, BYPASS BC MODE HANDLING      @VA01435 00280000
+         STC   R1,VMPSW+2     SAVE CONDITION CODE & PROGRAM    @VA01435 00281000
+*                             MASK                                      00282000
+         B     VMNONDIS       SET VIRTUAL USER NON-DISPATCHABLE@VA01435 00283000
+CHKWAIT  DS    0H                                              @V407510 00284000
+         CLI   CPSTATUS,CPWAIT  SYSTEM IN WAIT STATE?          @V4M0144 00285000
+         BNE   MCHSYSIL       NO, SET UP TRACE ENTRY           @V4M0175 00286000
+         MVC   WAITEND,XD8    STORE CPU TIMER                  @V407510 00287000
+         B     MCHSYSIL       GO SET UP TRACE ENTRY            @V407510 00288000
+VMNONDI1 EQU   *                                               @VA01435 00289000
+         STC   R1,VMPSW+4     SAVE CONDITION CODE & PROGRAM    @VA01435 00290000
+*                             MASK                                      00291000
+VMNONDIS EQU   *                                                        00292000
+         OI    VMRSTAT,VMEXWAIT      SET THE VIRTUAL USER               00293000
+*                             NON-DISPATCHABLE                          00294000
+MCHSYSIL EQU   *                                                        00295000
+         AIF   (NOT &TRACE(9)).TR1                ** AIF **    @VA01166 00296000
+         TM    TRACFLG1,TRAC04  TRACING ACTIVE?                @V407510 00297000
+         BZ    NOTRAC1        BRANCH IF NOT                    @VA01166 00298000
+         TRACE CODE=TRCMCH,R15,R2,R3                           @V407510 00299000
+         STCM  R11,L3B,ONE(R15)  SAVE USER VMBLOK ADDRESS      @V407510 00300000
+         MVC   4(4,R15),INTMC SAVE MACHINE CHECK INT CODE      @VA01166 00301000
+         MVC   8(8,R15),MCOPSW SAVE THE OLD PSW                @VA01166 00302000
+NOTRAC1  DS    0H                                              @V407510 00303000
+.TR1     ANOP                                                  @V407510 00304000
+         SR    R4,R4          INDICATE NO TERMINATION          @V407510 00305000
+         TM    MCHFLAG7,MCH7OPSW  VIRTUAL USER ACTIVE?         @V407510 00306000
+         BNO   TESTSUP        NO, TEST FOR SUPERVISOR          @V407510 00307000
+         LA    R4,MCH7VRTM    SET UP TO TERMINATE USER         @V407510 00308000
+         B     ANALYSIS       START TO ANALYZE ERROR           @V407510 00309000
+TESTSUP  DS    0H                                              @V407510 00310000
+         CLI   CPSTATUS,CPWAIT   SYSTEM IN WAIT STATE?         @V4M0144 00311000
+         BE    ANALYSIS       YES, START TO ANALYZE ERROR      @V4M0144 00312000
+         LA    R4,MCH7SYST    INDICATE TERMINATE SYSTEM        @V407510 00313000
+ANALYSIS DS    0H             ANALYZE ERROR                    @V407510 00314000
+         LA    R3,MSG3        SETUP MESSAGE FOR SYSTEM INTEGRITY LOST   00315000
+         TM    MCIC,X'FD'     IS THE M.C.I.C. VALID                     00316000
+         BZ    FORCESYS       NO, TERMINATE SYSTEM             @V4M0144 00317000
+         TM    VALID1,WPBIT+MSBIT    ARE THE EMWP, KEY & PSW MK VALID   00318000
+         BNO   FORCESYS       NO, TERMINATE SYSTEM             @V4M0144 00319000
+         LA    R3,MSG2        SET UP SYSTEM DAMAGE MSG         @V4M0200 00320000
+         TM    VALID1,PMBIT+IABIT  IAR & PGM MASK VALID?       @V4M0200 00321000
+         BNO   MCHINVAL       NO, TERMINATE APPROPRIATELY      @V4M0200 00322000
+         TM    VALID2,FPBIT+GRBIT+CRBIT+STBIT REGS & STORAGE   @V4M0200 00323000
+*                             LOGICAL VALID?                   @V4M0200 00324000
+         BO    MCHSYSD        YES, TEST FOR SYSTEM DAMAGE      @V4M0200 00325000
+MCHINVAL DS    0H                                              @V4M0200 00326000
+         EX    R4,SETTERM     SET APPROPRIATE TERMINATION FLAG @V4M0200 00327000
+MCHSYSD  EQU   *                                                        00329000
+         TM    MCIC,SDBIT     IS SYSTEM DAMAGE INDICATED  ?             00330000
+         BO    PRETERM        YES, TERMINATE APPROPRIATELY     @V407510 00331000
+         TM    MCIC,CDBIT     IS T.O.D. CLOCK DAMAGE INDICATED  ?       00332000
+         BZ    MCHTIMER       NO, GO CHECK FOR TIMER DAMAGE             00333000
+         LA    R3,MSG4        SET UP TIMING FACILITIES         @V4M0200 00334000
+*                             DAMAGE MESSAGE                   @V4M0200 00335000
+         OI    MCHFLAG1,MCH1TODC     INDICATE TIME OF CLOCK DAMGE       00336000
+FORCESYS DS    0H             FORCE SYSTEM TERMINATION         @V4M0144 00337000
+         OI    MCHFLAG7,MCH7SYST   FORCE SYSTEM TERMINATION    @V407510 00338000
+         B     PRETERM        TERMINATE APPROPRIATELY          @V407510 00339000
+***************************************************************@V407510 00340000
+SETTERM  OI    MCHFLAG7,ZERO  TURN ON APPROPRIATE FLAG         @V407510 00341000
+***************************************************************@V407510 00342000
+MCHTIMER EQU   *                                                        00343000
+         TM    MCIC,TDBIT    IS CPU CLOCK DAMAGE INDICATED     @V5088AA 00344050
+         BZ    GROUPERR       IF NOT, CHECK FOR GROUP ERROR    @V5088AA 00344100
+         LA    R3,MSG4        SETUP MSG FOR TIMING FACILITIES  @V4M0200 00344150
+*                             DAMAGE                                    00344200
+         B     PRETERM       TERMINATE APPROPRIATELY           @V5088AA 00344250
+GROUPERR EQU   *                                               @V5088AA 00344300
+         CLI   MCHMODEL,MOD3033 IS PROCESSOR A 3033/3032/3031? @V5088AA 00344350
+         BNE   TSTTERM        IF NOT, DON'T CHECK FOR GROUP ERR@V5088AA 00344400
+         TM    MCIC,EDBIT    EXTERNAL DAMAGE INDICATED?        @V5088AA 00344450
+         BZ    TSTTERM       NO, TEST RESULT OF ANALYSIS       @V5088AA 00344500
+         TM    VALID2,ECBIT  IS EXT. DAMAGE REASON CODE VALID  @V5088AA 00344550
+         BZ    TSTTERM       NO, GO TEST RESULT OF ANALYSIS    @V5088AA 00344600
+         TM    INTRC,EXDRESVD IS BIT 0 OF REASON CODE = 0?     @V5088AA 00344650
+         BO    TSTTERM       BRANCH IF NOT                     @V5088AA 00344700
+         TM    INTRC,EXDCNO+EXDCCF IS A GROUP ERROR INDICATED? @V5088AA 00344750
+         BZ    TSTTERM       IF NOT, TEST ANALYSIS RESULTS     @V5088AA 00344800
+         OI    MCHFLAG1,MCH1GERR FLAG GROUP ERROR IN MCHAREA   @V5088AA 00344850
+         LA    R3,MSG17      SET UP MSG. FOR GROUP ERROR       @V5088AA 00344900
+         LA    R4,MCH7SYST   INDICATE SYSTEM TERMINATION       @V5088AA 00344950
+PRETERM  DS    0H                                              @V407510 00348000
+         EX    R4,SETTERM     SET APPROPRIATE TERMINATION FLG  @V407510 00349000
+TSTTERM  DS    0H                                              @V407510 00350000
+         TM    MCHFLAG7,MCH7SYST  SYSTEM TERMINATION?          @V407510 00351000
+         BO    OPCOM          YES, TERMINATE                   @V407510 00352000
+         CHARGE START         START CHARGING VIRTUAL USER      @V407510 00353000
+         TM    MCHFLAG7,MCH7VRTM     HAS TERMINATION BEEN SET FOR THE   00354000
+*                             VIRTUAL USER                              00355000
+         BO    VIRTERM        YES, GO TERMINATE THE VIRTUAL USER        00356000
+         TM    MCIC,PDBIT     HAS INSTRUCTION PROCESSING                00357000
+*                             DAMAGE OCCURED ?                          00358000
+         BO    MCHSPF         YES, GO CHECK FOR SPF ERROR               00359000
+         SR    R0,R0          CLEAR REGISTER 0 FOR NO MESSAGE           00360000
+         OI    MCHFLAG0,MCH0HDWR SET INDICATOR FOR HARDWARE             00361000
+*                             RECOVERY                                  00362000
+         TM    MCIC,SRBIT     IS SYSTEM RECOVERY INDICATED  ?           00363000
+         BZ    OPMSG3         NO, THAN IT'S EXTERNAL DAMAGE    @VA08088 00364100
+*********************************************************************** 00364200
+* THE 4331/4341 PROCESSORS SET BIT 17(SCBIT) TO ZERO AND             *  00364300
+* THEREFORE IT SHOULD NOT BE CHECKED SINCE IT HAS NO VALIDITY.        * 00364400
+*********************************************************************** 00364500
+         CLI   MCHMODEL,MOD4331   MODEL 4331 OR 4341 ???       @V60A6B6 00364600
+         BE    MCHENABL      YES BIT 17 IS QUESTIONABLE        @V60A6B6 00364700
+         TM    STOERR,SCBIT   WAS IT A RECOVERED STORAGE ERROR ?        00365000
+         BO    SOFTSTG        YES, GO CHECK FOR MODEL NUMBER            00366000
+         OI    MCHFLAG1,MCH1PROC     SET THE INDICATOR FOR PROCESSOR    00367000
+*                             ERROR                                     00368000
+         CLI   MCHMODEL,MODEL145   IS THIS A MOD. 145/148?     @V386298 00369000
+         BNE   MCHENABL       NO, GO SCHEDULE MESSAGE                   00370000
+         TM    VALID2,RCBIT   IS THE REGION CODE VALID ?                00371000
+         BZ    MCHENABL       NO, GO SCHEDULE MESSAGE                   00372000
+         TM    REGION,MSRECOVR WAS THE FAILURE IN MAIN STORAGE          00373000
+         BO    MCHENABL       YES, GO SCHEDULE THE MESSAGE              00374000
+         OI    MCHFLAG1,MCH1COST     SET INDICATOR FOR CONTROL STORAGE  00375000
+         B     MCHENABL       GO SCHEDULE MESSAGE                       00376000
+SOFTSTG  EQU   *                                                        00377000
+         CLI   MCHMODEL,MODEL135   IS THIS A MOD. 135/138?     @V386298 00378000
+         BNE   MCHMAIN        NO, GO SET INDICATOR FOR MAIN             00379000
+*                             STORAGE                                   00380000
+         OI    MCHFLAG1,MCH1COST     SET INDICATOR FOR CONTROL STORAGE  00381000
+         B     MCHENABL       GO SCHEDULE MESSAGE                       00382000
+MCHMAIN  EQU   *                                                        00383000
+         OI    MCHFLAG3,MCH3DATA     SET THE INDICATOR FOR DATA         00384000
+         OI    MCHFLAG1,MCH1MAIN     SET THE INDICATOR FOR MAIN STORAGE 00385000
+MCHENABL EQU   *                                                        00386000
+         COUNT CPULIMIT,R3,R4  UPDATE SOFT ERROR COUNT         @V407510 00387000
+         CLI   SOFTCT,MAXSOFT COUNT EXCEEDS 12?                @V407510 00388000
+         BNE   OPMSG2         NO, SCHEDULE MESSAGE             @V407510 00389000
+         BAL   R5,GETLOCK     OBTAIN SYSTEM LOCK               @V407510 00390000
+         SR    R2,R2          IDENTIFY ENTRY TO STKOP          @V407510 00391000
+         LR    R5,R11         SAVE VALUE OF R11                @V407510 00392000
+         L     R11,ASYSVM     STACK FOR SYSTEM                 @V407510 00393000
+         BAL   R6,STKOP       IF AP, DISABLE OTHER PROCESSOR   @V407510 00394000
+         LR    R11,R5         RESTORE R11 USER                 @V407510 00395000
+         NI    MCFXDLOG+272,X'FF'-RECOVRPT DISABLE SOFT MACHINE CHKS    00396000
+         OI    MCHFLAG0,MCH0QUIT     SYSTEM IN QUIET STATUS             00397000
+         LA    R0,53          GET THE LENGTH OF THE MESSAGE             00398000
+         MVC   MSGCDE(43),MSG15  MOVE IN SOFT ERROR MESSAGE             00399000
+         B     OPMSG2                                          @VA08088 00399100
+OPMSG3   EQU   *                                               @VA08088 00399200
+         MVC   MSGCDE(3),VMS19 SETUP MESSAGE ID IN BUFFER      @VA08088 00399300
+         MVC   MSGBUF(19),MSG2C MOVE MESSAGE INTO BUFFER       @VA08088 00399400
+         LA    R0,46          GET LENGTH OF MESSAGE TEXT       @VA08088 00399500
+OPMSG2   EQU   *                                                        00400000
+         BAL   R7,OPMSG       GO TO SYSTEM OPERATOR RTN        @V407510 00401000
+         SPACE                                                          00402000
+*********************************************************************** 00403000
+*        SOFT RECORDING ROUTINE                                         00404000
+*********************************************************************** 00405000
+         SPACE                                                          00406000
+SOFTREC  EQU   *                                                        00407000
+         BAL   R4,FUMAT       GO FORMAT THE MACHINE CHECK RECORD        00408000
+NORMSG   EQU   *                                                        00409000
+         TM    MCHFLAG7,MCH7OPSW WAS VIRTUAL USER ACTIVE                00410000
+         BNO   USERNOGO       NO, GO RETURN TO DISPATCHER               00411000
+         NI    VMRSTAT,X'FF'-VMEXWAIT MARK USER DISPATCHABLE            00412000
+USERNOGO EQU   *                                                        00413000
+MCHDISP  DS    0H                                              @V407510 00414000
+         MVC   MCNPSW+PSWA(LNADDR),MCHBASE RESTORE MC NEW PSW  @V407510 00415000
+         LCTL  R14,R15,MCFXDLOG+MCCR14 RESTORE CR14 & CR15     @V407510 00416000
+*                                      REGS 14 & 15            @V407510 00417000
+         GOTO  DMKDSPCH       RETURN TO DISPATCHER             @V407510 00418000
+         EJECT                                                          00419000
+*********************************************************************** 00420000
+*        COMMON ROUTINE TO TEST FOR AND/OR OBTAIN                       00421000
+*        THE GLOBAL SYSTEM LOCK                                         00422000
+*********************************************************************** 00423000
+         SPACE 1                                                        00424000
+GETLOCK  DS    0H                                              @V407510 00425000
+         TM    APSTAT1,APUOPER  AP MODE?                       @V4M0144 00426000
+         BZ    CONVPROC       NO, CONVERT PROCESSOR ADDR       @V407510 00427000
+         TM    MCHFLAG7,MCH7SUP LOCK ALREADY HELD?             @V407510 00428000
+         BOR   R5             YES, RETURN TO CALLER            @V407510 00429000
+         TM    MCHFLAG7,MCH7OPSW  VIRTUAL USER ACTIVE          @V4M0144 00430000
+         BNO   CALLSTK1       NO, MUST GIVE UP CONTROL         @V4M0144 00431000
+         LOCK  OBTAIN,TYPE=SYS,SPIN=NO  TRY TO GET LOCK        @V407510 00432000
+         BNZ   CALLSTK1        BRANCH IF LOCK NOT OBTAINED     @V407510 00433000
+LOCKOBT  DS    0H                                              @V407510 00434000
+         OI    MCHFLAG7,MCH7SUP  INDICATE LOCK HELD            @V407510 00435000
+CONVPROC DS    0H                                              @V407510 00436000
+         LH    R2,IPUADDR     GET PROCESSOR ADDRESS            @V407510 00437000
+         CVD   R2,WORK        CONVERTPROCESSOR ADDRESS         @V407510 00438000
+         UNPK  MSGPROC(LN2),WORKLO(LN2) CONVERT 2 DIGITS       @V407510 00439000
+         OI    MSGPROC+ONE,ZONE  SET ZONE FOR LAST DIGIT       @V407510 00440000
+         BR    R5             RETURN TO CALLER                 @V407510 00441000
+CALLSTK1 DS    0H                                              @V407510 00442000
+         LR    R6,R5          RESET RETURN REG FOR STACK RTN   @V407510 00443000
+         B     STACK          INITIALIZE CPEXBLOK              @V407510 00444000
+*                             STACK WILL RETURN TO             @V407510 00445000
+*                             CALLER OF GETLOCK                @V407510 00446000
+         SPACE 2                                                        00447000
+*********************************************************************** 00448000
+*        COMMON ROUTINE TO INITIALIZE CPEXBLOK FOR RETURN TO            00449000
+*        DMKMCH HOLDING SYSTEM LOCK                                     00450000
+*********************************************************************** 00451000
+         SPACE 1                                                        00452000
+STACK    DS    0H                                              @V407510 00453000
+         L     R1,MCHCPEX     GET ADDRESS OF CPEXBLOK          @V407510 00454000
+         USING CPEXBLOK,R1    ADDRESSABILITY FOR CPEXBLOK      @V407510 00455000
+         STM   R0,R15,CPEXREGS  SAVE REGISTERS                 @V407510 00456000
+         OI    APSTAT4,CPMCHSE     SET MCH INDICATOR IN PSA    @VA07615 00457100
+         AIF   (NOT &AP).APCHK4                                         00457130
+         TM    APSTAT1,APUOPER     IS AP OPERATIONAL           @VA07615 00457150
+         BO    NOMIC1         YES                              @VA07615 00457200
+.APCHK4  ANOP                                                           00457220
+         OI    APSTAT2,CPMCHLK     SET FOR ECPS IN UP MODE     @VA07615 00457250
+         AIF   (NOT &AP).DSPRU4                                         00457280
+NOMIC1   DS    0H                                              @VA07615 00457300
+         TM    MCHFLAG7,MCH7OPSW                               @VA07834 00457400
+         BNO   SOFTSUP                                         @VA07834 00457500
+         GOTO  DMKDSPRU                                        @VA07834 00457600
+         SPACE 3                                                        00458000
+**********************************************************************  00459000
+SOFTSUP  EQU   *                                                        00460000
+.DSPRU4  ANOP                                                           00460100
+         MVC   MCOPSW(8),MCOLDPW RESTORE MACHINE CHECK OLD              00461000
+*                             PSW                                       00462000
+         LCTL  C0,C13,MCFXDLOG+216 RESTORE CONTROL REGISTERS            00463000
+         AIF   (NOT &FLOATPT).NOFP1                             **AIF** 00464000
+         LD    Y0,MCFXDLOG+120     RESTORE FLOATING-POINT REGS @V200820 00465000
+         LD    Y2,MCFXDLOG+128                 ...             @V200820 00466000
+         LD    Y4,MCFXDLOG+136                 ...             @V200820 00467000
+         LD    Y6,MCFXDLOG+144                 ...             @V200820 00468000
+.NOFP1   ANOP                                                  @V200820 00469000
+RESETSUP DS    0H                                              @V407510 00477000
+         CHARGE STOP          STOP CHARGING SYSTEM             @V4M0217 00478000
+         SPT   XD8            SET CPU TIMER FROM LOGOUT        @V4M0217 00479000
+         LM    R0,R15,MCFXDLOG+152      RESTORE GENERAL REGS   @V200820 00480000
+         LPSW  MCOPSW              RESTART WHATEVER WAS STOPPED@V200820 00481000
+**********************************************************************  00482000
+         SPACE 3                                                        00483000
+         SPACE                                                          00484000
+DMKMCHSE DS    0H                                              @V407510 00485000
+         L     R9,AMCHAREA    GET MCHAREA ADDRESS              @V407510 00486000
+         L     R1,MCHCPEX     GET CPEXBLOK ADDRESS             @V407510 00487000
+         LM    R0,R15,CPEXREGS  RESTORE REGISTERS              @V407510 00488000
+         C     R11,ASYSVM     IS THIS SYSTEM VMBLOCK?          @VA08054 00488100
+         BE    NOLOCK         YES - DONT LOCK IT               @VA08054 00488200
+         LH    R5,LPUADDR     LOAD PROCESSOR ADDRESS           @VA08054 00488300
+         CH    R5,VMLOCK+2-VMBLOK(,R11) IS VMBLOK LOCKED       @VA08054 00488400
+         BE    NOLOCK         YES - DONT LOCK IT               @VA08054 00488500
+         LR    R1,R11         PREPARE VMBLOCK FOR LOCK         @VA08054 00488600
+         LOCK  OBTAIN,TYPE=VMBLOK,SPIN=NO GET VMBLOK LOCK      @VA08054 00488700
+NOLOCK   EQU   *                                               @VA08054 00488800
+         NI    APSTAT4,X'FF'-CPMCHSE  TURN OFF MCH INDICATOR   @VA07615 00489100
+         TM    APSTAT1,APUOPER     RUNNING AS AP               @VA07615 00489150
+         BO    NOMIC2         YES                              @VA07615 00489200
+         NI    APSTAT2,X'FF'-CPMCHLK  RESET FOR ECPS - UP ONLY @VA07615 00489250
+NOMIC2   DS    0H                                              @VA07615 00489300
+         LR    R5,R6          SET UP TO EXIT FROM GETLOCK      @V407510 00490000
+         B     LOCKOBT        BRANCH TO END OF GETLOCK         @V407510 00491000
+         SPACE 2                                                        00492000
+*********************************************************************** 00493000
+*        COMMON ROUTINE TO USE NORMAL SYSTEM FACILITIES        @V407510 00494000
+*        TO COMMUNICATE WITH THE PRIMARY SYSTEM OPERATOR       @V407510 00495000
+*********************************************************************** 00496000
+         SPACE 1                                                        00497000
+OPMSG    DS    0H                                              @V407510 00498000
+         TM    MCHFLAG7,MCH7SUP CHECK FOR SYSTEM LOCK          @VA07775 00498100
+         BO    MCHMSGW        YES,BYPASS GETTING CPEXBLOK AGAIN@VA07775 00498200
+         TM    MCHFLAG7,MCH7OPSW  VIRTUAL USER ACTIVE?         @V4M0144 00499000
+         BNO   CALLSTK        NO, STACK CPEXBLOK               @V4M0144 00500000
+         BAL   R5,GETLOCK     OBTAIN SYSTEM LOCK               @V407510 00501000
+         B     MCHMSGW        PUT MESSAGE OUT                  @V407510 00502000
+CALLSTK  DS    0H                                              @V407510 00503000
+         BAL   R6,STACK       STACK CPEXBLOK                   @V407510 00504000
+MCHMSGW  DS    0H                                              @V407510 00505000
+         LTR   R0,R0          IS THE MESSAGE LENGTH ZERO                00506000
+         BZ    0(R7)          YES, NO MESSAGE FOR OPERATOR     @V407510 00507000
+         LA    R0,MSGLN       GET LENGTH OF FULL AREA          @V407510 00508000
+         LA    R1,MCHMSG      GET ADDRESS OF MESSAGE BUFFER             00509000
+         CALL  DMKQCNWT,PARM=OPERATOR+NORET+ALARM,AFFINITY     @V407510 00510000
+         MVI   MSGBUF,BLANK   CLEAR BUFFER                     @V407510 00511000
+         MVC   MSGBUF+ONE(L'MSGBUF-1),MSGBUF CLEAR BUFFER      @V407510 00512000
+         MVC   MSGCDE+4(13),VMSGTA  RESTORE THE MESSAGE IN THE BUFFER   00513000
+         BR    R7             RETURN TO CALLER                 @V407510 00514000
+         SPACE                                                          00515000
+STKOPS   DS    0H                                              @V407510 00516000
+         SR    R2,R2          CLEAR REGISTER                   @V407510 00517000
+         IC    R2,MODFLAG1    SAVE MODFLAG FOR RE-ENTRY        @V407510 00518000
+         ICM   R2,B'0010',SWTCH  SAVE SWTCH FLAG               @V407510 00519000
+STKOP    DS    0H             STACK BLOCK FOR OTHER PROCESSOR  @V407510 00520000
+         AIF   (NOT &AP).APCHK5                                         00520900
+         TM    APSTAT1,APUOPER  AP MODE?                       @V407510 00521000
+         BZR   R6             NO, RETURN                       @V407510 00522000
+         LA    R0,CPEXSIZE    SIZE OF CPEXBLOK                 @V407510 00523000
+         CALL  DMKFREE        GET STORAGE                      @V407510 00524000
+         USING CPEXBLOK,R1    ADDRESSABILITY TO CPEXBLOK       @V407510 00525000
+         LA    R15,STKRETN    ADDR OF ROUTINE TO GET CONTROL   @V407510 00526000
+         ST    R15,CPEXADD    SET UP RETURN ADDRESS            @V407510 00527000
+         STM   R0,R15,CPEXREGS  SAVE REGISTERS                 @V407510 00528000
+         CALL  DMKSTKOP       STACK FOR OTHER PROCESSOR        @V407510 00529000
+         DROP  R1             RELEASE REG                      @V407510 00530000
+.APCHK5  ANOP                                                           00530100
+         BR    R6             RETURN TO CALLER                 @V407510 00531000
+         AIF   (NOT &AP).APCHK6                                         00531900
+STKRETN  DS    0H                                              @V407510 00532000
+         LTR   R2,R2          PART OF MACHINE CHECK HANDLER?   @V407510 00533000
+         BZ    DISABLE        YES, DISABLE AND EXIT            @V407510 00534000
+         STC   R2,MODFLAG1    REFRESH MODFLAG1                 @V407510 00535000
+         STCM  R2,B'0010',SWTCH  REFRESH SWITCH                @V407510 00536000
+         MVI   STKOPSW,YES    INDICATE SPECIAL EXIT            @V407510 00537000
+         CLI   SWTCH,OTHER    REQUEST FOR THIS PROCESSOR ONLY? @V407510 00538000
+         MVI   SWTCH,THIS     INDICATE THIS PROCESSOR ONLY     @V407510 00539000
+         BE    MSGSET         YES, PROCESSOR ADDR ALREADY SET  @V407510 00540000
+         MVC   PROCA(LN2),IPUADDR  SET UP THIS PROCESSOR ADDR  @V407510 00541000
+         LH    R2,IPUADDR     GET PROCESSOR ADDRESS            @V407510 00542000
+         CVD   R2,WORK        CONVERT PROCESSOR ADDRESS        @V407510 00543000
+         UNPK  CPROCA(LN2),WORKLO(LN2) CONVERT 2 DIGITS        @V407510 00544000
+         OI    CPROCA+ONE,ZONE  SET ZONE FOR LAST DIGIT        @V407510 00545000
+         B     MSGSET         REPEAT RTN FOR THIS PROCESSOR    @V407510 00546000
+DISABLE  DS    0H             DISABLE SOFT ERRORS              @V407510 00547000
+         STCTL R14,R14,CR14ENB  SAVE CONTROL REG 14            @V407510 00548000
+         NI    CR14ENB,OFF-RECOVRPT DISABLE IN CR14            @V407510 00549000
+         LCTL  R14,R14,CR14ENB  RESTORE CR14                   @V407510 00550000
+.APCHK6  ANOP                                                           00550100
+MCEXIT   DS    0H                                              @V407510 00551000
+         GOTO  DMKDSPCH       RETURN TO DISPATCHER             @V407510 00552000
+         EJECT                                                          00553000
+*************************************************************           00554000
+MCHSPF   EQU   *                                                        00555000
+         MVC   MCHFSAR(4),FSA SAVE THE FAILING STORAGE ADDRESS          00556000
+         TM    STOERR,PEBIT   IS UNCORRECTED PROTECTION ERROR           00557000
+*                             INDICATED ?                               00558000
+         BO    MCHFSA         YES, GO CHECK FAILING STORAGE ADDR.       00559000
+*                             VALIDITY FLAG                             00560000
+MCHMSG2  EQU   *                                                        00561000
+         LA    R3,MSG2        SETUP THE SUPERVISOR DAMAGE               00562000
+*                             MESSAGE                                   00563000
+         TM    MCHFLAG7,MCH7OPSW WAS THE VIRTUAL USER ACTIVE            00564000
+         BO    MCHNXT         YES, MAKE MORE CHECKS            @V407510 00565000
+         OI    MCHFLAG7,MCH7SYST  INDICATE SYSTEM TERMINATION  @V407510 00566000
+         B     OPCOM          TERMINATE SYSTEM                 @V407510 00567000
+MCHNXT   DS    0H                                              @V407510 00568000
+         TM    STOERR,SEBIT+PEBIT IS SPF/STORAGE ERROR INDICATED ?      00569000
+         BNZ   MCHFSA         YES, GO CHECK FAILING STORAGE             00570000
+*                             ADDRESS VALIDITY FLAG                     00571000
+         OI    MCHFLAG1,MCH1PROC     INDICATE PROCESSOR DAMAGE          00572000
+MCHCPU   EQU   *                                                        00573000
+         TM    MCHFLAG7,MCH7OPSW WAS THE VIRTUAL USER ACTIVE ?          00574000
+         BZ    MCHMSG2        NO, GO PUT SYSTEM IN WAIT STATE           00575000
+MCHSW    EQU   *                                                        00576000
+         OI    MCHFLAG7,MCH7VRTM     SET TERMINATION FLAG FOR USER      00577000
+         B     VIRTERM        GO TERMINATE THE USER                     00578000
+MCHFSA   EQU   *                                                        00579000
+         TM    VALID2,FABIT   IS THE FAILING STORAGE ADDRESS            00580000
+*                             VALID ?                                   00581000
+         BO    MCHBACK        YES, GO CHECK BACKUP FLAG                 00582000
+         OI    MCHFLAG5,MCH5IFSA     INDICATE THE FAILING STORAGE       00583000
+*                             ADDRESS IS INVALID                        00584000
+         B     MCHCPU         GO SEE IF USER IS ACTIVE                  00585000
+MCHBACK  EQU   *                                                        00586000
+**********************************************************************  00586100
+* IF THIS IS A 4331OR 4341 PROCESSOR, THEN BIT 14(BVBIT) IS          *  00586200
+* STORED AS A ZERO AND THEREFORE HAS NO MEANING. DO NOT TEST IT.     *  00586300
+**********************************************************************  00586400
+         CLI   MCHMODEL,MOD4331   MODEL 4331 OR 4341           @V60A6B6 00586500
+         BE    CKBIT16       YES BIT 14 IS QUESTIONABLE.       @V60A6B6 00586600
+         TM    TENSE,BVBIT    IS THE BACKUP FLAG ON ?                   00587000
+         BZ    MCHCPU         NO, GO SEE IF USER IS ACTIVE              00588000
+CKBIT16  EQU *                                                 @V60A6B6 00588100
+         NI    MCHFSAR+3,X'F0'       PUT THE FAILING STORAGE ADDRESS    00589000
+*                             ON A QUADWORD BOUNDARY                    00590000
+         TM    STOERR,SEBIT   IS STORAGE ERROR INDICATED ?              00591000
+         BZ    SPFTEST        NO, GO SETUP FOR SPF ERROR                00592000
+         SPACE 2                                                        00593000
+**********************************************************************  00594000
+         SPACE                                                          00595000
+         SPACE                                                          00596000
+*********************************************************************** 00597000
+         SPACE                                                          00598000
+REFRESH  EQU   *                                                        00599000
+         OI    MCHFLAG1,MCH1MAIN     INDICATE MAIN STORAGE DAMAGE       00600000
+         OI    MCHFLAG3,MCH3DATA     INDICATE DATA HAS BEEN DAMAGED     00601000
+         TM    MCOPSW,TRANMODE       WAS THE CPU IN RELOCATE MODE ?     00602000
+         BNO   MCHSW          NO, GO TERMINATE VIRTUAL USER             00603000
+         BAL   R5,GETLOCK     OBTAIN SYSTEM LOCK               @V407510 00604000
+         L     R2,MCHFSAR     GET THE FAILING STORAGE ADDRESS           00605000
+*                             THAT'S ON A 4K BOUNDARY                   00606000
+         SRL   R2,12          PUT THE FAILING STORAGE ADDRESS           00607000
+         SLL   R2,12          ON A 4K BOUNDARY                          00608000
+         LR    R3,R2          SAVE THE FAILING STORAGE ADDRESS          00609000
+         LA    R3,2048(R3)    ADD 2K TO GET THE NEXT KEY                00610000
+         SR    R1,R1          CLEAR REGISTER 1                          00611000
+         ISK   R1,R2          GET THE FIRST KEY FROM STORAGE            00612000
+         SLL   R1,8           MAKE ROOM FOR NEXT KEY                    00613000
+         ISK   R1,R3          GET SECOND KEY FROM STORAGE               00614000
+         N     R1,=A(X'202')  ARE THE CHANGE BITS ON IN KEYS            00615000
+         BNZ   STGTEST        YES, GO SET CHANGE INDICATOR              00616000
+         BAL   R14,CORTBLR    GO GET THE CORTABLE ADDRESS               00617000
+         L     R3,CORSWPNT    GET THE SWPTABLE ENTRY ADDRESS            00618000
+         USING SWPFLAG,R3     SETUP ADDRESSABILITY FOR SWPTABLE         00619000
+         TM    SWPFLAG,SWPCHG1+SWPCHG2 ARE CHANGE FLAGS ON IN TABLE     00620000
+         BZ    STGTEST1       NO, REFRESH IS POSSIBLE                   00621000
+         DROP  R3             DROP BASE REGISTER FOR SWPTABLE           00622000
+STGTEST  EQU   *                                                        00623000
+         OI    MCHPDAR6,MCHP6CBA     INDICATE THE CHANGE BIT IS ON      00624000
+         B     STORA          GO TO STORAGE EXERCISE ROUTINE   @V5088AB 00624100
+STGTEST1 EQU   *                                                        00625000
+         CLI   MCHMODEL,MOD3031 IS THIS A 3031/3032/3033       @V5088AB 00625100
+*                             PROCESSOR?                                00625200
+         BE    MCHSOLID       IF SO, TREAT MULTI-BIT ECC ERRORS@V5088AB 00625300
+*                             AS SOLID ERRORS                           00625400
+STORA    EQU   *                                               @V5088AB 00625500
+         BAL   R3,MCHSTORA    GO TO THE STORAGE EXERCISE RTN.           00626000
+         OI    MCHFLAG3,MCH3INTE     INDICATE INTERMITTENT ERROR        00627000
+         OI    MCHPDAR1,MCHP1IDE     INDICATE INTERMITTENT STORAGE      00628000
+*                             ERROR                                     00629000
+         B     VRTSPF         GO CHECK FOR V=R USER                     00630000
+********************************************************************    00631000
+*        THE STORAGE TEST RESULTED IN A MC INTERRUPT,IF THE             00632000
+*        FAILURE IS IN THE SAME FRAME THEN THE DEFECTIVE FRAME WILL     00633000
+*        BE REMOVED FROM SYSTEM USE                                     00634000
+*********************************************************************   00635000
+         SPACE                                                          00636000
+MCHSTORA EQU   *                                                        00637000
+         STCTL R14,R14,SAVECR14    SAVE CONTENT OF CONTROL REGISTER 15  00638000
+         CLI   MCHMODEL,MODEL155      IS THIS A MODEL 155               00639000
+         BE    MCDIABUF       YES, GO ENABLE ECC LOGIC                  00640000
+         CLI   MCHMODEL,MODEL165      IS THIS A MODEL 165               00641000
+         BNE   MCHSKIP        NO, GO SETUP EXERCISE HANDLER             00642000
+         DC    X'8300'        ENABLE THE ECC LOGIC                      00643000
+         DC    S(ECCENA65)    FOR THE MODEL 165                         00644000
+         B     MCENCR14       GO ENABLE THE RECOVERY REPORT             00645000
+*                             IN CONTROL REGISTER 14                    00646000
+MCDIABUF EQU   *                                                        00647000
+         DC    X'8300'        ENABLE THE ECC LOGIC                      00648000
+         DC    S(ECCENA55)    FOR THE MODEL 155                         00649000
+MCENCR14 EQU   *                                                        00650000
+         LA    R2,MCHSKIP     GET THE ADDRESS OF THE EXERCISE           00651000
+*                             HANDLER THAT BLEED OFF INTERRUPT          00652000
+         ST    R2,MCNPSW+4    CHANGE MACHINE CHECK NEW PSW              00653000
+*                             TO THE ADDRESS OF THE HANDLER             00654000
+         OI    MCNPSW+1,MCHEK ENABLE MACHINE CHECK NEW FOR              00655000
+*                             MACHINE CHECKS                            00656000
+         OI    SAVECR14,RECOVRPT ENABLE THE RECOVERY REPORT IN          00657000
+*                             CONTROL REGISTER 14                       00658000
+         LCTL  R14,R14,SAVECR14 RESTORE CONTROL REGISTER 14             00659000
+MCHSKIP  EQU   *                                                        00660000
+         LA    R2,HANDLER     GET THE ADDRESS OF THE EXERCISE           00661000
+*                             HANDLER TO INTERCEPT MACHINE CHECKS       00662000
+         ST    R2,MCNPSW+4    CHANGE MACHINE CHECK NEW PSW              00663000
+         LA    R6,X'FF'       SETUP COUNTER FOR EXERCISE ROUTINE        00664000
+*******************************************************************     00664100
+*  THE FOLLOWING FEW INSTRUCTIONS VALIDATES STORAGES USING THE    *     00664200
+*  MVCL COMMAND. REG 2 CONTAINS THE ADDRESS OF THE AREA TO BE     *     00664300
+*  TESTED ROUNDED DOWN TO A 2K BOUNDARY. REG 3 CONTAINS THE LENGTH*     00664400
+*  OF THE MOVE(2K). REG 4 CONTAINS MOVE FROM ADDR(IN THIS CASE 0) *     00664500
+*  REG 5 CONTAINS PAD CHAR AND LENGTH OF 0.  STOREXE1 AND STOREXE0*     00664600
+*  EXERCISE THE STORAGE IN QUESTION TO FORCE MACHINE CHECK IF A   *     00664700
+*  STORAGE PROBLEM EXISTS.                                        *     00664800
+*******************************************************************     00664900
+         STM   R2,R3,SAVEREGS SAVE THE REGS.....               @V60A6B6 00665000
+         L     R2,MCHFSAR     GET ADDR OF TEST AREA            @V60A6B6 00665100
+         L     R4,MCHMASK     SET UP MASK FOR ROUNDING TO 2K   @V60A6B6 00665200
+         NR    R2,R4          ROUNDS DOWN TO 2K BOUNDARY       @V60A6B6 00665300
+         LH    R3,TWOK        LOAD 2K LENGTH                   @V60A6B6 00665400
+         SR    R4,R4          SET REG 4 AND 5 FOR MVCL         @V60A6B6 00665500
+         SR    R5,R5          ....                             @V60A6B6 00665600
+         MVCL  R2,R4          NOW VALIDATE                     @V60A6B6 00666000
+         LM    R2,R3,SAVEREGS RESTORE REGS FOR SOMEBODY ELSE   @V60A6B6 00667000
+STOREXE1 EQU   *                                                        00668000
+         LM    R4,R5,FFS      PUT THE ONES PATTERN IN THE REGISTERS     00669000
+         STM   R4,R5,0(R2)    STORE INTO THE FAILING STORAGE   @V60A6B6 00670000
+         STM   R4,R5,8(R2)    LOCATION ONES                    @V60A6B6 00671000
+         LM    R4,R5,0(R2)    FETCH FROM THE FAILING STORAGE   @V60A6B6 00672000
+         LM    R4,R5,8(R2)    LOCATION ONES                    @V60A6B6 00673000
+STOREXE0 EQU   *                                                        00674000
+         LM    R4,R5,ZEROES   PUT THE ZEROS PATTERN IN THE REGISTERS    00675000
+         STM   R4,R5,0(R2)    STORE INTO THE FAILING STORAGE   @V60A6B6 00676000
+         STM   R4,R5,8(R2)    LOCATION ZEROS                   @V60A6B6 00677000
+         LM    R4,R5,0(R2)    FETCH FROM THE FAILING STORAGE   @V60A6B6 00678000
+         LM    R4,R5,8(R2)    LOCATION ZEROS                   @V60A6B6 00679000
+SWITCLR  EQU   *                                                        00680000
+         MVI   SWITCH,X'00'   CLEAR SWITCH WHEN EXERCISE IS FINISHED    00681000
+         BCT   R6,STOREXE1    GO START EXERCISE SECTION AGAIN           00682000
+CLEANUP  EQU   *                                                        00683000
+         NI    SAVECR14,X'FF'-RECOVRPT MASK OFF THE RECOVERY REPORT     00684000
+*                             IN CONTROL REGISTER 14                    00685000
+         LCTL  R14,R14,SAVECR14      RESTORE CONTROL REGISTER 14        00686000
+         CLI   MCHMODEL,MODEL155      IS THIS A MODEL 155               00687000
+         BE    MCHECC         YES, GO CHECK THE MODE FLAG               00688000
+         CLI   MCHMODEL,MODEL165      IS THIS A MODEL 165               00689000
+         BNE   MCREPSW        NO, GO RESTORE THE MACHINE CHECK          00690000
+*                             NEW PSW                                   00691000
+         TM    APSTAT4,RECMODE     SYSTEM ENABLED FOR ECC      @VA07615 00692100
+         BO    MCREPSW        YES, RESTORE MACHINE CHK NEW PSW @V407510 00693000
+         DC    X'8300'        DISABLE THE ECC LOGIC                     00694000
+         DC    S(ECCDIS65)    ON THE MODEL 165                          00695000
+         B     MCREPSW        GO RESTORE MACHINE CHECK NEW PSW          00696000
+MCHECC   EQU   *                                                        00697000
+         TM    APSTAT4,RECMODE     SYSTEM ENABLED FOR ECC      @VA07615 00698100
+         BO    MCREPSW        YES, RESTORE MACHINE CHK NEW PSW @V407510 00699000
+         DC    X'8300'        DISABLE THE ECC LOGIC                     00700000
+         DC    S(ECCDIS55)    ON THE MODEL 155                          00701000
+MCREPSW  EQU   *                                                        00702000
+         MVC   MCNPSW(8),STGSVE      RESTORE MACHINE CHECK              00703000
+*                             NEW PSW WITH SECONDARY HANDLER            00704000
+         BR    R3             RETURN TO INLINE CODE                     00705000
+**********************************************************************  00706000
+**********************************************************************  00707000
+         SPACE 2                                                        00708000
+**********************************************************************  00709000
+**********************************************************************  00710000
+HANDLER  EQU   *                                                        00711000
+         TM    STOERR,SEBIT   IS THIS A MULT-BIT STORAGE ERROR          00712000
+         BO    MCHSOLID       YES, GO TO CLEANUP ROUTINE AND            00713000
+*                             INDICATE SOLID ERROR                      00714000
+*********************************************************************** 00714100
+*   THE 4331 OR 4341 PROCESSORS STORE BIT 17 AS A ZERO AND THERE     *  00714200
+*   FORE IT SHOULD NOT BE CHECKED SINCE IT DOES NOT HAVE ANY VALIDITY.* 00714300
+*********************************************************************** 00714400
+         CLI   MCHMODEL,MOD4331  MODEL 4331 OR 4341 ?          @V60A6B6 00714500
+         BE    MCHSOLID         YES BIT 17 IS QUESTIONABLE.    @V60A6B6 00714600
+         TM    STOERR,SCBIT   IS THIS A SOFT ERROR ?                    00715000
+         BZ    MCHSOLID       NO, GO TO CLEANUP ROUTIE AND              00716000
+*                             INDICATE SOLID ERROR                      00717000
+         LTR   R5,R5          IS THE ZERO PATTERN IN REGISTER 5         00718000
+         BZ    TESTSWIT       YES, GO CHECK TEST SWITCH                 00719000
+         OI    SWITCH,X'80'   THE TEST SWITCH IS SET WHEN EXERCISE      00720000
+*                             EXERCISING THE ONES PATTERN               00721000
+         B     STOREXE0       GO EXERCISE THE ZERO PATTERN              00722000
+TESTSWIT EQU   *                                                        00723000
+         TM    SWITCH,X'80'   IS THE TEST SWITCH SET ?                  00724000
+         BZ    SWITCLR        NO, GO CLEAR TEST SWITCH                  00725000
+MCHSOLID EQU   *                                                        00726000
+         BAL   R3,CLEANUP     GO RESTORE THE STATUS OF THE SYSTEM       00727000
+         OI    MCHFLAG3,MCH3SOLD     INDICATE SOLID ERROR IN            00728000
+*                             THE DAMAGE ASSESSMENT AREA                00729000
+         OI    MCHPDAR1,MCHP1SDE     INDICATE SOLID STORAGE ERROR       00730000
+VRTSPF   EQU   *                                                        00731000
+         ICM   R4,15,AVMREAL  GET THE VIRTUAL V=R USER ADDRESS          00732000
+         BZ    MCHCORT        IF ZERO, GO GET CORTABLE ADDRESS          00733000
+         CR    R4,R11         IS THE VMBLOK THE SAME AS RUNUSER         00734000
+         BNE   MCHCORT        NO, GO GET THE CORTABLE ADDRESS           00735000
+         OI    MCHFLAG7,MCH7VEQR     INDICATE TERMINATION OF V=R USER   00736000
+         TM    MCHFLAG3,MCH3SOLD     IS THIS A SOLID ERROR ?            00737000
+         BZ    VIRTERM        NO, GO TERMINATE VIRTUAL=REAL USER        00738000
+         MVC   AVMREAL(4),FFS SET THE INDICATOR TO REMOVE THE           00739000
+*                             VIRTUAL=REAL PAGE                         00740000
+         L     R14,PREFIXB    GET PREFIX ADDR OF OTHER PROC    @V4M0132 00741000
+         MVC   AVMREAL-PSA(,R14),FFS SET AVMREAL IN OTHER PSA  @V4M0132 00742000
+         B     VIRTERM        GO TERMINATE THE V=R USER                 00743000
+MCHCORT  EQU   *                                                        00744000
+         BAL   R14,CORTBLR    GO GET THE CORTABLE ADDRESS               00745000
+         USING PAGCORE,R6     SETUP ADDRESSABILITY FOR PAGE TABLE       00746000
+*                             ENTRY                                     00747000
+         L     R6,CORPGPNT    GET THE PAGE TABLE ENTRY ADDRESS          00748000
+         MVI   PAGCORE,X'00'  CLEAR THE REAL STORAGE ADDRESS            00749000
+         NI    PAGCORE+1,X'0F'                                          00750000
+         OI    PAGCORE+1,PAGINVAL    INVALIDATE THE PAGE TABLE ENTRY    00751000
+         SR    R6,R6          CLEAR THE PAGE TABLE ENTRY POINTER        00752000
+         ST    R6,CORPGPNT    CLEAR PTE IN CORTABLE                     00753000
+         DROP  R6             DROP BASE FOR PTE                         00754000
+         OI    VMESTAT,VMINVPAG      INVALIDATE SHADOW PAGE TABLE       00755000
+         SPACE                                                          00756000
+         TM    VMMCR6,VMMVTMR IS TIMER ASSIST BEING USED ?     @V3M5014 00757000
+         BZ    UNCHAIN        NO EXTRA CHECKS NECESSARY...     @V3M5014 00758000
+         ICM   R15,B'0111',VMMADDR   VM ASSIST ON FOR USER ?   @V3M5014 00759000
+         BZ    UNCHAIN        NO TIMER ASSIST IF NO VM ASSIST  @V3M5014 00760000
+         USING MICBLOK,R15    ADDRESSABILITY TO POINTER LIST   @V3M5014 00761000
+         LCTL  C1,C1,VMSEG    GET CORRECT SEGMENT TABLE ORIGIN @V3M5014 00762000
+         LRA   R1,TIMER-PSA   PAGE ZERO CURRENTLY INVALID ?    @V3M5014 00763000
+         BZ    STMICTMR       NO, TIMER ASSIST POINTER O.K.    @V3M5014 00764000
+         LA    R1,VMTIMER     POINT TIMER ASSIST HERE...       @V3M5014 00765000
+STMICTMR ST    R1,MICVTMR     FOR UPDATING VIRTUAL TIMER VALUE @V3M5014 00766000
+         DROP  R15                                             @V3M5014 00767000
+         SPACE                                                          00768000
+UNCHAIN  DS    0H                                                       00769000
+         TM    MCHFLAG3,MCH3SOLD     IS THIS A SOLID ERROR ?            00770000
+         BZ    REFPAG         NO, GO PURGE AFFECTED PAGE                00771000
+         MVI   CORFLAG,CORDISA       DISABLE THE DEFECTIVE FRAME        00772000
+         MVC   MSGCDE(3),MSG13       SETUP MESSAGE NUMBER               00773000
+         MVC   MSGBUF(28),MSG13B     MOVE THE MESSAGE INTO THE BUFFER   00774000
+         LA    R1,MCHMSG      GET THE ADDRESS OF THE MESSAGE            00775000
+         LA    R0,56          GET THE LENGTH OF THE MESSAGE             00776000
+         CALL  DMKQCNWT,PARM=ALARM+OPERATOR+NORET,AFFINITY     @V407510 00777000
+         TM    MCHPDAR1,MCHP1SKE     IS THIS A SOLID SPF ERROR ?        00778000
+         BO    MCHSW          YES, GO TERMINATE THE VIRTUAL USER        00779000
+         B     MCHCHANG       GO CHECK THE CHANGE FLAG                  00780000
+REFPAG   EQU   *                                                        00781000
+         OI    MCHPDAR7,MCH7PURG     SET PURGE PAGE INTERFACE'S FLAG    00782000
+         LR    R7,R10         GET THE ADDRESS OF THE CORTABLE           00783000
+         CALL  DMKPTRFT,AFFINITY                               @V407510 00784000
+         NI    MCHPDAR7,X'FF'-MCH7PURG CLEAR PURGE INTERFACE'S FLAG     00785000
+MCHCHANG EQU   *                                                        00786000
+         TM    MCHPDAR6,MCHP6CBA     IS THE CHANGE FLAG ACTIVE ?        00787000
+         BO    MCHSW          YES, GO TERMINATE THE VIRTUAL USER        00788000
+         B     SOFTREC        GO BUILD ERROR RECORD                     00789000
+*********************************************************************   00790000
+*        THIS ROUTINE FINDS THE CORTABLE ASSOCIATED WITH THE FAILING    00791000
+*        STORAGE ADDRESS AND DETERMINES IF THE LOCKBIT IS ON FOR        00792000
+*        THE PAGE                                                       00793000
+*********************************************************************   00794000
+         SPACE                                                          00795000
+CORTBLR  EQU   *                                                        00796000
+         SR    R10,R10        CLEAR REGISTER 10                         00797000
+         ICM   R10,C3,MCHFSAR+1 GET THE FAILING STORAGE                 00798000
+*                             ADDRESS                                   00799000
+         SRL   R10,4          CLEAR THE LOW ORDER BITS                  00800000
+         SLL   R10,4          SETUP ADDRESS FOR CORETABLE               00801000
+         A     R10,ACORETBL   ADD CORTABLE ORIGN POINTER TO ENTRY       00802000
+         TM    MCHPDAR1,MCHP1IKE     IS THIS AN INTERMITTENT SPF ERROR  00803000
+         BC    1,0(R14)       YES, RETURN TO IN LINE CODE               00804000
+         TM    CORFLAG,CORIOLCK      IS THE PAGE LOCKED IN STORAGE ?    00805000
+         BO    MCHSW          YES, TERMINATE THE VIRTUAL USER           00806000
+         BR    R14                 NO,RETURN(R10=ADDR. OF CORTABLE)     00807000
+*********************************************************************   00808000
+         EJECT                                                          00809000
+**********************************************************************  00810000
+*        SPF FAILURE ANALYSIS ROUTINE                                   00811000
+**********************************************************************  00812000
+         SPACE                                                          00813000
+SPFTEST  EQU   *                                                        00814000
+         SR    R8,R8          CLEAR REGISTER 8                          00815000
+         MR    R4,R8          CLEAR TWO REGISTERS                       00816000
+         OI    MCHFLAG3,MCH3PROT     SET THE INDICATOR FOR PROTECT      00817000
+         L     R3,MCHFSAR     GET THE FAILING STORAGE ADDRESS           00821000
+         LA    R7,SPFTERM     GET THE ADDRESS OF HANDLER                00822000
+         ST    R7,MCNPSW+4       CHANGE MACHINE CHECK NEW PSW           00823000
+*                             TO SPF SECONDARY HANDLER                  00824000
+         TM    MCHFLAG7,MCH7OPSW VIRTUAL MACHINE ACTIVE ?      @VA08064 00824100
+         BO    SIG0014U       YES, CONTINUE PROCESSING         @VA08064 00824400
+         SIGNAL STOP          STOP THE OTHER PROCESSOR         @V4M0144 00825000
+SIG0014U DS    0H                                              @VA08064 00825500
+         LA    R7,5           SETUP THE COUNT FOR THE EXERCISE          00826000
+         LA    R6,16          SETUP THE COUNT FOR THE NUMBER OF KEYS    00827000
+SPFEXEC  EQU   *                                                        00828000
+         SSK   R4,R3          EXECERCISE THE                            00829000
+         ISK   R4,R3          FAILING STORAGE LOCATION BY DURING        00830000
+*                             STORES AND FETCHS FROM THE KEY            00831000
+*                             LOCATION IN STORAGE                       00832000
+         BCT   R7,SPFEXEC     GO EXERCISE THE KEY FIVE TIMES            00833000
+         LA    R4,16(R4)      GET THE NEXT KEY VALUE                    00834000
+         LR    R5,R4          SAVE THE NEW KEY                          00835000
+         LA    R7,5           RE-INITIALIZE THE COUNT                   00836000
+         BCT   R6,SPFEXEC     GO EXERCISE THE NEW KEY                   00837000
+SPFMSG   EQU   *                                                        00838000
+         MVC   MCNPSW(8),STGSVE      RESTORE MACHINE CHECK NEW          00839000
+*                             PSW TO THE SECONDARY HANDLER              00840000
+         OI    MCHFLAG3,MCH3INTE     INDICATE INTERMITTENT ERROR        00841000
+*                             IN THE DAMAGE ASSESSMENT AREA             00842000
+         OI    MCHPDAR1,MCHP1IKE     INDICATE INTERMITTENT SPF ERROR    00843000
+         TM    MCHFLAG7,MCH7OPSW     WAS THE VIRTUAL USER ACTIVE ?      00844000
+         BO    SPFCORT        YES, CALL CORTBLR                @V407510 00845000
+         SIGNAL START         RESTART OTHER PROCESSOR          @V407510 00846000
+         B     CPUSPF         CONTINUE PROCESSING              @V407510 00847000
+SPFCORT  DS    0H                                              @V407510 00848000
+         BAL   R14,CORTBLR    GO GET THE CORTABLE ADDRESS               00849000
+         ICM   R7,C7,CORSWPNT+1 GET SWAPTABLE ENTRY FROM CORTABLE       00850000
+         USING SWPFLAG,R7     SETUP ADDRESSABILITY FOR SWPTABLE         00851000
+         IC    R8,SWPKEY1     GET THE KEY FOR THE EVEN HALF PAGE        00852000
+         TM    FSA+3,X'08'    IS THE HALF PAGE EVEN OR ODD ?            00853000
+         BZ    CPUSPF         YES, THE HALF PAGE IS EVEN                00854000
+         IC    R8,SWPKEY2     GET THE KEY FOR THE ODD HALF PAGE         00855000
+CPUSPF   EQU   *                                                        00856000
+         SRL   R3,11          PUT THE FAILING STORAGE ADDRESS           00857000
+         SLL   R3,11          ON A 2K BOUNDARY                          00858000
+         O     R8,F6          TURN ON THE CHANGE AND REFERENCE          00859000
+*                             BITS                                      00860000
+         SSK   R8,R3          RESTORE THE PROPER KEY TO THE             00861000
+*                             FAILING STORAGE LOCATION                  00862000
+         L     R8,MCHREC      RELOAD MCH RECORD PTR            @V4M0144 00863000
+         OI    MCHFLAG0,MCH0SFTR     INDICATE SOFTWARE RECOVERY         00864000
+         OI    MCHFLAG4,MCH4REPA     INDICATE REPAIR IN THE DAMAGE      00865000
+*                             ASSESSMENT AREA                           00866000
+         SR    R0,R0          SEND NO MESSAGE TO THE OPERATOR           00867000
+         B     OPMSG2          GO TO OPERATOR MESSAGE ROUTINE           00868000
+SPFTERM  EQU   *                                                        00869000
+         TM    MCHFLAG7,MCH7OPSW IS VIRTUAL MACHINE ACTIVE ?   @VA08064 00869100
+         BO    SIG0016U       YES, CONTINUE PROCESSING         @VA08064 00869400
+         SIGNAL START         RESTART THE OTHER PROCESSOR      @V4M0144 00870000
+SIG0016U DS    0H                                              @VA08064 00870500
+         L     R8,MCHREC      RELOAD MCH RECORD PTR            @V4M0144 00871000
+         MVC   MCNPSW(8),STGSVE      RESTORE MACHINE CHECK NEW PSW      00872000
+*                             TO THE SECONDARY HANDLER                  00873000
+         LPSW  SPFDIE         ENABLE FOR HARD MACHINE CHECKS            00874000
+SPFTERMA EQU   *                                                        00875000
+         OI    MCHFLAG3,MCH3SOLD     INDICATE SOLID ERROR               00876000
+*                             IN DAMAGE ASSESSMENT AREA                 00877000
+         OI    MCHPDAR1,MCHP1SKE     INDICATE SOLID SPF ERROR           00878000
+         TM    MCHFLAG7,MCH7OPSW     WAS THE VIRTUAL USER ACTIVE ?      00879000
+         BZ    MCHCPU         NO, PUT SYSTEM DOWN              @V407510 00880000
+         BAL   R5,GETLOCK     OBTAIN SYSTEM LOCK               @V407510 00881000
+         B     VRTSPF         MAKE PAGE UNAVAILABLE            @V407510 00882000
+         EJECT                                                          00883000
+         SPACE                                                          00884000
+         SPACE                                                          00885000
+*********************************************************************** 00886000
+*        VIRTUAL MACHINE TERMINATION ROUTINE                            00887000
+*********************************************************************** 00888000
+         SPACE                                                          00889000
+VIRTERM  EQU   *                                                        00890000
+         BAL   R5,GETLOCK     OBTAIN SYSTEM LOCK               @V4M0144 00891000
+         OI    MCHFLAG0,MCH0USAD     SET THE USER ABORTED FLAG          00892000
+         BAL   R4,FUMAT       GO FORMAT THE MACHINE CHECK RECORD        00893000
+********************************************************************    00894000
+NOURMSG  EQU   *                                                        00895000
+         MVC   MSGCDE(3),VMS19       SETUP MESSAGE ID IN BUFFER         00896000
+         MVC   MSGCDE+4(35),VMSGTA   MOVE MESSAGE INTO BUFFER           00897000
+         LA    R0,MSGLN       GET LENGTH OF FULL AREA          @V407510 00898000
+         LA    R1,MCHMSG      GET THE ADDRESS OF THE MESSAGE TEXTS      00899000
+         CALL DMKQCNWT,PARM=NORET,AFFINITY                     @V407510 00900000
+         MVI   MSGBUF,BLANK   CLEAR BUFFER                     @V407510 00901000
+         MVC   MSGBUF+ONE(L'MSGBUF-1),MSGBUF CLEAR BUFFER      @V407510 00902000
+         MVC   MSGCDE(3),MSG8 SETUP THE MESSAGE ID IN THE BUFFER        00903000
+         MVC   MSG8A+7(8),VMUSER MOVE THE USERID INTO BUFFER            00904000
+         MVC   MSGBUF(28),MSG8A MOVE MESSAGE TEXTS INTO BUFFER          00905000
+         LA    R0,MSGLN       GET LENGTH OF FULL AREA          @V407510 00906000
+         LA    R1,MCHMSG      GET THE MESSAGE BUFFER ADDRESS            00907000
+         OI    MCHPDAR7,MCH7EXIT SET EXIT INTERFACE'S FLAG              00908000
+         CALL DMKQCNWT,PARM=OPERATOR+ALARM,AFFINITY            @V407510 00909000
+         MVI   MSGBUF,BLANK   CLEAR BUFFER                     @V407510 00910000
+         MVC   MSGBUF+ONE(L'MSGBUF-1),MSGBUF CLEAR BUFFER      @V407510 00911000
+         NI    MCHPDAR7,X'FF'-MCH7EXIT CLEAR EXIT INTERFACE'S FLAG      00912000
+         TM    MCHFLAG7,MCH7VEQR     IS TERMINATION SET FOR V=R USER    00913000
+         BZ    MCHRESET       NO, GO RESET VIRTUAL USER                 00914000
+         OI    VMOSTAT,VMKILL      DMKDSPCH WILL LOGOFF USER   @V200820 00915000
+         B     MCHDISP        GO RETURN TO THE DISPATCHER               00916000
+MCHRESET EQU   *                                                        00917000
+         OI    MCHPDAR7,MCH7RSRE SET THE RESET AND RELEASE              00918000
+*                             INTERFACE'S FLAG                          00919000
+         SPACE                                                          00920000
+         CALL  DMKCFPRR,AFFINITY                               @V407510 00921000
+         SR    R2,R2    IND CLEAR OPTION                                00922000
+         CALL  DMKPGSPO,AFFINITY                               @V407510 00923000
+         NI    VMRSTAT,X'FF'-VMEXWAIT  MARK USER DISPATCHABLE           00924000
+         CALL DMKCFMBK,AFFINITY                                @V407510 00925000
+         NI    MCHPDAR7,X'FF'-MCH7RSRE CLEAR THE RESET AND RELEASE      00926000
+*                             INTERFACE'S FLAG                          00927000
+         B     MCHDISP        GO TO DISPATCHER                 @V407510 00928000
+*********************************************************************** 00929000
+*        FORMAT THE MACHINE CHECK RECORD                                00930000
+*********************************************************************** 00931000
+         SPACE                                                          00932000
+FUMAT    EQU   *                                                        00933000
+         BAL   R5,GETLOCK     OBTAIN SYSTEM LOCK               @V4M0144 00934000
+         CLI   MCHMODEL,MODEL145   IS THIS A MODEL 145/148     @V386298 00935000
+         BE    MCHFORT        YES, GO FORMAT THE RECORD                 00936000
+         CLI   MCHMODEL,MODEL135   IS THIS A MODEL 135/138     @V386298 00937000
+         BE    MCHFORT        YES, GO FORMAT THE RECORD                 00938000
+         TM    MCIC,DGBIT     IS THE DEGRADATION INDICATOR ON ?         00939000
+         BZ    MCHFORT        NO, GO FORMAT THE RECORD                  00940000
+         OI    MCHFLAG1,MCH1BUFF     SET THE INDICATOR FOR BUFFER       00941000
+*                             ERROR                                     00942000
+         OI    MCHFLAG4,MCH4BURE  INDICATE BUFFER RECONFIGURATION       00943000
+         MVC   MSGCDE(3),MSG16       MOVE MESSAGE ID INTO BUFFER        00944000
+         MVC   MSGBUF(MSG16L),MSG16B  MOVE TEXT INTO BUFFER    @V4M0200 00945000
+         LA    R0,MSGLN       GET LENGTH OF FULL AREA          @V407510 00946000
+         LA    R1,MCHMSG      GET THE ADDRESS OF THE BUFFER             00947000
+*                             ERROR MESSAGE                             00948000
+         CALL  DMKQCNWT,PARM=OPERATOR+ALARM+NORET,AFFINITY     @V407510 00949000
+         MVI   MSGBUF,BLANK   CLEAR BUFFER                     @V407510 00950000
+         MVC   MSGBUF+ONE(L'MSGBUF-1),MSGBUF CLEAR BUFFER      @V407510 00951000
+MCHFORT  EQU   *                                                        00952000
+         XC    MCREC(40),MCREC       CLEAR MACHINE CHECK RECORD HEADER  00953000
+         MVC   MCRECTYP(8),HEADERFD  GET THE HEADER INFORMATION         00954000
+         MVC   MCCPUID(8),CPUID  MOVE CPUID INTO RECORD                 00955000
+         MVC   MCPROGID(8),VMUSER  MOVE USER NAME INTO RECORD           00956000
+         TM    MCHFLAG7,MCH7OPSW  WAS VIRTUAL USER ACTIVE ?             00957000
+         BO    MCHRECOD       YES, GO SETUP RECORD LENGTH               00958000
+         MVC   MCPROGID(8),CPEYED MOVE CP/370 NAME INTO RECORD          00959000
+MCHRECOD EQU   *                                                        00960000
+         LR    R6,R8          GET THE ADDRESS OF THE MACHINE   @V4M0196 00961000
+*                             CHECK RECORD                              00962000
+         LH    R7,MCFXDLOG+6  GET THE LENGTH OF THE EXTENDED LOGOUT     00963000
+         LA    R7,MCHFIX(R7) ADD THE LENGTH OF THE FIXED                00964000
+*                             LOGOUT AND RECORD HEADER                  00965000
+         LA    R7,MCHLEN1(R7) ADD THE LENGTH OF THE DAMAGE              00966000
+*                             ASSESSMENT AREA                           00967000
+         A     R7,F8          PUT LENGTH ON A DOUBLEWORD BOUNDARY       00968000
+         SRL   R7,3           DIVIDE BY 8                               00969000
+         OI    MCHPDAR7,MCH7IOEM SET THE INTERFACE'S FLAG FOR           00970000
+*                             THE RECORDER                              00971000
+         SR    R0,R0          CLEAR RETURN CODE REGISTER       @VA03358 00972000
+         CALL  DMKIOEMC,AFFINITY                               @V407510 00973000
+         NI    MCHPDAR7,X'FF'-MCH7IOEM CLEAR THE INTERFACE'S            00974000
+*                             FLAG FOR THE RECORDER                     00975000
+*                             RECORD                                    00976000
+         LTR   R0,R0          WAS THE RECORDING SUCCESSFUL ?            00977000
+         BC    8,0(R4)        YES, GO RETURN TO IN LINE CODE            00978000
+         LA    R0,MSG10L      GET THE LENGTH OF THE MESSAGE             00979000
+         LA    R1,MSG10B      GET THE ADDRESS OF THE MESSAGE            00980000
+         CALL  DMKQCNWT,PARM=OPERATOR+ALARM+NORET,AFFINITY     @V407510 00981000
+         MVI   MSGBUF,BLANK   CLEAR BUFFER                     @V407510 00982000
+         MVC   MSGBUF+ONE(L'MSGBUF-1),MSGBUF CLEAR BUFFER      @V407510 00983000
+         BR    R4             RETURN TO IN LINE CODE                    00984000
+         SPACE                                                          00985000
+         SPACE                                                          00986000
+*********************************************************************   00987000
+         EJECT                                                          00988000
+**********************************************************************  00989000
+*        TERM ROUTINE                                                   00990000
+**********************************************************************  00991000
+         SPACE                                                          00992000
+TERM     EQU   *                                                        00993000
+         BALR  R15,R0         ESTABLISH ADDRESSABILITY FOR HANDLER      00994000
+         USING *,R15                                                    00995000
+         L     R12,=A(DMKMCH)    RESET THE BASE                         00996000
+         DROP  R15                                                      00997000
+         USING DMKMCH,R12                                               00998000
+         MVC   MCNPSW(8),WAITMCH  MOVE WAIT PSW INTO MACHINE            00999000
+*                             CHECK NEW PSW                             01000000
+         LPSW  MCHTERM1       ENABLE FOR HARD MACHINE CHECKS            01001000
+MCHTERM2 EQU   *                                                        01002000
+         L     R9,MCHREC      GET ADDRESS OF MCH RECORD        @V407510 01003000
+         L     R11,MCFXDLOG+152+4*R11 GET THE VMBLOK ADDRESS   @VM08879 01004000
+         LA    R3,MSG3        SETUP MESSAGE FOR SYSTEM INTEGRITY        01005000
+*                             LOST                                      01006000
+         TM    MCHFLAG7,MCH7SMCR     IS THE RECURSION INDICATOR ON ?    01007000
+         BO    OPCOM          YES, GO SCHEDULE SYSTEM MESSAGE           01008000
+         OI    MCHFLAG7,MCH7SMCR     SET THE RECURSION INDICATOR        01009000
+         TM    MCHPDAR7,X'FE' IS THE MACHINE CHECK                      01010000
+*                             HANDLER ACTIVE ?                          01011000
+         BNZ   OPCOM          NO, GO SCHEDULE SYSTEM MESSAGE            01012000
+         TM    MCHFLAG0,MCH0HDWR IS THE HARDWARE RECOVERY               01013000
+*                             INDICATOR ACTIVE ?                        01014000
+         BZ    OPCOM          NO, GO SCHEDULE SYSTEM MESSAGE            01015000
+         MVC   MCNPSW(8),STGSVE  RESTORE THE ADDRESS OF THE             01016000
+*                             SECONDARY HANDLER                         01017000
+         SR    R0,R0          SEND NO MESSAGE                           01018000
+         B     OPMSG2          GO TO THE MESSAGE ROUTINE                01019000
+         SPACE                                                          01020000
+*********************************************************************** 01021000
+*        OPERATOR COMMUNICATION ROUTINE                                 01022000
+*********************************************************************** 01023000
+DMKMCHST DS    0H             SYSTEM TERMINATION               @V407510 01024000
+         USING *,R12          TEMPORARY ADDRESSABILITY         @V4M0175 01025000
+         L     R12,MCHBASE    GET COMMON BASE REGISTER         @V407510 01026000
+         USING DMKMCH,R12     COMMON ADDRESSABILITY            @V407510 01027000
+         ST    R2,WAITCODE    SAVE WAIT STATE CODE             @V4M0175 01028000
+         AIF   (NOT &AP).MCTST5                                         01028900
+         TM    APSTAT1,APUOPER    AP MODE?                     @V407510 01029000
+         BZ    CALLOPR        NO, CALL DMKOPRWT                @V407510 01030000
+         GOTO  DMKMCTST       YES, USE AP MODULE TO TERMINATE  @V407510 01031000
+         AGO   .MCTST6                                                  01031100
+.MCTST5  ANOP                                                           01031200
+         B     CALLOPR        CALL DMKOPRWT                    @V407510 01031300
+.MCTST6  ANOP                                                           01031400
+         SPACE                                                          01032000
+OPCOM    EQU   *                                                        01033000
+         AIF   (NOT &AP).MCTPT4                                         01033900
+         TM    APSTAT1,APUOPER   AP MODE?                      @V407510 01034000
+         BZ    SETMSG         NO, SET UP MSG                   @V407510 01035000
+         GOTO  DMKMCTPT       YES, USE AP TERMINATION          @V407510 01036000
+.MCTPT4  ANOP                                                           01036100
+SETMSG   DS    0H                                              @V407510 01037000
+         MVI   MSGBUF,BLANK   CLEAR BUFFER                     @V407510 01038000
+         MVC   MSGBUF+ONE(L'MSGBUF-1),MSGBUF CLEAR BUFFER      @V407510 01039000
+         OI    MCHFLAG0,MCH0TERM     THE OPERATING SYSTEM TERMINATED    01040000
+         MVI   MCHFLAG6,MCHCODE  PUT WAIT STATE CODE IN        @V4M0175 01041000
+*                             DAMAGE ASSESSMENT AREA           @V4M0175 01042000
+         L     R2,0(0,R3)     PICK UP MESSAGE NUMBER AND LENGTH@V200820 01043000
+         STCM  R2,B'1110',MSGCDE   PUT CODE INTO THE MSG HDR   @V200820 01044000
+         N     R2,F255        SAVE ONLY THE MESSAGE LENGTH     @V200820 01045000
+         S     R2,F3          SUBTRACT 3 FROM LENGTH           @V407510 01046000
+*                             2 FOR CONTROL, 1 FOR EXECUTE     @V407510 01047000
+         EX    R2,EMSGMVC     MOVE THE MESSAGE TEXT TO 'MSGBUF'@V200820 01048000
+         LA    R0,MSGLN       GET LENGTH OF MESSAGE            @V407510 01049000
+         LA    R1,MCHMSG           START OF THE MESSAGE DATA   @V200820 01050000
+CALLOPR  DS    0H                                              @V407510 01051000
+         CALL  DMKOPRWT,PARM=ALARM   EMERGENCY WRITE TO OPERATO@V200820 01052000
+         SPACE                                                          01053000
+         SPACE                                                          01054000
+MCHWAIT  EQU   *                                                        01055000
+         L     R14,PREFIXA    GET OWN PREFIX REG               @V4M0175 01056000
+         CLC   CPID-PSA(4,R14),WARM  IS WARM INDICATED IN ID   @V4M0144 01057000
+         BNE   MCHCKP         NO, DON'T CHANGE ID              @VA00881 01058000
+         MVC   CPID-PSA(4,R14),CPCP  MOVE ID IN FOR CHECKPOINT @V4M0144 01059000
+MCHCKP   EQU   *                                               @VA00881 01060000
+         LPSW  WAITMCH       ENTER DISABLED WAIT                        01061000
+         SPACE                                                          01062000
+EMSGMVC  MVC   MSGBUF(*-*),4(R3)                               @V200820 01063000
+         EJECT                                                          01064000
+*********************************************************************   01065000
+*        ROUTINE TO ENABLE ALL SOFT RECORDING                           01066000
+*********************************************************************   01067000
+DMKMCHMS RELOC                                                          01068000
+         CLI   CPUVERSN,X'FF' IS THIS A VIRTUAL MACHINE ?               01069000
+         BE    ALLOK          YES, RETURN TO THE SYSTEM                 01070000
+         STC   R2,MODFLAG1    SAVE MESSAGE INDICATOR           @V407510 01071000
+         MVI   STKOPSW,NO     INDICATE NORMAL EXIT             @V407510 01072000
+         STCTL R14,R14,CR14ENB       SAVE CONTROL REGISTER 14           01073000
+         CALL  DMKSCNFD       GO GET NEXT ARGUMENT BEGINNING ADDRESS    01074000
+         BNZ   MCH026         NO ARGUMENT IS SPECIFIED, GO PUT          01075000
+*                             ERROR MESSAGE                             01076000
+*                             (DMKMCH026)                               01077000
+         LR    R3,R0          GET THE LENGTH OF THE ARGUMENT            01078000
+         C     R3,F8          IS THE ARGUMENT LENGTH GREATER THAN 8     01079000
+         BH    MCH026         YES, GO PUT OUT ERROR MESSAGE             01080000
+         LA    R5,MESSTEXT    GET THE BEGINNING ADDRESS OF ARGUMENT     01081000
+*                             TEXTS                                     01082000
+         BCTR  R3,R0          SUBTRACT ONE FROM THE COUNT               01083000
+MCHCLC   EQU   *                                                        01084000
+         EX    R3,MCLC        COMPARE THE MESSAGE TEXT AGAINST THE      01085000
+*                             ARGUMENT TEXTS                            01086000
+         BE    MCHTEROC       YES, THE ARGUMENTS ARE THE SAME           01087000
+         TM    MODFLAG1,MOD1QUIT IS THE QUIET MESSAGE INDICATOR SET ?   01088000
+         BO    MCH003         YES, GO PUT OUT ERROR MESSAGE             01089000
+*                             (DMKMCH003)                               01090000
+         OI    MODFLAG1,MOD1QUIT SET THE QUIET MESSAGE INDICATOR        01091000
+         LA    R5,6(R5)       UPDATE ADDRESS TO THE NEXT MESSAGE TEXTS  01092000
+         B     MCHCLC         GO CHECK NEW ARGUMENT                     01093000
+*********************************************************************   01094000
+         SPACE 2                                                        01095000
+MCLC     CLC   0(0,R1),0(R5) ARE THE ARGUMENTS THE SAME ?               01096000
+         SPACE 2                                                        01097000
+***************************************************************@V407510 01098000
+MCHTEROC DS    0H                                              @V407510 01099000
+         MVC   CPROCA(LN2),BLANKS  BLANK PROCESSOR VALUE       @V407510 01100000
+         XC    PROCA,PROCA    CLEAR PROCESSOR ADDRESS          @V407510 01101000
+         MVI   SWTCH,BOTH     INITIALIZE SWTCH TO DEFAULT      @V407510 01102000
+         CALL  DMKSCNFD       GET NEXT PARAMETER               @V407510 01103000
+         BNZ   MSGSET         NONE SPECIFIED, USE DEFAULT      @V407510 01104000
+         C     R0,F2          LENGTH OF 2 REQUIRED             @V407510 01105000
+         BNE   MCH003         NOT EQ 2, ERROR                  @V407510 01106000
+         MVC   CPROCA(LN2),0(R1)  MOVE ADDRESS                 @V407510 01107000
+         CALL  DMKCVTDB       CONVERT TO DECIMAL               @V407510 01108000
+         BNZ   MCHMSG3        CONVERT NOT OK, ERROR            @V407510 01109000
+         STH   R1,PROCA       SAVE PROCESSOR ADDRESS           @V407510 01110000
+         MVI   SWTCH,THIS     SET UP FOR THIS PROCESSOR        @V407510 01111000
+         CH    R1,IPUADDR     THIS PROCESSOR SPECIFIED         @V407510 01112000
+         BE    MSGSET         YES, BRANCH                      @V407510 01113000
+         TM    APSTAT1,APUOPER  AP MODE?                       @V407510 01114000
+         BNO   MCHMSG3        NO, ERROR                        @V407510 01115000
+         MVI   SWTCH,OTHER    SET UP FOR OTHER PROCESSOR       @V407510 01116000
+         CH    R1,IPUADDRX    OTHER PROCESSOR SPECIFIED?       @V407510 01117000
+         BNE   MCHMSG3        NO, ERROR                        @V407510 01118000
+MSGSET   DS    0H                                              @V407510 01119000
+         LA    R2,MESSAGE     GET THE BEGINNING OF THE MESSAGE BUFFER   01120000
+         MVI   0(R2),X'40'    CLEAR THE BUFFER WITH                     01121000
+         MVC   1(M618L-1,R2),0(R2) BLANKS                      @V407510 01122000
+         MVC   0(13,R2),MAINST MOVE THE MAIN STORAGE MESSAGE IN BUFFER  01123000
+         LA    R5,13          CALCULATE THE MESSAGE LENGTH              01124000
+         TM    MODFLAG1,MOD1RETY IS THE RETRY MESSAGE INDICATOR ON ?    01125000
+         BZ    MCHSOFT        NO, GO SETUP OTHER PART OF MESSAGE        01126000
+         MVC   0(18,R2),INSTRUCT MOVE INSTRUCTION RETRY INTO BUFFER     01127000
+         LA    R5,18          CALCULATE THE MESSAGE LENGTH              01128000
+MCHSOFT  EQU   *                                                        01129000
+         LA    R3,0(R5,R2)    UPDATE MESSAGE BUFFER POINTER             01130000
+         MVC   0(7,R3),NOW1   MOVE NOW MESSAGE INTO BUFFER              01131000
+         LA    R5,7(R5)       CALCULATE THE MESSAGE LENGTH              01132000
+         LA    R3,0(R5,R2)  UPDATE MESSAGE BUFFER POINTER      @V407510 01133000
+         MVC   0(LN10,R3),QUIET MOVE QUIET MSG TO BUFFER       @V407510 01134000
+         LA    R5,10(R5)      CALCULATE THE MESSAGE LENGTH              01135000
+         TM    MODFLAG1,MOD1QUIT IS THE QUIET MESSAGE INDICATOR ON ?    01136000
+         BO    TESTC          YES, GO ENABLE/DISABLE RECORDING          01137000
+         MVC   0(LN11,R3),RECORD  MOVE RECORD MSG INTO BUFFER  @V407510 01138000
+         LA    R5,1(R5)       CALCULATE MESSAGE LENGTH         @V407510 01139000
+TESTC    DS    0H                                              @V407510 01140000
+         LA    R2,1(R5,R2)  UPDATE MESSAGE BUFFER PTR          @V407510 01141000
+         MVC   0(LN2,R2),CPROCA  MOVE PROCESSOR ADDR TO MSG    @V407510 01142000
+         L     R9,AMCHAREA    GET ADDR OF MCHAREA              @V407510 01143000
+         SR    R3,R3          CLEAR REGISTER 3 FOR MODEL ID             01144000
+         ICM   R3,1,MCHMODEL  GET THE MACHINE ID                        01145000
+         BZ    ALLOK          IF ZERO, NO SUPPORT FOR MODEL             01146000
+         TM    MODFLAG1,MOD1RETY IS THE RETRY MESSAGE INDICATED ?       01147000
+         BZ    MODEL(R3)      NO, GO TO THE MAIN STORAGE SECTION        01148000
+*                             FOR EACH MACHINE MODEL                    01149000
+         B     MC135138       GO AND CHECK THE MOD STATUS      @V386298 01150000
+MODEL    EQU   *                                                        01151000
+         B     ALLOK          GO TO THE EXITS SECTION                   01152000
+         B     MC135138       GOTO MAIN STO. SECT. FOR 135/138 @V386298 01153000
+         B     MC145148       GOTO MAIN STO. SECT. FOR 145/148 @V386298 01154000
+         B     MC15558        GO TO MAIN STORAGE SECTION FOR 155/158    01155000
+         B     MC16568        GO TO MAIN STORAGE SECTION FOR 165/168    01156000
+         B     MC331341      GO TO 4331/4341 PROCESSING        @V60A6B6 01156100
+MC145148 EQU   *                                               @V386298 01157000
+         TM    MODFLAG1,MOD1QUIT IS QUIT MESSAGE INDICATED ?            01158000
+         BO    MCQUIT         YES, GO ISSUE DIAGNOSE                    01159000
+         DC    X'8300'        DIAGNOSE TO                               01160000
+         DC    X'0008'        ENABLE ECC RECORDING                      01161000
+         B     ENBLR14        GO MASK ON THE RECOVERY REPORT            01162000
+MCQUIT   EQU   *                                                        01163000
+         DC    X'8300'        DIAGNOSE TO                               01164000
+         DC    X'000C'        DIABLE ECC RECORDING                      01165000
+         B     MCDISA         GO SET INDICATOR FOR QUIET                01166000
+MC15558  EQU   *                                                        01167000
+         CLI   SWTCH,OTHER    OTHER PROCESSOR SPECIFIED?       @V407510 01168000
+         BNE   MC558          NO, CONTINUE                     @V407510 01169000
+         LA    R6,ALLOK       SET UP TO EXIT                   @V407510 01170000
+         B     STKOPS         STACK CPEXBLOK                   @V407510 01171000
+MC558    DS    0H                                              @V407510 01172000
+         TM    MODFLAG1,MOD1QUIT IS THE QUIT MESSAGE INDICATED ?        01173000
+         BO    MCQUIT1        YES, GO ISSUE DIAGNOE                     01174000
+         DC    X'8300'        DIAGNOSE TO                               01175000
+         DC    S(ECCENA55)    ENABLE ECC RECORDING                      01176000
+         B     ENBLR14        GO MASK ON THE RECOVERY REPORT            01177000
+MCQUIT1  EQU   *                                                        01178000
+         DC    X'8300'        DIAGNOSE TO                               01179000
+         DC    S(ECCDIS55)    DISABLE ECC RECORDING                     01180000
+         B     MCDISA         GO SET INDICATOR FOR QUIET                01181000
+MC16568  EQU   *                                                        01182000
+         CLI   SWTCH,OTHER    OTHER PROCESSOR SPECIFIED?       @V407510 01183000
+         BNE   MC658          NO, CONTINUE                     @V407510 01184000
+         LA    R6,ALLOK       SET UP TO EXIT                   @V407510 01185000
+         B     STKOPS         STACK CPEXBLOK                   @V407510 01186000
+MC658    DS    0H                                              @V407510 01187000
+         TM    MODFLAG1,MOD1QUIT IS THE QUIET MESSAGE INDICATED ?       01188000
+         BO    MCQUIT2        YES, GO ISSUE DIAGNOSE                    01189000
+         DC    X'8300'        DIAGNOSE TO                               01190000
+         DC    S(ECCENA65)    ENABLE ECC RECORDING                      01191000
+         DC    X'8300'        DIAGNOSE TO                      @VA05036 01192000
+         DC    S(LITOUT65)    TURN OFF TEST LIGHT              @VA05036 01193000
+         B     ENBLR14        GO MASK ON THE RECOVERY REPORT            01194000
+MCQUIT2  EQU   *                                                        01195000
+         DC    X'8300'        DIAGNOSE TO                               01196000
+         DC    S(ECCDIS65)    DISABLE ECC RECORDING                     01197000
+         B     MCDISA         GO SET INDICATOR FOR QUIET                01198000
+MCH026   EQU   *                                                        01199000
+         LA    R2,26          INDICATE MESSAGE DMKMCH026                01200000
+         SR    R1,R1          CLEAR REGISTER 1                          01201000
+         B     MCHIDS         GO GET ID FOR MESSAGE NUMBER              01202000
+MCHMSG3  DS    0H                                              @V407510 01203000
+         LA    R0,LN2         SET UP LENGTH OF 2               @V407510 01204000
+         LA    R1,CPROCA      ADDRESS OF BAD PARM              @V407510 01205000
+MCH003   EQU   *                                                        01206000
+         LA    R2,3           INDICATE MESSAGE DMKMCH003                01207000
+MCHIDS   EQU   *                                                        01208000
+         ICM   R0,14,MCHID+3  GET MCH ID                                01209000
+         CALL  DMKERMSG       GO TO ERROR ROUTINE                       01210000
+         B     ALLOK                                                    01211000
+MCDISA   EQU   *                                                        01212000
+         NI    APSTAT4,X'FF'-RECMODE  SET ECC TO QUIET MODE    @VA07615 01213100
+         B     ENBLR          GO CLEAR SOFT COUNT FIELD                 01214000
+ENBLR14  EQU   *                                                        01215000
+         OI    APSTAT4,RECMODE     INDICATE ECC IN RECORD MODE @VA07615 01216100
+*                                    MODE                               01217000
+         B     ENBLR141       GO MASK ON THE RECOVERY REPORT            01218000
+MC135138 EQU   *                                               @V386298 01219000
+         CLI   SWTCH,OTHER    OTHER PROCESSOR SPECIFIED?       @V407510 01220000
+         BNE   MC358          NO, CONTINUE                     @V407510 01221000
+         LA    R6,ALLOK       SET UP TO EXIT                   @V407510 01222000
+         B     STKOPS         STACK CPEXBLOK                   @V407510 01223000
+MC358    DS    0H                                              @V407510 01224000
+         NI    CR14ENB,X'FF'-RECOVRPT CLEAR THE RECOVERY REPORT MASK    01225000
+         TM    MODFLAG1,MOD1QUIT IS THE QUIET MESSAGE INDICATED ?       01226000
+         BO    ENBLR          YES , GO CLEAR COUNT FIELD                01227000
+ENBLR141 EQU   *                                                        01228000
+         OI    CR14ENB,RECOVRPT SET THE RECOVERY REPORT MASK            01229000
+ENBLR    EQU   *                                                        01230000
+         XC    CPULIMIT,CPULIMIT  ZERO CPULIMIT                @V407510 01231000
+         LCTL  R14,R14,CR14ENB RESTORE CONTROL REGISTER 14              01232000
+         LA    R0,MCH618LN    TOTAL LENGTH OF DMKMCH618I       @V407510 01233000
+         LA    R1,MCH618      GET THE ADDRESS OF THE MESSSAGE           01234000
+         CALL  DMKQCNWT,PARM=OPERATOR+NORET                             01235000
+         CLI   SWTCH,BOTH    OTHER PROCESSOR SPECIFIED?        @V407510 01236000
+         BNE   STKCK          NO, FINISHED                     @V407510 01237000
+         BAL   R6,STKOPS      STACK CPEXBLOK                   @V407510 01238000
+MC331341 EQU   *             4331/4341 PROCESSING              @V60A6B6 01238100
+ALLOK    EQU   *                                                        01239000
+STKCK    DS    0H                                              @V407510 01240000
+         CLI   STKOPSW,YES    ENTRY FROM STKOPS?               @V407510 01241000
+         BE    MCEXIT         YES, RETURN TO DISPATCHER        @V407510 01242000
+         EXIT  (R0,R4)                                                  01243000
+*********************************************************************   01244000
+         EJECT                                                          01245000
+WAITMCH  DS    0D                                                       01246000
+         DC    X'0002',X'0000'  WAIT PSW, RUN SEREP            @V4M0175 01247000
+WAITCODE DC    X'00000001'    WAIT STATE CODE                  @V4M0175 01248000
+         SPACE                                                          01249000
+HARDPSW  DS    0D                                                       01250000
+         DC    X'000C0000'    ALLOW HARD MACHINE CHECKS                 01251000
+         DC    A(ENBHARD)                                               01252000
+MCHTERM1 DS    0D                                                       01253000
+         DC    X'000C0000'                                              01254000
+         DC    A(MCHTERM2)    ALLOW HARD MACHINE CHECKS IN TERM         01255000
+SPFOKPSW DS    0D                                                       01256000
+         DC    X'000C0000'                                              01257000
+         DC    A(SPFMSG)                                                01258000
+SPFDIE   DS    0D                                                       01259000
+         DC    X'000C0000'                                              01260000
+         DC    A(SPFTERMA)                                              01261000
+STGSVE   DS    0D                                                       01262000
+         DC    X'00080000'                                              01263000
+         DC    A(TERM)        ADDRESS OF THE SECONDARY HANDLER          01264000
+CR14MSK  DC    X'80400000'   MASK TO PREVENT SOFT MACHINE CHECKS        01265000
+*                             IN V=R AREA                               01266000
+*                             REFERENCE BITS                            01267000
+SAVECR14 DC    F'0'           SAVE AREA FOR CONTROL REGISTER 14         01268000
+MCNEWSV  DC    F'0'                                                     01269000
+CR14ENB  DC    F'0'           WORK AREA TO STORE CONTROL                01270000
+*                             REGISTER 14                               01271000
+TWOK     DC    H'2408'        LENGTH FOR STORAGE VALIDATION    @V60A6B6 01271100
+         DS    0F                                                       01271200
+MCHMASK  DC    X'00FFF800'    MASK TO ROUND TO 2K BOUNDARY     @V60A6B6 01271300
+**********************************************************************  01272000
+*                             REGISTER 14                               01273000
+CPEYED   DC    C'  CP/370'    PROGRAM ID FOR CP                         01274000
+MESSTEXT EQU   *                                                        01275000
+         DC    C'RECORD'                                                01276000
+         DC    C'QUIET'       MESSAGE TEXTS FOR THE MODE COMMAND        01277000
+HEADERFD DC     X'1065400000000000' MCH RECORD HEADER INFO.    @V5088AA 01278100
+**********************************************************************  01279000
+         EJECT                                                          01280000
+SWITCH   DC    X'00'          SWITCH FOR MAIN STORAGE EXERCISE RTN.     01281000
+MOD1RETY EQU   X'80'          MESSAGE INDICATOR FOR RETRY MESSAGE       01282000
+MOD1QUIT EQU   X'40'          MESSAGE INDICATOR FOR QUIET MESSAGE       01283000
+OFF      EQU   X'FF'          MASK TO TURN BIT OFF             @V407510 01284000
+CPULIMIT DC    F'0'           COUNT FIELD FOR SOFT ERRORS      @V407510 01285000
+SOFTCT   EQU   CPULIMIT+3     LOW BYTE OF CPULIMIT             @V407510 01286000
+MCHBASE  DS    0F             COMMON BASE VALUE                @V407510 01287000
+         DC    X'0'                                            @V407510 01288000
+         DC    AL3(DMKMCH)    DMKMCH BASE ADDRESS              @V407510 01289000
+WARM     DC    CL4'WARM'      CHARACTERS FOR CPID              @V4M0144 01290000
+CPCP     DC    CL4'CPCP'      CHARACTERS FOR CPID              @V4M0144 01291000
+         SPACE 2                                                        01292000
+*              DMKMCHMS DATA AREAS- SERIALIZED BY SYSTEM LOCK  @V407510 01293000
+         SPACE                                                          01294000
+WORK     DC    D'0'           WORK AREA FOR CONVERSION         @V407510 01295000
+WORKLO   EQU   WORK+6         SIGNIFICANT DIGITS AFTER UNPK    @V407510 01296000
+STKOPSW  DC    X'00'          ENTRY FLAG FOR DMKMCHMS          @V407510 01297000
+MODFLAG1 DC    X'0'           MESSAGE INDICATOR                @V407510 01298000
+PROCA    DC    H'0'           PROCESSOR ADDRESS CONVERTED      @V407510 01299000
+CPROCA   DC    CL2' '         PROCESSOR ADDRESS SPECIFIED      @V407510 01300000
+SWTCH    DC    X'0'           PROCESSOR INDICATOR SWITCH       @V407510 01301000
+         DS    0H                                              @V60A6B6 01301100
+**********************************************************************  01302000
+*                 THE DIAGNOSE SUPPORT FOR ALL                          01303000
+*                    THE MACHINE MODELS                                 01304000
+**********************************************************************  01305000
+         DS    0D                                                       01306000
+BUFDIA55 DC    X'0100D100'    DISABLE BUFFER FOR MODEL 155              01307000
+         DS    0D                                                       01308000
+BUFENA55 DC    X'0200D100'    ENABLE BUFFER FOR MODEL 155               01309000
+         DS    0D                                                       01310000
+ECCDIS55 DC    X'0300D100'    DISABLE ECC FOR MODEL 155                 01311000
+         DS    0D                                                       01312000
+ECCENA55 DC    X'0400D100'    ENABLE ECC FOR THE MODEL 155              01313000
+         DS    0D                                                       01314000
+BUFDIA65 DC    X'0300000000000000'  DISABLE BUFFER FOR MODEL 165        01315000
+BUFENA65 DC    X'0300002000000000'  ENABLE BUFFER FOR MODEL 165         01316000
+ECCDIS65 DC    X'0200000003000000'  DISABLE ECC FOR MODEL 165           01317000
+ECCENA65 DC    X'0200000000000000'  ENABLE ECC FOR MODEL 165            01318000
+LITOUT65 DC    X'0000000000000000' TURN OFF TEST LIGHT         @VA05036 01319000
+**********************************************************************  01320000
+MCHCODE  EQU   X'01'          WAIT STATE CODE FOR DMKMCH       @V4M0175 01321000
+         EJECT                                                          01322000
+*********************************************************************** 01323000
+*        EQUATES TO LOW CORE INFORMATION                                01324000
+**********************************************************************  01325000
+         SPACE                                                          01326000
+MCIC     EQU   232            MACHINE CHECK INTERRUPT CODE              01327000
+         SPACE                                                          01328000
+SUBCLASS EQU   232            SUBCLASS CODES                            01329000
+SDBIT    EQU   X'80'          SYSTEM DAMAGE BIT                         01330000
+PDBIT    EQU   X'40'          PROCESSING DAMAGE BIT                     01331000
+SRBIT    EQU   X'20'          SYSTEM RECOVERY BIT                       01332000
+TDBIT    EQU   X'10'          TIMER DAMAGE                              01333000
+CDBIT    EQU   X'08'          CLOCK DAMAGE                              01334000
+EDBIT    EQU   X'04'          EXTERNAL DAMAGE                           01335000
+ERBIT    EQU   X'02'          EXTERNAL RECOVERY (NOT USED)              01336000
+DGBIT    EQU   X'01'          DEGRADATION BIT                           01337000
+         SPACE                                                          01338000
+TENSE    EQU   233            TENSE CODES                               01339000
+BVBIT    EQU   X'02'          VALID RETRY CONDITION EXISTS              01340000
+DLBIT    EQU   X'01'          MACHINE CHECK CODE=OR'ED VALUE            01341000
+         SPACE                                                          01342000
+STOERR   EQU   234            STORAGE ERROR CODES,BITS 0-3              01343000
+SEBIT    EQU   X'80'          UNCORRECTED STORAGE ERROR                 01344000
+SCBIT    EQU   X'40'          CORRECTED STORAGE ERROR                   01345000
+PEBIT    EQU   X'20'          UNCORRECTED PROTECTION ERROR              01346000
+         SPACE                                                          01347000
+VALID1   EQU   234            PSW VALIDITY CODES, BITS 4-7              01348000
+WPBIT    EQU   X'08'          BITS 12-15 OF MC OLD PSW ARE VALID        01349000
+MSBIT    EQU   X'04'          SYSTEM MASK OF MC OLD PSW VALID           01350000
+PMBIT    EQU   X'02'          PROGRAM MASK OF MC OLD PSW VALID          01351000
+IABIT    EQU   X'01'          IAR OF MC OLD PSW IS VALID                01352000
+         SPACE                                                          01353000
+VALID2   EQU   235            MISC VALIDITY CODES,BITS 0-7              01354000
+FABIT    EQU   X'80'          FAILING STORAGE ADDRESS IS VALID          01355000
+RCBIT    EQU   X'40'          REGION CODE IS VALID (ECC OR CWA          01356000
+ECBIT    EQU   X'20'         EXT. DAMAGE REASON CODE VALID     @V5088AA 01356100
+FPBIT    EQU   X'10'          FP REGISTERS STORED ARE VALID             01357000
+GRBIT    EQU   X'08'          GP REGISTERS STORED ARE VALID             01358000
+CRBIT    EQU   X'04'          CONTROL REGISTERS STORED ARE VALID        01359000
+LGBIT    EQU   X'02'          EXTENDED LOGOUT AREA IS VALID             01360000
+STBIT    EQU   X'01'          INST. MODIFIED STORAGE IS VALID           01361000
+         SPACE                                                          01362000
+VALID3   EQU   236            RESERVED                                  01363000
+         SPACE                                                          01364000
+MCELL    EQU   238            EXTENDED LOGOUT LENGTH                    01365000
+         SPACE                                                          01366000
+RES2     EQU   240            RESERVED AREA 2                           01367000
+FSA      EQU   248            FAILING STORAGE ADDRESS                   01368000
+CWA      EQU   252            CONTROL WORD ADDRESS                      01369000
+ECCBITS  EQU   254            ERROR CORRECTION CODE BITS                01370000
+         SPACE                                                          01371000
+REGION   EQU   255            REGION CODE (FOR 145)                     01372000
+CSFATAL  EQU   X'08'          MULTI-BIT CONTROL STORAGE ERROR           01373000
+CSTHRESH EQU   X'04'          CONTROL STG. THRESHOLD EXCEEDED (145)     01374000
+CSRECOVR EQU   X'03'          SINGLE BIT FAILURE IN CONTROL STORAGE     01375000
+MSRECOVR EQU   X'02'          SINGLE BIT FAILURE IN MAIN STORAGE        01376000
+         SPACE                                                          01377000
+FLA      EQU   232            FIXED LOGOUT AREA                         01378000
+XD8      EQU   X'D8'          MACHINE CHECK CPU TIMER AREA     @VM08879 01379000
+PSWA     EQU   4              LENGTH OF ADDRESS IN PSW         @V407510 01380000
+LNADDR   EQU   4              LENGTH OF ADDRESS                @V407510 01381000
+ZERO     EQU   0              CONSTANT OF ZERO                 @V407510 01382000
+MCCR14   EQU   272            CR 14 IN LOG OUT AREA            @V407510 01383000
+MAXSOFT  EQU   12             MAXIMUM SOFT ERROR COUNT         @V407510 01384000
+L3B      EQU   7              STCM MASK FOR LOW 3 BYTES        @V407510 01385000
+ONE      EQU   1              DISPLACEMENT OF 1                @V407510 01386000
+LN11     EQU   11             LENGTH OF 11                     @V407510 01387000
+LN10     EQU   10             LENGTH OF 10                     @V407510 01388000
+LN2      EQU   2              LENGTH OF 2                      @V407510 01389000
+ZONE     EQU   X'F0'          ZONE USED FOR CONVERSION         @V407510 01390000
+BLANK    EQU   X'40'          BLANK CHARACTER                  @V407510 01391000
+BOTH     EQU   X'00'          NO PROCESSOR SPECIFIED           @V407510 01392000
+THIS     EQU   X'10'          THIS PROCESSOR SPECIFIED         @V407510 01393000
+OTHER    EQU   X'20'          OTHER PROCESSOR SPECIFIED        @V407510 01394000
+YES      EQU   X'80'          SPECIAL ENTRY FROM STKOPS        @V407510 01395000
+NO       EQU   X'00'          NORMAL ENTRY                     @V407510 01396000
+CMWP     EQU   1              PSW CMWP FIELD                   @V4M0144 01397000
+*********************************************************************** 01398000
+         EJECT                                                          01399000
+**********************************************************************  01400000
+         SPACE                                                          01401000
+         SPACE                                                          01402000
+         SPACE                                                          01403000
+         SPACE                                                          01404000
+MCMSGL   EQU   27                                                       01405000
+MCHMSG   DC    X'151515'                                                01406000
+MCHID    DC    C'DMKMCH6'                                               01407000
+MSGCDE   DC    C'10W '                                         @V4M0217 01408000
+         DC    C'MACHINE CHECK'                                         01409000
+MSGBUF   DC    CL35' '                                         @V4M0217 01410000
+MSGPROC  DC    2C' '          PROCESSOR ADDRESS                @V407510 01411000
+         DC    XL2'1515'      CONTROL CHARACTERS               @V4M0217 01412000
+MSGLN    EQU   *-MCHMSG       LENGTH OF MESSAGE                @V407510 01413000
+VMSGTA   DC    C'MACHINE CHECK; OPERATION TERMINATED'                   01414000
+VMSGT    EQU   *-VMSGTA                                                 01415000
+VMS19    DC    C'19I'                                                   01416000
+MSG2     DC    C'10W'                                          @V4M0217 01417000
+MSG2A    DC    X'15'                                                    01418000
+MSG2B    DC    C'; SUPERVISOR DAMAGE',X'1515'                           01419000
+MSG2C    DC    C'; EXTERNAL DAMAGE',X'1515'                    @VA08088 01419500
+MSG3     DC    C'11W'                                          @V4M0217 01420000
+MSG3A    DC    X'19'                                                    01421000
+MSG3B    DC    C'; SYSTEM INTEGRITY LOST',X'1515'                       01422000
+MSG4     DC    C'12W'                                                   01423000
+MSG4A    DC    X'1C'                                                    01424000
+MSG4B    DC    C'; TIMING FACILITIES DAMAGE',X'1515'                    01425000
+MSG8     DC    C'16I'                                                   01426000
+MSG8A    DC    C'; USER XXXXXXXX TERMINATED',X'1515'                    01427000
+MSG10B   DC    X'1515'                                                  01428000
+         DC    C'DMKMCH615I MACHINE CHECK RECORDING FAILURE',X'1515'    01429000
+MSG10L   EQU   *-MSG10B                                                 01430000
+MSG13    DC    C'14I'                                                   01431000
+MSG13B   DC    C'; DAMAGED PAGE NOW DELETED',X'1515'                    01432000
+MSG15    DC    C'13I SOFT MACHINE CHECK RECORDING DISABLED',X'1515'     01433000
+MSG16    DC    C'17I'                                                   01434000
+MSG16B   DC    C'; BUFFER OR DLAT DAMAGE',X'1515'                       01435000
+MSG16L   EQU   *-MSG16B       LENGTH OF DMKMCH616I             @V4M0200 01436000
+MCH618   DC    X'1515',C'DMKMCH618I '                                   01437000
+MCH618I  DC    CL40' '        MESSAGE BUFFER FOR MODE COMMAND  @V407510 01438000
+MCH618LN EQU   *-MCH618       TOTAL LENGTH OF DMKMCH618I       @V407510 01439000
+MAINST   DC    C'MAIN STORAGE '                                         01440000
+INSTRUCT DC    C'INSTRUCTION RETRY '                                    01441000
+NOW1     DC    C'NOW IN '                                               01442000
+QUIET    DC    C'QUIET MODE'                                            01443000
+RECORD   DC    C'RECORD MODE'                                           01444000
+MESSAGE  EQU   MCH618I                                                  01445000
+M618L    EQU   L'MCH618I      LENGTH OF MSG BUFFER             @V407510 01446000
+MSG17    DC    C'22W'                                          @V5088AA 01446100
+MSG17A   DC    X'1B'                                           @V5088AA 01446200
+MSG17B   DC    C'; MULTIPLE CHANNEL ERRORS',X'1515'            @V5088AA 01446300
+**********************************************************************  01447000
+         EJECT                                                          01448000
+         LTORG                                                          01449000
+         EJECT                                                          01450000
+         COPY MCHAREA                                          @V407510 01451000
+         COPY  MCRECORD                                                 01452000
+         COPY SAVE                                                      01453000
+         COPY  VMBLOK                                                   01454000
+         COPY  MICBLOK                                                  01455000
+         PSA                                                            01456000
+         COPY  CORE                                                     01457000
+         COPY  EQU                                                      01458000
+         COPY  RBLOKS                                                   01459000
+         COPY  DEVTYPES                                                 01460000
+         END   DMKMCH                                          @V200820 01461000

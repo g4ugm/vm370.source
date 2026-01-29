@@ -1,0 +1,918 @@
+ERS      TITLE 'DMSERS     (CMS)       VM/370 - RELEASE 6'              00001000
+         SPACE 2                                                        00002000
+*.                                                                      00003000
+* MODULE NAME:                                                          00006000
+*                                                                       00007000
+*        DMSERS (ERASE)                                                 00008000
+*                                                                       00009000
+* FUNCTION:                                                             00010000
+*                                                                       00011000
+*        TO  DELETE A  FILE  OR RELATED  GROUP  OF FILES  FROM          00012000
+*        READ-WRITE DISK(S).                                            00013000
+*                                                                       00014000
+* ATTRIBUTES:                                                           00015000
+*                                                                       00016000
+*      NUCLEUS RESIDENT                                                 00017000
+*                                                                       00018000
+* ENTRY POINTS:                                                         00019000
+*                                                                       00020000
+*      DMSERS                                                           00021000
+*                                                                       00022000
+* ENTRY CONDITIONS:                                                     00023000
+*                                                                       00024000
+*        LA   R1,PLIST     R1 MUST POINT TO P-LIST AS USUAL             00025000
+*                                                                       00026000
+*        THEN EITHER                                                    00027000
+*                                                                       00028000
+*        SVC  X'CA'        CALL ERASE VIA SVC                           00029000
+*        DC   AL4(ERROR)   ERROR-RETURN (FOR EXAMPLE, IF FILE           00030000
+*                            NOT FOUND)                                 00031000
+*        OR                                                             00032000
+*                                                                       00033000
+*        L    R14,AERASE   WHERE AERASE=V(DMSERS)                       00034000
+*        BALR R14,R15      CALL ERASE VIA BALR WITHIN NUCLEUS           00035000
+*        BNZ  ERROR        TRANSFER IF ERROR (FOR EXAMPLE, FILE         00036000
+*                            NOT FOUND)                                 00037000
+*                                                                       00038000
+*               R1 MUST POINT TO ERASE PARAMETER LIST:                  00039000
+*               DS    0F                                                00040000
+*                                                                       00041000
+*        PLIST  DC    CL8'ERASE'          (IMMATERIAL IF BALR-CALL)     00042000
+*               DC    CL8'     '          FILENAME OR '*'               00043000
+*               DC    CL8'     '          FILETYPE OR '*'               00044000
+*               DC    CL2'     '          FILEMODE OR 'BLANK'           00045000
+*               DC    CL8'('            START OF OPTIONS, IF SUPPLIED   00046000
+*               DC    CL8'TYPE'|'NOTYPE'                                00047000
+*               DC    X'FFFFFFFF'       DELIMITER (NECESSARY IF FM      00048000
+*                                       OMITTED)                        00049000
+*                                                                       00050000
+* EXIT CONDITIONS:                                                      00051000
+*                                                                       00052000
+*        NORMAL RETURN                                                  00053000
+*           R15=0       (AND CONDITION - CODE=0)                        00054000
+*                                                                       00055000
+*        ERROR RETURN                                                   00056000
+*           R15= NON-ZERO     (AND CONDITION CODE 2)                    00057000
+*           RETURN CODE 24 - PARAMETER LIST ERROR                       00058000
+*           RETURN CODE 25 -  INSUFFICIENT FREE STORAGE        @VA02374 00058500
+*           RETURN CODE 28 -  FILE NOT FOUND                            00059000
+*           RETURN CODE 36 -  DISK IS READ-ONLY                         00060000
+*                                                                       00061000
+* CALLS TO OTHER ROUTINES:                                              00062000
+*                                                                       00063000
+*        DMSLAD - LOCATE THE FIRST R/W DISK                             00064000
+*        DMSLAF - FIND THE ACTIVE FILE TABLE FOR THE GIVEN FILE         00065000
+*        DMSLAFFE -FIND THE NEXT ACTIVE FILE TABLE                      00066000
+*        DMSFNSD - 'DIE' IF PERMANENT ERROR READING DISK                00067000
+*        DMSFNST - TEMPORARILY CLOSE A FILE                             00068000
+*        DMSFREE - GET FREE STORAGE                                     00069000
+*        DMSFRET - RETURN FREE STORAGE                                  00070000
+*        DMSLFS - FIND THE SPECIFIED FILE STATUS TABLE                  00071000
+*        DMSTQQ - ALLOCATE A 200 BYTE DISK AREA                         00072000
+*        DMSDIOR -                                                      00073000
+*        DMSTRKW -                                                      00074000
+*        DMSAUD - CLOSE ALL FILES AND UPDATE THE USER FILE DIRECTORY    00075000
+*        DMSCWRB - TYPE A LINE TO THE TERMINAL                          00076000
+*        DMSTQQX -                                                      00077000
+*                                                                       00078000
+* EXTERNAL REFERENCES:                                                  00079000
+*                                                                       00080000
+*        ADT - ACTIVE DISK TABLE                                        00081000
+*        AFT - ACTIVE FILE TABLE                                        00082000
+*        FSTB - FILE STATUS TABLE BLOCK                                 00083000
+*        FVS - INFORMATION FOR THE FILE SYSTEM                          00084000
+*                                                                       00085000
+* TABLES/WORKAREAS:                                                     00086000
+*                                                                       00087000
+*        MISCELLANEOUS CONSTANTS                                        00088000
+*                                                                       00089000
+* REGISTER USAGE:                                                       00090000
+*                                                                       00091000
+*        GPR1  = A(PLIST)                                               00092000
+*        GPR12 = BASE REGISTER                                          00093000
+*        GPR13 = A(FVS)                                                 00094000
+*                                                                       00095000
+* NOTES:                                                                00096000
+*                                                                       00097000
+* |      ERASE IS TREATED AS A "COMMAND" OR A "FUNCTION"                00097100
+* |      ACCORDING TO THE HIGH-ORDER BYTE OF R1 AT INPUT, VIZ:          00097200
+* |      IF = X'0C', IT WAS ISSUED AS A COMMAND FROM DMSINT.            00097300
+* |      IF = X'0D', IT WAS ISSUED FROM AN EXEC FILE (DMSEXT),          00097400
+* |            WITH "&CONTROL" SET TO EITHER "CMS" OR "ALL".            00097500
+* |      IF = X'0E', IT WAS ISSUED FROM AN EXEC FILE (DMSEXT),          00097600
+* |            WITH "&CONTROL OFF" IN EFFECT.                           00097700
+* |      IF < X'0C' OR > X'0E', IT IS ASSUMED TO BE A FUNCTION.         00097800
+*                                                                       00097900
+* |      IF DMSERS IS CALLED AS A FUNCTION, THERE IS NO CHECK FOR       00098000
+* |      THE "(TYPE" OPTION, AND ALL ERROR MESSAGES ARE OMITTED.        00098100
+*                                                                       00098200
+* |      ALSO, IF ERASE IS CALLED FROM EXEC WITH "&CONTROL OFF" IN      00098300
+* |      EFFECT, THE "FILE NOT FOUND" ERROR MESSAGE IS OMITTED.         00098400
+*                                                                       00099000
+* OPERATION:                                                            00100000
+*                                                                       00101000
+*        DMSERS CHECKS  THE PARAMETER LIST  FOR ERRORS  BY THE          00102000
+*        CALLER.  THE FILENAME                                          00103000
+*        AND FILETYPE MUST  EACH BE GIVEN, OR  ELSE A ASTERISK          00104000
+*        IN  PLACE OF  FILENAME OR  FILETYPE  TO INDICATE  ALL          00105000
+*        NAMES AND/OR ALL TYPES.  THE  FILEMODE MAY BE OMITTED          00106000
+*        IN WHICH CASE  THE FIRST READ-WRITE DISK  IS ASSUMED.          00107000
+*        IF NOT OMITTED, THE FILEMODE  MUST BE ALPHABETIC.  IF          00108000
+*        ALPHABETIC, A MODE NUMBER IS ACCEPTABLE.                       00109000
+*                                                                       00110000
+*        FOR EXAMPLE,  A CALL OF ERASE  * TEXT A5  WOULD ERASE          00111000
+*        ALL TEXT FILES  ON THE A-DISK THAT HAD  A MODE NUMBER          00112000
+*        OF 5.  ALL OTHER TEXT FILES ON ANY DISKS WOULD REMAIN          00113000
+*        INTACT, AND ALL OTHER A5 FILES WOULD REMAIN ALSO.              00114000
+*                                                                       00115000
+*        IF ANY  ERRORS ARE  DETECTED IN  THE PARAMETER  LIST,          00116000
+*        ERROR 1 IS RETURNED, AND NOTHING IS ERASED.                    00117000
+*                                                                       00118000
+*        AFTER  CHECKING   THE  PARAMETER  LIST   AND  SETTING          00119000
+*        FLAGBITS AS NEEDED, DMSERS CHECKS FOR A                        00120000
+*        GIVEN  FILE  AND  DELETES  IT,  IF  FOUND, USING  THE          00121000
+*        FOLLOWING PROCEDURE:                                           00122000
+*                                                                       00123000
+*      1.   DMSLAF  IS CALLED  TO DETERMINE  IF    THE   FILE           00124000
+*           TO BE  ERASED IS  STILL ACTIVE -  THAT IS,  IN THE          00125000
+*           ACTIVE FILE TABLE (AFT).  IF IT IS (ONLY A FILE ON          00126000
+*           A READ-WRITE DISK IS  ACCEPTABLE, OF COURSE), THEN          00127000
+*           IT IS TEMPORARILY CLOSED VIA A CALL TO EFINIS IN            00128000
+*           THE DMSFNT ROUTINE, WHICH  PERFORMS JUST ENOUGH OF          00129000
+*           THE NORMAL  CLOSING STEPS ORDINARILY  PERFORMED BY          00130000
+*           DMSFNS  TO  PERMIT  THE FILE  TO  BE  SUCCESSFULLY          00131000
+*           ERASED. PROCEEDS                                            00132000
+*           THEN TO STEP 3 BELOW.                                       00133000
+*                                                                       00134000
+*      2.   IF NOT FOUND  BY DMSLAF, THEN DMSERS  CALLS DMSLFS          00135000
+*           TO FIND THE FILE.  IF NOT FOUND, EXIT IS MADE FROM          00136000
+*           DMSERS AS DESCRIBED IN STEP 14 BELOW.                       00137000
+*                                                                       00138000
+*      3.   WHEN THE FILE HAS BEEN FOUND EITHER BY DMSLAF (AND          00139000
+*           DMSFNSE CALLED),  OR BY  DMSLFSW, THEN  DMSFNST IS          00140000
+*           CALLED TO  TEMPORARILY CLOSE ALL OUTPUT  FILES FOR          00141000
+*           THIS                                                        00142000
+*           PARTICULAR   DISK   (UNLESS   THIS   WAS   ALREADY          00143000
+*           ACCOMPLISHED BY AN EARLIER  EXCURSION THROUGH THIS          00144000
+*           PROCEDURE FOR ANOTHER FILE ON THE SAME DISK).               00145000
+*                                                                       00146000
+*      4.   DMSERS THEN  CHECKS THE  TYPE OPTION  FLAG BIT  TO          00147000
+*           DETERMINE IF THE USER SPECIFIED                             00148000
+*           THAT THE IDENTIFIER(S) OF THE FILE(S) BEING ERASED          00149000
+*           ARE TO BE TYPED TO THE CONSOLE.                             00150000
+*           IF THE BIT IS ON, THE PLIST  IS SET UP, AND A CALL          00151000
+*           IS MADE TO DMSCWR.                                          00152000
+*                                                                       00153000
+*      5.   BEFORE RELEASING ANY TRACKS  BELONGING TO THE FILE          00154000
+*           THAT HAS BEEN FOUND, DMSERS  CALLS A SPECIAL ENTRY          00155000
+*           IN THE  DMSAUD ROUTINE  TO RESERVE ENOUGH   DISK            00156000
+*           RECORDS FOR  A NEW  FILE DIRECTORY  TO BE  UPDATED          00157000
+*           WHEN THE FILE HAS BEEN  ERASED.  THIS PROCEDURE IS          00158000
+*           PART OF CMS'S DOUBLE DIRECTORY SCHEME, AND ENSURES          00159000
+*           THAT THE  FILE DIRECTORY FOR  THE DISK  FROM WHICH          00160000
+*           THE FILE IS BEING ERASED  IS UPDATED WHEN AND ONLY          00161000
+*           WHEN THE ERASE HAS BEEN  COMPLETED. (IF ANY SYSTEM          00162000
+*           MALFUNCTION  OR USER  INTERVENTION INTERRUPTS  THE          00163000
+*           PROCESS BEFORE COMPLETION, THE  OLD FILE DIRECTORY          00164000
+*           AND THE FILE BEING ERASED ARE BOTH STILL INTACT.)           00165000
+*                                                                       00166000
+*      6.   THEN (UNLESS IT IS  ALREADY AVAILABLE), 1000 BYTES          00167000
+*           OF FREE STORAGE ARE OBTAINED VIA                            00168000
+*           DMSFREE, FOR USE IN READING IN THE FIRST AND OTHER          00169000
+*           (IF ANY) CHAIN LINKS OF THE FILE.                           00170000
+*                                                                       00171000
+*      7.   NEXT THE FIRST CHAIN LINK OF THE FILE IS READ INTO          00172000
+*           CORE, INTO THE FIRST 200 BYTES OF                           00173000
+*           FREE STORAGE AREA, VIA DMSDIOR.                             00174000
+*                                                                       00175000
+*      8.   THE DATA BLOCKS POINTED TO BY THE FIRST CHAIN LINK          00176000
+*           ARE THEN RELEASED VIA DMSTRKX, AND THE FIRST CHAIN          00177000
+*           LINK  ITSELF VIA  DMSTQQX  (THE  FIRST CHAIN  LINK          00178000
+*           REMAINING IN CORE, HOWEVER).                                00179000
+*                                                                       00180000
+*      9.   IF ANY DATA BLOCKS REMAIN, ACCORDING TO THE FSTDBC          00181000
+*           DATA-BLOCK-COUNT IN THE FST ENTRY, THEN ADDITIONAL          00182000
+*           CHAIN LINKS ARE  READ INTO CORE, AS  POINTED TO BY          00183000
+*           THE FIRST CHAIN LINK.  FOR EACH OF THESE NTH CHAIN          00184000
+*           LINKS, THE DATA BLOCKS POINTED TO THEREBY ARE               00185000
+*           RELEASED  VIA DMSTRKX,  AND  THEN  THE CHAIN  LINK          00186000
+*           ITSELF.  THIS PROCESS CONTINUES, WITH                       00187000
+*           A COUNT OF DATA BLOCKS RETURNED BEING DECREMENTED,          00188000
+*           UNTIL THERE ARE NONE LEFT,  OR ALL AVAILABLE CHAIN          00189000
+*           LINKS HAVE BEEN EXHAUSTED.                                  00190000
+*                                                                       00191000
+*      10.  AT THIS  POINT, ALL  DATA BLOCKS  AND CHAIN  LINKS          00192000
+*           HAVE BEEN GIVEN BACK TO THE QMSK AND                        00193000
+*           QQMSK VIA APPROPRIATE CALLS TO DMSTRKX AND THE ONE          00194000
+*           CALL TO DMSTQQX.  NOW A CHECK IS MADE                       00195000
+*           TO SEE IF PERCHANCE THE FILE BEING ERASED  HAPPENS          00196000
+*           TO BE CONTAINED IN STATEFST.  IF SO,                        00197000
+*           THE 48  BYTES AT STATEFST  ARE CLEARED  TO REFLECT          00198000
+*           THE DELETION OF THE GIVEN FILE.  (NOTE - DMSBRD             00199000
+*           UTILIZES   THE   STATEFST  INFORMATION   IN   SOME          00200000
+*           CIRCUMSTANCES; THUS  IT MUST BE EITHER  CORRECT OR          00201000
+*           NULL.)                                                      00202000
+*                                                                       00203000
+*      11.  NEXT  PROVISIONS   ARE  MADE   TO  KEEP   THE  FST          00204000
+*           HYPERBLOCKS COMPACTED,  FOR THE DISK ON  WHICH THE          00205000
+*           FILE WAS FOUND  AND ERASED.  IN THIS  PROCESS, THE          00206000
+*           LAST FST ENTRY  FOR THE DISK INVOLVED  IS MOVED TO          00207000
+*           WHERE THE FST ENTRY WAS FOR  THE FILE THAT WE JUST          00208000
+*           ERASED, AND THE                                             00209000
+*           PLACE FROM WHICH IT WAS MOVED IS CLEARED.  A CHECK          00210000
+*           IS MADE OF THE ACTIVE FILE TABLE VIA DMSLAFNX               00211000
+*           IN CASE  AN ACTIVE FILE  ENTRY POINTS TO  THE FILE          00212000
+*           MOVED, IN WHICH CASE THE POINTER IS CORRECTED; THE          00213000
+*           POINTER FOLLOWING  STATEFST IS  ALSO CHECKED,  AND          00214000
+*           CORRECTED  IF   NECESSARY.   IN  ANY   EVENT,  THE          00215000
+*           COMPACTING  IS  CAREFULLY ACCOMPLISHED,  WITH  ALL          00216000
+*           POINTERS, DISPLACEMENTS, BLOCK COUNTS, ETC., BEING          00217000
+*           CORRECTED AS NECESSARY.                                     00218000
+*                                                                       00219000
+*      12.  FINALLY,  A CALL  TO THE  OTHER  ENTRY  OF DMSAUD           00220000
+*           IS  MADE TO COMPLETE THE  UPDATING OF                       00221000
+*           THE FILE DIRECTORY FOR THE DISK INVOLVED.                   00223000
+*                                                                       00224000
+*      13.  AT THIS  POINT, IF THE  ENTIRE FST  HYPERBLOCK AND          00225000
+*           THE  LAST FST  ENTRY IN  THE PRECEDING  HYPERBLOCK          00226000
+*           HAVE  ALL BECOME  CLEAR,  THE  LAST HYPERBLOCK  IS          00227000
+*           RETURNED  TO FREE  STORAGE, AND  ALL POINTERS  AND          00228000
+*           COUNTS CORRECTED  ACCORDINGLY.  (THIS  IS DONE  TO          00229000
+*           AVOID  KEEPING A  NUMBER OF  EMPTY HYPERBLOCKS  IN          00230000
+*           CORE IN CASE A LARGE NUMBER OF FILES ARE ERASED.)           00231000
+*                                                                       00232000
+*      14.  FINALLY, THE ENTIRE PROCEDURE IS REPEATED STARTING          00233000
+*           AT STEP  1, IF  THE PARAMETER  LIST SPECIFIED  ALL          00234000
+*           NAMES, TYPES, OR MODES.                                     00235000
+*                                                                       00236000
+*      15.  WHEN  ALL APPROPRIATE  ERASING (IF  ANY) HAS  BEEN          00237000
+*           COMPLETED, DMSERS RETURNS THE 1000-BYTE                     00238000
+*           BUFFER TO FREE  STORAGE, AND EXISTS TO  THE CALLER          00239000
+*           WITH THE APPROPRIATE ERROR CODE.                            00240000
+*                                                                       00241000
+*        IF NO  FILES AT  ALL WERE  ERASED, DMSERS  RETURNS AN          00242000
+*        ERROR CODE 2, BUT WITHOUT  AN ERROR MESSAGE. (SEVERAL          00243000
+*        SYSTEM  PROGRAMS   CALL  DMSERS   TO  ELIMINATE   OLD          00244000
+*        LISTINGS, OLD  TEXT FILES, ETC.,  IN CASE  THEY MIGHT          00245000
+*        EXIST, SO THAT AN ERROR MESSAGE FOR FILE NOT FOUND IN          00246000
+*        DMSERS ITSELF WOULD BE IMPRACTICAL.)                           00247000
+*                                                                       00248000
+*        SEVERAL ERROR CONDITIONS ARE  DETECTED BY DMSERS.  ON          00249000
+*        ONE OF THESE,  A PERMANENT I/O ERROR IN  READING IN A          00250000
+*        CHAIN  LINK  DUE  TO  HARDWARE  DISK  ERRORS,  DMSERS          00251000
+*        PURPOSELY INVOKES                                              00252000
+*        THE CODE  AT DMSFNSD  (WITHIN THE  FINIS COMMAND)  TO          00253000
+*        LEAVE THE FILE DIRECTORY INTACT UNTIL                          00254000
+*        THE DISK ERROR CAN BE CORRECTED.                               00255000
+*                                                                       00256000
+*        ON ALL  OTHERS, WHEN  THE ERROR  IS DETECTED,  DMSERS          00257000
+*        CEASES TO GIVE BACK RECORDS USING                              00258000
+*        DMSTKX  AND/OR DMSTQQX,  BUT  DELETES  THE FILES  AND          00259000
+*        COMPACTS THE DIRECTORY AS USUAL.  AN ERROR 3 IS GIVEN          00260000
+*        ON EXIT, WHEN DMSERS IS FINISHED.                              00261000
+*                                                                       00262000
+*        THIS FEATURE MAKES IT FEASIBLE TO ERASE A FAULTY FILE          00263000
+*        FROM   ONE'S   DIRECTORY  WITHOUT   ENDANGERING   THE          00264000
+*        INTEGRITY OF OTHER FILES ON THE SAME DISK.                     00265000
+*                                                                       00266000
+*.                                                                      00267000
+         EJECT                                                          00268000
+DMSERS   START 0                                                        00269000
+ERASE    EQU   *                                                        00270000
+         SPACE                                                          00271000
+         ENTRY ERASE                                                    00272000
+         EXTRN DISKDIE                                                  00273000
+         SPACE                                                          00274000
+         USING NUCON,R0                                                 00275000
+         L     R15,AFVS       A(FVS) INTO R15                           00277000
+         USING FVSECT,R15                                               00278000
+         STM   R0,R14,REGSAV1 SAVE REGISTERS.                           00279000
+         DROP  R15                                                      00280000
+         LR    R13,R15        REFERENCE FVS INFO.                       00281000
+         USING FVSECT,R13                                               00282000
+         BALR  R12,0          ESTABLISH OUR OWN ADDRESSIBILITY          00283000
+         SPACE                                                          00284000
+         USING *,R12                                                    00285000
+         OI    UFDBUSY,ERBIT  SET OUR BIT IN THE UFDBUSY FLAG.          00286000
+         XC    FVSERAS0(12),FVSERAS0    CLEAR 3 WORDS OF ERASE STORAGE, 00287000
+         MVI   ERSFLAG,QUIET  DEFAULT FLAG FOR A FUNCTION CALL @VA01154 00288100
+         LA    R1,0(,R1)      MAKE PLIST REGISTER PRESENTABLE.          00289000
+         ST    R1,FVSERAS1    STORE R1 FOR USE BY ACTLKP & FSTLKP.      00290000
+         MVI   ERRCOD1,00     INITIALIZE RETURN CODE TO ZERO.           00291000
+         CLI   REGSAV1+4,X'0C' CALLED AS COMMAND FROM "INIT" ? @VA01154 00292100
+         BL    PRESCAN         IF < X'0C', TREAT AS A FUNCTION @VA01154 00292200
+         CLI   REGSAV1+4,X'0E' CALLED AS COMMAND FROM "EXEC" ? @VA01154 00292300
+         BH    PRESCAN         IF > X'0E', TREAT AS A FUNCTION @VA01154 00292400
+         MVI   ERSFLAG,00      CLEAR FLAG IF IT'S A "COMMAND"  @VA01154 00292500
+* SCAN FOR PARAMETER LIST ERRORS                                        00295000
+PRESCAN  LA    R2,ERR1        INITIALIZE ERROR PATH.                    00296000
+         LA    R3,PARMCKN     AND THE CONTINUATION PATH.                00297000
+         BALR  R6,0           MIGHT AS WELL MARK THE SPOT.              00298000
+SCAN     LA    R1,8(,R1)      INCREMENT THE PLIST POINTER.              00299000
+         CLI   0(R1),X'FF'    END OF PARAMETERS?                        00300000
+         BCR   8,R2           YES.  THEN, DONE WITH SCAN.               00301000
+         CLI   0(R1),C'('     IS THERE AN OPTION LIST?                  00302000
+         BE    OPTSCAN        YES.  GO DECIPHER IT.                     00303000
+         BR    R3             GO TO THE PROPER ROUTINE.                 00304000
+         EJECT                                                          00305000
+PARMCKN  LA    R2,ERR1        RESET ERROR PATH.                         00306000
+         LA    R3,PARMCKT     AND CONTINUATION PATH.                    00307000
+         LA    R4,ERR2        AND ALSO BE READY FOR JUNK FILEID.        00308000
+         BAL   R5,CKSTAR      EVALUATE FILENAME.                        00309000
+         OI    ERSFLAG,ALLNAMES    SIGNAL ANYTHING WILL DO.             00310000
+         BR    R6             CONTINUE.                                 00311000
+         SPACE                                                          00312000
+PARMCKT  LA    R2,CHECKALL    SET CONTINUED...                          00313000
+         LA    R3,PARMCKM     ...SCAN PATHS.                            00314000
+         BAL   R5,CKSTAR      EVALUATE FILETYPE.                        00315000
+         OI    ERSFLAG,ALLTYPES    ANYTHING GOES.                       00316000
+         BR    R6             CONTINUE.                                 00317000
+         SPACE                                                          00318000
+PARMCKM  LA    R2,CHECKALL    RESET CONTINUATION PATH.                  00319000
+         LA    R3,ERR3        AND ERROR PATH.                           00320000
+         LA    R4,ERR2        AND THE OTHER ONE                   P1035 00321000
+         BAL   R5,CKSTAR      EVALUATE FILEMODE.                        00322000
+         OI    ERSFLAG,ALLMODES    ANYOLD MODE IS FINE.                 00323000
+         TM    ERSFLAG,ALLNAMES+ALLTYPES+ALLMODES                       00324000
+         BO    ERR6           '* * *' IS NOT ALLOWED.                   00325000
+         CLI   0(R1),C'*'     WAS MODE AN ASTERISK?                     00326000
+         BNE   CKLET          BETTER VERIFY IT THEN.                    00327000
+         TM    ERSFLAG,QUIET  WAS THIS A FUNCTION CALL?                 00328000
+         BCR   1,R2           ALL DONE IF SO.                           00329000
+         BR    R6             GO LOOK AT NEXT PARAMETER (IF ANY)        00330000
+CKLET    LA    R4,ERR2D       SET BADMODE VECTOR                  V0006 00331100
+         CLI   0(R1),C'A'     MAKE SURE THAT MODE IS              V0006 00331150
+         BCR   4,R4           LESS THAN OR EQUAL TO 'Z',                00332000
+         CLI   0(R1),C'Z'     GREATER THAN OR EQUAL TO 'A'              00333000
+         BCR   2,R4           AND NOT IN THE RANGE                      00334000
+         CLI   0(R1),C'H'     'H' TO 'X'.                               00335000
+         BL    CKNUM          OTHERWISE, THIS REPRESENTS                00336000
+         CLI   0(R1),C'Y'     AN ERROR                                  00337000
+         BCR   4,R4           CONDITION.                                00338000
+CKNUM    CLI   1(R1),C' '     IS ONLY A MODE LETTER SPECIFIED?          00339000
+         BNE   MODECK         CORRECT.                                  00340000
+         TM    ERSFLAG,ALLNAMES+ALLTYPES     '* *' ALREADY?             00341000
+         BO    ERR6           NOT ALLOWED.                              00342000
+         TM    ERSFLAG,QUIET  IS THIS A FUNCTION CALL?                  00343000
+         BCR   1,R2           IF SO, WE'RE DONE.                        00344000
+         BR    R6             CONTINUE.                                 00345000
+MODECK   CLI   1(R1),C'0'     MAKE SURE THAT THE MODENUMBER IS          00346000
+         BCR   4,R4           NOT LESS THAN 0                           00347000
+         CLI   1(R1),C'5'     OR                                        00348000
+         BCR   2,R4           GREATER THAN 5.                           00349000
+         TM    ERSFLAG,QUIET  (UNLESS CALLED AS                         00350000
+         BCR   1,R2               A FUNCTION)                           00351000
+         CLI   2(R1),C' '     OR MORE THAN 2 CHARACTERS.                00352000
+         BCR   7,R4           OTHERWISE, THESE ALSO                     00353000
+         BR    R6             WILL BE ERRORS.                           00354000
+         SPACE                                                          00355000
+CKSTAR   CLI   0(R1),C'*'     IS THERE AN ASTERISK?                     00356000
+         BNE   4(,R5)         NO.  RETURN.                              00357000
+         CLI   1(R1),C' '     MUST BE FOLLOWED BY A BLANK.              00358000
+         BCR   8,R5           OKAY.                                     00359000
+         BR    R4             ERROR                                     00360000
+         SPACE                                                          00361000
+OPTSCAN  L     R2,FVSERAS1    GET PLIST POINTER.                        00362000
+         LA    R2,24(,R2)     GET REASONABLE POSITION FOR PARENTHESIS.  00363000
+         CR    R1,R2          HOW ARE WE DOING?                         00364000
+         BL    ERR1           BADLY.                                    00365000
+         CLI   8(R1),X'FF'    IS IT A BARE PARENTHESIS?                 00366000
+         BE    CHECKALL       YES, THEN WE ARE DONE.                    00367000
+         LA    R5,7           GET THE LENGTH OF AN OPTION.              00368000
+         LA    R1,8(,R1)      POINT TO THE OPTION SUPPLIED.             00369000
+         LA    R3,OPTIONS-8   FIND THE OPTION TABLE (OFFSET A LITTLE).  00370000
+         LA    R4,NUMOPTS     GET THE NUMBER OF OPTIONS.                00371000
+         LR    R2,R1          MAKE A COPY OF THE POINTER.               00372000
+CKBLANK  LA    R2,1(,R2)      POINT INTO THE FIELD.                     00373000
+         CLI   0(R2),C' '     HAVE WE FOUND A BLANK?                    00374000
+         BE    GOTLN          YES.  THEN LET'S GO ON.                   00375000
+         BCT   R5,CKBLANK     KEEP TRYING.                              00376000
+GOTLN    SR    R2,R1          GOT THE LENGTH BY NOW.                    00377000
+         BCTR  R2,0           BUT IT'S TOO HIGH BY 1.                   00378000
+CKNXT    LA    R3,8(,R3)      POINT INTO THE OPTION TABLE.              00379000
+         EX    R2,CKMATCH     COMPARE SOMETHING AGAINST SOMETHING ELSE. 00380000
+         BE    OPTFND         WE GOT A MATCH!                           00381000
+         BCT   R4,CKNXT       BETTER LUCK NEXT TIME.                    00382000
+         B     ERR5           THERE IS NO NEXT TIME.                    00383000
+         SPACE                                                          00384000
+CKMATCH  CLC   0(*-*,R3),0(R1)                                          00385000
+         SPACE                                                          00386000
+OPTFND   CLI   0(R1),C'T'     WAS IT TYPE (ONLY 'T' SO FAR)?            00387000
+         BNE   PARTDONE       NO, SO DON'T SET THE FLAG.                00388000
+         OI    ERSFLAG,TYPEM  FLAG THAT THE USER WANTS TO WATCH.        00389000
+PARTDONE LA    R1,8(,R1)      CHECK FOR ADDITIONAL PARAMETERS.          00390000
+         CLI   0(R1),X'FF'    ARE THERE ANY?                            00391000
+         BE    CHECKALL       NO, THEN WE ARE DONE.                     00392000
+         CLI   0(R1),C')'     DID HE BALANCE HIS PARENTHESES?           00393000
+         BNE   ERR3           WITH SOMETHING WEIRD, APPERENTLY.         00394000
+         LA    R1,8(,R1)      ANYTHING BEYOND THIS SYNTACTIC ELEGANCE?  00395000
+         CLI   0(R1),X'FF'    WELL?                                     00396000
+         BNE   ERR3           YES, BUT CAN'T IMAGINE WHAT.              00397000
+CHECKALL TM    ERSFLAG,ALLNAMES+ALLTYPES+ALLMODES '* * *'?              00398000
+         BO    ERR6           NOT ALLOWED.                              00399000
+CKM      L     R1,FVSERAS1    GET STARTING ADDRESS OF THE PLIST.        00400000
+         TM    ERSFLAG,ALLMODES    WAS MODE AN ASTERISK?                00401000
+         BO    MAINLOOP       DON'T WORRY, IF SO.                       00402000
+         CLI   24(R1),C'A'    WAS IT A PARENTHESIS?                     00403000
+         BL    CKA            MOST LIKELY.                              00404000
+         CLI   24(R1),C'Z'    OR POSSIBLY A FENCE?                      00405000
+         BNH   MAINLOOP       PROBABLY  NOT.                            00406000
+CKA      TM    ERSFLAG,ALLNAMES+ALLTYPES     WAS IT ' * * '?            00407000
+         BO    ERR6           NOT ALLOWED.                              00408000
+         OI    ERSFLAG,FRSTONLY        SET APPROPRIATE BIT        P0589 00410000
+         LA    R1,DMODE-24    POINT TO THE DEFAULT MODE-LETTER.   V0268 00411100
+         L     R15,=V(DMSLADW)     CALL ADTLKP TO FIND                  00412000
+         BALR  R14,R15        THE FIRST READ-WRITE DISK.                00413000
+         BNZ   ERR2X                                              V0268 00414100
+         ST    R1,ADTADD      STORE ADT ADDRESS IN A HANDY PLACE.       00419000
+         SPACE                                                          00420000
+MAINLOOP SR    R0,R0          R0=0 TO SEARCH FROM THE BEGINNING         00421000
+ERAS02   L     R1,FVSERAS1    SEARCH ACTIVE-TABLE                       00422000
+         L     R15,AACTLKP    CALL ACTLKP                               00423000
+         BALR  R14,R15        ...                                       00424000
+         BZ    FOUND1         BRANCH IF ACTLKP FOUND IT.                00425000
+         LM    R0,R1,FVSERAS0 IF NOT, RE-LOAD R0 AND R1 AND             00426000
+         L     R15,=V(DMSLFSW)         CALL 'FSTLKW'                    00427000
+         BALR  R14,R15        ...                                       00428000
+         BZ    FOUND2         'FOUND' IF CONDITION-CODE = 0             00429000
+*                                                                       00430000
+ERAS02A  TM    ERSFLAG,UPNEED    UPDATE OF UFD NEEDED ?                 00431000
+         BZ    ERAS04         TRF IF NOT.                               00432000
+ERAS03   L     R0,FVSERAS0    A (ACTIVE-DISK-TABLE) INTO R0,            00433000
+         SR    R1,R1          ZERO OUT A REGISTER.                V0636 00434100
+         BCTR  R1,0           NOW, MAKE IT NEGATIVE.              V0636 00434200
+         L     R15,AUPDISK    FINISH UPDATING THE DIRECTORY             00435000
+         BALR  R14,R15        ...                                       00436000
+*                                                                       00437000
+*        GIVE BACK FREE STORAGE IF WE USED ANY ...                      00438000
+ERAS04   L     R1,FVSERAS2    GET ADDRESS OF FREE STORAGE.              00439000
+         LTR   R1,R1          DID WE USE ANY FREE STORAGE AT ALL ?      00440000
+         BZ    ERR2           (NOTHING ERASED)                          00441000
+* CALL FRET TO RELEASE 1000 BYTES                                       00442000
+         LA    R0,125         SET THE NUMBER OF DWORDS.           V0636 00443100
+         DMSFRET DWORDS=(0),LOC=(1),TYPCALL=BALR                  V0636 00443200
+         L     R15,ERRCOD1-3  ERROR-CODE (0 IF ALL WENT WELL) INTO R15  00444000
+*                                                                       00445000
+EXIT     KXCHK ERBIT          CHECK FOR 'KX' WANTED...                  00446000
+         LM    R0,R14,REGSAV1 RESTORE R0-R14                            00447000
+         LTR   R15,R15     SET CONDITION-CODE FOR CONVENIENCE OF CALLER 00448000
+         BR    R14            RETURN TO SVCINT OR CALLER.               00449000
+         EJECT                                                          00450000
+FOUND1   DS    0H             FILE-TO-BE-ERASED 'FOUND' BY ACTLKP ...   00451000
+         USING AFTSECT,R1     (BRIEFLY)                                 00452000
+         L     R11,AFTADT     GET POINTER TO ACTIVE-DISK-TABLE          00453000
+         USING ADTSECT,R11    REFERENCE SAME                            00454000
+         TM    ADTFLG1,ADTFRW IS THIS A READ-WRITE DISK ?               00455000
+         LR    R0,R1          IF NOT, SET UP R0 AS NEEDED               00456000
+         BZ    ERAS02         AND RESUME SEARCHING.                     00457000
+         TM    ERSFLAG,FRSTONLY    FIRST R/W DISK ONLY WANTED ?         00458000
+         BZ    FOUND1A        BZ IF NOT (DON'T WORRY ABOUT IT).         00459000
+         C     R11,ADTADD     IS THE DISK FOUND THE FIRST R/W DISK ?    00460000
+         BNE   ERAS02         IF NOT, FORGET IT & RESUME SEARCHING.     00461000
+FOUND1A  LR    R0,R11         IF READ-WRITE, SET R0 TO ACT. DISK TABLE  00462000
+         L     R15,ATFINIS    CLOSE FILE VIA NEW FUNCTION 'EFINIS'      00463000
+         BALR  R14,R15        WITHOUT CALLING UPDISK OR SUCH.           00464000
+         L     R2,AFTPFST-1 REMEMBER ITS ADDRESS (IF ANY) IN FST-TABLES 00465000
+         LA    R2,0(,R2)      (STRIP OFF LIKELY FLAG-BYTE)              00466000
+         LH    R6,AFTFCL      GET FIRST-CHAIN-LINK DISK-ADDRESS,        00467000
+         LH    R7,AFTDBC      AND NO. OF 800-BYTE DATA BLOCKS           00468000
+         DROP  R1             ...                                       00469000
+         L     R15,AACTFRET   NOW GIVE BACK THE ACTIVE-FILE-TABLE       00470000
+         BALR  R14,R15        (PURPOSELY LEFT THERE FOR US BY EFINIS)   00471000
+         B     FOUND3         AND JOIN FORCES BELOW.                    00472000
+*                                                                       00473000
+FOUND2   DS    0H             FILE-TO-BE-ERASED 'FOUND' BY FSTLKW ...   00474000
+         LR    R11,R0         REFERENCE THE ACTIVE-DISK-TABLE           00475000
+         TM    ERSFLAG,FRSTONLY    FIRST R/W DISK ONLY WANTED ?         00476000
+         BZ    FOUND2A        BZ IF NOT (DON'T WORRY ABOUT IT).         00477000
+         C     R11,ADTADD     IS THE DISK FOUND THE FIRST R/W DISK ?    00478000
+         BNE   ERAS02A        TRF IF NOT, STOP SEARCHING, GO FINISH UP. 00479000
+FOUND2A  OI    FVSERAS1,X'80' SET SIGN-BIT 'ON' IN 'R1' FOR NEXT TIME   00480000
+         LR    R2,R1       REMEMBER ITS ADDRESS IN FST-TABLES FOR LATER 00481000
+         USING FSTSECT,R2     REFERENCE IT BRIEFLY,                     00482000
+         LH    R6,FSTFCL      GET FIRST-CHAIN-LINK DISK-ADDRESS,        00483000
+         LH    R7,FSTDBC      AND NO. OF 800-BYTE DATA BLOCKS           00484000
+         DROP  R2                                                       00485000
+FOUND3   EQU   *          JOIN FORCES WHETHER FOUND BY ACTLKP OR FSTLKW 00486000
+         L     R1,FVSERAS0    "OLD" ACTIVE-DISK-TABLE (IF ANY) INTO R1, 00487000
+         CR    R11,R1         IS "THIS" ADT THE SAME AS THE OLD ONE ?   00488000
+         BE    FOUND4A        TRF IF YES - NO TFINIS OR UPDISK NEEDED.  00489000
+         LTR   R0,R1          DOES OLD ACTIVE-DISK-TABLE EXIST AT ALL ? 00490000
+         BZ    FOUND4         IF NOT (1ST TIME THRU), CALL 'TFINIS' ETC 00491000
+         SR    R1,R1          ZERO OUT A REGISTER.                V0636 00492100
+         BCTR  R1,0           NOW, MAKE IT NEGATIVE.              V0636 00492200
+         L     R15,AUPDISK    'FINISH' UPDATING DIRECTORY FOR OLD DISK  00493000
+         BALR  R14,R15        ...                                       00494000
+         TM    ERSFLAG,FRSTONLY    WAS FIRST R/W DISK ONLY WANTED ?     00495000
+         BO    ERAS04              TRF IF YES -EXIT RIGHT NOW, MAN.     00496000
+         SR    R1,R1          R1 MUST = 0 NOW                           00497000
+FOUND4   EQU   *              CLOSE ANY OPEN FILES...                   00498000
+         LR    R0,R11         SET R0 FOR NEW ACTIVE DISK TABLE          00500000
+         ST    R11,FVSERAS0   STORE NEW ACTIVE-DISK-TABLE ADDRESS,      00501000
+         L     R15,ATFINIS    CALL 'TFINIS' TO 'TCLOSE' ALL OUTPUT      00502000
+         BALR  R14,R15        FILES FOR THIS ACTIVE-DISK-TABLE.         00503000
+         L     R15,AUPDISK    CALL 'UPDISK' TO RESERVE                  00504000
+         BALR  R14,R15        DISK-SPACE FOR NEW UFD IN ADVANCE.        00505000
+FOUND4A  LTR   R7,R7          CHECK NUMBER OF 800-BYTE DATA-BLOCKS      00506000
+         BNP   ERROR3         FAULTY FILE IF NOT > 0 (BUT CONTINUE)     00507000
+         LTR   R6,R6          CHECK FIRST-CHAIN-LINK DISK-ADDRESS,      00508000
+         BZ    ERROR3         FAULTY FILE IF = 0.                       00509000
+         STH   R6,SIGNAL      STORE 1ST CHAIN LINK DISK-ADDRESS IN      00510000
+         LA    R6,SIGNAL      HANDY HALFWORD, AND REFER TO IT THERE     00511000
+         L     R1,FVSERAS2    ADDRESS OF BUFFER (IF ANY) INTO R1        00512000
+         LTR   R4,R1          WAS THERE ANY ?                           00513000
+         BP    LTR22          BP (BNZ) IF YES - USE IT (IN R4)          00514000
+* IF NOT, GET 1000 BYTES - ENOUGH FOR WORST CASE                        00515000
+         LA    R0,125         SET THE NUMBER OF DWORDS.           V0636 00516100
+         DMSFREE DWORDS=(0),TYPE=NUCLEUS,TYPCALL=BALR             V0636 00516200
+         LTR   R15,R15           FAIL IF FREE STORAGE CANNOT   @VA02374 00516500
+         BNZ   ERROR25           BE ACQUIRED                   @VA02374 00516700
+         ST    R1,FVSERAS2    STORE ITS ADDRESS FOR FUTURE REFERENCE.   00517000
+         LR    R4,R1          CORE-ADDRESS OF 1ST CHAIN LINK TO R4,     00518000
+LTR22    TM    ERSFLAG,TYPEM      IS THE (TYP FLAG ON ??                00519000
+         BNO   SR55               NO, GO TO SR55                        00520000
+         LTR   R2,R2          DOES FST-ENTRY EXIST IN THE TABLES ?      00521000
+         BZ    SR55           IF NOT, FORGET FANCY STUFF.               00522000
+         USING FSTSECT,R2                                               00523000
+         LA    R5,15(,R1)     POINT CONVENIENTLY INTO THE BUFFER  V0144 00524100
+         MVC   1(8,R5),FSTN   MOVE IN THE FILENAME                V0144 00524150
+         MVI   9(R5),C' '     DELIMIT WITH A BLANK                V0144 00524200
+         MVC   10(8,R5),FSTT  MOVE IN THE FILETYPE                V0144 00524250
+         MVI   18(R5),C' '    YES...ANOTHER BLANK                 V0144 00524300
+         MVC   19(1,R5),ADTM  NOW, GET THE CORRECT MODE-LETTER    V0144 00524350
+         MVC   20(1,R5),FSTM+1     AND THE CORRECT NODE-NUMBER    V0144 00524400
+         MVI   0(R5),X'14'    MOVE IN THE MESSAGE LENGTH          V0144 00524450
+         LINEDIT MF=(E,'SYS'),TEXTA=(5),TYPCALL=BALR,DOT=NO,      V0144*00524500
+               COMP=NO                                            V0144 00524550
+         DROP  R2                                                       00547000
+SR55     SR    R5,R5          R5 WILL BE BYTE-COUNT OF '0'              00548000
+         STM   R4,R5,DSKLOC   STORE CORE-ADDRESS AND BYTE-COUNT,        00549000
+         BAL   R10,READCL     READ IN FIRST CHAIN LINK                  00550000
+*                                                                       00551000
+*        NOW RELEASE THE VARIOUS DATA BLOCKS AND CHAIN LINKS ...        00552000
+*                                                                       00553000
+         SR    R3,R3          CLEAR R3 (AN AVAILABLE REGISTER)          00554000
+         LA    R8,80(,R4)     POINT TO BEGINNING OF DATA BLOCKS,        00555000
+         LA    R9,60          MAXIMUM OF 60 DATA BLOCKS IN 1ST C.L.     00556000
+         BAL   R10,ERSUB1     RELEASE DATA BLOCKS OF FIRST C.L.         00557000
+         SR    R0,R0              PICK UP THE DISK ADDRESS     @VA01100 00558100
+         ICM   R0,B'0011',SIGNAL  OF THE 1ST CHAIN LINK        @VA01100 00558200
+         LR    R1,R11         REFERENCE ACTIVE-DISK-TABLE,              00559000
+         L     R15,AQQTRKX    RELEASE FIRST CHAIN LINK ITSELF           00560000
+         BALR  R14,R15        VIA 'QQTRKX'.                             00561000
+         BZ    ERAS05         OK IF R15=0 FROM QQTRKX.               JS 00562000
+         CH    R15,H3         IF ERROR, MAYBE ERROR 3 (FULL QQMSK) ? JS 00563000
+         BNE   ERROR3         REAL ERROR (ERROR 3 FOR ERASE) IF NOT  JS 00564000
+ERAS05   LTR   R7,R7          ANY DATA BLOCKS LEFT ?                 JS 00565000
+         BNP   ERAS06         ALL DONE UNLESS COUNT STILL > 0.          00566000
+         LR    R6,R4          BEGINNING OF 1ST C.L. POINTS TO 2ND C.L.  00567000
+         LA    R4,200(,R4)    ADVANCE 200 BYTES FOR 800-BYTE BUFFER,    00568000
+         LA    R5,800         800 BYTES WE'LL READ NOW,                 00569000
+         STM   R4,R5,DSKLOC   STORE CORE-ADDRESS AND BYTE-COUNT,        00570000
+         LA    R5,40          MAXIMUM OF 40 NTH CHAIN LINKS             00571000
+*                                                                       00572000
+NCLOOP   DS    0H           LOOP TO READ IN AND RELEASE NTH CHAIN LINKS 00573000
+         CH    R3,0(,R6)      CHECK DISK-ADDRESS OF NTH CHAIN LINK      00574000
+         BE    LAR626         BE IF 'EMPTY' ...                         00575000
+         BAL   R10,READCL     READ IN NTH CHAIN LINK,                   00576000
+         LR    R8,R4          POINT TO BEGINNING OF SAME IN CORE        00577000
+H400     LA    R9,400         MAXIMUM OF 400 DATA BLOCKS,               00578000
+         BAL   R10,ERSUB1     RELEASE UP TO 400 DATA BLOCKS             00579000
+         LH    R0,0(,R6)      GET DISK-ADDRESS OF CHAIN-LINK ITSELF,    00580000
+         LA    R9,1           JUST 1,                                   00581000
+         BAL   R10,ERSUB2     RELEASE NTH CHAIN LINK ITSELF.            00582000
+LAR626   LA    R6,2(,R6)      ADVANCE TO NEXT CHAIN LINK (IF ANY)       00583000
+         LTR   R7,R7          CHECK NUMBER OF DATA BLOCKS LEFT (IF ANY) 00584000
+         BNP   ERAS06         ALL DONE IF NONE LEFT.                    00585000
+         BCT   R5,NCLOOP      KEEP ITERATING UP TO 40 NTH CHAIN LINKS   00586000
+*                                                                       00587000
+ERROR3   EQU   *              CHAINING SEARCH TERMINATED.         V0039 00588100
+*                                                                       00589000
+ERAS06   LTR   R2,R2          REFERENCE FILE ADDRESS IN FST TABLES,     00590000
+         BZ    ERAS14         BZ IF NOT THERE AT ALL (FORGET IT).       00591000
+         XC    0(40,R2),0(R2) CLEAR THE 40 BYTES,                       00592000
+         C     R2,STATER1     DOES ERASED FILE MATCH STATEFST INFO ?    00593000
+         BNE   ERAS07         BNE IF NOT (FORGET IT).                   00594000
+         XC    STATEFST(48),STATEFST  IF YES, CLEAR ALL 'STATEFST' INFO 00595000
+ERAS07   LM    R4,R5,ADTCHBA  POINT TO 'CURRENT ITEM' (IF ANY),         00596000
+         AR    R4,R5          ADDRESS NOW IN R4.                        00597000
+         LM    R6,R7,ADTLHBA  POINT TO                                  00598000
+         LR    R8,R6          'LAST ITEM',                              00599000
+         AR    R8,R7          ADDRESS NOW IN R8.                        00600000
+         LA    R9,40          (NEED SHORTLY)                            00601000
+         CR    R2,R8          DID WE ERASE THE VERY LAST ITEM ?         00602000
+         BE    ERAS12         BE IF YES (ENTIRELY POSSIBLE).            00603000
+         C     R3,0(,R8)      IS LAST ITEM NULL ?                       00604000
+         BNE   ERAS10         BNE IF NOT (GOOD SHOW, NO PROBLEM).       00605000
+ERAS08   BAL   R10,ERAS22     BACK OFF 40 BYTES & SEE IF OK,            00606000
+         BNM   ERAS09         NO PROBLEM IF R7 NOT MINUS.               00607000
+         L     R6,FSTBKWD(,R6)    BACK UP TO PREVIOUS FST HYPERBLOCK,   00608000
+         LTR   R6,R6          (IF ANY)                                  00609000
+         BZ    ERAS14         GIVE UP IF NOTHING THERE.                 00610000
+         LA    R7,760         POINT TO LAST FST-ENTRY IN PREVIOUS BLOCK 00611000
+         LR    R8,R6          AND GET                                   00612000
+         AR    R8,R7          ADDRESS OF SAME                           00613000
+         STM   R6,R7,ADTLHBA  STORE NEW VALUES                          00614000
+         OI    ERSFLAG,GIVEBACK SET FLAG-BIT TO DETACH EMPTY FROM CHAIN 00615000
+ERAS09   C     R3,0(,R8)      MAKE SURE NOT ANOTHER EMPTY ONE           00616000
+         BNE   ERAS10         OK IF NOT, PROCEED.                       00617000
+         CR    R2,R8          IF EMPTY, ARE WE AT THE FILE WE ERASED ?  00618000
+         BNE   ERAS08         BNE IF NOT, KEEP TRYING.                  00619000
+         B     ERAS14         GIVE UP IF YES.                           00620000
+*                                                                       00621000
+*        CHECK ACTIVE FILE TABLE FOR POSSIBILITY THAT AN                00622000
+*        ACTIVE FILE TABLE ENTRY POINTS TO THE FST-ENTRY (GIVEN BY R8)  00623000
+*        THAT WE WILL BE MOVING TO THE EMPTY SLOT GIVEN BY R2 ...       00624000
+*                                                                       00625000
+ERAS10   SR    R1,R1          R1=0 TO START WITH 1ST ACTIVE FILE TABLE  00626000
+CHKACTL  L     R15,AACTNXT    GET 'NEXT' ACTIVE FILE TABLE              00627000
+         BALR  R14,R15        VIA ACTNXT                                00628000
+         LTR   R1,R1          IF R1=0, THERE ARE NO AFT'S LEFT          00629000
+         BZ    ERAS11         BZ IF THAT'S THE CASE, WE'RE DONE.        00630000
+         USING AFTSECT,R1     IF SOMETHING THERE, REFERENCE THE AFT,    00631000
+         L     R15,AFTPFST-1  GET POINTER TO FST-TABLES,                00632000
+         LA    R15,0(,R15)    STRIP OFF FLAG-BYTE,                      00633000
+         CR    R15,R8         DOES IT MATCH THE 'LAST' FST ENTRY ?      00634000
+         BNE   CHKACTL        IF NOT, KEEP CHECKING.                    00635000
+         IC    R14,AFTFLG     IF IT DOES MATCH, SAVE THE FLAG-BYTE,     00636000
+         ST    R2,AFTPFST-1   CHANGE POINTER TO THE NEW LOCATION WHERE  00637000
+         STC   R14,AFTFLG     THE OLD FILE WAS, RESTORE THE FLAG BYTE,  00638000
+         DROP  R1                                                       00639000
+*                                                                       00640000
+ERAS11   MVC   0(40,R2),0(R8) MOVE THAT LAST FILE TO THE EMPTY SLOT,    00641000
+         XC    0(40,R8),0(R8)  CLEAR THE PLACE WHERE IT WAS             00642000
+         C     R8,STATER1     DOES OLD PLACE MATCH STATEFST POINTER ?   00643000
+         BNE   CR24           BNE IF NOT (FORGET IT).                   00644000
+         ST    R2,STATER1     STORE NEW ADDRESS THERE IF IT DID.        00645000
+CR24     CR    R2,R4          DOES POINTER TO 'CURRENT ITEM' MATCH R2 ? 00646000
+         BNE   ERAS12         BNE IF NOT.                               00647000
+         SR    R5,R9          BACK OFF 40 BYTES ON CURRENT DISPLACEMENT 00648000
+         ST    R5,ADTCFST     & STORE NEW DISPLACEMENT (MINUS 40 IS OK) 00649000
+ERAS12   BAL   R10,ERAS22     BACK OFF 40 BYTES ON DISP. OF LAST FST,   00650000
+*                                                                       00651000
+ERAS14   OI    ERSFLAG,UPNEED INDICATE UPDATE OF UFD WILL BE NEEDED     00652000
+*                                                                       00653000
+         LM    R4,R5,ADTHBCT  GET HYPERBLOCK COUNT & NUMBER OF FILES,   00654000
+         BCTR  R5,0           DECREMENT NUMBER OF FILES,                00655000
+         ST    R5,ADTFSTC     STORE UPDATED VALUE OF NUMBER OF FILES JS 00656000
+         TM    ERSFLAG,GIVEBACK    SHOULD WE GIVE BACK EMPTY HYPERBLOCK 00657000
+         BZ    ERAS16         BZ IF FLAG-BIT NOT SET.                   00658000
+         NI    ERSFLAG,255-GIVEBACK   IF YES, TURN OFF THE FLAG-BIT,    00659000
+         L     R1,FSTFWDP(,R6)   GET POINTER TO EMPTY BLOCK (R6 INTACT) 00660000
+         ST    R3,FSTFWDP(,R6)  CLEAR IT (R3 IS STILL 0),               00661000
+* GIVE BACK 808-BYTE BUFFER VIA FRET                                    00662000
+         DMSFRET LOC=(1),DWORDS=101,TYPCALL=BALR                        00663000
+         BCTR  R4,0           DECREMENT HYPERBLOCK COUNT,               00664000
+         LH    R6,ADTRES      ALSO DECREMENT                            00665000
+         BCTR  R6,0           THE                                       00666000
+         STH   R6,ADTRES      RESERVE-COUNT.                            00667000
+         ST    R4,ADTHBCT     STORE UPDATED HYPERBLOCK COUNT         JS 00668000
+*                                                                       00669000
+ERAS16   EQU   *                                                     JS 00670000
+*                                                                       00671000
+         TM    ERSFLAG,ALLNAMES+ALLTYPES+ALLMODES  SHOULD WE CONTINUE ? 00672000
+         BZ    ERAS03         TRF IF NOT - GO FINISH UP.                00673000
+         SSM   ON             PERMIT TIMER AND/OR TERMINAL INTERRUPT(S) 00674000
+         SSM   *+1            NOW INHIBIT ALL INTERRUPTS AGAIN          00675000
+         B     MAINLOOP       GO CHECK FOR MORE FILE(S) TO BE ERASED.   00676000
+         SPACE 2                                                        00677000
+*        SUBROUTINE TO BACK OFF 40 BYTES ON LAST FST (IF POSSIBLE)      00678000
+*                                                                       00679000
+ERAS22   SR    R8,R9          BACK OFF R8 BY 40 (NEEDED IN SOME CASES)  00680000
+         SR    R7,R9          BACK OFF 40 BYTES ON DISP. OF LAST FST,   00681000
+         BCR   4,R10          BUT IF MINUS, EXIT.                       00682000
+         ST    R7,ADTLFST    IF 0 OR +, STORE UPDATED DISP. OF LAST FST 00683000
+         BR    R10            AND RETURN TO CALLER.                     00684000
+*                                                                       00685000
+*        NOTE - CALLER CAN CHECK CONDITION-CODE TO SEE WHAT HAPPENED    00686000
+         EJECT                                                          00687000
+*                                                                       00688000
+*        SUBROUTINE TO READ IN A CHAIN LINK ...                         00689000
+*                                                                       00690000
+*        R6 = CORE-ADDRESS OF DISK-ADDRESS                              00691000
+*        R10 = RETURN-REGISTER                                          00692000
+*        R11 = ADDRESS OF ACTIVE-DISK-TABLE                             00693000
+*                                                                       00694000
+READCL   ST    R6,DSKADR      STORE CORE-ADDRESS OF DISK-ADDRESS,       00695000
+         ST    R11,ADTADD     STORE ADDRESS OF ACTIVE-DISK-TABLE,       00696000
+         LA    R1,DSKLST      PARAMETER-LIST FOR RDTK,                  00697000
+         L     R15,ARDTK      CALL RDTK TO                              00698000
+         BALR  R14,R15        READ IN CHAIN LINK                        00699000
+         BCR   8,R10          IF NO ERRORS, EXIT TO CALLER VIA R10.     00700000
+*                             IF ERROR FROM RDTK (BAD NEWS) ...         00701000
+         CH    R15,H5         ERROR 5 WOULD MEAN 'SICK' DISK-ADDRESS    00702000
+         BE    ERROR3         (FAULTY FILE)                             00703000
+*                             FOR ANY OTHER RDTK ERROR, ...             00704000
+         L     R14,ADISKDIE   TO 'DIE' IS TO HAVE UFD INTACT   @VA01539 00705100
+         BR    R14            UNTIL DISK TROUBLE IS CORRECTED. @VA01539 00705200
+*                                                                       00707000
+*                                                                       00708000
+*        SUBROUTINE TO GIVE BACK A DATA-BLOCK OR CHAIN LINK             00709000
+*                                                                       00710000
+*        R7 = NUMBER OF DATA-BLOCKS REMAINING TO BE RETURNED            00711000
+*        R8 = CORE-ADDRESS OF 1ST DISK-RECORD TO BE RETURNED            00712000
+*        R9 = NUMBER OF RECORDS TO BE RETURNED (E.G. 1, 60, 400)        00713000
+*        R10 = RETURN-REGISTER                                          00714000
+*        ENTER AT ERSUB1 TO GIVE BACK DATA BLOCKS                       00715000
+*        ENTER AT ERSUB2 WITH R9=1 TO GIVE BACK A CHAIN LINK            00716000
+*                                                                       00717000
+ERSUB1   LH    R0,0(,R8)      PICK UP DISK-RECORD TO BE GIVEN BACK,     00718000
+         LTR   R0,R0          IS IT 0 (A NULL BLOCK) ?                  00719000
+         BZ    LAR828         BZ IF YES (SKIP IT)                       00720000
+         BCTR  R7,0           DECREMENT NO. OF DATA-BLOCKS LEFT         00721000
+ERSUB2   LR    R1,R11         SET R1 FOR ACTIVE-DISK-TABLE,             00722000
+         ICM   R0,B'1100',=H'0'    ZERO THE 2 HIGH BYTES          V0636 00722100
+         L     R15,ATRKLKPX   CALL 'TRKLKPX' TO GIVE                    00723000
+         BALR  R14,R15        BACK THE DISK-RECORD                      00724000
+         BNZ   ERROR3         BEWARE OF TRKLKPX ERROR                   00725000
+LAR828   LA    R8,2(,R8)      ADVANCE TO NEXT DISK-RECORD,              00726000
+         LTR   R7,R7          CHECK IT ANY DATA-BLOCKS LEFT AT ALL,     00727000
+         BCR   13,R10         'BNP' IF NONE LEFT, EXIT FORTHWITH        00728000
+         BCT   R9,ERSUB1      ITERATE IF NEEDED                         00729000
+         BR    R10            RETURN TO CALLER WHEN THRU.               00730000
+         EJECT                                                          00731000
+*        CONSTANTS,  ETC.                                               00732000
+*                                                                       00733000
+DMODE    DC    C'A'           DEFAULT MODE-LETTER                 V0268 00734100
+ON       DC    X'81'          PERMIT TIMER AND/OR TERMINAL INTERRUPT(S) 00735000
+*                                                                       00736000
+H3       DC    H'0003'        ERROR 3 (FULL QQMSK) FROM QQTRKX IS OK JS 00737000
+H5       DC    H'0005'      ERROR 5 FROM RDTK MEANS 'SICK' DISK-ADDRESS 00738000
+*                                                                       00739000
+ADISKDIE DC    A(DISKDIE)     TO 'DIE' IF PERMANENT ERROR READING DISK. 00740000
+*                                                                       00741000
+*                                                                       00742000
+ERR1     SR    R2,R2                                                    00743000
+         LA    R3,BADID                                                 00744000
+         LA    R4,54                                                    00745000
+         B     ERR4B                                                    00746000
+*                                                                       00747000
+* ERASE HAS NOT BEEN ABLE TO FIND THE FILE(S) WHICH ARE TO BE     P0589 00748000
+* ERASED.  THE FOLLOWING LOGIC DETERMINES THE ERROR MESSAGE WHICH P1035 00749000
+* IS TO BE TYPED TO THE USER.  FIRST, 'STATEW' IS CALLED, TO SEE  P1035 00750000
+* ANY OF HIS RULES ARE VIOLATED.  IF NOT, WE CALL 'ADTLKP' TO SEE P1035 00751000
+* WHETHER THE DISK SPECIFIED IS READ/ONLY, THE LATTER DETERMINING P1035 00752000
+* WHETHER WE TYPE 'FILE NOT FOUND' OR 'DISK IS READ/ONLY'.        P1035 00753000
+ERR2     TM    ERSFLAG,FRSTONLY    DEFAULT OF MODE?               V0268 00754100
+         BO    ERR2A          JUST 'FILE NOT FOUND', THEN.        V0268 00754150
+         L     R1,FVSERAS1             POINT TO ORIGINAL PLIST    P1035 00755000
+         L     R15,ASTATEW             CALL 'STATEW' FOR ERROR MSGP1035 00756000
+         BALR  R14,R15                                            P1035 00757000
+         SPACE 1                                                  P1035 00758000
+* IF RETURN CODE FROM 'STATEW' IS NOT 0 OR 28, THEN STATEW HAS    P1035 00759000
+* ALREADY TYPED AN ERROR MESSAGE.                                 P1035 00760000
+         LTR   R15,R15                 RETURN CODE = 0?           P1035 00761000
+         BZ    ERR2CK                  CONTINUE PROCESSING IF SO  P1035 00762000
+         CH    R15,=H'28'              WAS ERR 'FILE NOT FOUND'?  P1035 00763000
+         BNE   EXIT                    JUST PASS BACK STATEW'S RC P1035 00764000
+         SPACE 1                                                  P1035 00765000
+ERR2CK   EQU   *                                                  P1035 00766000
+         TM    ERSFLAG,ALLMODES        '*' SPECIFIED FOR FILEMODE?P0589 00767000
+         BO    ERR2A                   THEN 'FILE NOT FOUND'      P0589 00768000
+         SPACE 1                                                  P0589 00769000
+* OTHERWISE HE REQUESTED A SPECIFIC DISK (OR DEFAULTED TO THE     P0589 00770000
+* A-DISK)                                                         P0589 00771000
+ERR2X    LA    R6,DMODE                                           V0268 00772100
+         L     R1,FVSERAS1             GET ADDR OF ORIGINAL PLIST P0589 00773000
+         TM    ERSFLAG,FRSTONLY        SHOULD WE USE A-DISK?      P0589 00774000
+         BO    *+8                     SKIP IF SO                 P0589 00775000
+         LA    R6,24(,R1)              POINT TO SPECIFIED MODE LETP0589 00776000
+         LR    R1,R6                   LET R1 POINT TO MODE LET,  P0589 00777000
+         SH    R1,=H'24'               DISPLACED BACK 24 BYTES    P0589 00778000
+         L     R15,=V(DMSLAD)          AND CALL ADTLKP            P0589 00779000
+         BALR  R14,R15                                            P0589 00780000
+         USING ADTSECT,R1                                         P0589 00781000
+         DROP  R11                                                P0589 00782000
+         TM    ADTFLG1,ADTFRW+ADTFRO    DISK ACCESSED AT ALL?     V0268 00782100
+         BZ    ERR2B                                              V0268 00782150
+         TM    ADTFLG1,ADTFRW          IS IT READ/WRITE?          P0589 00783000
+         BZ    ERR2C                   GO IF IT'S READ/ONLY       P0589 00784000
+         SPACE 1                                                  P0589 00785000
+* COME HERE IF THE 'FILE NOT FOUND' MESSAGE IS TO BE TYPED.       P0589 00786000
+ERR2A    EQU   *                                                  P0589 00787000
+         CLI   REGSAV1+4,X'0E' WAS ERASE INVOKED FROM EXEC     @VA01154 00787100
+*                             WITH "&CONTROL OFF" IN EFFECT ?           00787200
+         BE    ERROR28        IF YES, OMIT THE ERROR MESSAGE   @VA01154 00787300
+*                             JUST AS IF IT HAD BEEN A FUNCTION CALL.   00787400
+*                             NO - USE THE USUAL ERROR MESSAGE ROUTINE: 00787500
+         LA    R3,NTFND                R3 POINTS TO MSG TEXT      P0589 00788000
+         LA    R4,2                                                     00789000
+         BAL   R5,LENCK                                                 00790000
+         LA    R2,8(,R2)                                                00791000
+         BAL   R5,ERRMSG                                                00792000
+ERROR28  LA    R15,28         ERROR 28 = FILE NOT FOUND        @VA01154 00793100
+         B     EXIT                                                     00794000
+*                                                                 V0268 00795100
+ERR2B    LA    R3,NOTACC                                          V0268 00795150
+         LA    R2,1                                               V0268 00795200
+         LA    R4,69                                              V0268 00795250
+         B     ERR2E                                              V0268 00795300
+* COME HERE IF 'DISK IS READ/ONLY'                                P0589 00796000
+ERR2C    EQU   *                                                  P0589 00797000
+         LA    R3,DISKRO               R3 -> MESSAGE TEXT         P0589 00798000
+         LA    R2,1                    SUBSTITUTION LENGTH        P0589 00799000
+         LA    R4,37                   MESSAGE NUMBER             P0589 00800000
+* NOTE: R6 ALREADY POINTS TO THE SUBSTITUTION PARM, THE           P0589 00801000
+* MODE LETTER.                                                    P0589 00802000
+ERR2E    BAL   R5,ERRMSG                                          V0268 00803100
+         LA    R15,36                  RETURN CODE = 36           P0589 00804000
+         B     EXIT                                               P0589 00805000
+*                                                                       00806000
+ERR2D    LA    R3,BADMODE                                         V0006 00806100
+         LR    R6,R1                                              V0006 00806150
+         LA    R2,8                                               V0006 00806200
+         LA    R4,48                                              V0006 00806250
+*                                                                 V0268 00806500
+         B     ERR4C                                              V0268 00806550
+ERR3     LA    R3,BADPARM                                               00807000
+         LA    R4,70                                                    00808000
+ERR4A    LA    R2,8                                                     00809000
+ERR4B    LR    R6,R1                                                    00810000
+ERR4C    BAL   R5,ERRMSG                                                00811000
+         LA    R15,24                                                   00812000
+         B     EXIT                                                     00813000
+*                                                                       00814000
+ERR5     LA    R3,BADOPT                                                00815000
+         LA    R4,3                                                     00816000
+         B     ERR4A                                                    00817000
+*                                                                       00818000
+ERR6     LA    R3,CANTDO                                                00819000
+         LA    R4,71                                                    00820000
+         BAL   R5,LENCK                                                 00821000
+         LA    R2,8(,R2)                                                00822000
+         B     ERR4C                                                    00823000
+*                                                                       00824000
+LENCK    L     R1,FVSERAS1                                              00825000
+         LA    R6,8(,R1)                                                00826000
+         LA    R2,16                                                    00827000
+         CLI   24(R1),C'*'                                              00828000
+         BCR   8,R5                                                     00829000
+         CLI   24(R1),C'A'                                              00830000
+         BL    4(,R5)                                                   00831000
+         CLI   24(R1),C'Z'                                              00832000
+         BH    4(,R5)                                                   00833000
+         BR    R5                                                       00834000
+ERROR25  LA    R3,NOCORE         MESSAGE 'CORE NOT AVAILABLE'  @VA02374 00834150
+         LA    R4,109            STANDARD NOCORE MSG NO        @VA02374 00834300
+         BAL   R5,ERRMSG         WRITE IT IF BY COMMAND        @VA02374 00834450
+         LA    R15,25                                          @VA02374 00834600
+         B     EXIT                                            @VA02374 00834750
+*                                                                       00835000
+ERRMSG   TM    ERSFLAG,QUIET  ARE WE A FUNCTION?                        00836000
+         BCR   1,R5           YES.  NO ERROR MESSAGES, THEN.            00837000
+         DMSERR MF=(E,'SYS'),LET=E,NUM=(4),TEXTA=(3),                  X00838000
+               SUB=(CHAR8A,((6),(2))),TYPCALL=BALR                      00839000
+         BR    R5                                                       00840000
+*                                                                       00841000
+NTFND    DC    AL1(L'NTFNDMSG)                                          00842000
+NTFNDMSG DC    C'FILE ''..........................'' NOT FOUND'         00843000
+*                                                                       00844000
+BADOPT   DC    AL1(L'OPTMSG)                                            00845000
+OPTMSG   DC    C'INVALID OPTION ''........'''                           00846000
+*                                                                       00847000
+BADID    DC    AL1(L'IDMSG)                                             00848000
+IDMSG    DC    C'INCOMPLETE FILEID SPECIFIED'                           00849000
+*                                                                       00850000
+CANTDO   DC    AL1(L'CANTMSG)                                           00851000
+CANTMSG  DC    C'ERASE ................... NOT ALLOWED'                 00852000
+*                                                                       00853000
+BADPARM  DC    AL1(L'PARMMSG)                                           00854000
+PARMMSG  DC    C'INVALID PARAMETER ''........'''                        00855000
+*                                                                 P0589 00856000
+DISKRO   DC    AL1(L'ROMSG)            LENGTH OF MESSAGE TEXT     P0589 00857000
+ROMSG    DC    C'DISK ''..'' IS READ/ONLY'                        P0589 00858000
+*                                                                       00859000
+BADMODE  DC    AL1(L'MODEMSG)                                     V0006 00859100
+MODEMSG  DC    C'INVALID MODE ''........'''                       V0006 00859150
+*                                                                 V0006 00859200
+NOTACC   DC    AL1(L'ACCMSG)                                      V0268 00859300
+ACCMSG   DC    C'DISK ''..'' NOT ACCESSED'                        V0268 00859350
+*                                                              @VA02374 00859365
+NOCORE   DC    AL1(L'COREMSG)                                  @VA02374 00859380
+COREMSG  DC    C'VIRTUAL STORAGE CAPACITY EXCEEDED'            @VA02374 00859395
+*                                                                       00859500
+         DS    0F                                                       00860000
+OPTIONS  EQU   *                                                        00861000
+         DC    CL8'TYPE'                                                00862000
+         DC    CL8'NOTYPE'                                              00863000
+NUMOPTS  EQU   (*-OPTIONS)/8                                            00864000
+*                                                                       00865000
+         LTORG                                                          00865100
+         EJECT                                                          00866000
+         NUCON                                                          00867000
+         AFT                                                            00868000
+         ADT                                                            00870000
+         FSTB                                                           00872000
+         FVS                                                            00874000
+*                                                                       00875000
+ALLNAMES EQU   X'80'          FLAG-BIT FOR ALL-NAMES                    00876000
+ALLTYPES EQU   X'40'          FLAG-BIT FOR ALL-TYPES                    00877000
+ALLMODES EQU   X'20'          FLAG-BIT FOR ALL-MODES                    00878000
+GIVEBACK EQU   X'10'          GIVE BACK LAST FST HYPERBLOCK (EMPTY)     00879000
+FRSTONLY EQU   X'08'          SEARCH ONLY THE FIRST READ-WRITE DISK     00880000
+UPNEED   EQU   X'04'          UPDATE OF UFD NEEDED BEFORE WE EXIT       00881000
+TYPEM    EQU   X'02'          TYPING WANTED PLEASE                      00882000
+QUIET    EQU   X'01'          DO NOT TYPE ERROR MESSAGES                00883000
+         EJECT                                                          00884000
+         REGEQU                                                         00885000
+         END                                                            00886000

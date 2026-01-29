@@ -1,0 +1,1105 @@
+PRT      TITLE 'DMSPRT     (CMS)       VM/370 - RELEASE 6'              00001000
+         SPACE 2                                                        00002000
+*.                                                                      00003000
+* MODULE NAME: DMSPRT                                                   00004000
+*                                                                       00005000
+* FUNCTION:    TO PRINT CMS FILES                                       00006000
+*                                                                       00007000
+* ATTRIBUTES:  DISK RESIDENT, TRANSIENT, SERIALLY REUSABLE              00008000
+* NOTE: PRINT MUST BE GENMOD'D WITH THE SYSTEM OPTION                   00008100
+*                                                                       00009000
+* ENTRY POINT: DMSPRT(PRINT)                                            00010000
+*                                                                       00011000
+* ENTRY CONDITIONS:  UPON ENTRY, R13 POINTS TO A 24-FULLWORD SAVE       00012000
+*        AREA PROVIDED BY DMSITS, AND R1 POINTS TO A PARAMETER LIST     00013000
+*        IN THE FOLLOWING FORMAT:                                       00014000
+*              DS     0F                                                00015000
+*        PLIST DC     CL8'PRINT'                                        00016000
+*              DC     CL8'FILENAME'    MUST BE GIVEN                    00017000
+*              DC     CL8'FILETYPE'    MUST BE GIVEN                    00018000
+*             <DC     CL8'FILEMODE'>   IF NOT GIVEN, 'A ' IS USED       00019000
+*             <DC     CL8'('>           NEEDED IF OPTIONS GIVEN         00020000
+*             <DC     CL8'OPTION1'>     (OPTIONS IN SUCCESSIVE          00021000
+*             <DC     CL8'OPTION N'>     'CL8' GROUPS)                  00022000
+*             <DC     CL8')'>           OPTION END - NOT REQUIRED       00023000
+*              DC     8X'FF'                                            00024000
+*                                                                       00025000
+*        THE VALID OPTIONS ARE:                                         00026000
+*              CC - THE FIRST BYTE OF EACH RECORD IS USED FOR CCW       00027000
+*                             COMMAND BUILDING                          00028000
+*              NOCC - X'09' IS USED AS THE FIRST BYTE OF THE LINE       00029000
+*              MEMBER OR MEM - A 'MACLIB' OR 'TXTLIB' IS TO BE          00030000
+*                             SEARCHED, AND ONE OR ALL MEMBERS ARE      00031000
+*                             TO BE PRINTED. (MUST BE FOLLOWED BY       00032000
+*                             THE MEMBER NAME OR '*')                   00033000
+*              HEX - EACH RECORD IS TO BE PRINTED IN EBCDIC FORM        00034000
+*              UPCASE OR UP - EACH CHARACTER IS TO BE TRANSLATED TO     00035000
+*                             UPPERCASE                                 00036000
+*              LINECOUN OR LI - THE NUMBER OF LINES TO BE      @V2D4921 00036150
+*                             PRINTED ON EACH PAGE.  IF ZERO   @V2D4921 00036300
+*                             IS SPECIFIED, NO PAGE EJECTS     @V2D4921 00036450
+*                             WILL BE PERFORMED FOR THE        @V2D4921 00036600
+*                             DURATION OF THE COMMAND.         @V2D4921 00036750
+*                                                                       00037000
+*        OVERRIDING OPTIONS:                                            00038000
+*              IF THE FILETYPE IS 'LISTING', THE CC OPTION IS THE       00039000
+*                             DEFAULT. OTHERWISE, NOCC IS THE DEFAULT.  00040000
+*              IF NOCC OR HEX IS SPECIFIED, THE CC OPTION IS            00041000
+*                             OVERRIDDEN, EVEN IF CC WAS SPECIFIED      00042000
+*                             OR THE FILETYPE IS 'LISTING'              00043000
+*              IF HEX IS SPECIFIED, UPCASE IS IGNORED                   00044000
+*              IF LINECOUN IS NOT SPECIFIED, 55 IS THE         @V2D4921 00044150
+*                             DEFAULT.  IF CC IS IN EFFECT,    @V2D4921 00044300
+*                             THE OPTION HAS NO EFFECT, SINCE  @V2D4921 00044450
+*                             FORMATTING IS UNDER CONTROL OF   @V2D4921 00044600
+*                             CARRIAGE CONTROL IN THE FILE.    @V2D4921 00044750
+*                                                                       00045000
+* EXIT CONDITIONS:  AT EXIT R15 CONTAINS ONE OF THE FOLLOWING CODES:    00046000
+*        CODE:   MEANING:                                               00047000
+*           0    NO ERRORS - NORMAL COMPLETION                          00048000
+*          20    ILLEGAL * IN FILEID (FN AND FT MUST BE GIVEN)          00049000
+*          24    OPTION ERROR, INCOMPLETE FILEID                        00050000
+*          28    FILE NOT FOUND                                         00051000
+*          32    LIBRARY ERROR, RECORD TOO LONG                         00052000
+*          36    PRINTER DEVICE NONEXISTENT OR NOT SUPPORTED            00053000
+*         100    DISK ERROR, PRINT ERROR                                00054000
+*                                                                       00055000
+         EJECT                                                          00056000
+* CALLS TO OTHER ROUTINES:    DMSSTT   - GET FST COPY                   00057000
+*                             DMSBRD   - READ NEXT RECORD FROM FILE     00058000
+*                             DMSCPF   - CLOSE PRINTER                  00059000
+*                             DMSFNS   - CLOSE FILE                     00060000
+*                             DMSFRE   - GET, RELEASE FREE STORAGE      00061000
+*                             DMSPIOCC - BUILD CCWS, FILL BUFFER        00062000
+*                             DMSPIOSI - PRINT BUFFER                   00063000
+*                             DMSERR   - PROCESS ERROR MESSAGES         00064000
+*                                                                       00065000
+* EXTERNAL REFERENCES:        NUCON                                     00066000
+*                                                                       00067000
+* TABLES/WORKAREAS:           R13 AREA PROVIDED BY DMSITS               00068000
+*                             (USED WITH UIOSECT DSECT)                 00069000
+*                                                                       00070000
+* REGISTER USAGE:                                                       00071000
+*        R1    PLIST POINTER AT ENTRY                                   00072000
+*        R2    PLIST POINTER SAVE                                       00073000
+*        R5    INTERNAL RETURN REGISTER                                 00074000
+*        R6    ADDRESS OF RECORD BEING PROCESSED                        00075000
+*        R7    LENGTH OF RECORD BEING PROCESSED                         00076000
+*        R11   BASE REG IN BUFFER                                       00077000
+*        R12   BASE REG IN CODE                                         00078000
+*        R13   BASE REG IN UIOSECT                                      00079000
+*        R14   RETURN REG AT ENTRY, INTERNAL RETURN REG                 00080000
+*        R15   RETURN CODE                                              00081000
+*                                                                       00082000
+* NOTES: DMSPRT PROVIDES A 4096-BYTE BUFFER ON A PAGE BOUNDARY FOR      00083000
+*        PRINTING.  DMSPIOCC IS CALLED TO FILL THIS BUFFER WITH         00084000
+*        CHAINED CCWS, TIC CCWS, AND DATA.  DMSPIOSI IS CALLED TO       00085000
+*        ISSUE A START I/O AGAINST THE CCW CHAIN IN THE BUFFER.         00086000
+*        THIS PROCEDURE IS MUCH MORE EFFICIENT THAN ISSUING A           00087000
+*        SEPARATE START I/O FOR EACH LINE BEING PRINTED.                00088000
+*        DMSPRT EXECUTES IN THE TRANSIENT AREA, WHICH IS TWO PAGES      00089000
+*        LONG.  THE EXECUTABLE CODE OCCUPIES THE FIRST PAGE, AND        00090000
+*        THE BUFFER OCCUPIES THE SECOND PAGE.                           00091000
+*                                                                       00092000
+* OPERATION:                                                            00093000
+*        SET UP -                                                       00094000
+*        1) CHECK TO INSURE A VIRTUAL 1403, 3211, OR 3203 IS            00095000
+*           AVAILABLE. IF A 3211 OR 3203, LOAD VIRTUAL FORMS            00096000
+*           CONTROL BUFFER TO SUIT THIS COMMAND. (THIS FORMS CONTROL    00097000
+*           BUFFER CONFIGURATION WILL MINIMIZE BREAKING THE CCW CHAIN   00098000
+*           FOR 'CHAN 9' OR 'CHAN 12', WHILE ALLOWING ALL FUNCTIONS     00099000
+*           THAT ARE ALLOWED WITH THE DEFAULT CONFIGURATION).           00100000
+*        2) SCAN OPTIONS AND SET SWITCHES.                              00101000
+*        3) CALL DMSSTT(STATE) TO VERIFY EXISTENCE OF FILE.             00102000
+*        4) CHECK LARGEST REC LEN AGT ALLOWABLE MAX (132 FOR A          00103000
+*           1403 OR 3203 AND 150 FOR A 3211. IF CC IS IN EFFECT         00104000
+*           LENGTH CAN BE ONE GREATER TO ALLOW FOR CC CHARACTER.        00105000
+*           IF HEX IS SPECIFIED, RECORD CAN BE UP TO 65,535, THE        00106000
+*           CMS MAXIMUM).                                               00107000
+*        5) CALL DMSFRE TO GET STORAGE AREA EQUAL TO LARGEST RECORD.    00108000
+*        6) SET UP PAGE HEADING, DO INITIAL PAGE EJECT.                 00109000
+         EJECT                                                          00110000
+*        7) IF MEMBER OPTION, GO TO ROUTINE 'MEMBS', WHICH READS THE    00111000
+*           LIBRARY DICTIONARY AND LOCATES THE FIRST, OR ONLY,          00112000
+*           MEMBER TO BE PRINTED.                                       00113000
+*                                                                       00114000
+*        MAIN LOOP -                                                    00115000
+*        8) CALL DMSBRD(RDBUF) TO READ A RECORD FROM THE FILE INTO      00116000
+*           THE FREE STORAGE AREA PREVIOUSLY OBTAINED.  IF 'END OF      00117000
+*           FILE' RETURNED, GO TO 18.                                   00118000
+*        9) PREPARE THE RECORD FOR PRINTING AS DETERMINED BY THE        00119000
+*           OPTIONS IN EFFECT:                                          00120000
+*              A) HEX - IF HEX PRINT IS WANTED, GO TO 15.               00121000
+*              B) UP OR UPCASE - TRANSLATE EACH CHARACTER IN THE        00122000
+*                 RECORD TO UPPERCASE BY OR'ING IT WITH X'40'.          00123000
+*              C) CC - THE CARRIAGE CONTROL OPTION MEANS THAT THE       00124000
+*                 FIRST CHARACTER OF THE RECORD IS USED TO DETERMINE    00125000
+*                 WHAT PRINT, SPACE, AND SKIP CCWS WILL BE GENERATED.   00126000
+*                 IF CC IS NOT IN EFFECT, USE A X'09' TO PRINT AND      00127000
+*                 SPACE 1 AS THE FIRST BYTE OF THE RECORD, AND ADJUST   00128000
+*                 THE POINTER TO THE RECORD AND THE LENGTH OF THE       00129000
+*                 RECORD TO INCLUDE IT.                                 00130000
+*        10) GO TO 11, AND RETURN TO 8.                                 00131000
+*                                                                       00132000
+*        FILBUF ROUTINE -                                               00133000
+*        11) CALL DMSPIOCC TO GENERATE CCWS FOR THE LINE, AND PUT       00134000
+*           THE CCWS AND DATA INTO THE BUFFER.                          00135000
+*        12) IF THE BUFFER IS FULL, CALL DMSPIOSI TO PRINT IT.          00136000
+*        13) IF LINECOUN HAS BEEN SATISFIED OR 55 LINES        @V2D4921 00136600
+*           HAVE BEEN PROCESSED, AND CC IS NOT IN              @V2D4921 00137200
+*           EFFECT, DO PAGE EJECT.                                      00138000
+*        14) RETURN TO THE MAIN LOOP (8) OR THE HEX ROUTINE (15)        00139000
+*           TO PREPARE THE NEXT LINE.                                   00140000
+*                                                                       00141000
+*        HEX ROUTINE -                                                  00142000
+*        15) UNPACK 10 GROUPS OF 4 BYTES FROM THE RECORD INTO A         00143000
+*           LOCAL BUFFER.                                               00144000
+*        16) IF RECORD IS EXHAUSTED, GO TO 11 AND RETURN TO 8.          00145000
+*        17) IF MORE OF THE RECORD TO BE TRANSLATED,                    00146000
+*           GO TO 11 AND RETURN TO 15.                                  00147000
+*                                                                       00148000
+*        RETURNS -                                                      00149000
+*        18) IF BUFFER NOT EMPTY, CALL DMSPIOSI TO PRINT IT.            00150000
+*        19) CALL CP CLOSE TO CLOSE THE PRINTER.                        00151000
+*        20) CALL DMSFNS TO CLOSE THE FILE.                             00152000
+*        21) CALL DMSFRE TO RELEASE FREE STORAGE.                       00153000
+*        22) RETURN TO CMS.                                             00154000
+*                                                                       00155000
+*        NOTE: IF AN ERROR IS DETECTED, DMSERR IS CALLED TO PROCESS     00156000
+*              AN ERROR MESSAGE, AND THEN THE 'RETURNS' SECTION IS      00157000
+*              ENTERED AT AN APPROPRIATE POINT TO CLOSE ONLY            00158000
+*              THOSE THINGS THAT HAD BEEN OPENED AT THE TIME OF         00159000
+*              THE ERROR.                                               00160000
+*                                                                       00161000
+*.                                                                      00162000
+**********************************************************************  00163000
+         EJECT                                                          00164000
+**********************************************************************  00165000
+*                                                                       00166000
+*        SETUP                                                          00167000
+*                                                                       00168000
+**********************************************************************  00169000
+         SPACE 1                                                        00170000
+DMSPRT   START X'E000'                                                  00171000
+PRINT    EQU   DMSPRT                                                   00172000
+         ENTRY PRINT                                                    00173000
+         USING *,R12,R11                                                00174000
+         LR    R12,R15        ESTABLISH ADDRESSABILITY                  00175000
+         L     R11,=A(PRINT+4096)                                       00176000
+         USING UIOSECT,R13                                              00177000
+         USING NUCON,R0                                                 00178000
+         ST    R14,UIOSAVE    SAVE RETURN ADDRESS                       00179000
+         SPACE 1                                                        00180000
+         LA    R3,BUFDATA     SET COUNTER TO BEGINNING OF BUFFER        00181000
+         SR    R4,R4          AND ZERO BATCTR                           00182000
+         STM   R3,R4,BUFCTR   ...                                       00183000
+         SPACE 1                                                        00184000
+         LA    R2,132         SET 1403 OR 3203 CARRIAGE SIZE   @V386298 00185000
+         STH   R2,CARRSZ      ...                                       00186000
+         LA    R2,14          ASSUME DEVICE '00E'                       00187000
+         DC    X'83',X'23',XL2'0024'    ISSUE DEVICE TYPE DIAGNOSE      00188000
+         BC    1,ERR008A      DEVICE NOT ATTACHED - ERROR 08            00189000
+         ST    R3,UIODIAG     RESULTS STORED                            00190000
+         CLI   UIOVTYPC,CLASURO    UNIT RECORD OUTPUT CLASS?            00191000
+         BNE   ERR008              NO, ERROR 08                         00192000
+         CLI   UIOVTYPE,TYP1403    IS IT A 1403?                        00193000
+         BE    DEVOK               IF SO, CONTINUE                      00194000
+         CLI   UIOVTYPE,TYP3203   IS IT A 3203 PRINTER??       @V386298 00194100
+         BE    LDVFCB             YES--LOAD VIRTUAL FCB        @V386298 00194200
+         CLI   UIOVTYPE,TYP3211    IS IT A 3211?                        00195000
+         BNE   ERR008              NEITHER 1403/3203/3211               00196000
+         LA    R2,150         IT'S A 3211 - SET CARRIAGE SIZE           00197000
+         STH   R2,CARRSZ      ...                                       00198000
+LDVFCB   EQU   *                                               @V386298 00198100
+         MVC   BUFDATA(88),CCWLFCB LOAD VIRT. 3203 OR 3211     @V386298 00199000
+         LA    R3,BUFDATA+88       SET COUNTER TO NEXT ADDRESS          00200000
+         ST    R3,BUFCTR           ...                                  00201000
+         SPACE 1                                                        00202000
+DEVOK    EQU   *              WE HAVE A SUPPORTED PRINTER...            00203000
+         LR    R2,R1          SAVE PLIST POINTER TO FREE R1             00204000
+         MVI   SWS,FIRST      CLEAR SWITCHES TO FIRST PASS SWITCH       00205000
+         LA    R3,55          SET DEFAULT LINE COUNT           @V2D4921 00205300
+         ST    R3,KOUNT       ...                              @V2D4921 00205600
+*                                                                       00206000
+*        DETERMINE FILEID OF FILE TO BE PRINTED                         00207000
+*                                                                       00208000
+         LM    R3,R7,8(R2)    REGS CONTAIN GIVEN FILEID                 00209000
+         LM    R8,R10,SCANFO  R8=X'FF', R9=C'*', R10=C'('               00210000
+         CLR   R3,R8          NO FILEID GIVEN?                          00211000
+         BE    ERR054         INCOMPLETE FILEID                         00212000
+         CLR   R3,R9          IS FILENAME GIVEN AS '*'?                 00213000
+         BE    ERR062         ILLEGAL *                                 00214000
+         CLR   R3,R10         OPTION START?                             00215000
+         BE    ERR054         INCOMPLETE FILEID                         00216000
+         CLR   R5,R8          NO FILETYPE GIVEN?                        00217000
+         BE    ERR054         INCOMPLETE FILEID                         00218000
+         CLR   R5,R9          FILETYPE GIVEN AS '*'?                    00219000
+         BE    ERR062         ILLEGAL *                                 00220000
+         CLR   R5,R10         OPTION START?                             00221000
+         BE    ERR054         INCOMPLETE FILEID                         00222000
+         LR    R9,R7          SAVE 24(PLIST) IN R9                      00223000
+         CLR   R7,R8          FILEMODE NOT GIVEN?                       00224000
+         BE    MODEA          ASSUME FM=A                               00225000
+         CLR   R7,R10         OPTION START?                             00226000
+         BE    MODEA          MODE NOT GIVEN - ASSUME FM=A              00227000
+         CLI   26(R2),C' '        IS FILEMODE > 2 CHARACTERS?  @V2D4921 00227100
+         BNE   ERR048             BRANCH IF YES                @V2D4921 00227200
+         CLI   25(R2),C' '        IS FILEMODE 2 CHARACTERS?    @V2D4921 00227300
+         BE    MODE               BRANCH IF NOT                @V2D4921 00227400
+         CLI   25(R2),X'F0'       IS SECOND CHAR < 0?          @V2D4921 00227500
+         BL    ERR048             BRANCH IF YES                @V2D4921 00227600
+         CLI   25(R2),X'F5'       IS SECOND CHAR > 5?          @V2D4921 00227700
+         BH    ERR048             BRANCH IF YES                @V2D4921 00227800
+MODE     EQU   *                                               @V2D4921 00227900
+         ICM   R7,B'0011',BITS     FILEMODE GIVEN - USE IT              00228000
+         B     SETLIST                                                  00229000
+MODEA    L     R7,AMODE       ASSUME FILEMODE OF 'A '                   00230000
+SETLIST  STM   R3,R7,FILENAME SET FILE SYSTEM PLIST WITH FILEID         00231000
+         L     R1,BITS        INITIALIZE OTHER FIELDS TO '0001'         00232000
+         ST    R1,RECNO       ...                                       00233000
+         STH   R1,FILENOIT    ...                                       00234000
+         MVC   FILE(8),=CL8'STATE' SET FILE PLIST FOR STATE CALL        00235000
+*                                                                       00236000
+*        SCAN OPTIONS, SET APPROPRIATE SWITCHES                         00237000
+*                                                                       00238000
+         CLR   R9,R8          24(PLIST) = X'FF'?                        00239000
+         BE    CKEXIST        IF SO,END OF PLIST                        00240000
+         CLR   R9,R10         24(PLIST) = C'('?                         00241000
+         BNE   SCAN6          IF NOT, FILEMODE WAS GIVEN                00242000
+         LA    R9,32(,R2)     POINT TO PARMS                            00243000
+SCAN1    CLI   0(R9),C')'     END OF PARMS                              00244000
+         BE    CKEXIST        YES                                       00245000
+         CLI   0(R9),X'FF'    END OF OPTIONS                            00246000
+         BE    CKEXIST        YES                                       00247000
+         CLC   0(4,R9),=CL4'CC'   CONTROL WANTED?              @V2D4921 00248000
+         BNE   SCAN2          NO                                        00249000
+         OI    SWS,CC         YES                                       00250000
+         LA    R9,8(,R9)      INCR POINTER                              00251000
+         B     SCAN1                                                    00252000
+SCAN2    CLC   0(8,R9),=CL8'NOCC'                                       00253000
+         BNE   SCAN2A                                          @V2D4921 00254000
+         OI    SWS,NOCC       SET NOT-CC SWITCH                         00255000
+         LA    R9,8(,R9)      INCR POINTER                              00256000
+         B     SCAN1                                                    00257000
+SCAN2A   CLC   0(8,R9),=CL8'LINECOUN'                          @V2D4921 00257060
+         BE    SCAN2B                                          @V2D4921 00257120
+         CLC   0(4,R9),=CL4'LI'                                @V2D4921 00257180
+         BNE   SCAN3                                           @V2D4921 00257240
+SCAN2B   CLI   8(R9),C')'     WAS A NUMBER GIVEN?              @V2D4921 00257300
+         BE    ERR029         NO, ERROR                        @V2D4921 00257360
+         CLI   8(R9),X'FF'    OR IF THIS IS THE END OF THE LINE@V2D4921 00257420
+         BE    ERR029         IT'S THE SAME ERROR              @V2D4921 00257480
+         CLI   10(R9),C' '        MORE THAN TWO DIGITS?        @V2D4921 00257540
+         BNE   ERR029             BRANCH IF YES, ERROR         @V2D4921 00257600
+         MVC   KOUNT(2),8(R9) MOVE CHARACTER FORM NUMBER       @V2D4921 00257660
+         CLI   KOUNT,X'F0'                                     @V2D4921 00257720
+         BL    ERR029             NOT A VALID NUMBER           @V2D4921 00257780
+         CLI   KOUNT,X'F9'        GREATER THAN NINE?           @V2D4921 00257840
+         BH    ERR029         NOT A VALID NUMBER               @V2D4921 00257900
+         NI    KOUNT,X'0F'        REMOVE ZONE FROM NUMBER      @V2D4921 00257960
+         SR    R1,R1          CLEAR A REGISTER                 @V2D4921 00258020
+         IC    R1,KOUNT       GET HIGH ORDER DIGIT OF NUMBER   @V2D4921 00258080
+         CLI   KOUNT+1,X'40'  WAS THERE ONLY ONE DIGIT?        @V2D4921 00258140
+         BE    ONLYONE        YES, GO                          @V2D4921 00258200
+         CLI   KOUNT+1,X'F0'      NUMBER LESS THAN ZERO?       @V2D4921 00258260
+         BL    ERR029             BRANCH IF YES                @V2D4921 00258320
+         CLI   KOUNT+1,X'F9'      GREATER THAN NINE?           @V2D4921 00258380
+         BH    ERR029             BRANCH IF YES                @V2D4921 00258440
+         MH    R1,=H'10'      MULTIPLY HIGH ORDER DIGIT        @V2D4921 00258500
+         NC    KOUNT(2),=X'000F'   KEEP ONLY LOW ORDER DIGIT   @V2D4921 00258560
+         AH    R1,KOUNT       AND ADD IN LOW ORDER DIGIT       @V2D4921 00258620
+ONLYONE  ST    R1,KOUNT       SET LINE COUNT VALUE             @V2D4921 00258680
+         LA    R9,16(,R9)     GO TO NEXT OPTION                @V2D4921 00258740
+         B     SCAN1          ...                              @V2D4921 00258800
+SCAN3    EQU   *                                               @V2D4921 00258860
+         CLC   0(4,R9),=CL4'UP'   UPPER CASE?                  @V2D4921 00258920
+         BE    SCAN3A                                                   00259000
+         CLC   0(8,R9),=CL8'UPCASE'   UPPER CASE?                       00260000
+         BNE   SCAN4                                                    00261000
+SCAN3A   OI    SWS,UPRCS      YES                                       00262000
+         LA    R9,8(,R9)      INCR POINTER                              00263000
+         B     SCAN1                                                    00264000
+SCAN4    EQU   *                                               @V2D4921 00264600
+         CLC   0(4,R9),=CL4'MEM'  MEMBER WANTED?               @V2D4921 00265200
+         BE    SCAN4B                                                   00266000
+         CLC   0(8,R9),=CL8'MEMBER'  MEMBER WANTED                      00267000
+         BNE   SCAN5                                                    00268000
+SCAN4B   OI    SWS,MEMB       TURN ON MEMBER PRESENT                    00269000
+         CLC   8(4,R9),SCANFO+4   ALL MEMBERS?                 @V2D4921 00270000
+         BE    SCAN4A         YES                                       00271000
+         CLI   8(R9),C')'     IS IT END OF LINE                         00272000
+         BE    ERR029         ERROR IF IT IS                            00273000
+         CLI   8(R9),X'FF'    END OF LIST                               00274000
+         BE    ERR029         ERROR IF IT IS                            00275000
+         MVC   NAME1(8),8(R9) SAVE NAME                                 00276000
+         OI    SWS,NAME       TURN ON MEMB NAME                         00277000
+SCAN4A   LA    R9,16(,R9)                                               00278000
+         B     SCAN1                                                    00279000
+SCAN5    EQU   *                                               @V2D4921 00279600
+         CLC   0(4,R9),=CL4'HEX'  HEX WANTED?                  @V2D4921 00280200
+         BNE   ERR003         END OF LINE,DON'T KNOW WHAT IT IS         00281000
+         OI    SWS,HEX        TURN ON HEX PRINT                         00282000
+         LA    R9,8(,R9)      INCR PTR                                  00283000
+         B     SCAN1          GO BACK                                   00284000
+SCAN6    CLI   32(R2),X'FF'   END OF PLIST?                             00285000
+         BE    CKEXIST        YES                                       00286000
+         CLI   32(R2),C'('    BEGINNING OF PARAMETERS                   00287000
+         BNE   SCAN6A         DON'T KNOW WHAT IT IS                     00288000
+         LA    R9,40(,R2)                                               00289000
+         B     SCAN1                                                    00290000
+SCAN6A   LA    R9,32(R2)      POINT TO STRANGE PARM                     00291000
+         B     ERR070                                          @V2D4921 00292000
+         SPACE 1                                                        00293000
+CKEXIST  EQU   *                                                        00294000
+         CLC   FILETYPE(8),=CL8'LISTING'  IS IT A LISTING FILE?         00295000
+         BNE   CK1            BRANCH IF NOT                             00296000
+         OI    SWS,CC         LISTING FILE DEFAULTS TO CC               00297000
+CK1      TM    SWS,NOCC       UNLESS OVERRIDDEN...                      00298000
+         BZ    CK2                                                      00299000
+         NI    SWS,255-CC     ...IN WHICH CASE TURN IT OFF              00300000
+CK2      TM    SWS,HEX        ...OR UNLESS HEX SPECIFIED...             00301000
+         BZ    CK3                                                      00302000
+         NI    SWS,255-CC     ...IN WHICH CASE ALSO TURN IT OFF         00303000
+*                                                                       00304000
+*        CHECK EXISTENCE OF FILE                                        00305000
+*                                                                       00306000
+CK3      EQU   *                                                        00307000
+         LA    R1,FILE        POINT TO FILE PLIST                       00308000
+         L     R15,ASTATE                                      @V305066 00309000
+         BALR  R14,R15        ...                              @V305066 00309100
+         BNZ   STATERR        ERROR RETURN                     @V305066 00309200
+         L     R3,FILEBUFF    LOCATION OF FST COPY                      00311000
+         L     R1,32(,R3)     RECORD LENGTH IN R1                       00312000
+         TM    SWS,HEX        IF HEX WANTED...                          00313000
+         BO    RECLOK         ...SKIP LENGTH CHECK                      00314000
+         LH    R4,CARRSZ      PRINTER CARRIAGE SIZE IN R4               00315000
+         TM    SWS,CC         IF CARRIAGE CONTROL SUPPLIED...           00316000
+         BZ    CKRECL         ...                                       00317000
+         LA    R4,1(,R4)      ...RECORD LENGTH CAN BE 1 MORE            00318000
+CKRECL   CR    R1,R4          RECORD LENGTH OK?                         00319000
+         BH    ERR044         ERROR IF TOO LONG                         00320000
+         SPACE 1                                                        00321000
+RECLOK   MVC   FILECOMM,=CL8'RDBUF'  SET FILE PLIST FOR READING         00322000
+         ST    R1,FILESIZE    RECORD LENGTH INTO FILE PLIST             00323000
+         LA    R1,7(,R1)      ROUND NUMBER UP...                        00324000
+         SRL   R1,3           ...IN DOUBLEWORDS...                      00325000
+         LA    R0,1(,R1)      ...PLUS ONE                               00326000
+         ST    R0,STRG        SAVE LENGTH                               00327000
+         DMSFREE  DWORDS=(0)                                            00328000
+         ST    R1,AREA        SAVE ADDRESS OF STORAGE                   00329000
+         TM    SWS,CC         CARRIAGE CONTROL PROVIDED?                00330000
+         BO    STSTG          BRANCH IF SO                              00331000
+         MVI   0(R1),X'09'    MOVE IN DEFAULT CARRIAGE CONTROL          00332000
+         LA    R1,1(,R1)      INCREASE BUFFER ADDRESS PAST X'09'        00333000
+STSTG    ST    R1,FILEBUFF    BUFFER ADDRESS FOR RDBUF                  00334000
+         SPACE 1                                                        00335000
+*                                                                       00336000
+*        SET UP TITLE                                                   00337000
+*                                                                       00338000
+         LA    R3,INSTALID    V(INSTALLATION HEADING)                   00339000
+         MVC   FILEHD+22(64),0(R3) MOVE HEADING TO LOCAL BUFFER         00340000
+         MVC   FILEHD(8),FILENAME  SET UP FILEID                        00341000
+         MVC   FILEHD+9(8),FILETYPE ...                                 00342000
+         MVC   FILEHD+18(2),FILEMODE ...                                00343000
+         ZAP   PAGCNT,H12     INITIALIZE PAGE NUMBER COUNT              00344000
+         LA    R14,MEMBS      SET RETURN FROM 1ST PAGE EJECT            00345000
+         TM    SWS,MEMB       PRINTING FROM A LIBRARY?                  00346000
+         BO    SETUPEND           YES, CHECK PAGE EJECT        @V2D4921 00347000
+         LA    R14,MAINLOOP   NO, CHANGE RETURN FROM 1ST PAGE EJECT     00348000
+SETUPEND EQU   *                                               @V2D4921 00348500
+         TM    SWS,CC             CARRIAGE CONTROL PROVIDED?   @V2D4921 00349000
+         BOR   R14                YES, SKIP INITIAL EJECT      @V2D4921 00349500
+         EJECT                                                          00350000
+**********************************************************************  00351000
+*                                                                       00352000
+*        PAGE EJECT ROUTINE                                             00353000
+*                                                                       00354000
+**********************************************************************  00355000
+         SPACE 1                                                        00356000
+PAGE     EQU   *                                                        00357000
+         NI    SWS,255-EJEC       REMOVE EJECT FLAG                     00357500
+         AP    PAGCNT,=PL2'1'      INCREMENT PAGE NUMBER                00358000
+         UNPK  HDCNT(3),PAGCNT(2)  SET NEW PAGE NUMBER                  00359000
+         OI    HDCNT+2,X'F0'       ...                                  00360000
+         LM    R6,R7,PABUF    SET TO SKIP, PRINT HEADING                00361000
+         BAL   R5,FILBUF                                                00362000
+         LM    R6,R7,PASPACE  AND SPACE 3                               00363000
+         BAL   R5,FILBUF                                                00364000
+         L     LINCNT,KOUNT   INITIALIZE LINE COUNT            @V2D4921 00365000
+         BR    R14            RETURN                                    00366000
+         EJECT                                                          00367000
+**********************************************************************  00368000
+*        MAIN LOOP                                                      00369000
+*                                                                       00370000
+**********************************************************************  00371000
+         SPACE 1                                                        00372000
+MAINLOOP EQU   *                                                        00373000
+         TM    SWS,MEMB       PRINTING A LIBRARY MEMBER?                00374000
+         BZ    MAINRD         NO, READ A RECORD                         00375000
+         L     R1,FILEBUFF    POINT TO RECORD                           00376000
+         CLC   0(4,R1),=X'61FFFF61'    END OF MEMBER RECORD?            00377000
+         BE    MEMEND         BRANCH IF SO                              00378000
+         LA    R4,1(,R4)      INCREMENT ITEM NUMBER                     00379000
+         STH   R4,FILEITNO    AND SET IN FILE PLIST                     00380000
+         B     MAINRD         READ NEXT RECORD                          00381000
+         SPACE 1                                                        00382000
+MEMEND   LA    R15,12         SIMULATE EOF IN CASE FINISHED             00383000
+         TM    SWS,NAME       MEMBER NAME GIVEN?                        00384000
+         BO    READERR        YES, PRINTING SINGLE MEMBER ONLY          00385000
+         SPACE 1                                                        00386000
+MEMFIND  L     R1,DICTADR     PREPARE TO LOCATE NEXT MEMBER             00387000
+         LA    R1,12(,R1)     POINT TO NEXT DICTIONARY ENTRY            00388000
+         C     R1,DICTEND     END OF ALL MEMBERS?                       00389000
+         BNL   READERR        YES, END                                  00390000
+         ST    R1,DICTADR     NO, STORE NEW ADDRESS                     00391000
+         CLI   0(R1),X'00'    NULL DICTIONARY ENTRY?                    00392000
+         BE    MEMFIND        IF SO, LOOK AGAIN                         00393000
+         LH    R4,8(,R1)      IF NOT, GET STARTING LOCATION             00394000
+         STH   R4,FILEITNO    AND SET IT IN PLIST                       00395000
+         SPACE 1                                                        00396000
+MAINRD   EQU   *                                                        00397000
+         LA    R1,FILE        SET TO READ A RECORD                      00398000
+         L     R15,ARDBUF     RDBUF                            @V305066 00399000
+         BALR  R14,R15        ...                              @V305066 00399100
+         BNZ   READERR        ERROR RETURN                     @V305066 00399200
+         TM    SWS,EJEC           WAS EJECT WANTED?                     00400200
+         BZ    NOEJEC             BRANCH IF NOT                         00400400
+         BAL   R14,PAGE           GO EJECT                              00400600
+NOEJEC   EQU   *                                                        00400800
+         L     R6,FILEBUFF    BUFFER LOCATION TO R6                     00401000
+         L     R7,FILENORD    BYTE COUNT TO R7                          00402000
+         TM    SWS,HEX        IF HEX WANTED...                          00403000
+         BO    HEXRTN         ...GO TO HEX ROUTINE                      00404000
+         TM    SWS,CC         CARRIAGE CONTROL PROVIDED?                00405000
+         BO    CTROK          BRANCH IF SO                              00406000
+         BCTR  R6,0           REDUCE LOCATION TO INCLUDE OUR CC         00407000
+         LA    R7,1(,R7)      AND INCREASE COUNT                        00408000
+         SPACE 1                                                        00409000
+CTROK    TM    SWS,UPRCS      TRANSLATE TO UPPERCASE?                   00410000
+         BZ    CASEOK         BRANCH IF NOT                             00411000
+         LA    R3,1(,R6)      POINT TO DATA (1 PAST CC CHAR)            00412000
+         LR    R5,R7          CALCULATE BYTE COUNT FOR EX               00413000
+         BCTR  R5,0             SUBTRACT 1 FOR NOT XLATING CC CHAR      00414000
+         LTR   R5,R5          ONLY 1 BYTE IN RECORD?           @VA05422 00414100
+         BZ    TRANS          YES DON'T DECREMENT FURTHER      @VA05422 00414200
+         BCTR  R5,0             SUBTRACT 1 FOR EXECUTE INSTRUCTION      00415000
+TRANS    EQU   *                                               @VA05422 00415100
+         EX    R5,UPTRANS     TRANSLATE TO UPPERCASE                    00416000
+         SPACE 1                                                        00417000
+CASEOK   TM    SWS,CC+FIRST   IS THIS FIRST PASS WITH CC GIVEN?         00418000
+         BNO   PRTOK          BRANCH IF NOT                             00419000
+         NI    SWS,255-FIRST  TURN OFF SW - IF NOT CC, NOT USED         00420000
+         CLI   0(R6),C'1'     IS THIS ASA CHAR FOR EJECT?               00421000
+         BE    PRTOK          YES, GOOD                                 00422000
+         CLI   0(R6),X'8B'    OR EJECT IMMEDIATE?                       00425000
+         BE    PRTOK          YES, GOOD                                 00426000
+         L     R5,BUFCTR      MOVE IN OUR OWN EJECT                     00427000
+         MVC   0(8,R5),CCWEJCT  ...                                     00428000
+         LA    R5,8(,R5)      UPDATE BUFCTR                             00429000
+         ST    R5,BUFCTR      ...                                       00430000
+         SPACE 1                                                        00431000
+PRTOK    BAL   R5,FILBUF      GO FILL BUFFER                            00432000
+         LA    R14,MAINLOOP   SET RETURN TO GET ANOTHER RECORD          00433000
+         TM    SWS,CC         IF CARRIAGE CONTROL PROVIDED...           00434000
+         BCR   B'0001',R14    ...GO GET NEXT RECORD IMMEDIATELY         00435000
+         BCTR  LINCNT,R14     OTHERWISE, DECREMENT LINE COUNT           00436000
+         OI    SWS,EJEC           IF EXHAUSTED, SET EJECT WANTED        00436600
+         BR    R14                                                      00437200
+         SPACE 1                                                        00438000
+*                                                                       00439000
+*        FOLLOWING INSTRUCTION IS THE SUBJECT INSTRUCTION OF EX         00440000
+*                                                                       00441000
+UPTRANS  OC    0(0,R3),UBUF   TRANSLATE TO UPPERCASE                    00442000
+         EJECT                                                          00443000
+*********************************************************************   00444000
+*                                                                       00445000
+*        SUBROUTINE TO CALL DMSPIO TO FILL BUFFER AND PRINT BUFFER.     00446000
+*        R6 = LINE LOCATION                                             00447000
+*        R7 = LINE BYTE COUNT                                           00448000
+*        R5 = RETURN ADDRESS                                            00449000
+*        LINE STARTS WITH A CARRIAGE CONTROL CHARACTER                  00450000
+*                                                                       00451000
+**********************************************************************  00452000
+         SPACE 1                                                        00453000
+FILBUF   EQU   *                                                        00454000
+         STM   R0,R14,LSAVE   SAVE REGISTERS                            00455000
+         L     R15,ADMSPIOC   ADDRESS OF DMSPIOCC                       00456000
+         STM   R6,R7,BLDCCW+8 LINE LOC AND LENGTH TO DMSPIO PLIST       00457000
+         LA    R1,BLDCCW      ADDRESS OF DMSPIOCC PLIST                 00458000
+         BALR  R14,R15        CALL DMSPIO                               00459000
+         BALR  R15,0          REGAIN ADDRESSABILITY                     00460000
+         USING *,R15          ...                                       00461000
+         LM    R0,R14,LSAVE   RESTORE REGS                              00462000
+         DROP  R15                                                      00463000
+         SPACE 1                                                        00464000
+         L     R8,BUFCTR      DETERMINE IF BUFFER IS FULL               00465000
+         L     R9,LIMIT       ...                                       00466000
+         CR    R8,R9          ...                                       00467000
+         BL    BUFRESM        BUFFER NOT FULL - RETURN                  00468000
+         SPACE 1                                                        00469000
+BUFFUL   LM    R3,R4,CCWNOP   PUT NOP AT END OF BUFFER                  00470000
+         STM   R3,R4,0(R8)    ...                                       00471000
+         LA    R1,PRTBUF      ADDRESS OF PLIST TO PRINT BUFFER          00472000
+         SVC   202                                                      00473000
+         DC    AL4(BUFERR)                                              00474000
+         LA    R3,BUFDATA     RESTORE BUFCTR TO BEGINNING OF BUFFER     00475000
+         SR    R4,R4          AND ZERO BATCTR                           00476000
+         STM   R3,R4,BUFCTR   ...                                       00477000
+         SPACE 1                                                        00478000
+BUFRESM  LM    R0,R14,LSAVE   RESTORE REGISTERS AGAIN                   00479000
+         BR    R5             RETURN                                    00480000
+         EJECT                                                          00481000
+**********************************************************************  00482000
+* HEX  CONVERSION ROUTINE                                               00483000
+*        ON ENTRY-                                                      00484000
+*        R6 HAS BUFFER START ADDRESS                                    00485000
+*        R7 HAS LENGTH OF RECORD                                        00486000
+*                                                                       00487000
+**********************************************************************  00488000
+         SPACE 1                                                        00489000
+HEXRTN   EQU   *                                                        00490000
+* PRINT HEADER IN FORM: RECORD= XXXXX LENGTH= XXXXX                     00491000
+HEX1     CVD   R7,DECD                                                  00492000
+         MVC   RSZF(6),RSZM   SET EDIT MASK                             00493000
+         ED    RSZF(6),DECD+5 EDIT NUMBER TO MSG                        00494000
+         L     R5,RECNO       *UPDATE RECORD COUNT                      00495000
+         CVD   R5,DECD                                                  00496000
+         LA    R5,1(R5)       INCR COUNT                                00497000
+         ST    R5,RECNO       SAVE FOR NEXT TIME                        00498000
+         MVC   RNOF(6),RNOM   SET EDIT MASK                             00499000
+         ED    RNOF(6),DECD+5    EDIT REC NUM TO MSG                    00500000
+         SPACE 1                                                        00501000
+         STM   R6,R7,HXSAVE   SAVE RECORD ADDR/LENGTH                   00502000
+         LM    R6,R7,PHDR     SET FOR PRINTING HEADER                   00503000
+         BAL   R5,FILBUF      PUT HEADER IN BUFFER                      00504000
+         BCT   LINCNT,HEX1A   DECREMENT LINE COUNT                      00505000
+         BAL   R14,PAGE       ...AND IF EXHAUSTED DO PAGE EJECT         00506000
+HEX1A    LM    R6,R7,HXSAVE   RESTORE RECORD ADDR/LENGTH                00507000
+         SPACE 1                                                        00508000
+* DEBLOCK AND CONVERT EACH WORD IN INPUT RECORD AND                     00509000
+* OUTPUT IT                                                             00510000
+*        R6=BUFFER ADDR                                                 00511000
+*        R7=LENGTH IN BYTES                                             00512000
+*                                                                       00513000
+         SPACE 1                                                        00514000
+OUTER1   LA    R8,4           INCREMENT VALUE IN R8                     00515000
+         SR    R6,R8          REDUCE R6 FOR BXH                         00516000
+         LA    R7,0(,R7)      INSURE HIGH ORDER BYTE IS ZERO            00517000
+         LA    R9,0(R7,R6)    SET END OF REQUESTED BUFFER               00518000
+OUTER    LA    R3,PBUF                                                  00519000
+         LA    R2,10                                                    00520000
+         MVI   PBUF,C' '      CLEAR BUFFER                              00521000
+         MVC   PBUF+1(129),PBUF    *                                    00522000
+INNER    BXH   R6,R8,ENDREC                                             00523000
+         LA    R14,0(R3)                                                00524000
+         LA    R15,0(R6)                                                00525000
+         UNPK  HEXUNPK(9),0(5,R15)                                      00526000
+         TR    HEXUNPK(9),HEXTRTBL                                      00527000
+         MVC   0(8,R14),HEXUNPK                                         00528000
+         LA    R3,10(,R3)                                               00529000
+         BCT   R2,INNER                                                 00530000
+         SPACE 1                                                        00531000
+         STM   R6,R7,HXSAVE                                             00532000
+         LM    R6,R7,PHEX                                               00533000
+         BAL   R5,FILBUF      PUT LINE IN BUFFER                        00534000
+         BCT   LINCNT,HEX1B   DECREMENT LINE COUNT                      00535000
+         LA    R3,4               EXHAUSTED, CHECK IF RECORD LEFT       00535200
+         A     R3,HXSAVE          SET FOR NEXT WORD                     00535400
+         CR    R3,R9              IS THERE ONE?                         00535600
+         BNL   HEX1C              BRANCH IF NOT                         00535800
+         BAL   R14,PAGE       ...AND IF EXHAUSTED DO PAGE EJECT         00536000
+         B     HEX1B                                                    00536100
+*                                                                       00536200
+*        RESTORE LINCNT FOR LATER BCT AND POSS. EJECT                   00536300
+*                                                                       00536400
+HEX1C    EQU   *                                                        00536500
+         LA    LINCNT,1                                                 00536600
+HEX1B    LM    R6,R7,HXSAVE                                             00537000
+         B     OUTER                                                    00538000
+         SPACE 1                                                        00539000
+ENDREC   LA    R14,MAINLOOP   SET RETURN IN CASE PAGE EJECT NEEDED      00540000
+         SR    R6,R9          SEE IF ANY BYTES LEFT TO TRANSLATE        00541000
+         SR    R8,R6            (R8 HAD A 4 IN IT)                      00542000
+         AR    R6,R9                                                    00543000
+         LTR   R8,R8          REMAINDER - MUST BE 0,1,2, OR 3           00544000
+         BNZ   ENDREC1        WE HAVE 1,2, OR 3 BYTES TO TRANSLATE      00545000
+         LA    R8,10          SEE IF ANYTHING IN PBUF                   00546000
+         CR    R2,R8          IF R2=10, WAS 1ST PASS IN INNER           00547000
+         BE    SPACER         ...AND NOTHING YET IN CLEARED PBUF        00548000
+         B     LSTWRT         OTHERWISE, MOVE PBUF TO MAIN BUFFER       00549000
+         SPACE 1                                                        00550000
+ENDREC1  SR    R9,R9          PUT INTO R9 LENGTHS FOR EX SUBJECTS       00551000
+         IC    R9,UNPKTBL(R8) ...BY INDEXING NO. BYTES LEFT INTO TAB    00552000
+         SLL   R8,1           READY FOR TR MASK                         00553000
+         BCTR  R8,0                                                     00554000
+         EX    R9,UNPK        DO UNPACK                                 00555000
+         EX    R8,TR          AND TRANSLATE                             00556000
+         EX    R8,MVC         AND MVC                                   00557000
+         SPACE 1                                                        00558000
+LSTWRT   LM    R6,R7,PHEX     SET REGS TO FILL BUFFER                   00559000
+         BAL   R5,FILBUF      PUT LAST LINE IN BUFFER                   00560000
+         BCT   LINCNT,SPACER  DECREMENT LINE COUNT, SPACE 1             00561000
+         OI    SWS,EJEC           SET EJECT WANTED                      00561600
+         BR    R14                                                      00562200
+         SPACE 1                                                        00563000
+SPACER   LM    R6,R7,HXSPACE  SET REGS TO SPACE 1                       00564000
+         BAL   R5,FILBUF      SPACE 1                                   00565000
+         BCTR  LINCNT,R14     DECREMENT LINE COUNT, GET NEXT RECORD     00566000
+         OI    SWS,EJEC           SET EJECT WANTED                      00566600
+         BR    R14                                                      00567200
+         EJECT                                                          00568000
+**********************************************************************  00569000
+* READ AND CHECK FOR 'LIB' LIBRARY.  GET STORAGE AND READ DICTIONARY    00570000
+* INTO IT.  IF MEMBER NAME WANTED SEARCH FOR IT AND SET REGS.           00571000
+* R2-LENGTH,R4-DICTIONARY LOCATION OF CURRENT NAME.                     00572000
+* DICTIONARY FORM-                                                      00573000
+*  CL8'NAME'                                                            00574000
+*  CL2'INDEX'                                                           00575000
+*  CL2'LENGTH'                                                          00576000
+*                                                                       00577000
+**********************************************************************  00578000
+         SPACE 1                                                        00579000
+MEMBS    EQU   *                                                        00580000
+         L     R7,AREA        POINT TO BUFFER                           00581000
+         ST    R7,FILEBUFF    STORE IN PLIST                            00582000
+         LA    R5,1                                                     00583000
+         STCM  R5,B'0011',FILEITNO  SET ITEM NUMBER TO 1ST RECORD       00584000
+         LA    R1,FILE        READ DICTIONARY POINTER                   00585000
+         L     R15,ARDBUF     RDBUF                            @V305066 00586000
+         BALR  R14,R15        ...                              @V305066 00586100
+         BNZ   LIBRERR        ERROR RETURN                     @V305066 00586200
+         CLC   3(3,R7),=CL3'LIB'        IS IT A LIBRARY FILE            00588000
+         BNE   ERR033              NOT A LIB FILE                       00589000
+         L     R0,8(R7)       GET LENGTH OF DICTIONARY                  00590000
+         ST    R0,DICTLEN     SAVE                                      00591000
+         LTR   R0,R0          IF LENGTH IS ZERO...                      00592000
+         BZ    ERR039         THERE ARE NO ENTRIES IN LIBRARY           00593000
+         LA    R1,60          FIX FOR MINIMUM NUMBER DOUBLE WORDS       00594000
+         AR    R0,R1          *                                         00595000
+         SRL   R0,3           *                                         00596000
+         ST    R0,STRLEN      SAVE AMOUNT REQUESTED                     00597000
+         DMSFREE  DWORDS=(0)                                            00598000
+         ST    R1,STRADR      SAVE ADDRESS                              00599000
+         ST    R1,DICTADR     SAVE STORAGE START                        00600000
+         L     R6,DICTLEN     GET BUF AREA ADDR                         00601000
+         LA    R3,0(R1,R6)    SET END                                   00602000
+         LA    R2,72          SET INDEX FACTOR                          00603000
+         ST    R3,DICTEND     SAVE END OF DICTIONARY                    00604000
+         BCTR  R3,R0          DECR FOR BXLE                             00605000
+         LH    R4,6(R7)       GET INDEX FOR READ                        00606000
+         LR    R6,R1                                                    00607000
+*                                                                       00608000
+RDLOOP   STH   R4,FILEITNO    SET ITEM NO                               00609000
+         LA    R1,FILE        READ PARM LIST                            00610000
+         L     R15,ARDBUF     RDBUF                            @V305066 00611100
+         BALR  R14,R15        ...                              @V305066 00611200
+         BNZ   READERR        ERROR RETURN                     @V305066 00611300
+         MVC   0(72,R6),0(R7) MOVE TO DICTIONARY                        00613000
+         LA    R4,1(,R4)       INCR INDEX                               00614000
+         BXLE  R6,R2,RDLOOP   GET EVERY ONE                             00615000
+*                                                                       00616000
+         L     R3,DICTEND     END OF DICTIONARY                         00617000
+         L     R4,DICTADR     GET START ADDR                            00618000
+         LA    R2,12                                                    00619000
+         BCTR  R3,0           DECREMENT FOR BXLE                        00620000
+RDLOOP1  CLI   0(R4),X'00'    NULL ENTRY?                               00621000
+         BNZ   NAMLOOP2       NO                                        00622000
+         BXLE  R4,R2,RDLOOP1  LOOK AGAIN                                00623000
+         B     ERR039A        ERROR NO ENTRIES                          00624000
+*                                                                       00625000
+NAMLOOP2 ST    R4,DICTADR                                               00626000
+         TM    SWS,NAME       ONLY ONE MEMBER WANTED?                   00627000
+         BNO   NAMLOOP1         NO,THEN WE CAN START                    00628000
+         LA    R2,12                                                    00629000
+NAMLOOP  CLC   0(8,R4),NAME1  IS IT NAME                                00630000
+         BE    NAMLOOP1       YES, FOUND IT                             00631000
+         BXLE  R4,R2,NAMLOOP  LOOK AT NEXT                              00632000
+         B     ERR013         NAME NOT FOUND                            00633000
+*                                                                       00634000
+NAMLOOP1 CLC   0(2,R4),BITS   IS FIRST SLOT EMPTY?                      00635000
+         BNE   NAMLOOP3       NO                                        00636000
+         LA    R4,12(R4)      POINT TO NEXT IF FIRST EMPTY              00637000
+         B     NAMLOOP2                                                 00638000
+NAMLOOP3 EQU   *                                                        00639000
+         LH    R4,8(R4)       GET STARTING ITEM NO                      00640000
+         BCTR  R4,R0          FIX FOR FIRST PASS                        00641000
+         LA    R1,1(R7)       RESET BUFFER ADDR                         00642000
+         ST    R1,FILEBUFF    AND STORE                                 00643000
+         MVI   0(R7),X'09'    FOR SINGLE SPACE                          00644000
+         B     MAINLOOP                                                 00645000
+         EJECT                                                          00646000
+**********************************************************************  00647000
+*                                                                       00648000
+*        ERROR MESSAGES                                                 00649000
+*                                                                       00650000
+**********************************************************************  00651000
+         SPACE 1                                                        00652000
+ERRMSG1  LA    R0,FILENAME                                              00653000
+         DMSERR  MF=(E,'SYS'),LET=S,NUM=(4),TEXTA=(3),                 *00654000
+               SUB=(DEC,(15),CHAR8A,(0))                                00655000
+         BR    R5                                                       00656000
+         SPACE 1                                                        00657000
+LIBRERR  NI    SWS,255-MEMB   CONSIDER AS NOT MEMB, FREE STG NOT GOT    00658000
+READERR  CH    R15,H12        IS IT EOF?                                00659000
+         BE    NORMRET        YES, ALL DONE                             00660000
+         SPACE 1                                                        00661000
+ERR104   LA    R3,BRDERR                                                00662000
+         LA    R4,104                                                   00663000
+         BAL   R5,ERRMSG1                                               00664000
+         LA    R15,100                                                  00665000
+         B     CLOSRET                                                  00666000
+         SPACE 1                                                        00667000
+BUFERR   EQU   *                                                        00668000
+ERR123   C     R15,=F'100'    MSG GIVEN BY DMSPIO?                      00669000
+         BE    CLOSRET1       BRANCH IF SO                              00670000
+         LA    R3,PIOERR                                                00671000
+         LA    R4,123                                                   00672000
+         BAL   R5,ERRMSG1                                               00673000
+         LA    R15,100                                                  00674000
+         B     CLOSRET1                                                 00675000
+         SPACE 1                                                        00676000
+ERRMSG2  LA    R0,FILENAME                                              00677000
+         DMSERR  MF=(E,'SYS'),LET=E,NUM=(4),TEXTA=(3),                 *00678000
+               SUB=(CHAR8A,(0))                                         00679000
+         BR    R5                                                       00680000
+         SPACE 1                                                        00681000
+STATERR  C     R15,=F'28'     FILE NOT FOUND FROM STATE?                00682000
+         BNE   ERRET          NO, MESSAGE GIVEN BY STATE                00683000
+ERR002   LA    R3,NOFILE                                                00684000
+         LA    R4,2                                                     00685000
+         BAL   R5,ERRMSG2                                               00686000
+         LA    R15,28                                                   00687000
+         B     ERRET                                                    00688000
+         SPACE 1                                                        00689000
+ERR008   LA    R3,UNS                                                   00690000
+         LA    R4,8                                                     00691000
+         BAL   R5,ERRMSG2                                               00692000
+         LA    R15,36                                                   00693000
+         B     ERRET                                                    00694000
+         SPACE 1                                                        00695000
+ERR008A  LA    R3,INV                                                   00696000
+         LA    R4,8                                                     00697000
+         BAL   R5,ERRMSG2                                               00698000
+         LA    R15,36                                                   00699000
+         B     ERRET                                                    00700000
+         SPACE 1                                                        00701000
+ERR039   NI    SWS,255-MEMB                                             00702000
+ERR039A  LA    R3,NOMEMB                                                00703000
+         LA    R4,39                                                    00704000
+         BAL   R5,ERRMSG2                                               00705000
+         LA    R15,32                                                   00706000
+         B     FINRET                                                   00707000
+         SPACE 1                                                        00708000
+ERR033   LA    R3,NOTLIB                                                00709000
+         LA    R4,33                                                    00710000
+         BAL   R5,ERRMSG2                                               00711000
+         NI    SWS,255-MEMB                                             00712000
+         LA    R15,32                                                   00713000
+         B     FINRET                                                   00714000
+         SPACE 1                                                        00715000
+ERR062   LA    R3,ASTER                                                 00716000
+         LA    R4,62                                                    00717000
+         BAL   R5,ERRMSG2                                               00718000
+         LA    R15,20                                                   00719000
+         B     ERRET                                                    00720000
+         SPACE 1                                                        00721000
+ERR044   LA    R3,EXCED                                                 00722000
+         LA    R4,44                                                    00723000
+         BAL   R5,ERRMSG2                                               00724000
+         LA    R15,32                                                   00725000
+         B     ERRET                                                    00726000
+         SPACE 1                                                        00727000
+ERR054   LA    R3,INCID                                                 00728000
+         LA    R4,54                                                    00729000
+         BAL   R5,ERRMSG2                                               00730000
+         LA    R15,24                                                   00731000
+         B     ERRET                                                    00732000
+         SPACE 1                                                        00733000
+ERRMSG3  DMSERR  MF=(E,'SYS'),LET=E,NUM=(4),TEXTA=(3),                 *00734000
+               SUB=(CHARA,(9),CHARA,(6))                                00735000
+         BR    R5                                                       00736000
+         SPACE 1                                                        00737000
+ERR003   LA    R3,BADOPT                                                00738000
+         LA    R4,3                                                     00739000
+         BAL   R5,ERRMSG3                                               00740000
+         LA    R15,24                                                   00741000
+         B     ERRET                                                    00742000
+         SPACE 1                                                        00743000
+ERR013   LA    R9,NAME1                                                 00744000
+         LA    R3,MEMNF                                                 00745000
+         LA    R4,13                                                    00746000
+         BAL   R5,ERRMSG3                                               00747000
+         LA    R15,32                                                   00748000
+         B     FINRET                                                   00749000
+         SPACE 1                                                        00750000
+ERR029   LR    R6,R9                                                    00751000
+         LA    R9,8(,R9)                                                00752000
+         LA    R3,BADPARM                                               00753000
+         LA    R4,29                                                    00754000
+         BAL   R5,ERRMSG3                                               00755000
+         LA    R15,24                                                   00756000
+         B     ERRET                                                    00757000
+         SPACE 1                                               @V2D4921 00757060
+ERR048   EQU   *                                               @V2D4921 00757120
+         LA    R3,NOTMODE         GET ERROR MSG ADDRESS        @V2D4921 00757180
+         LA    R4,48              SET ERROR NUMBER             @V2D4921 00757240
+         LA    R9,24(R2)          POINT TO 'MODE'              @V2D4921 00757300
+         BAL   R5,ERRMSG3         GO PRINT ERROR               @V2D4921 00757360
+         LA    R15,24             SET ERROR CODE               @V2D4921 00757420
+         B     ERRET                                           @V2D4921 00757480
+         SPACE 1                                               @V2D4921 00757540
+ERR070   EQU   *                                               @V2D4921 00757600
+         LA    R3,NOTPARM         GET ERROR MSG ADDRESS        @V2D4921 00757660
+         LA    R4,70              SET ERROR NUMBER             @V2D4921 00757720
+         BAL   R5,ERRMSG3         GO PRINT ERROR               @V2D4921 00757780
+         LA    R15,24             SET ERROR CODE               @V2D4921 00757840
+         B     ERRET                                           @V2D4921 00757900
+         EJECT                                                          00758000
+NOFILE   DC    AL1(L'NOFILEMS)                                          00759000
+NOFILEMS DC    C'FILE ''....................'' NOT FOUND'               00760000
+         SPACE 1                                                        00761000
+NOMEMB   DC    AL1(L'NOMEMBMS)                                          00762000
+NOMEMBMS DC    C'NO ENTRIES IN LIBRARY ''....................'''        00763000
+         SPACE 1                                                        00764000
+NOTLIB   DC    AL1(L'NOTLIBMS)                                          00765000
+NOTLIBMS DC    C'FILE ''....................'' IS NOT A LIBRARY'        00766000
+         SPACE 1                                                        00767000
+INCID    DC    AL1(L'INCIDMS)                                           00768000
+INCIDMS  DC    C'INCOMPLETE FILEID SPECIFIED'                           00769000
+         SPACE 1                                                        00770000
+EXCED    DC    AL1(L'EXCEDMS)                                           00771000
+EXCEDMS  DC    C'RECORD EXCEEDS ALLOWABLE MAXIMUM'                      00772000
+         SPACE 1                                                        00773000
+ASTER    DC    AL1(L'ASTERMS)                                           00774000
+ASTERMS  DC    C'INVALID * IN FILEID'                                   00775000
+         SPACE 1                                                        00776000
+BRDERR   DC    AL1(L'BRDERRMS)                                          00777000
+BRDERRMS DC    C'ERROR ''...'' READING FILE ''....................'' FR*00778000
+               OM DISK'                                                 00779000
+         SPACE 1                                                        00780000
+PIOERR   DC    AL1(L'PIOERRMS)                                          00781000
+PIOERRMS DC    C'ERROR ''...'' PRINTING FILE ''....................'''  00782000
+         SPACE 1                                                        00783000
+INV      DC    AL1(L'INVMS)                                             00784000
+INVMS    DC    C'DEVICE ''00E'' INVALID OR NONEXISTENT'                 00785000
+         SPACE 1                                                        00786000
+UNS      DC    AL1(L'UNSMS)                                             00787000
+UNSMS    DC    C'DEVICE ''00E'' UNSUPPORTED DEVICE TYPE'                00788000
+         SPACE 1                                                        00789000
+BADOPT   DC    AL1(L'BADOPTMS)                                          00790000
+BADOPTMS DC    C'INVALID OPTION ''........'''                           00791000
+         SPACE 1                                                        00792000
+BADPARM  DC    AL1(L'BADPARMS)                                          00793000
+BADPARMS DC    C'INVALID PARAMETER ''........'' IN THE OPTION ''.......*00794000
+               .'' FIELD'                                               00795000
+         SPACE 1                                                        00796000
+MEMNF    DC    AL1(L'MEMNFMS)                                           00797000
+MEMNFMS  DC    C'MEMBER ''........'' NOT FOUND'                         00798000
+         SPACE 1                                               @V2D4921 00798100
+NOTMODE  DC    AL1(L'NOTMODE1)                                 @V2D4921 00798200
+NOTMODE1 DC    C'INVALID MODE ''...'''                         @V2D4921 00798300
+         SPACE 1                                               @V2D4921 00798400
+NOTPARM  DC    AL1(L'NOTPARM1)                                 @V2D4921 00798500
+NOTPARM1 DC    C'INVALID PARAMETER ''........'''               @V2D4921 00798600
+         EJECT                                                          00799000
+**********************************************************************  00800000
+*                                                                       00801000
+*        RETURNS                                                        00802000
+*                                                                       00803000
+**********************************************************************  00804000
+         SPACE 1                                                        00805000
+NORMRET  SR    R15,R15        CLEAR RETURN FOR NORMAL END               00806000
+         SPACE 1                                                        00807000
+CLOSRET  LR    R6,R15         SAVE RETURN CODE IN R6                    00808000
+         L     R8,BUFCTR      ADDR OF NEXT LOC IN BUFFER                00809000
+         LA    R3,BUFDATA     ADDR OF START OF BUFFER                   00810000
+         CR    R3,R8          IS BUFFER EMPTY?                          00811000
+         BE    BUFMT          YES, NO RESIDUAL DATA TO PUNCH            00812000
+         LM    R3,R4,CCWNOP   NO, PUT NOP AT END OF BUFFER              00813000
+         STM   R3,R4,0(R8)    ...                                       00814000
+         LA    R1,PRTBUF      ADDRESS OF PLIST TO PRINT BUFFER          00815000
+         SVC   202                                                      00816000
+         DC    AL4(BUFERR)                                              00817000
+BUFMT    LA    R3,BUFDATA     RESTORE COUNTER TO BUFFER BEGINNING       00818000
+         SR    R4,R4          AND ZERO BATCTR                           00819000
+         STM   R3,R4,BUFCTR   ...                                       00820000
+         LR    R15,R6                                                   00821000
+         SPACE 1                                                        00822000
+CLOSRET1 LR    R6,R15         SAVE RETURN CODE IN R6                    00823000
+         LA    R1,CLOSIO      SET UP TO CLOSE PRINTER                   00824000
+         MVC   CLOSION(16),FILENAME  NAME OF FILE BEING OUTPUT          00825000
+         SVC   202                                                      00826000
+         DC    AL4(*+4)       IGNORE ERRORS                             00827000
+         LR    R15,R6                                                   00828000
+         SPACE 1                                                        00829000
+FINRET   LR    R6,R15         SAVE RETURN CODE IN R6                    00830000
+         MVC   FILECOMM(8),=CL8'FINIS'  SET TO CLOSE FILE               00831000
+         LA    R1,FILE        ADDRESS OF FILE PLIST                     00832000
+         L     R15,AFINIS     FINIS                            @V305066 00833000
+         BALR  R14,R15        ...                              @V305066 00833100
+         TM    SWS,MEMB       IF MEMBER OPTION, RELEASE STG             00835000
+         BZ    MAINFRET                                                 00836000
+         L     R1,STRADR      ADDRESS OF MEMBER STG                     00837000
+         L     R0,STRLEN      LENGTH OF MEMBER STG                      00838000
+         DMSFRET  DWORDS=(0),LOC=(1)                                    00839000
+         SPACE 1                                                        00840000
+MAINFRET L     R1,AREA        ADDRESS OF STG                            00841000
+         L     R0,STRG        LENGTH OF STG                             00842000
+         DMSFRET  DWORDS=(0),LOC=(1)                                    00843000
+         LR    R15,R6         RESTORE RETURN CODE                       00844000
+         SPACE 1                                                        00845000
+ERRET    L     R14,UIOSAVE    RESTORE RETURN ADDRESS                    00846000
+         BR    R14                                                      00847000
+         EJECT                                                          00848000
+**********************************************************************  00849000
+*                                                                       00850000
+*        STORAGE AREAS AND PLISTS                                       00851000
+*                                                                       00852000
+**********************************************************************  00853000
+         SPACE 1                                                        00854000
+FILE     DS    0D                                                       00855000
+FILECOMM DC    CL8' '         FILE SYSTEM COMMAND                       00856000
+FILENAME DC    CL8' '         FILENAME                                  00857000
+FILETYPE DC    CL8' '         FILETYPE                                  00858000
+FILEMODE DC    CL2' '         FILEMODE                                  00859000
+FILEITNO DC    H'0'           RECORD NUMBER                             00860000
+FILEBUFF DC    A(*-*)         BUFFER ADDRESS                            00861000
+FILESIZE DC    A(80)          BUFFER SIZE                               00862000
+FILEFV   DC    CL2'F'         FIXED/VARIABLE FLAG                       00863000
+FILENOIT DC    H'1'           NUMBER OF RECORDS                         00864000
+FILENORD DC    F'0'           NUMBER OF BYTES READ                      00865000
+         DC    8X'FF'                                                   00866000
+         SPACE 1                                                        00867000
+CLOSIO   DS    0D                                                       00868000
+         DC    CL8'CP'                                                  00869000
+         DC    CL8'CLOSE'                                               00870000
+         DC    CL8'00E'                                                 00871000
+         DC    CL8'NAME'                                                00872000
+CLOSION  DS    16C                                                      00873000
+         DC    8X'FF'                                                   00874000
+         SPACE 1                                                        00875000
+         DS    0D                                                       00876000
+BLDCCW   DC    CL8'DMSPIOCC'                                            00877000
+         DC    A(*-*)         ADDRESS OF LINE                           00878000
+         DC    A(*-*)         LENGTH OF LINE                            00879000
+         DC    A(BUFCTR)      ADDRESS OF BUFFER FOR DMSPIOCC            00880000
+         DC    8X'FF'                                                   00881000
+         SPACE 1                                                        00882000
+PRTBUF   DC    CL8'DMSPIOSI'                                            00883000
+         DC    A(BUFCTR)      ADDRESS OF BUFFER FOR DMSPIOSI            00884000
+         DC    A(*-*)                                                   00885000
+         DC    8X'FF'                                                   00886000
+         SPACE 1                                                        00887000
+CCWNOP   CCW   X'03',0,X'20',1                                          00888000
+CCWEJCT  CCW   X'8B',0,X'60',1                                          00889000
+         SPACE 1                                                        00890000
+SCANFO   DS    0F                                                       00891000
+         DC    X'FFFFFFFF5C4040404D404040'  WORDS OF FF,*,(             00892000
+CARRSZ   DS    1H                                                       00893000
+H12      DC    H'12'                                                    00894000
+AMODE    DC    X'C1400000'                                              00895000
+BITS     DC    F'1'                                                     00896000
+KOUNT    DC    F'55'          NUMBER OF PRINT LINES PER PAGE   @V2D4921 00896500
+STRG     DS    1F             STORAGE LENGTH                            00897000
+AREA     DS    1F             STORAGE ADDRESS                           00898000
+PAGCNT   DS    CL2            PAGE NUMBER IN PACKED DEC                 00899000
+LINCNT   EQU   10                                                       00900000
+SWS      DS    1C             SWITCHES                                  00901000
+CC       EQU   X'80'            CARRIAGE CONTROL SUPPLIED BY CALLER     00902000
+NOCC     EQU   X'40'            USE OUR OWN CARRIAGE CONTROL            00903000
+HEX      EQU   X'20'            TRANSLATE TO HEXADECIMAL, FORMATTED     00904000
+UPRCS    EQU   X'10'            TRANSLATE TO UPPER CASE                 00905000
+MEMB     EQU   X'08'            PRINT LIBRARY MEMBER(S)                 00906000
+NAME     EQU   X'04'            MEMBER NAME GIVEN                       00907000
+FIRST    EQU   X'02'            FIRST PASS SW - USED ONLY WITH CC       00908000
+EJEC     EQU   X'01'              EJECT WANTED                          00908500
+NAME1    DS    8C             NAME OF MEMBER                            00909000
+         SPACE 1                                                        00910000
+         DS    0F                                                       00911000
+HEADING  DS    0CL120                                                   00912000
+         DC    C'1FILE: '                                               00913000
+FILEHD   DC    CL93' '                                                  00914000
+         DC    C'PAGE '                                                 00915000
+HDCNT    DC    CL20'XXX'                                                00916000
+         SPACE 1                                                        00917000
+PABUF    DC    A(HEADING,L'HEADING)                                     00918000
+         SPACE 1                                                        00919000
+SPACE3   DC    X'1B'          CHARACTER TO SPACE 3                      00920000
+PASPACE  DC    A(SPACE3,L'SPACE3)                                       00921000
+SPACE1   DC    X'0B'          CARACTER TO SPACE 1                       00922000
+HXSPACE  DC    A(SPACE1,L'SPACE1)                                       00923000
+         SPACE 1                                                        00924000
+UBUF     DC    CL151' '                                                 00925000
+LSAVE    DS    16F                                                      00926000
+LIMIT    DC    X'0000FF48'                                              00927000
+RECNO    DS    1F                                                       00928000
+DECD     DS    1D                                                       00929000
+RSZM     DC    XL6'402020202021'                                        00930000
+RNOM     DC    XL6'402020202021'                                        00931000
+HDR      DS    0CL30                                                    00932000
+         DC    X'09',CL29'RECORD XXXXX LENGTH= XXXXX'                   00933000
+HXSAVE   DS    1D                                                       00934000
+PHDR     DC    A(HDR,L'HDR)                                             00935000
+MAXCC    DC    F'65535'                                                 00936000
+PBFR     DS    0CL131                                                   00937000
+         DC    X'09'                                                    00938000
+PBUF     DC    CL130' '                                                 00939000
+PHEX     DC    A(PBFR,L'PBFR)                                           00940000
+HEXUNPK  DS    4F                                                       00941000
+HEXTRN   DC    C'0123456789ABCDEF'                                      00942000
+HEXTRTBL EQU   HEXTRN-240                                               00943000
+UNPK     UNPK  HEXUNPK(0),0(0,R6)   EXECUTED                            00944000
+TR       TR    HEXUNPK(0),HEXTRTBL  EXECUTED                            00945000
+MVC      MVC   0(0,3),HEXUNPK       EXECUTED                            00946000
+UNPKTBL  DC    XL4'00214263'    FOR EX OF UNPK                          00947000
+         SPACE 1                                                        00948000
+RSZF     EQU   HDR+21                                                   00949000
+RNOF     EQU   HDR+7                                                    00950000
+         SPACE 1                                                        00951000
+DICTLEN  DS    1F                                                       00952000
+DICTADR  DS    1F                                                       00953000
+DICTEND  DS    1F                                                       00954000
+STRADR   DS    1F                                                       00955000
+STRLEN   DS    1F                                                       00956000
+         DS    0D                                                       00957000
+CCWLFCB  DS    0CL88                                                    00958000
+         CCW   X'63',X'F020',X'40',66                                   00959000
+         CCW   X'08',X'F068',X'60',1                                    00960000
+         DC    X'01020304050607080A0B'                                  00961000
+         DC    XL53'00'                                                 00962000
+         DC    X'0C0910000000000000'                                    00963000
+         SPACE 1                                                        00964000
+         LTORG                                                          00965000
+         EJECT                                                          00966000
+         ORG   PRINT+4096                                               00967000
+PAGETWO  EQU   *                                                        00968000
+BUFCTR   DC    A(BUFDATA)                                               00969000
+BATCTR   DC    A(*-*)                                                   00970000
+         DS    2F                                                       00971000
+BUFDATA  DS    500D                                                     00972000
+         EJECT                                                          00973000
+**********************************************************************  00974000
+*                                                                       00975000
+*        DSECTS                                                         00976000
+*                                                                       00977000
+**********************************************************************  00978000
+         SPACE 1                                                        00979000
+UIOSECT  DSECT                                                          00980000
+UIOSAVE  DS    1F             RETURN REGISTER SAVE AREA                 00981000
+UIODIAG  DS    0F             DIAGNOSE 24 STORAGE AREA                  00982000
+UIOVTYPC DS    1C             VIRTUAL DEVICE TYPE CLASS                 00983000
+CLASURI  EQU   X'20'             UNIT RECORD INPUT DEVICE               00984000
+CLASURO  EQU   X'10'             UNIT RECORD OUTPUT DEVICE              00985000
+UIOVTYPE DS    1C             VIRTUAL DEVICE TYPE                       00986000
+TYPRDR   EQU   X'80'             CARD READER                            00987000
+TYPPUN   EQU   X'80'             CARD PUNCH                             00988000
+TYP1403  EQU   X'41'             PRINTER - 1403                         00989000
+TYP3211  EQU   X'42'             PRINTER - 3211                         00990000
+TYP3203  EQU   X'43'              PRINTER - 3203               @V386298 00990100
+UIOVSTAT DS    1C             VIRTUAL DEVICE STATUS                     00991000
+UIOVFLAG DS    1C             VIRTUAL DEVICE FLAGS                      00992000
+         EJECT                                                          00993000
+         FVS                                                            00994000
+         NUCON                                                          00995000
+         REGEQU                                                         00996000
+         END                                                            00997000

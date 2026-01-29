@@ -1,0 +1,682 @@
+PIO      TITLE 'DMSPIO     (CMS)       VM/370 - RELEASE 6'              00001000
+         SPACE 2                                                        00002000
+*.                                                                      00004000
+* MODULE NAME: DMSPIO (ALSO KNOWN AS PRINTIO)                           00005000
+*                                                                       00006000
+* FUNCTIONS:   1) TO BUILD PRINTER CCWS BASED ON ASA OR MACHINE CODE    00007000
+*                 CONTROL CHARACTERS                                    00008000
+*                                                                       00009000
+*              2) TO ISSUE START I/O TO VIRTUAL PRINTER AND ANALYZE     00010000
+*                 THE RESULTING STATUS                                  00011000
+*                                                                       00012000
+* ATTRIBUTES:  NUCLEUS RESIDENT, REENTRANT                              00013000
+*                                                                       00014000
+* ENTRY POINTS:  DMSPIO(PRINTR)  - PRINT 1 LINE                         00015000
+*                DMSPIOCC - PUT CCWS AND DATA IN CALLER'S BUFFER        00016000
+*                DMSPIOSI - PRINT CALLER'S BUFFER                       00017000
+*                                                                       00018000
+* ENTRY CONDITIONS:  UPON ENTRY, R1 POINTS TO A PARAMETER LIST.         00019000
+*              THE FORMATS OF THE PLISTS FOR THE 3 ENTRY POINTS         00020000
+*              ARE AS FOLLOWS:                                          00021000
+*                                                                       00022000
+*              PLIST FOR DMSPIO:   CL8'PRINTIO'|CL8'PRINTR'             00023100
+*                                  A(LINE TO BE PRINTED)                00024000
+*                                  H  - '0' = ASA CODE (SEE NOTES)      00025000
+*                                       '1' = MACH CODE (SEE NOTES)     00026000
+*                                  H  - LENGTH OF THE LINE              00027000
+*                                  8X'FF'                               00028000
+*                                                                       00029000
+*              PLIST FOR DMSPIOCC: CL8'DMSPIOCC'                        00030000
+*                                  A(LINE TO BE PUT IN BUFFER)          00031000
+*                                  H  - '0' = ASA CODE (SEE NOTES)      00032000
+*                                       '1' = MACH CODE (SEE NOTES)     00033000
+*                                  H  - LENGTH OF THE LINE              00034000
+*                                  A(BUFFER)                            00035000
+*                                  8X'FF'                               00036000
+*                                                                       00037000
+*              PLIST FOR DMSPIOSI: CL8'DMSPIOSI'                        00038000
+*                                  A(BUFFER)                            00039000
+*                                  8X'FF'                               00040000
+*                                                                       00041000
+* EXIT CONDITIONS: AT EXIT R15 CONTAINS ONE OF THE FOLLOWING:           00042000
+*                                                                       00043000
+*        R15   MEANING                                                  00044000
+*          0   NORMAL COMPLETION                                        00045000
+*          1   LINE TOO LONG                                            00046000
+*          2   CHANNEL 12 DETECTED (VIRTUAL 3211 OR 3203)               00047000
+*          3   CHANNEL  9 DETECTED (VIRTUAL 3211 OR 3203)               00048000
+*          5   UNKNOWN ERROR                                            00049000
+*        100   NO VIRTUAL PRINTER                                       00050000
+*                                                                       00051000
+* CALLS TO OTHER ROUTINES:    DMSIOW (WAIT) - WAIT FOR DEVICE END       00052000
+*                             DMSERR        - PROCESS ERROR MESSAGES    00053000
+*                                                                       00054000
+* EXTERNAL REFERENCES:        NUCON                                     00055000
+         EJECT                                                          00056000
+*                                                                       00057000
+* TABLES/WORKAREAS:           AREA PROVIDED BY INTSVC OR BUFFER         00058000
+*                             PROVIDED BY CALLER                        00059000
+*                                                                       00060000
+* REGISTER USAGE:                                                       00061000
+*        R1    PLIST POINTER AT ENTRY                                   00062000
+*        R2    PLIST POINTER SAVE                                       00063000
+*        R10   RETURN ADDRESS SAVE                                      00064000
+*        R11   BASE REG IN CALLER'S BUFFER OR ZERO                      00065000
+*        R12   BASE REGISTER                                            00066000
+*        R13   BUFFER/WORK AREA POINTER                                 00067000
+*        R14   RETURN REG AT ENTRY                                      00068000
+*        R15   A(WAIT) OR RETURN CODE                                   00069000
+*                                                                       00070000
+* NOTES: THE COMMAND CODES THAT ARE PUT IN THE CCWS ARE BASED ON THE    00071000
+*        FIRST CHARACTER OF THE LINE TO BE PRINTED.  IF THIS            00072000
+*        CHARACTER IS AN ASA DEFINED CODE, APPROPRIATE CCWS ARE         00073000
+*        BUILT TO SKIP OR SPACE AS NEEDED, THEN PRINT.  IF THE          00074000
+*        CHARACTER IS ITSELF A VALID MACHINE CCW COMMAND CODE, A        00075000
+*        CCW IS BUILT USING THE CHARACTER AS THE COMMAND CODE.          00076000
+*        IF THE CHARACTER IS NOT RECOGNIZED AS EITHER ASA OR            00077000
+*        MACHINE CODE, A CCW WITH THE MACHINE CODE X'09' IS BUILT,      00078000
+*        TO SPACE 1 AFTER PRINTING.                                     00079000
+*                                                                       00080000
+*        THERE ARE TWO CHARACTERS, X'C1' AND X'C3', THAT ARE VALID      00081000
+*        BOTH AS ASA CODES AND AS MACHINE CODES.  IF THE HALFWORD       00082000
+*        AT 12 INTO THE PLIST CONTAINS 0, THE ASA CODES ARE CHECKED     00083000
+*        BEFORE THE MACHINE CODES, AND THEREFORE X'C1' AND X'C3' WILL   00084000
+*        BE INTERPRETED AS ASA CODES.  IF THE HALFWORD IS EQUAL TO 1,   00085000
+*        ASA CODES ARE NOT CHECKED AT ALL, SO X'C1' AND X'C3' ARE       00086000
+*        INTERPRETED AS MACHINE CODES.  NOTE THAT IF THE HALFWORD       00087000
+*        EQUALS 0, ALL ASA CODES AND ALL MACHINE CODES EXCEPT X'C1'     00088000
+*        AND X'C3' ARE RECOGNIZED, BUT IF THE HALFWORD EQUALS 1,        00089000
+*        ONLY MACHINE CODES ARE RECOGNIZED.                             00090000
+*                                                                       00091000
+*                                                                       00092000
+* OPERATION:                                                            00093000
+*        DMSPIO(PRINTR) - A CHAIN OF 3 STOCK CCWS IS MOVED INTO         00094000
+*        THE WORK AREA PROVIDED BY INTSVC.  THESE CCWS ARE SPACE,       00095000
+*        PRINT, AND NOP.  THE FIRST CHARACTER OF THE LINE TO BE         00096000
+*        PRINTED IS ANALYZED TO DETERMINE WHAT CCW COMMANDS TO USE.     00097000
+*        THE STOCK CCWS ARE MODIFIED WITH WITH THESE COMMANDS.  IF      00098000
+*        ONLY ONE CCW IS NEEDED TO PERFORM THE REQUESTED FUNCTION,      00099000
+*        THE SECOND CCW IS USED.  IF THE GIVEN CODE IS AN IMMEDIATE     00100000
+*        MACHINE CODE, NO DATA ARE PRINTED.  THE LAST CCW IN THE        00101000
+*        CHAIN IS A NOP TO FORCE CHANNEL END AND DEVICE END TO COME     00102000
+*        TOGETHER.  WHEN THE CCWS ARE SET UP, THE CAW IS SET TO         00103000
+*        POINT TO THE CHAIN, AND A START I/O IS ISSUED TO THE           00104000
+*        VIRTUAL PRINTER.  DMSIOW (WAIT) IS CALLED TO WAIT FOR          00105000
+*        DEVICE END.  THE STATUS AND, IF NECESSARY, THE SENSE           00106000
+*        INFORMATION, IS ANALYZED.  ANY ERRORS ENCOUNTERED ARE          00107000
+*        RETURNED TO THE CALLER.                                        00108000
+         EJECT                                                          00109000
+*                                                                       00110000
+*        DMSPIOCC - TO USE DMSPIOCC, THE CALLER MUST PROVIDE A          00111000
+*        4096-BYTE BUFFER ON A PAGE BOUNDARY.  THE BUFFER MUST          00112000
+*        BE IN THE FOLLOWING FORMAT:                                    00113000
+*                                                                       00114000
+*        PAGE BOUNDARY  +--------+--------+                             00115000
+*                       | BUFCTR | BATCTR |                             00116000
+*                   +8  +--------+--------+                             00117000
+*                       |        |        |                             00118000
+*                  +16  +--------+--------+                             00119000
+*                       | BUFDATA         |                             00120000
+*                       |                 |                             00121000
+*                       |                 |                             00122000
+*                       |     (ETC.)      |                             00123000
+*                                                                       00124000
+*        WHERE 'BUFCTR' IS A FULLWORD CONTAINING THE ADDRESS OF THE     00125000
+*        NEXT AVAILABLE LOCATION IN THE BUFFER, AND 'BUFDATA' IS        00126000
+*        THE FIRST DATA LOCATION, AND BATCTR IS A FULLWORD USED         00127000
+*        FOR CMS BATCH ACCOUNTING.                                      00128000
+*                                                                       00129000
+*        A CHAIN OF 3 STOCK CCWS IS MOVED INTO THE CALLER'S BUFFER,     00130000
+*        AND THE FIRST CHARACTER OF THE LINE IS ANALYZED AS             00131000
+*        DESCRIBED ABOVE TO DETERMINE THE CCW COMMAND CODES TO BE       00132000
+*        USED.  IF ONLY ONE CCW IS NEEDED, THE FIRST ONE IS USED.       00133000
+*        WHEN THE CCWS ARE SET UP, THE DATA ARE MOVED INTO THE          00134000
+*        CALLER'S BUFFER, PRECEDED BY A TIC CCW THAT POINTS TO THE      00135000
+*        NEXT DOUBLEWORD ADDRESS BEYOND THE DATA.  THE CALLER'S         00136000
+*        BUFCTR IS UPDATED TO POINT TO THE NEXT AVAILABLE               00137000
+*        LOCATION.                                                      00138000
+*                                                                       00139000
+*        DMSPIOSI - TO USE DMSPIOSI, THE CALLER MUST PROVIDE            00140000
+*        A BUFFER IN THE FORMAT DESCRIBED ABOVE.  THE BUFFER            00141000
+*        CONTAINS CHAINED CCWS, TICS AROUND DATA, AND DATA.             00142000
+*        SINCE ALL CCWS PUT IN THE BUFFER BY DMSPIOCC HAVE THE          00143000
+*        COMMAND CHAIN FLAG ON,  THE CALLER SHOULD MOVE A NOP           00144000
+*        INTO THE END OF THE BUFFER BEFORE CALLING DMSPIOSI.            00145000
+*        WHEN DMSPIOSI IS ENTERED, THE CAW IS SET TO POINT TO           00146000
+*        THE BEGINNING OF THE CCW CHAIN, AND A START I/O IS             00147000
+*        ISSUED TO THE VIRTUAL PRINTER.  DMSIOW (WAIT) IS CALLED        00148000
+*        TO WAIT FOR DEVICE END.  THE STATUS AND, IF NECESSARY,         00149000
+*        THE SENSE INFORMATION, IS ANALYZED. IF ERRORS ARE DETECTED,    00150000
+*        THEY ARE RETURNED TO THE CALLER.                               00151000
+*                                                                       00152000
+*.                                                                      00153000
+*********************************************************************   00154000
+         EJECT                                                          00155000
+*********************************************************************** 00156000
+*                                                                       00157000
+*        START OF PROGRAM                                               00158000
+*                                                                       00159000
+*********************************************************************** 00160000
+         SPACE 1                                                        00161000
+DMSPIO   START 0                                                        00162000
+         ENTRY PRINTR                                                   00163000
+PRINTR   EQU   DMSPIO                                                   00164000
+         LR    R12,R15        ESTABLISH ADDRESSABILITY                  00165000
+         USING DMSPIO,R12                                               00166000
+         USING NUCON,0                                                  00167000
+         SR    R11,R11        R11 = 0 WILL INDICATE WE ENTERED HERE     00168000
+         B     JOIN                                                     00169000
+         SPACE 1                                                        00170000
+         ENTRY DMSPIOCC                                                 00171000
+DMSPIOCC EQU   *                                                        00172000
+         LR    R12,R15        GET SAME ADDRESSABILITY AS ABOVE          00173000
+         LA    R15,DMSPIOCC-DMSPIO ...                                  00174000
+         SR    R12,R15             NOW IT IS CORRECT                    00175000
+         L     R11,16(,R1)    ADDRESS OF CALLER'S BUFFER IN R11         00176000
+         USING BUFSECT,R11    ADDRESSABILITY IN CALLER'S BUFFER         00177000
+         L     R13,BUFCTR     NEXT AVAILABLE BUFFER ADDRESS IN R13      00178000
+         B     JOIN                                                     00179000
+         SPACE 1                                                        00180000
+         ENTRY DMSPIOSI                                                 00181000
+DMSPIOSI EQU   *                                                        00182000
+         LR    R12,R15        GET SAME ADDRESSABILITY AS ABOVE          00183000
+         LA    R15,DMSPIOSI-DMSPIO ...                                  00184000
+         SR    R12,R15             NOW IT IS CORRECT                    00185000
+         LR    R10,R14        SAVE RETURN ADDRESS IN R10                00186000
+         L     R11,8(,R1)     ADDRESS OF BUFFER IN R11                  00187000
+         LA    R3,BUFDATA     ADDRESS OF DATA START IN R3               00188000
+         B     PRINGO         GO DO SIO - NO CCW BUILD                  00189000
+         SPACE 1                                                        00190000
+         SPACE 1                                                        00191000
+JOIN     EQU   *                                                        00192000
+         LR    R10,R14        SAVE RETURN ADDRESS IN R10                00193000
+         LR    R2,R1          KEEP ADDRESS OF PLIST IN R2               00194000
+*                                                                       00195000
+*        LENGTH OF LINE TO PRINT INTO R7...                             00196000
+*                                                                       00197000
+         L     R7,12(R2)      LOW ORDER HALFWORD IS THE LENGTH          00198000
+         N     R7,=A(X'FFFF') ENSURE IT'S NOT A NEGATIVE NUMBER         00199000
+         BZ    NORMRET0       RETURN IMMEDIATELY IF NOTHING TO DO       00200000
+         LA    R15,151        MAXIMUM ALLOWABLE LENGTH                  00201000
+         CR    R7,R15         IS HIS TOO BIG?                           00202000
+         BH    ERROR1         IF SO, THAT'S ERROR 1                     00203000
+         BCTR  R7,0           DECREMENT TO ALLOW FOR CARRIAGE CONTROL   00204000
+*                                                                       00205000
+*        MOVE CCWS INTO STORAGE PROVIDED BY INTSVC OR INTO              00206000
+*        BUFFER IF CALLED BY BALR (TO KEEP IT REENTRANT)...             00207000
+*                                                                       00208000
+         MVC   0(24,R13),CCW  MOVE CCWS INTO R13 AREA                   00209000
+         SPACE 3                                                        00210000
+*********************************************************************** 00211000
+*                                                                       00212000
+*        DEAL WITH CARRIAGE CONTROL CHARACTER...                        00213000
+*                                                                       00214000
+*********************************************************************** 00215000
+         SPACE 1                                                        00216000
+         L     R6,8(,R2)      LOOK AT GIVEN CARRIAGE CONTROL CHARACTER  00217000
+         CLC   12(2,R2),=XL2'0001' WAS MACH CODE SPECIFIED?             00218000
+         BE    MAC            YES, BYPASS ASA CHECK                     00219000
+*                                                                       00220000
+*        CHECK FOR CHARACTERS 'BLANK','0','-','A,B,C', AND '+'.         00221000
+*                                                                       00222000
+         CLI   0(R6),C' '     IS CONTROL CHAR BLANK?                    00223000
+         BE    PRINDEF        BRANCH IF SO - USE DEFINED ASA CONTROL    00224000
+         BL    MAC            (OR GO DEAL WITH MACHINE CODES)           00225000
+         LA    R15,X'13'      READY FOR SPACE 2 LINES BEFORE PRINT      00226000
+         CLI   0(R6),C'0'     IS THAT WHAT HE WANTS?                    00227000
+         BE    PRINCC         BRANCH IF SO (GO DO IT)                   00228000
+         LA    R15,X'1B'      READY FOR SPACE 3 LINES BEFORE PRINT      00229000
+         CLI   0(R6),C'-'     IS THAT WHAT HE WANTS?                    00230000
+         BE    PRINCC         BRANCH IF SO (GO DO IT)                   00231000
+         LA    R15,2          SET INDEX IN CASE ONE OF THE NEXT 3       00232000
+         CLI   0(R6),C'A'     DOES HE WANT TO SKIP TO 10?               00233000
+         BE    ASKIP          BRANCH IF SO                              00234000
+         CLI   0(R6),C'B'     DOES HE WANT TO SKIP TO 11?               00235000
+         BE    BSKIP          BRANCH IF SO                              00236000
+         CLI   0(R6),C'C'     DOES HE WANT TO SKIP TO 12?               00237000
+         BE    CSKIP          BRANCH IF SO                              00238000
+         CLI   0(R6),C'+'     DOES HE WANT OVERPRINT?                   00239000
+         BNE   USASKIP        BRANCH IF NOT (CHECK REST OF ASA CODES)   00240000
+         LTR   R7,R7          ARE THERE ANY DATA?                       00241000
+         BZ    NORMRET0       BRANCH IF NOT (NOTHING TO DO)             00242000
+         B     PRINT          GO PRINT WITHOUT CARRIAGE CONTROL         00243000
+         SPACE 1                                                        00244000
+ASKIP    BCTR  R15,0          REDUCE INDEX BY 1                         00245000
+BSKIP    BCTR  R15,0          REDUCE INDEX BY 1                         00246000
+CSKIP    IC    R15,ABC(R15)   INDEX INTO TABLE FOR CORRECT CODE         00247000
+         B     PRINCC         GO BUILD THE CCW                          00248000
+         SPACE 1                                                        00249000
+ABC      DC    XL4'D3DBE300'  SKIP CODES FOR ASA 'A,B,C'                00250000
+         SPACE 1                                                        00251000
+*                                                                       00252000
+*        SEE IF CARRIAGE CONTROL IS ONE OF THE OTHER                    00253000
+*        ASA CODES (SKIP COMMANDS)...                                   00254000
+*                                                                       00255000
+USASKIP  EQU   *                                                        00256000
+         CLI   0(R6),X'F9'    IS CONTROL CHAR TOO HIGH TO BE ASA?       00257000
+         BH    DEFAULT        BRANCH IF SO - USE DEFAULT CARR CONTROL   00258000
+         CLI   0(R6),X'F1'    IS IT TOO LOW?                            00259000
+         BL    MAC            BRANCH IF SO - CHECK MACHINE CODES        00260000
+         IC    R15,0(R6)      CARRIAGE CONTROL CHAR INTO R15            00261000
+         SLL   R15,3          MOVE CHANNEL VALUE OVER TO RIGHT PLACE    00262000
+         LA    R15,3(,R15)    INDICATE CARRIAGE CONTROL ONLY (NO DATA)  00263000
+         B     PRINCC                                                   00264000
+*                                                                       00265000
+*        SEE IF CARRIAGE CONTROL IS A PERMISSABLE MACHINE CODE.         00266000
+*        FIRST TEST LITERAL ONES (NOT THE SKIP COMMANDS)                00267000
+*                                                                       00268000
+MAC      EQU   *                                                        00269000
+         LA    R3,MACODES     READY TO LOOP THRU MACHINE CODES          00270000
+         LA    R4,1           LOOP INCREMENT                            00271000
+         LA    R5,MACODES+L'MACODES-1   LOOP LIMIT                      00272000
+         SPACE 1                                                        00273000
+MACLOOP  EQU   *              LOOP THRU LITERAL MACHINE CODES           00274000
+         CLC   0(1,R6),0(R3)  IS THIS IT?                               00275000
+         BE    MACFOUND       BRANCH IF SO                              00276000
+         BXLE  R3,R4,MACLOOP  LOOP BACK                                 00277000
+*                                                                       00278000
+*        SEE IF CONTROL CHARACTER IS A 'SKIP' MACHINE CODE              00279000
+*                                                                       00280000
+         TM    0(R6),X'81'    COULD IT BE 'SKIP TO CHANNEL N'?          00281000
+         BNO   DEFAULT        BRANCH IF NOT - USE DEFAULT CONTROL CHAR  00282000
+         TM    0(R6),X'04'    MAKE SURE                                 00283000
+         BO    DEFAULT        BRANCH IF NOT VALID FOR SKIP COMMAND      00284000
+         CLI   0(R6),X'E3'    IS IT TOO HIGH?                           00285000
+         BH    DEFAULT        BRANCH IF SO - USE DEFAULT                00286000
+         CLI   0(R6),X'89'    IS IT TOO LOW?                            00287000
+         BNL   MACFOUND       BRANCH IF OK TO USE AS IS                 00288000
+         SPACE 1                                                        00289000
+DEFAULT  MVI   0(R6),X'09'    USE MACH CODE TO PRINT, THEN SPACE        00290000
+MACFOUND EQU   *              WE'VE FOUND A VALID MACHINE CODE          00291000
+         TM    0(R6),X'03'    IS IT AN IMMEDIATE COMMAND?               00292000
+         BNO   MACDATA        NO, PRINT WHATEVER DATA IS GIVEN          00293000
+         SR    R7,R7          YES, NO DATA WILL BE PRINTED              00294000
+MACDATA  EQU   *                                                        00295000
+         MVC   8(1,R13),0(R6) REPLACE COMMAND CODE IN 2ND CCW           00296000
+         B     PRINT          GO DO IT                                  00297000
+         EJECT                                                          00298000
+**********************************************************************  00299000
+*                                                                       00300000
+*        COME HERE TO PERFORM PRELIMINARY CARRIAGE CONTROL              00301000
+*                                                                       00302000
+*********************************************************************** 00303000
+         SPACE 1                                                        00304000
+PRINCC   EQU   *                                                        00305000
+         STC   R15,0(,R13)    STORE COMMAND CODE IN FIRST CCW           00306000
+         SPACE 1                                                        00307000
+PRINDEF  EQU   *              (COME HERE TO SPACE 1 BEFORE PRINT)       00308000
+         LTR   R11,R11        BUILDING BUFFER ONLY?                     00309000
+         BNZ   PRINDEF1       BRANCH IF SO                              00310000
+         LR    R3,R13         READY TO START FROM BEGINNING OF CCWS     00311000
+         LTR   R7,R7          ARE THERE ANY DATA TO PRINT?              00312000
+         BNZ   PRINSET        BRANCH IF SO - SET UP 2ND CCW             00313000
+*                                                                       00314000
+*        IF CARRIAGE CONTROL ALONE IS REQUIRED, USE SECOND CCW          00315000
+*        INSTEAD OF THE FIRST                                           00316000
+*                                                                       00317000
+         MVC   8(8,R13),0(R13)     MOVE COMMAND TO 2ND CCW              00318000
+*                                                                       00319000
+*        DROP THROUGH TO 'PRINT', WHICH, SINCE R7=0, WILL SET R3        00320000
+*        TO ADDRESS OF 2ND CCW AND BRANCH TO 'PRINGO'                   00321000
+*                                                                       00322000
+         SPACE 1                                                        00323000
+*********************************************************************** 00324000
+*                                                                       00325000
+*        COME HERE TO PERFORM PRINTING WITHOUT PRELIMINARY CARRIAGE     00326000
+*        CONTROL, OR DROP THROUGH FROM ABOVE TO PERFORM CARRIAGE        00327000
+*        CONTROL WITHOUT PRINTING ANY DATA...                           00328000
+*                                                                       00329000
+**********************************************************************  00330000
+         SPACE 1                                                        00331000
+PRINT    EQU   *                                                        00332000
+         LTR   R11,R11        BUILDING BUFFER ONLY?                     00333000
+         BNZ   PRINT1         BRANCH IF SO                              00334000
+         LA    R3,8(,R13)     READY TO START WITH 2ND CCW               00335000
+         LTR   R7,R7          ARE THERE ANY DATA TO PRINT?              00336000
+         BZ    PRINGO         BRANCH IF NOT - USE A BLANK               00337000
+         SPACE 1                                                        00338000
+PRINSET  EQU   *              SET UP CCW FOR PRINTING THE LINE          00339000
+         IC    R15,8(,R13)    SAVE COMMAND CODE IN 2ND CCW              00340000
+         LA    R6,1(,R6)      ADDRESS OF LINE TO PRINT                  00341000
+         ST    R6,8(,R13)     STORE IN CCW                              00342000
+         STC   R15,8(,R13)    RESTORE COMMAND CODE                      00343000
+         STH   R7,14(,R13)    STORE LENGTH ALSO                         00344000
+         B     PRINGO         GO ISSUE START I/O                        00345000
+         EJECT                                                          00346000
+*********************************************************************** 00347000
+*                                                                       00348000
+*        COME HERE TO MOVE DATA INTO CALLER'S BUFFER.                   00349000
+*                                                                       00350000
+*        STOCK CCWS HAVE BEEN MOVED INTO THE BUFFER.                    00351000
+*        NOW, FINISH BUILDING THESE CCWS, ADD APPROPRIATE               00352000
+*        TIC CCW AROUND THE DATA, AND MOVE THE DATA TO THE              00353000
+*        BUFFER.                                                        00354000
+*                                                                       00355000
+*********************************************************************** 00356000
+         SPACE 1                                                        00357000
+PRINDEF1 EQU   *              COME HERE FOR DEFINED CCWS FOR BUFFER     00358000
+         LA    R13,8(,R13)    1ST CCW OK - POINT R13 TO 2ND CCW         00359000
+         LTR   R7,R7          ARE THERE ANY DATA?                       00360000
+         BNZ   PRINSET1       BRANCH IF SO - SET UP 2ND CCW             00361000
+*** CARRIAGE CONTROL ONLY - LEAVE 1ST CCW AS IS                         00362000
+         ST    R13,BUFCTR     UPDATE BUFFER ADDRESS                     00363000
+         B     NORMRETC                                                 00364000
+         SPACE 1                                                        00365000
+PRINT1   EQU   *              COME HERE TO USE ONLY 1 CCW               00366000
+         MVC   0(8,R13),8(R13)     MOVE COMMAND TO 1ST CCW              00367000
+         LTR   R7,R7          ARE THERE ANY DATA?                       00368000
+         BNZ   PRINSET1       BRANCH IF SO                              00369000
+         TM    0(R13),X'03'   IMMEDIATE COMMAND?                        00370000
+         BO    IMMED          IF SO, NO DATA NEEDED                     00371000
+         LA    R6,NODATA      NO DATA GIVEN, AND NOT IMM. CMD. @VA05935 00372000
+         LA    R7,1           ...USE A BLANK AS DATA                    00373000
+         B     PRINSET1       ...AND PUT SAME IN BUFFER                 00374000
+IMMED    LA    R8,8(,R13)     NO DATA - ADDRESS AFTER CCW IN R8         00375000
+         ST    R8,BUFCTR      UPDATE RESUME ADDRESS IN BUFFER           00376000
+         B     NORMRETC                                                 00377000
+*                                                                       00378000
+*        COME HERE IF THERE ARE DATA TO MOVE TO BUFFER. R13 POINTS      00379000
+*        TO EITHER 1ST OR 2ND CCW. THIS CCW WILL BE FILLED IN FOR       00380000
+*        THE DATA TO PRINT. R6 POINTS TO THE DATA, AND R7, WHICH        00381000
+*        IS NONZERO, CONTAINS THE COUNT.                                00382000
+*                                                                       00383000
+PRINSET1 EQU   *                                                        00384000
+         LA    R3,16(,R13)    FILL IN DATA ADDRESS IN CCW               00385000
+         STCM  R3,B'0111',1(R13)   ...                                  00386000
+         STH   R7,6(R13)      FILL IN BYTE COUNT IN CCW                 00387000
+         LA    R3,16(R7,R13)  BASIC CONTINUATION ADDRESS IN R3          00388000
+         BCTR  R7,0           DECREMENT LENGTH FOR EXECUTE              00389000
+         EX    R7,BUFLOAD     MOVE DATA TO BUFFER                       00390000
+         SR    R9,R9          ZERO R9                                   00391000
+         LA    R9,7           COMPUTE ACTUAL...                         00392000
+         AR    R3,R9          ...CONTINUATION ADDRESS...                00393000
+         SRL   R3,3           ...BY ROUNDING UP TO NEXT...              00394000
+         SLL   R3,3           ...DOUBLEWORD BOUNDARY                    00395000
+         ST    R3,8(,R13)     BUILD TIC CCW                             00396000
+         MVI   8(R13),X'08'   AND MOVE IN COMMAND CODE                  00397000
+         ST    R3,BUFCTR      UPDATE CONTINUATION ADDRESS               00398000
+         B     NORMRETC                                                 00399000
+         SPACE 1                                                        00400000
+BUFLOAD  MVC   16(0,R13),1(R6)   MOVE DATA INTO BUFFER                  00401000
+         EJECT                                                          00402000
+**********************************************************************  00403000
+*                                                                       00404000
+*        COME HERE TO PERFORM START I/O AND ANALYZE STATUS              00405000
+*                                                                       00406000
+*        R3 POINTS TO CCW                                               00407000
+*        R11 = 0 MEANS WE CAME HERE AFTER ENTERING AT DMSPIO(PRINTR)    00408000
+*              AND WE ARE PRINTING A SINGLE LINE                        00409000
+*        R11 NONZERO MEANS ENTRY WAS MADE AT DMSPIOSI, AND WE ARE       00410000
+*              PRINTING THE CALLER'S BUFFER                             00411000
+*                                                                       00412000
+**********************************************************************  00413000
+         SPACE 1                                                        00414000
+PRINGO   EQU   *                                                        00415000
+         USING PRSECT,R13                                               00416000
+         LA    R5,14          ASSUME PRINTER '00E'                      00417000
+         MVC   PRWAITP(20),PWAIT MOVE WAIT PLIST TO KEEP IT REENTRANT   00418000
+         LA    R1,PRWAITP     ADDRESS OF WAIT PLIST IN R1               00419000
+         SPACE 1                                                        00420000
+SIO      EQU   *                                                        00421000
+         SR    R15,R15        ZERO CSW SAVE FIELD                       00422000
+         ST    R15,PRCSW      ...                                       00423000
+         LA    R14,SIO        SET RETURN VECTOR FOR WAIT                00424000
+         LA    R4,NORMRET     SET RETURN VECTOR FOR TALL                00425000
+         ST    R3,CAW         STORE ADDRESS OF CCW FOR SIO              00426000
+         LR    R9,R3          SAVE ADDRESS OF CCW              @VA07597 00426100
+         SIO   0(R5)          ISSUE START I/O                           00427000
+         BC    8,IOWAIT       BRANCH IF SUCCESSFULLY STARTED            00428000
+         BC    4,CSWSTOR      CC1 - CSW STORED                          00429000
+         BC    2,BUSY         CC2 - BUSY                                00430000
+         B     ERR113S        CC3 - NOT OPERATIONAL                     00431000
+         SPACE 1                                                        00432000
+IOWAIT   EQU   *                                                        00433000
+         L     R15,=V(WAIT)   ADDRESS OF WAIT ROUTINE                   00434000
+         BALR  R14,R15        WAIT FOR INTERRUPT                        00435000
+         MVC   PRCSW(8),CSW   MOVE IT TO SAVE AREA                      00436000
+         TM    PRSTAT,X'04'   HAVE WE DEVICE END?                       00437000
+         BO    TSTINT         YES, SEE KIND OF INTERRUPTS               00438000
+         L     R15,=V(WAIT)   ADDRESS OF WAIT ROUTINE                   00439000
+         BALR  R14,R15        WAIT FOR DEVICE END                       00440000
+         OC    PRSTAT(2),CSW+4   OR IN THE STATUS BYTES                 00441000
+         SPACE 1                                                        00442000
+TSTINT   EQU   *                                                        00443000
+         CLC   ZERO,PRCOUNT   ANY RESIDUAL COUNT?                       00444000
+         BE    TESTCSW        NO RESIDUAL COUNT, CHECK CSW              00445000
+         LA    R8,8                                                     00446000
+         L     R15,PRCSW      ADDRESS OF NEXT CCW IN R15                00447000
+         SR    R15,R8         ADDRESS OF THIS CCW IN R15                00448000
+         TM    0(R15),X'03'   CHECK COMMAND TYPE                        00449000
+         BO    TESTCSW        IMMEDIATE COMMAND - SKIP CHECK            00450000
+         LA    R15,1          RETURN ERROR 1                            00451000
+         B     ERRET          RETURN TO CALLER                          00452000
+         SPACE 1                                                        00453000
+TESTCSW  EQU   *                                                        00454000
+         TM    PRSTAT,X'02'   HAVE WE UNIT CHECK?                       00455000
+         BO    FEEL           YES, CHECK SENSE BYTES                    00456000
+         TM    PRSTAT,X'01'   HAVE WE UNIT EXCEPTION?                   00457000
+         BNO   TALL           NO, TEST FOR OTHER ERRORS                 00458000
+         LTR   R11,R11        PRINTING FROM BUFFER?                     00459000
+         BZ    ERROR2         NO,ERROR2                                 00460000
+         TM    DOSFLAGS,EIGHT   IS THIS DOS PIO CALL?          @V305066 00460100
+         BO ERROR2            YES, BREAK CCW CHAIN ON UE       @V305066 00460200
+         BAL   R8,RESTART     YES, RESTART THE BUFFER                   00461000
+ERROR2   LA    R15,2          RETURN 'CHAN 12 SENSED'                   00462000
+         B     ERRET                                                    00463000
+         SPACE 1                                                        00464000
+TALL     EQU   *                                                        00465000
+         TM    PRSTAT+1,X'3F'    ANY OTHER ERRORS?                      00466000
+         BCR   8,R4           NO,RETURN VIA R4                          00467000
+         B     ERROR5         ELSE, UNKNOWN ERROR RETURNED              00468000
+         SPACE 1                                                        00469000
+CSWSTOR  EQU   *                                                        00470000
+         LA    R4,ERROR5      IN CASE OF UNKNOWN ERROR                  00471000
+         MVC   PRSTAT(2),CSW+4  SAVE STORED CSW (BYTES 4,5 ONLY)        00472000
+         CLC   PRSTAT(2),=X'0C00' IS CSWSTOR FOR NOP?          @VA03714 00472300
+         BE    NORMRET        YES, GOTO NORMAL RETURN          @VA03714 00472600
+         TM    PRSTAT,X'0C'   NICE CE+DE?                               00473000
+         BM    WAITDE         CE GIVEN - WAIT FOR DE                    00474000
+         B     TESTCSW        TEST THE CSW STATUS                       00475000
+         SPACE 1                                                        00476000
+WAITDE   EQU   *                                                        00477000
+         L     R15,=V(WAIT)   ADDRESS OF WAIT ROUTINE                   00478000
+         BALR  R14,R15        WAIT FOR DE                               00479000
+         OC    PRSTAT(2),CSW+4   SAVE STATUS BITS IF ANY                00480000
+         B     TESTCSW        TEST THE CSW STATUS                       00481000
+         SPACE 1                                                        00482000
+BUSY     EQU   *                                                        00483000
+         L     R15,=V(WAIT)   ADDRESS OF WAIT ROUTINE                   00484000
+         BR    R15            WAIT FOR INTERRUPT                        00485000
+         SPACE 1                                                        00486000
+FEEL     EQU   *                                                        00487000
+         LA    R15,PRSNCCW    LOCATION FOR SENSE CCW, NOP               00488000
+         MVC   0(16,R15),SENCCW   PUT THE SENSE CCW THERE               00489000
+         ST    R15,CAW        STORE ADDRESS FOR SIO                     00490000
+         LA    R15,PRSENFO    LOCATION FOR SENSE BYTE                   00491000
+         MVI   0(R15),X'FF'   INITIALIZE WITH BAD NEWS                  00492000
+         ST    R15,PRSNCCW    ADDRESS INTO CCW                          00493000
+         MVI   PRSNCCW,X'04'  CHANGE COMMAND CODE                       00494000
+         SIO   0(R5)          READ THE SENSE BYTE                       00495000
+         BNE   *-4                                                      00496000
+         TIO   0(R5)          THEN WAIT UNTIL...                        00497000
+         BC    2,*-4          ...IT'S DONE                              00498000
+         TM    0(R15),X'40'   IS INTERVENTION REQUIRED?                 00499000
+         BO    ERR145S        PRINT MESSAGE IF SO                       00500000
+         TM    0(R15),X'3C'   DATA ERRORS?                              00501000
+         BNZ   ERR145S                                                  00502000
+         TM    0(R15),X'01'   CHAN 9 SENSED?                            00503000
+         BZ    ERROR5         NO, DON'T KNOW WHAT IT IS                 00504000
+         LTR   R11,R11        PRINTING FROM BUFFER?                     00505000
+         BZ    ERROR3         NO, ERROR3                                00506000
+         TM    DOSFLAGS,EIGHT   IS THIS DOS PIO CALL?          @V305066 00506100
+         BO    ERROR3         YES, BREAK CCW CHAIN ON UC       @V305066 00506200
+         BAL   R8,RESTART     YES, RESTART THE BUFFER                   00507000
+ERROR3   LA    R15,3          RETURN WITH CHAN 9 SENSED                 00508000
+         B     ERRET                                                    00509000
+         SPACE 1                                                        00510000
+RESTART  EQU   *              ATTEMPT BUFFER RESTART                    00511000
+         L     R15,PRCSW      1ST WORD OF CSW IN R15                    00512000
+         LA    R3,0(,R15)     ADDRESS OF NEXT CCW IN R3                 00513000
+         LTR   R3,R3          ...WILL BE 0 IF 'CSW STORED'              00514000
+         BZ    RETRYIO        CSW STORED ON SIO                @VA07597 00515110
+         CLI   0(R3),X'08'    IS NEXT CCW A TIC?               @VA02370 00515300
+         BNE   SIO            NO, GO AHEAD AND RESTART         @VA02370 00515400
+         ICM   R3,7,1(R3)     PICK UP TIC-TO ADDRESS           @VA02370 00515500
+         B     SIO            AND RESTART ON THAT              @VA02370 00515600
+RETRYIO  EQU   *                                               @VA07597 00515700
+         LR    R3,R9          PICKUP CCW ADD FOR RETRY         @VA07597 00515800
+         B     SIO            GO RETRY SIO                     @VAO7597 00515900
+         EJECT                                                          00517000
+**********************************************************************  00518000
+*                                                                       00519000
+*        ERROR MESSAGES                                                 00520000
+*                                                                       00521000
+**********************************************************************  00522000
+         SPACE 1                                                        00523000
+ERR113S  EQU   *                                                        00524000
+         LA    R3,NATT                                                  00525000
+         LA    R4,113                                                   00526000
+         B     ERRMSG                                                   00527000
+         SPACE 1                                                        00528000
+ERR145S  EQU   *                                                        00529000
+         LA    R3,INT                                                   00530000
+         LA    R4,145                                                   00531000
+         B     ERRMSG                                                   00532000
+         SPACE 1                                                        00533000
+ERRMSG   EQU   *                                                        00534000
+         DMSERR  MF=(E,'SYS'),LET=S,NUM=(4),TEXTA=(3)                   00535000
+         LA    R15,100                                                  00536000
+         B     ERRET0                                                   00537000
+         SPACE 1                                                        00538000
+ERROR1   EQU   *              COME HERE FOR LINE TOO LONG               00539000
+         LA    R15,1                                                    00540000
+         B     ERRET0                                                   00541000
+         SPACE 1                                                        00542000
+ERROR5   EQU   *              COME HERE IF ANY OTHER I/O ERROR          00543000
+         LA    R15,5                                                    00544000
+         B     ERRET                                                    00545000
+         EJECT                                                          00546000
+*********************************************************************   00547000
+*                                                                       00548000
+*        RETURNS                                                        00549000
+*                                                                       00550000
+*********************************************************************   00551000
+         SPACE 1                                                        00552000
+NORMRETC EQU   *                                                        00553000
+         L     R3,BATCTR                                                00554000
+         LA    R4,1                                                     00555000
+         AR    R3,R4                                                    00556000
+         ST    R3,BATCTR                                                00557000
+         SPACE 1                                                        00558000
+NORMRET0 EQU   *              NORMAL RETURN                             00559000
+         SR    R15,R15        ZERO RETURN CODE                          00560000
+ERRET0   LR    R14,R10        RESTORE RETURN ADDRESS                    00561000
+         BR    R14            RETURN                                    00562000
+         SPACE 1                                                        00563000
+NORMRET  EQU   *              NORMAL RETURN                             00564000
+         SR    R15,R15        ZERO RETURN CODE                          00565000
+ERRET    TM    BATFLAGS,BATRUN+BATNOEX IS CMS BATCH RUNNING?            00566000
+         BM    BATTERUP       BRANCH IF SO                              00567000
+         LR    R14,R10        RESTORE RETURN ADDRESS                    00568000
+         BR    R14            RETURN                                    00569000
+         SPACE 1                                                        00570000
+BATTERUP EQU   *              COME HERE IF BATCH IS RUNNING             00571000
+         L     R6,ABATLIMT    ADDRESSABILITY IN BATCH LIMITS AREA       00572000
+         USING BATLSECT,R6    ...                                       00573000
+         LH    R7,BATPRTC     CURRENT PRINT LINE COUNT                  00574000
+         LA    R8,1           LINE COUNT THIS PRINTING                  00575000
+         LTR   R11,R11        ...IF NOT PRINTING BUFFER                 00576000
+         BZ    BATIK                                                    00577000
+         L     R8,BATCTR      LINE COUNT IF PRINTING BUFFER             00578000
+BATIK    AR    R7,R8          UPDATE BATCH PRINT COUNT                  00579000
+         LH    R8,BATPRTL     GET LIMIT AS A FULLWORD                   00580000
+         CR    R7,R8          ARE WE OVER THE LIMIT?                    00581000
+         BNH   BATHOS         NO, UPDATE BATCH'S FIELD, RETURN          00582000
+         OI    BATFLAGS+1,BATXLIM+BATXPRT  YES, SIGNAL TROUBLE          00583000
+         L     R15,ABATABND   ...AND ABEND BATCH                        00584000
+         BR    R15            ...                                       00585000
+BATHOS   STH   R7,BATPRTC     UPDATE PRINT COUNT                        00586000
+         LR    R14,R10        RESTORE RETURN ADDRESS                    00587000
+         BR    R14            RETURN                                    00588000
+         EJECT                                                          00589000
+*********************************************************************** 00590000
+*                                                                       00591000
+*        DATA                                                           00592000
+*                                                                       00593000
+*********************************************************************** 00594000
+         SPACE 1                                                        00595000
+*                                                                       00596000
+*        LEGAL MACHINE CODES (EXCLUDING CHANNEL CODES)...               00597000
+*                                                                       00598000
+         DS    0F                                                       00599000
+MACODES  DC    X'010911190B131B03'                                      00600000
+         SPACE 1                                                        00601000
+         DS    0F                                                       00602000
+BLANK    DC    X'40000000'                                              00603000
+         DS    0H                                              @VA05935 00603300
+NODATA   DC    X'0040'                                         @VA05935 00603600
+         SPACE 1                                                        00604000
+*                                                                       00605000
+*        DUMMY CCWS - MOVED INTO R13 AREA BEFORE EXECUTION...           00606000
+*                                                                       00607000
+         SPACE 1                                                        00608000
+CCW      CCW   X'0B',0,CC+SILI,1        CCW FOR CARRIAGE CONTROL        00609000
+         CCW   X'01',BLANK,CC+SILI,1    2ND OR 'PRIMARY' CCW            00610000
+         CCW   X'03',0,SILI,1           (NO-OP FOR EFFICIENCY)          00611000
+         SPACE 1                                                        00612000
+*                                                                       00613000
+*        WAIT PLIST - MOVED TO R13 AREA BEFORE EXECUTION...             00614000
+*                                                                       00615000
+PWAIT    DS    0F                                                       00616000
+         DC    CL8'WAIT'                                                00617000
+         DC    CL4'PRN1'                                                00618000
+         DC    F'0'                                                     00619000
+         DC    CL4'PRN1'      (LET WAIT OFF THE HOOK)                   00620000
+         SPACE 1                                                        00621000
+*                                                                       00622000
+*        SENSE CCW - MOVED TO R13 AREA BEFORE EXECUTION...              00623000
+*                                                                       00624000
+         SPACE 1                                                        00625000
+SENCCW   CCW   X'04',*-*,CC+SILI,1                                      00626000
+         CCW   X'03',0,SILI,1          NOP FOR EFFICIENCY               00627000
+ZERO     DC    H'0'                                                     00628000
+         SPACE 1                                                        00629000
+NATT     DC    AL1(L'NATTMS)                                            00630000
+NATTMS   DC    C'PRINTER NOT ATTACHED'                                  00631000
+*                                                                       00632000
+INT      DC    AL1(L'INTMS)                                             00633000
+INTMS    DC    C'INTERVENTION REQUIRED ON PRINTER'                      00634000
+*                                                                       00635000
+CC       EQU   X'40'                                                    00636000
+SILI     EQU   X'20'                                                    00637000
+EIGHT    EQU   X'08'          DOS PRINTER INDICATOR IN NUCON   @V305066 00637100
+*                                                                       00638000
+         LTORG                                                          00639000
+         EJECT                                                          00640000
+**********************************************************************  00641000
+*                                                                       00642000
+*        DSECTS                                                         00643000
+*                                                                       00644000
+**********************************************************************  00645000
+         SPACE 1                                                        00646000
+PRSECT   DSECT                                                          00647000
+PRCCWS   DS    3D             LOCATION FOR STOCK CCWS                   00648000
+PRWAITP  DS    5F             AREA FOR WAIT PLIST                       00649000
+PRSENFO  DS    1F             SENSE AREA                                00650000
+PRSNCCW  DS    2D             SENSE CCW, NOP                            00651000
+PRCSW    DS    4B             CSW SAVE AREA...                          00652000
+PRSTAT   DS    2B             ...STATUS BYTES...                        00653000
+PRCOUNT  DS    2B             ...COUNT...                               00654000
+PRMISC   DS    2D                                                       00655000
+         SPACE 1                                                        00656000
+BUFSECT  DSECT                                                          00657000
+BUFCTR   DC    A(*-*)                                                   00658000
+BATCTR   DC    A(*-*)                                                   00659000
+         DS    2F                                                       00660000
+BUFDATA  DS    500D                                                     00661000
+         SPACE 1                                                        00662000
+         BATLIMIT                                                       00663000
+         EJECT                                                          00664000
+         NUCON                                                          00665000
+         REGEQU                                                         00666000
+         END                                                            00667000

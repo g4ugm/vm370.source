@@ -1,0 +1,766 @@
+VER      TITLE 'DMKVER     (CP)        VM/370 - RELEASE 6'              00001000
+*.                                                                      00002000
+*                                                                       00003000
+* MODULE NAME -                                                         00004000
+*        DMKVER                                                         00005000
+*                                                                       00006000
+* FUNCTION -                                                            00007000
+*        TO PROCESS ERROR RECORDS PASSED FROM VIRTUAL MACHINES          00008000
+*        VIA AN SVC 76.                                                 00009000
+*                                                                       00010000
+* ATTRIBUTES -                                                          00011000
+*        PAGEABLE,REENTRANT,CALLED VIA SVC                              00012000
+*                                                                       00013000
+* ENTRY POINTS -                                                        00014000
+*        DMKVERO - SVC 76 FROM OS, VS/1, VS/2, OR VM/370.               00015000
+*        DMKVERD - SVC 76 FROM DOS OR DOS/VS.                           00016000
+*                                                                       00017000
+* ENTRY CONDITIONS -                                                    00018000
+*        FOR DMKVERO -                                                  00019000
+*            GPR0 - 2'S COMPLEMENT OF RECORD LENGTH.                    00020000
+*            GPR1 - ADDRESS OF THE RECORD.                              00021000
+*        FOR DMKVERD -                                                  00022000
+*            GPR0 - ADDRESS OF THE RECORD.                              00023000
+*            GPR1 - ADDRESS OF CCB(DOS CONTROL BLOCK)                   00024000
+*        COMMON TO BOTH ENTRIES -                                       00025000
+*            GPR11 - USERS VMBLOCK ADDRESS.                             00026000
+*            GPR12 - ADDRESS OF ENTRY POINT.                            00027000
+*            GPR13 - ADDRESS OF STANDARD SAVE AREA.                     00028000
+*                                                                       00029000
+* EXIT CONDITIONS -                                                     00030000
+*                                                                       00031000
+*        NONE                                                           00032000
+*                                                                       00033000
+* CALLS TO OTHER ROUTINES -                                             00034000
+*        DMKFREE - TO OBTAIN STORAGE FOR RECORD BUFFER.                 00035000
+*        DMKFRET - TO RETURN STORAGE TO THE SYSTEM.                     00036000
+*        DMKQCNWT - TO SEND MESSAGES TO THE OPERATOR.                   00037000
+*        DMKIOEVR - TO WRITE RECORD TO RECORDING CYLINDER.              00038000
+*        DMKSCNVU - TO OBTAIN VIRTUAL CANNEL, CONTROL UNIT, AND         00039000
+*                   DEVICE BLOK ADDRESSES.                              00040000
+*        DMKSCNRD - TO OBTAIN REAL DEVICE ADDRESS.                      00041000
+*        DMKCVTBH - TO CONVERT BINARY ADDRESSES TO HEX.                 00042000
+*                                                                       00043000
+* EXTERNAL REFERENCES -                                                 00044000
+*        NONE                                                           00045000
+*                                                                       00046000
+* TABLES / WORKAREAS -                                                  00047000
+*        NONE                                                           00048000
+*                                                                       00049000
+* REGISTER USAGE -                                                      00050000
+*        GPR0 - PARAMETER REGISTER                                      00051000
+*        GPR1 - PARAMETER REGISTER                                      00052000
+*        GPR2 - WORK REGISTER AND PARAMETER REGISTER                    00053000
+*        GPR3 - WORK REGISTER                                           00054000
+*        GPR4 - WORK REGISTER                                           00055000
+*        GPR5 - WORK REGISTER AND SECONDARY BAL REGISTER                00056000
+*        GPR6 - WORK REGISTER                                           00057000
+*        GPR7 - ADDRESS OF VDEVBLOK                                     00058000
+*        GPR8 - ADDRESS OF RDEVBLOK                                     00059000
+*        GPR9 - BASE REGISTER FOR ERROR RECORD                          00060000
+*        GPR10 - BAL REGISTER                                           00061000
+*        GPR11 - VMBLOK ADDRESS                                         00062000
+*        GPR12 - BASE ADDRESS                                           00063000
+*        GPR13 - SAVE AREA ADDRESS                                      00064000
+*        GPR14 - LINKAGE REGISTER                                       00065000
+*        GPR15 - LINKAGE REGISTER                                       00066000
+*                                                                       00067000
+* NOTES -                                                               00068000
+*        NONE                                                           00069000
+*                                                                       00070000
+* OPERATION -                                                           00071000
+*                                                                       00072000
+*        1. DMKVERO - ENTRY FOR OS,VS,OR VM TYPE SYSTEM RECORDING. SET  00073000
+*           A FLAG TO INDICATE AN OS TYPE. CHECK IF THE PASSED RECORD   00074000
+*           RESIDES WITHIN THE LIMITS OF THE VIRTUAL MACHINE. IF IT     00075000
+*           DOES, GO TO STEP 3, ELSE RETURN TO DMKPSA TO REFLECT THE    00076000
+*           SVC BACK TO THE VIRTUAL MACHINE.                            00077000
+*        2. DMKVERD - ENTRY FROM A DOS TYPE SYSTEM. THE LENGTH OF       00078000
+*           THE RECORD IS NOT KNOWN IN THIS CASE. IF AT LEAST THE       00079000
+*           RECORD HEADER RESIDES WITHIN THE LIMITS OF THE VIRTUAL      00080000
+*           MACHINES STORAGE, A RECORDING WILL BE ATTEMPTED. A RECORD   00081000
+*           SIZE OF 136 BYTES WILL BE USED IF IT WILL FIT IN USER       00082000
+*           STORAGE, ELSE A SIZE OF WHATEVER IS LEFT WILL BE USED.      00083000
+*        3. CALL DMKFREE TO OBTAIN STORAGE FOR A RECORD BUFFER. MOVE    00084000
+*           THE RECORD FROM USER STORAGE TO THE BUFFER.                 00085000
+*        4. IF THE RECORD IS AN OS TYPE, GO TO STEP 5. IF A DOS TYPE,   00086000
+*           CHECK IF THE RECORD TYPE IS 'OBR'. IF NOT, WE DON'T HAVE    00087000
+*           A VALID RECORDING. IN THIS CASE - CALL DMKFRET TO RETURN    00088000
+*           THE BUFFER AND EXIT TO DMKPSA TO REFECT THE SVC TO THE      00089000
+*           VIRTUAL MACHINE. IF VALID, GO TO STEP 6.                    00090000
+*        5. USE THE RECORD TYPE TO INDEX INTO A BRANCH TABLE WHICH      00091000
+*           WILL GIVE CONTROL TO THE APPROPRIATE CONVERSION ROUTINE     00092000
+*           OR IF INVALID RETURN TO DMKPSA TO REFLECT THE SVC.          00093000
+*        6. TYPE30 (OBR) - GO TO STEP 11 TO DO THE COMMON CONVERTS.     00094000
+*           IF THE DEVICE IS NONDEDICATED DASD, REPLACE THE VOLUME      00095000
+*           SERIAL, SEEK ADDRESS, AND H. A. WITH THE REAL DATA. ALSO    00096000
+*           UPDATE SENSE DATA FROM VIRTUAL TO REAL AND THEN GO TO       00097000
+*           STEP 12. IF THE DEVICE IS DEDICATED, GO RIGHT TO STEP 12.   00098000
+*        7. TYPE40 (ABEND) - GO TO STEP 11 TO DO THE COMMON CONVERTS    00099000
+*           AND THEN GO TO STEP 13.                                     00100000
+*        8. TYPE60 (DDR) - GO TO STEP 11 TO DO THE COMMON CONVERTS.     00101000
+*           CONVERT THE FROM AND TO CUA'S FROM VIRTUAL TO REAL          00102000
+*           AND GO TO STEP 13.                                          00103000
+*        9. TYPE70 (MIH) - GO TO STEP 11 FOR COMMON CONVERTS. THEN IF   00104000
+*           DEVICE IS NONDEDICATED DASD, UPDATE THE VOLUME SERIAL       00105000
+*           WITH THE REAL VOLUME SERIAL AND GO TO STEP 13. IF DEVICE    00106000
+*           IS DEDICATED, GO RIGHT TO STEP 13.                          00107000
+*        10. TYPE90 (MDR) - GO TO STEP 11 TO DO THE COMMON CONVERTS     00108000
+*            AND THEN GO TO STEP 13.                                    00109000
+*        11. THIS ROUTINE WIIL CONVERT THE FIELDS COMMON TO MORE THAN   00110000
+*            ONE RECORD TYPE FROM VIRTUAL TO REAL. FAILING CUA'S WILL   00111000
+*            BE CONVERTED FOR TYPE 30,70, AND 90. THE PROGRAM NAME      00112000
+*            WILL BE REPLACED WITH THE USERID FOR TYPE 30,40,60,70,     00113000
+*            AND 90. THE CPUID WILL BE REPLACED WITH THE REAL CPUID     00114000
+*            FOR ALL RECORDS.                                           00115000
+*        12. SET UP THE DMKVER575I MESSAGE AND CALL DMKQCNWT TO  SEND   00116000
+*            THE MESSAGE TO THE SYSTEMS OPERATOR.                       00117000
+*        13. RESET THE VMEXWAIT FLAG IN VMRSTAT. THEN CALL DMKIOEVR     00118000
+*            TO DO THE ACTUAL RECORDING. CALL DMKFRET TO RETURN THE     00119000
+*            BUFFER TO FREE STORAGE. ISSUE AN SVC 16 TO RETURN THE      00120000
+*            SAVEAREA TO THE SYSTEM AND GOTO DMKDSPCH.                  00121000
+*.                                                                      00122000
+         EJECT                                                          00123000
+         COPY  OPTIONS                                         @V1D0226 00124000
+         COPY  LOCAL          OPTIONS                          @V1D0226 00125000
+         EJECT                                                          00126000
+DMKVER   CSECT                                                 @V1D0226 00127000
+         SPACE                                                          00128000
+DMKVERID DC    CL8'DMKVER'    MODULE IDENTIFIER                @V1D0226 00129000
+         SPACE                                                          00130000
+         EXTRN DMKFREE,DMKFRET                                 @V1D0226 00131000
+         EXTRN DMKQCNWT                                        @V1D0226 00132000
+         EXTRN DMKIOEVR                                        @V1D0226 00133000
+         EXTRN DMKSCNVU,DMKSCNRD                               @V1D0226 00134000
+         EXTRN DMKCVTBH                                        @V1D0226 00135000
+         EXTRN DMKSYSTZ                                        @VM08585 00136000
+         EXTRN DMKVATRN                                        @VM08585 00137000
+         SPACE 3                                                        00138000
+*                                                                       00139000
+*        EQUATES FOR THIS MODULE ONLY                                   00140000
+*                                                                       00141000
+OS       EQU   X'80'          OS TYPE RECORD                   @V1D0226 00142000
+DOS      EQU   X'40'          DOS TYPE RECORD                  @V1D0226 00143000
+TWOMOVE  EQU   X'20'          RECORD CROSSES PAGE BOUNDARY     @V1D0226 00144000
+VVADR    EQU   X'10'          PROC. V.M. IN TRANSLATE MODE     @VM08585 00145000
+*        FOLLOWING EQUQTE WILL HAVE TO BE ALTERED FOR ANY NEW RELEASE   00146000
+*        OF VM370.                                                      00147000
+VMSYS    EQU   X'65'          SYSTEM & RELEASE LEVEL           @VA08439 00148110
+         SPACE 3                                                        00149000
+         USING PSA,R0                                          @V1D0226 00150000
+         USING RDEVBLOK,R8                                     @V1D0226 00151000
+         USING VMBLOK,R11                                      @V1D0226 00152000
+         USING SAVEAREA,R13                                    @V1D0226 00153000
+         EJECT                                                          00154000
+DMKVERO  RELOC ENTRY          FOR OS, VS, OR VM                @V1D0226 00155000
+         MVI   SAVEWRK1,OS    FLAG AS OS TYPE RECORD           @V1D0226 00156000
+         LR    R3,R1          POSSIBLE V-V ADR.                @VM08585 00157000
+         BAL   R10,TRNSTEST   GO CHECK IT                      @VM08585 00158000
+         TM    SAVEWRK1,VVADR TRANSLATE MODE V.M. ??           @VM08585 00159000
+         BO    VEROTRN        YES ---                          @VM08585 00160000
+         LCR   R5,R0          BYTE COUNT INTO R5               @VA03323 00161000
+         CL    R1,VMSTOR      IS IT A VALID ADDRESS            @VM03010 00162000
+         BNL   PSARETRN       NO                               @VA03323 00163000
+         LA    R3,4(R1,R5)    ADDRESS + LENGTH + HDR           @VA03323 00164000
+         CL    R3,VMSTOR      IS IT A VALID RANGE              @V304635 00165000
+         BNL   PSARETRN       NO                               @VA03323 00166000
+         CLR   R3,R1          CORE WRAP AROUND?                @VA03323 00167000
+         BNH   PSARETRN       YES - SORRY                      @VA03323 00168000
+         B     VERFREE        WILL ASSUME FRO NOW THAT IS VALID@V1D0226 00169000
+VEROTRN  EQU   *                                               @VM08585 00170000
+         L     R5,SAVEWRK4    LOAD ORIG. R0                    @VM08585 00171000
+         LCR   R5,R5          MAKE POS.                        @VM08585 00172000
+         LR    R1,R2          REAL ADR TO R1                   @VM08585 00173000
+         B     VERFREE                                         @VM08585 00174000
+         SPACE 4                                                        00175000
+DMKVERD  RELOC ENTRY          FOR DOS, DOS/VS                  @V1D0226 00176000
+         MVI   SAVEWRK1,DOS   FLAG AS DOS TYPE RECORDING       @V1D0226 00177000
+         A     R0,F8          ADD 8 TO GET ADR.                @VM08564 00178000
+         LR    R3,R0          POSSIBLE V-V ADR.                @VM08585 00179000
+         BAL   R10,TRNSTEST   GO CHECK IT                      @VM08585 00180000
+         TM    SAVEWRK1,VVADR TRANSLATE MODE MACHINE ??        @VM08585 00181000
+         BO    DOSTRN         YES - - -                        @VM08585 00182000
+         LR    R1,R0          PUT THE ADDRESS IN GPR1          @V1D0226 00183000
+*                                                                       00184000
+*        SINCE THE RECORD SIZE IS NOT KNOWN FOR DOS, WE WILL TRY        00185000
+*        TO RECORD AS MUCH AS POSSIBLE. IF WE HAVE ENOUGH FOR A         00186000
+*        HEADER WE WILL RECORD THAT. IF NOT, WILL RETURN TO             00187000
+*        DMKPSA TO REFLECT THE SVC TO THE VIRTUAL MACHINE.              00188000
+*                                                                       00189000
+         L     R2,VMSTOR      GET VM STORAGE SIZE              @V304635 00190000
+         AH    R0,F24+2       BUMP THE ADDRESS PASSED BY 24    @V1D0226 00191000
+         CR    R0,R2          WILL HEADER FIT IN USER STORAGE  @V1D0226 00192000
+*                             ???                                       00193000
+         BNL   PSARETRN       IF NOT, MUST REFLECT THE SVC.    @V1D0226 00194000
+         AH    R0,=H'112'     ADD MAX SIZE RECORD TO THE       @V1D0226 00195000
+*                             ADDRESS                                   00196000
+         LTR   R0,R0          GO NEGATIVE ???                  @VM08500 00197000
+         BM    PSARETRN       YES INDEED - SO GET OUT          @VM08500 00198000
+         CR    R0,R2          ENOUGH ROOM ????                 @V1D0226 00199000
+         BNL   VERSETSM       IF NOT - GO SET UP FOR WHAT WE   @V1D0226 00200000
+*                             HAVE                                      00201000
+         SPACE                                                          00202000
+VERSETLG LA    R5,136         LOAD MAX RECORD LENGTH           @V1D0226 00203000
+         B     VERFREE        AND GO TO IT                     @V1D0226 00204000
+DOSTRN   EQU   *                                               @VM08585 00205000
+         LR    R1,R2          REAL ADDRESS TO R1               @VM08585 00206000
+         LA    R5,136         TRY MAX OBR COUNT                @VM08585 00207000
+         B     VERFREE        .....                            @VM08585 00208000
+         SPACE                                                          00209000
+VERSETSM LR    R5,R2          MOVE MAX ADDRESS TO R5           @V1D0226 00210000
+         SR    R5,R1          MAX BYTE COUNT CAN HAVE          @V1D0226 00211000
+         SPACE                                                          00212000
+VERFREE  EQU   *                                               @V1D0226 00213000
+*                                                                       00214000
+*        WHEN COME HERE, GPR5 = BYTE COUNT AND GPR1 = RECORD ADDRESS    00215000
+*                                                                       00216000
+         LR    R0,R5          BYTE COUNT TO GPR0               @V1D0226 00217000
+         AH    R0,F4+2        ADD 4 BYTES FOR SIZE FIELD       @V1D0226 00218000
+         ST    R5,SAVEWRK8        SAVE CALLER BYTE COUNT       @VA04327 00218500
+         LA    R6,4075        MAX SIZE RECORDING CAN HANDLE    @VM08500 00219000
+         CLR   R0,R6          CAN WE DO IT?                    @VA03679 00220000
+         BNL   PSARETRN       NO - SO FORGET IT                @VM08500 00221000
+         A     R0,F7          ROUND THE BYTE COUNT UP          @V1D0226 00222000
+         SRL   R0,3           DIVIDE BY EIGHT FOR FREE CALL    @V1D0226 00223000
+         ST    R0,SAVEWRK9    SAVE THIS FOR LATER FRET         @V1D0226 00224000
+         LR    R4,R1          RECORD ADR. TO R4                @VM08585 00225000
+         CALL  DMKFREE        GET STORAGE FOR RECORD           @V1D0226 00226000
+         LR    R9,R1          POINT GPR9 TO THIS AREA          @V1D0226 00227000
+         LA    R9,4(,R9)      BUMP R9 PAST RECORD SIZE FIELD   @V1D0226 00228000
+         L     R2,F4095       LOAD GPR2 WITH FFF               @V1D0226 00229000
+         OR    R2,R4          GET MAX ADDRESS FOR THIS PAGE    @V1D0226 00230000
+         LR    R3,R5          BYTE COUNT TO GPR3               @V1D0226 00231000
+         SL    R3,F1          MINUS ONE TO CALC HIGH ADDRESS   @V1D0226 00232000
+         AR    R3,R4          HIGHEST ADDRESS NEEDED           @VM08585 00233000
+*                             NEEDED                                    00234000
+         CR    R3,R2          IS IT ALL IN ONE PAGE            @V1D0226 00235000
+         BNH   ONEMOVE        BRANCH IF IT DOES                @V1D0226 00236000
+         OI    SAVEWRK1,TWOMOVE FLAG FOR PAGE BOUNDARY XOVER   @VA05851 00237000
+         LA    R2,1(,R2)      START ADDRESS OF SECOND PAGE     @VA05851 00237750
+         TM    SAVEWRK1,VVADR PROCESS TRANS. MODE V.M. ??      @VA05851 00238500
+         BO    TRNS2MOV       MUST HANDLE DIFFERENTLY          @VA05851 00239250
+         ST    R2,SAVEWRK3    SAVE FOR LATER                   @V1D0226 00241000
+         SR    R3,R2          GET COUNT FOR SECOND PAGE        @V1D0226 00242000
+         AL    R3,F1          ADD ONE BACK IN                  @V1D0226 00243000
+         ST    R3,SAVEWRK2    AND SAVE IT FOR LATER            @V1D0226 00244000
+         SR    R5,R3          BYTE COUNT FOR FIRST MOVE        @V1D0226 00245000
+         SPACE                                                          00246000
+ONEMOVE  EQU   *                                               @V1D0226 00247000
+         LR    R6,R9          LOAD GPR6 WITH 'TO' ADDRESS      @V1D0226 00248000
+         LR    R7,R5          BYTE COUNT FOR THE MOVE          @V1D0226 00249000
+         TM    SAVEWRK1,VVADR PROC. TRANSLATE V.M. ??          @VM08585 00250000
+         BO    RECMOVE        YEP --                           @VM08585 00251000
+PAGBRING LR    R1,R4          VADDR TO R1                      @VA05851 00252000
+         TRANS 2,1,OPT=(BRING,DEFER) LOAD THE PAGE             @VA05851 00252750
+         LR    R4,R2          LOAD THE REAL ADDRESS IN GPR4    @V1D0226 00254000
+RECMOVE  EQU   *                                               @VM08585 00255000
+         MVCL  R6,R4          DO THE MOVE                      @V1D0226 00256000
+         TM    SAVEWRK1,TWOMOVE DO WE NEED A SECOND MOVE       @V1D0226 00257000
+         BZ    BUFFUL         NO - GO PROCESS RECORD           @V1D0226 00258000
+         NI    SAVEWRK1,X'FF'-TWOMOVE RESET FLAG               @V1D0226 00259000
+         L     R4,SAVEWRK3    LOAD NEXT ADDRESS                @VA05851 00260000
+         L     R5,SAVEWRK2    AND THE BYTE COUNT FOR THE MVCL  @V1D0226 00262000
+         LR    R7,R5          TO GPR7 ALSO                     @V1D0226 00263000
+         TM    SAVEWRK1,VVADR TRANS MODE V.M. ??               @VM08585 00264000
+         BO    RECMOVE        DO THE MOVE                      @VM08585 00265000
+         B     PAGBRING       LOOP BACK FOR NEXT PAGE          @V1D0226 00266000
+TRNS2MOV EQU   *                                               @VM08585 00267000
+         LR    R7,R2          UPPER PAGE ADDR. TO R7           @VM08585 00268000
+         SR    R7,R4          R7 NOW HAS FIRST BYTE COUNT      @VM08585 00269000
+         SR    R5,R7          GET SECOND MOVE COUNT            @VM08585 00270000
+         ST    R5,SAVEWRK2    AND SAVE IT                      @VM08585 00271000
+         LR    R5,R7          NOW HAVE COUNT FOR 1ST MOVE      @VM08585 00272000
+         TM    SAVEWRK1,DOS   DOS V.M.                         @VM08585 00273000
+         BO    LOADDOS        YES ---                          @VM08585 00274000
+         L     R3,SAVEWRK5    LOAD ORIG OS ADR.                @VM08585 00275000
+         B     NEXTPAG        ....                             @VM08585 00276000
+LOADDOS  EQU   *                                               @VM08585 00277000
+         L     R3,SAVEWRK4    LOAD ORIG DOS ADR                @VM08585 00278000
+NEXTPAG  EQU   *                                               @VM08585 00279000
+         O     R3,F4095       GET TO END THIS PAGE             @VM08585 00280000
+         A     R3,F1          PLUS ONE TO GET NEXT PAGE        @VM08585 00281000
+         CALL  DMKVATRN       GET NEXT PAGE                    @VM08585 00282000
+         LTR   R0,R0          GOOD RETURN ???                  @VM08585 00283000
+         BNZ   VERERREX       NO - CAN'T RECORD                @VM08585 00284000
+         ST    R2,SAVEWRK3    SAVE REAL ADDRESS                @VM08585 00285000
+         B     ONEMOVE        GO DO THE MOVES                  @VM08585 00287000
+         SPACE 3                                                        00288000
+BUFFUL   EQU   *                                               @V1D0226 00289000
+*                                                                       00290000
+*        COMPLETE RECORD IN FREE STORAGE WITH BYTE COUNT SAVED IN       00291000
+*        SAVEWRK8, ADDRESS OF RECORD IN GPR9, AND FREE/FRET SIZE        00292000
+*        IN SAVEWRK9.                                                   00293000
+*                                                                       00294000
+*        NOW CHECK IF RECORD IS VALID.                                  00295000
+         SPACE                                                          00296000
+         USING OBRRECN,R9                                      @V1D0226 00297000
+         SPACE                                                          00298000
+         MVI   OBRKEYN+1,VMSYS SET VM'S SYSTEM AND RELEASE     @VM08585 00299000
+         SLR   R2,R2               ZERO R2                              00300000
+*        NOW CHECK FOR VALID RECORD TYPE.                               00301000
+*                                                                       00302000
+         SPACE                                                          00303000
+         TM    SAVEWRK1,OS    OS TYPE RECORD ???               @V1D0226 00304000
+         BO    OSRECD         YES - GO FIND THE TYPE           @V1D0226 00305000
+         CLI   OBRKEYN,X'30'  DOS CAN HAVE ONLY OBRS'          @V1D0226 00306000
+         BNE   VERERREX       SO IF NOT OBR, HAVE ERROR        @V1D0226 00307000
+         B     VER30          IF OBR, GO TO IT                 @V1D0226 00308000
+         SPACE                                                          00309000
+OSRECD   EQU   *                                               @V1D0226 00310000
+         IC    R2,OBRKEYN     LOAD THE RECORD TYPE             @V1D0226 00311000
+         SRL   R2,4           CLEAN OUT THE LOW BITS           @V1D0226 00312000
+         SLL   R2,2           SHIFT TO GET INDEX VALUE         @V1D0226 00313000
+         B     RECVECT(R2)    GO INTO BRANCH VECTORS           @V1D0226 00314000
+RECVECT  EQU   *                                               @V1D0226 00315000
+         B     VERERREX       INVALID                          @V1D0226 00316000
+         B     VERERREX       DITTO                            @V1D0226 00317000
+         B     VERERREX       DITTO AGAIN                      @V1D0226 00318000
+         B     VER30          OBR RECORDING                    @V1D0226 00319000
+         B     VER40          ABEND RECORDING                  @V1D0226 00320000
+         B     VERERREX       INVALID                          @V1D0226 00321000
+         B     VER60          DDR RECORDING                    @V1D0226 00322000
+         B     VER70          MIH RECORDING                    @V1D0226 00323000
+         B     VERERREX       INVALID                          @V1D0226 00324000
+         B     VER90          MDR RECORDING                    @V1D0226 00325000
+         B     VERERREX       INVALID                          @V1D0226 00326000
+         B     VERERREX       THIS TOO IS INVALID              @V1D0226 00327000
+         B     VERERREX       AND THIS ALSO.                   @V1D0226 00328000
+         B     VERERREX       AND THIS                         @V1D0226 00329000
+         B     VERERREX       AND ONE FINAL INVALID BRANCH.    @V1D0226 00330000
+         SPACE                                                          00331000
+VERERREX EQU   *                                               @V1D0226 00332000
+         L     R0,SAVEWRK9    COUNT FOR THE FRET               @V1D0226 00333000
+         SL    R9,F4          BACK UP TO START OF BUFFER       @V1D0226 00334000
+         LR    R1,R9          AND THE BUFFER ADDRESS           @V1D0226 00335000
+         CALL  DMKFRET        GET RID OF THE BUFFER            @V1D0226 00336000
+         SPACE                                                          00337000
+PSARETRN EQU   *                                               @V1D0226 00338000
+         NI    VMRSTAT,X'FF'-VMEXWAIT RESET WAIT FLAG          @V1D0226 00339000
+         EXIT                      RETURN TO DMKPSA            @V1D0226 00340000
+         EJECT                                                          00341000
+VER30    EQU   *                                               @V1D0226 00342000
+         SPACE                                                          00343000
+         USING OBRRECN,R9                                      @V1D0226 00344000
+         SPACE                                                          00345000
+         CLI   OBRKEYN,X'30'  MAKE SURE IS TYPE 30             @VM08500 00346000
+         BNE   VERERREX       IF NOT GET OUT                   @VM08500 00347000
+         BAL   R10,CKOBRLEN       GO CHECK CALLER LENGTH       @VA04327 00347500
+         BAL   R10,COMCVT30   GO CONVERT COMMON FIELDS         @V1D0226 00348000
+         L     R0,SAVEWRK5    LOAD DEVICE ADDRESS              @VM08506 00349000
+         TM    OBRSWSN+1,X'20' IS THIS A SHORT OBR RECORD      @VA03358 00350000
+         BZ    *+12           NO, BYPASS SHORT OBR SUPPORT     @VA03358 00351000
+         STCM  R0,7,OBRCUA    SAVE CUA IN SHORT OBR RECORD     @VA03358 00352000
+         B     VERRSTEX       NO MORE CONVERSION FOR SHORT OBR @VA03358 00353000
+         STCM  R0,7,OBRCUAPR  STORE INTO PHYS ADDRESS          @VM08506 00354000
+         CLI   RDEVTYPC,CLASDASD DASD TYPE DEVICE              @VM08506 00355000
+         BNE   VERDEDCK       NO - DEV ADDR STORED IS OK       @VM08506 00356000
+         TM    RDEVTYPE,TYP3330 IS DASD A 3330 DEVICE ?        @V304498 00357000
+         BZ    CHK2314        IF NOT, GO CHK FOR 2314          @V2A2029 00358000
+         IC    R1,OBR33SNS+4  LOAD PHYSICAL ADDR FROM SENSE    @VM08506 00359000
+         TM    OBR33SNS+2,X'08' TEST FOR EMULATED 3330 DEVICE  @V304498 00360000
+         BZ    VERPHA         NO, BYPASS EMULATION CODE CONV   @VA04586 00361500
+         BAL   R7,EMULCODE    YES, CODE 1 OF 8 AS 3 OF 6       @V304498 00362000
+VERPHA   N     R1,F7          ZAP ALL BUT LOW 3 BITS           @VA04586 00362100
+         TM    OBR33SNS+4,X'40' IS THIS 2ND OR 4TH CONTROL     @VA04586 00362200
+*                             UNIT?                                     00362300
+         BNO   VERSETPR       IF NOT, BRANCH                   @VA04586 00362400
+         A     R1,F8          BUMP ADDRESS IF 2ND OR 4TH       @VA04586 00362500
+*                             CONTROL UNIT                              00362600
+         B     VERSETPR       GO SET PHYSICAL ADDR             @VM08506 00363000
+CHK2314  EQU   *                                               @VM08506 00364000
+         CLI   RDEVTYPE,TYP2314 IS IT 2314 ???                 @VM08506 00365000
+         BNE   VERDEDCK       NO - ADDRESS OK                  @VM08506 00366000
+         IC    R1,OBRSENSN+4  LOAD 2314 PHYSICAL ADDR          @VM08506 00367000
+         N     R1,F15         ZAP ALL EXCEPT LOW 4 BITS        @VA04586 00367500
+VERSETPR EQU   *                                               @VM08506 00368000
+         N     R0,=X'00FFFFF0' SAVE ALL BUT LOW 4              @VM08506 00370000
+         OR    R1,R0          PUT THE TWO TOGETTHER            @VM08506 00371000
+         STCM  R1,7,OBRCUAPR  STORE PROPER DEV ADDR            @VM08506 00372000
+VERDEDCK EQU   *                                               @VM08506 00373000
+         TM    RDEVSTAT,RDEVDED DEDICATED DEVICE               @V1D0226 00374000
+         BO    VERMSGOP       YES - NO MORE CONVERSION TO DO   @V1D0226 00375000
+         SPACE                                                          00376000
+VERNOTDD EQU   *                                               @V1D0226 00377000
+*                                                                       00378000
+*        ON A NON-DEDICATED / NON-DASD DEVICE, GO AHEAD                 00379000
+*        WITH RECORDING. FOR DASD - CONVERT THE SEEK AND HOME ADDRESS   00380000
+*        TO THE REAL ADDRESS AND MOVE THE VOLUME SERIAL                 00381000
+*        FROM RDEVBLOK TO THE RECORD. FOR 3330/3340/3350/2305 ADJUST    00382000
+*        CYLINDER NUMBER IN THE SENSE BYTE TO THE REAL CYLINDER.        00383000
+*        FOR A 2311 BEING SIMULATED ON A 2314, ALTER THE SENSE IN       00384000
+*        SENSE BYTE 3 TO REFLECT A 2314.                                00385000
+*                                                                       00386000
+         SPACE                                                          00387000
+         CLI   RDEVTYPC,CLASDASD DASD DEVICE                   @V1D0226 00388000
+         BNE   VERMSGOP       IF NOT - GO RECORD               @V1D0226 00389000
+         MVC   OBRVOLN(6),RDEVSER MOVE THE REAL VOL SER        @V1D0226 00390000
+         L     R7,SAVEWRK4    LOAD THE VDEVBLOK ADDRESS        @V1D0226 00391000
+         SPACE                                                          00392000
+         USING VDEVBLOK,R7                                     @V1D0226 00393000
+         SPACE                                                          00394000
+         SLR   R2,R2          ZIP A WORK REG                   @V1D0226 00395000
+         ICM   R2,3,OBRLSKN+3 CLYINDER NUMBER OF LAST SEEK     @V1D0226 00396000
+         CLI   RDEVTYPE,TYP3340 IS IT A 3340 OR 3344?          @V56BDA8 00396100
+         BNE   NOT334X        NO, JUST CONTINUE                @V56BDA8 00396200
+         CH    R2,=H'696'     ALTERNATE OR CE CYLINDER?        @V56BDA8 00396300
+         BNL   VERMSGOP       YES, LEAVE UNCHANGED             @V56BDA8 00396400
+         TM    RDEVFTR,FTR35MB IS IT A SMALL DISK?             @V56BDA8 00396500
+         BZ    NOT334X        NO, MUST RELOCATE                @V56BDA8 00396600
+         CH    R2,=H'348'     35MB ALTERNATE OR CE CYLINDER?   @V56BDA8 00396700
+         BNL   VERMSGOP       YES, LEAVE UNCHANGED             @V56BDA8 00396800
+NOT334X  EQU   *                                               @V56BDA8 00396900
+         AH    R2,VDEVRELN    ADD THE RELOCATION FACTOR        @V1D0226 00397000
+         STCM  R2,3,OBRLSKN+3 REAL CLYNDER TO RECORD           @V1D0226 00398000
+         LH    R2,OBRHAN+2    NOW UPDATE HOME ADDRESS          @VA02834 00399000
+         AH    R2,VDEVRELN    ADD RELOCATION                   @V1D0226 00400000
+         STH   R2,OBRHAN+2    AND STORE INTO RECORD            @VA02834 00401000
+         CLI   RDEVTYPE,TYP2314 IS IT A 2314 ???               @V1D0226 00402000
+         BE    VER2314        GO CHECK FOR 2311 IF IT IS       @V1D0226 00403000
+         CLI   RDEVTYPE,TYP3330 3330 ????                      @V1D0226 00404000
+         BE    VERCYL         YEP ----                         @V1D0226 00405000
+         CLI   RDEVTYPE,TYP2305 COULD BE 2305 DRUM             @V1D0226 00406000
+         BE    VERCYL         IF IT IS - GO ADJUST SENSE       @V1D0226 00407000
+         TM    RDEVTYPE,TYP3340+TYP3350 3340 OR 3350 DEVICE ?  @V304498 00408000
+         BZ    VERMSGOP       NO - GO RECORD   RECORD          @V304498 00409000
+         IC    R2,OBR33SNS+6  GET HIGH CYL BYTE                @V2A2029 00410000
+         LR    R1,R2          SAVE FOR LATER                   @V2A2029 00411000
+         SLL   R2,3           SHIFT CYLINDER TO NEXT BYTE      @V2A2029 00412000
+         N     R2,=A(256+512) ISOLATE CYL 512 AND 256          @V2A2029 00413000
+         IC    R2,OBR33SNS+5  AND LOAD CYL BYTE ALONG WITH IT  @V2A2029 00414000
+         AH    R2,VDEVRELN    ADD THE RELOCATION FACTOR        @V2A2029 00415000
+         CLI   RDEVTYPE,TYP3350 3350 ????                      @V304498 00416000
+         BE    VER3350        CHECK CYLINDER LIMIT             @V304498 00417000
+SETCYL   STC   R2,OBR33SNS+5  STORE LOW CYL VALUE              @V2A2029 00424000
+         N     R2,=A(256+512) ISOLATE CYL 512 AND 256          @V2A2029 00425000
+         SRL   R2,3           SHIFT TO HARDWARE VALUE          @V2A2029 00426000
+         N     R1,=A(16+8+4+2+1) ISOLATE LOGICAL TRACK         @V304498 00427000
+         OR    R2,R1          COMBINE CYL AND HEAD BITS        @V2A2029 00428000
+         STC   R2,OBR33SNS+6  STORE HIGH CYL AND HEAD VALUE    @V2A2029 00429000
+         B     VERMSGOP       IF NOT - OK TO RECORD            @V1D0226 00430000
+         SPACE 1                                                        00431000
+VER3350  CH    R2,=H'559'     EXCEEDED CYL LIMIT - 560 CYL'S   @V304498 00432000
+         BH    VERMSGOP       YES - LEAVE AS IS                @V304498 00433000
+         B     SETCYL         YES - STORE CYLINDER NUMBER      @V304498 00434000
+         SPACE                                                          00435000
+VER2314  EQU   *                                               @V1D0226 00436000
+         TM    VDEVTYPE,FTR2311T+FTR2311B SIMULATING 2311 ???? @V1D0226 00437000
+         BZ    VERMSGOP       NO - GO RECORD                   @V1D0226 00438000
+         CLI   OBRSENSN+3,X'C8' 2311 SENSE SAY READY AND       @V1D0226 00439000
+*                             ONLINE ???                                00440000
+         BNE   VERCKOL        NO - GO CHECK FURTHER            @V1D0226 00441000
+         NI    OBRSENSN+3,X'40' LEAVE ONLINE SENSE BIT FOR 2314@V1D0226 00442000
+         B     VERMSGOP       NOW CAN SAFELY RECORD            @V1D0226 00443000
+         SPACE                                                          00444000
+VERCKOL  EQU   *                                               @V1D0226 00445000
+         TM    OBRSENSN+3,X'48' IF 2311 ONLINE BITS BOTH 1'S,  @V1D0226 00446000
+         BO    VERMSGOP       LEAVE AS IS.                     @V1D0226 00447000
+         TM    OBRSENSN+3,X'40' IF BIT 1 ON ALONE,             @V1D0226 00448000
+         BO    SETPCHG        GO SET PACK CHANGE FOR 2314      @V1D0226 00449000
+         XI    OBRSENSN+3,X'08' INVERT PACK CHANGE BIT         @V1D0226 00450000
+         B     VERMSGOP       . . .                            @V1D0226 00451000
+SETPCHG  OI    OBRSENSN+3,X'08' FORCE PACK CHANGE ON           @V1D0226 00452000
+         B     VERMSGOP       . . .                            @V1D0226 00453000
+         SPACE                                                          00454000
+VERCYL   EQU   *                                               @V1D0226 00455000
+*                                                                       00456000
+*        COME HERE TO ADJUST CYLINDER ADDRESS IN THE SENSE              00457000
+*                                                                       00458000
+         SPACE                                                          00459000
+         IC    R2,OBR33SNS+6  LOAD BYTE CONTAINING CYL. HIGH   @V1D0226 00460000
+*                             BIT                                       00461000
+         SLL   R2,2           GET IT UP TO NEXT BYTE           @V1D0226 00462000
+         N     R2,F256        SAVE ONLY THAT BIT               @V1D0226 00463000
+         IC    R2,OBR33SNS+5  AND LOAD CYL BYTE ALONG WITH IT  @V1D0226 00464000
+         AH    R2,VDEVRELN    ADD THE RELOCATION FACTOR        @V1D0226 00465000
+         CH    R2,=H'400'     DID WE GO OVER THE LIMIT ????    @V1D0226 00466000
+         BH    VERMSGOP       IF WE DID, MEANS DMKUNTR DIDN'T  @V1D0226 00467000
+*                             CHG                                       00468000
+         STC   R2,OBR33SNS+5  STORE NEW CYL NUMBER             @V1D0226 00469000
+         C     R2,F256        OVER 256 ???                     @V1D0226 00470000
+         BL    VERMSGOP       NO - GO RECORD                   @V1D0226 00471000
+         OI    OBR33SNS+6,X'40' SET CYL HIGH BIT               @V1D0226 00472000
+         SPACE                                                          00473000
+         DROP  R7                                              @V1D0226 00474000
+         SPACE                                                          00475000
+         SPACE                                                          00476000
+VERMSGOP EQU   *                                               @V1D0226 00477000
+         L     R1,SAVEWRK5    LOAD REAL DEVICE ADDRESS         @V1D0226 00478000
+         CALL  DMKCVTBH       CONVERT TO PRINTABLE FORM        @V1D0226 00479000
+         STCM  R1,7,MSG575AD  STUFF INTO MESSAGE               @V1D0226 00480000
+         MVC   MSG575ID(8),VMUSER STUFF THIS IN MESSAGE        @V1D0226 00481000
+         LA    R0,MSG575LN    MESSAGE LENGTH                   @V1D0226 00482000
+         LA    R1,MSG575      AND THE ADDRESS                  @V1D0226 00483000
+         LA    R2,NORET+ALARM+OPERATOR                         @V1D0226 00484000
+         CALL  DMKQCNWT                                        @V1D0226 00485000
+         SPACE                                                          00486000
+VERRSTEX EQU   *                                               @V1D0226 00487000
+         TM    SAVEWRK1,DOS   DOS TYPE RECORDING ??            @VM08506 00488000
+         BO    DOSRET         GIVE DOS RETURN CODE             @VA03448 00489000
+         XC    VMGPRS+15*4(4),VMGPRS+15*4 R15=0 FOR OS/VS      @VA03448 00490000
+         B     VEROSEX        CONTINUE                         @VA03448 00491000
+DOSRET   XC    VMGPRS+4(4),VMGPRS+4 R1=0 FOR DOS/VS            @VA03448 00492000
+VEROSEX  EQU   *                                               @VM08506 00493000
+         NI    VMRSTAT,X'FF'-VMEXWAIT RESET THE WAIT BIT       @V1D0226 00494000
+         S     R9,F4          BACK UP TO START OF BUFFER       @V1D0226 00495000
+         LR    R1,R9          PASS THE RECORD ADDRESS TO IOE   @V1D0226 00496000
+         L     R0,SAVEWRK9    GET SIZE OF RECORD IN DOUBLEWORDS@VA03358 00497000
+         LR    R3,R0          GET NUMBER OF DOUBLEWORDS        @VA03358 00498000
+         SLL   R3,3           GET ACTUAL LENGTH OF RECORD      @VA03358 00499000
+         S     R3,F4          SUBTRACT LENGTH FIELD FROM RECORD@VA03358 00500000
+         ST    R3,0(,R1)      SAVE RECORD SIZE IN RECORD       @VA03358 00501000
+         CALL  DMKIOEVR       GET IT RECORDED                  @V1D0226 00502000
+         SPACE                                                          00503000
+         SPACE                                                          00504000
+         L     R15,ADSPCH     ADDRESS OF DISPATCH              @V1D0226 00505000
+         ST    R15,SAVERETN   RETURN TO DISPATCH INSTEAD OF PSA@V1D0226 00506000
+         ST    R15,SAVER12    THIS TO SET DISPATCHERS BASE     @V1D0226 00507000
+         EXIT                                                  @V1D0226 00508000
+         EJECT                                                          00509000
+VER40    EQU   *                                               @V1D0226 00510000
+         CLI   OBRKEYN,X'43'  IS IT 40,41,OR 42 ??             @VM08500 00511000
+         BL    VER40OK        YEP - OK  TO RECCRD              @VM08500 00512000
+         CLI   OBRKEYN,X'4F'  4F IS LEGAL                      @VM08500 00513000
+         BE    VER40OK        ....                             @VM08500 00514000
+         CLI   OBRKEYN,X'44'  SO IS 44                         @VM08500 00515000
+         BE    VER40OK        ....                             @VM08500 00516000
+         CLI   OBRKEYN,X'48'  AND 48                           @VM08500 00517000
+         BE    VER40OK        .....                            @VM08500 00518000
+         B     VERERREX       ALL ELSE IS BAD ..               @VM08500 00519000
+VER40OK  EQU   *                                                        00520000
+         SLR   R1,R1              ZERO R1                      @VA04327 00520200
+         LA    R1,OBRHSIZE+8  GET STANDARD HEADER SIZE         @VA07880 00520500
+         CL    R1,SAVEWRK8        HEADER SIZE > CALLER SIZE ?  @VA04327 00520600
+         BH    VERERREX           YES, CAN'T RECORD            @VA04327 00520800
+         BAL   R10,COMCVT60   DO COMMON CONVERTS               @VA05286 00521000
+         B     VERRSTEX       AND GO RECORD                    @V1D0226 00522000
+         EJECT                                                          00523000
+VER60    EQU   *                                               @V1D0226 00524000
+         SPACE                                                          00525000
+         USING DDRREC,R9                                       @V1D0226 00526000
+         SPACE                                                          00527000
+         CLI   DDRKEYN,X'60'  60 IS ONLY CODE ALLOWED          @VM08500 00528000
+         BNE   VERERREX       ELSE CAN'T RECORD                @VM08500 00529000
+         SLR   R1,R1              ZERO R1                      @VA04327 00529200
+         LA    R1,DDRSIZE         GET LENGTH OF DDR RECORD     @VA04327 00529400
+         CL    R1,SAVEWRK8        RECORD SIZE > CALLER SIZE ?  @VA04327 00529600
+         BH    VERERREX           YES, CAN'T RECORD            @VA04327 00529800
+         BAL   R10,COMCVT60   GO DO COMMON CONVERTS            @V1D0226 00530000
+         ICM   R1,7,DDRCUA1   LOAD 'FROM' DEVICE ADDRESS       @V1D0226 00531000
+         LA    R1,0(,R1)      ZERO THE HIGH BYTE               @V1D0226 00532000
+         BAL   R5,CNVTVR      CONVERT VIRTUAL TO REAL          @V1D0226 00533000
+         STCM  R1,7,DDRCUA1   STORE REAL INTO RECORD           @V1D0226 00534000
+         ICM   R1,7,DDRCUA2   LOAD 'TO' ADDRESS                @V1D0226 00535000
+         LA    R1,0(,R1)      ZIP THE HIGH BYTE                @V1D0226 00536000
+         BAL   R5,CNVTVR      CONVERT THIS TO REAL             @V1D0226 00537000
+         STCM  R1,7,DDRCUA2   AND STORE INTO RECORD            @V1D0226 00538000
+         B     VERRSTEX       GO RECORD                        @V1D0226 00539000
+         EJECT                                                          00540000
+VER70    EQU   *                                               @V1D0226 00541000
+         SPACE                                                          00542000
+         USING MIHREC,R9                                       @V1D0226 00543000
+         SPACE                                                          00544000
+         CLI   MIHKEYN,X'70'  ONLY 70 TYPE ALLOWED             @VM08500 00545000
+         BNE   VERERREX       ELSE CAN'T RECORD                @VM08500 00546000
+         SLR   R1,R1              ZERO R1                      @VA04327 00546200
+         LA    R1,MIHSIZE         GET MIH RECORD LENGTH        @VA04327 00546400
+         CL    R1,SAVEWRK8        RECORD LENGTH > CALLER LENGTH@VA04327 00546600
+         BH    VERERREX           YES, CAN'T RECORD            @VA04327 00546800
+         BAL   R10,COMCVT70   DO THE COMMON CONVERTS           @V1D0226 00547000
+         TM    RDEVSTAT,RDEVDED DEDICATED DEVICE ????          @V1D0226 00548000
+         BO    VERRSTEX       YES - OK TO RECORD               @V1D0226 00549000
+         CLI   RDEVTYPC,CLASDASD DASD DEVICE ????              @V1D0226 00550000
+         BNE   VERRSTEX       NO - DON'T HAVE VOL SER TO       @V1D0226 00551000
+*                             CONVERT                                   00552000
+         MVC   MIHVOL(6),RDEVSER MOVE REAL SERIAL IN           @V1D0226 00553000
+         B     VERRSTEX       AND GO RECORD                    @V1D0226 00554000
+         EJECT                                                          00555000
+VER90    EQU   *                                               @V1D0226 00556000
+         USING MDRREC,R9                                       @VM08500 00557000
+         SPACE                                                          00558000
+         CLI   MDRKEYN,X'91'  VALID MDR TYPE ??                @VM08500 00559000
+         BNE   VERERREX       NO - CAN'T RECORD                @VM08500 00560000
+         SLR   R1,R1              ZERO R1                      @VA04327 00560200
+         LA    R1,MRDSIZE         GET MRD RECORD SIZE          @VA04327 00560400
+         CL    R1,SAVEWRK8        RECORD SIZE > CALLER SIZE ?  @VA04327 00560600
+         BH    VERERREX           YES, CAN'T RECORD            @VA04327 00560800
+         BAL   R10,COMCVT90   CONVERT THE COMMON STUFF         @V1D0226 00561000
+         CLI   RDEVTYPC,CLASDASD DASD CLASS DEVICE             @VA06101 00561050
+         BNE   NOTDASD        NO, HANDLE NON-DASD DEVICE       @VA06101 00561070
+         MVC   MDRVOL(6),RDEVSER MOVE REAL VOLSER INTO RECORD  @VA06101 00561090
+         CLI   RDEVTYPE,TYP3330 IS DEVICE 3330-1 OR 3330-11 ?  @VA06101 00561110
+         BNE   DEV2314        NO, CHECK FOR 2314 TYPE          @VA06101 00561130
+DEV3330  SR    R10,R10        CLEAR R10 FOR WORK REG           @VA06101 00561150
+         IC    R10,MDRSENS+4  GET DRIVE ID OF 3330             @VA06101 00561170
+         TM    MDRSENS+2,X'08' EMULATED 3330 ?                 @VA06101 00561190
+         BZ    NOTEMUL        NO,BYPASS EMULATED CONV CODE     @VA06101 00561210
+         BAL   R7,EMULCODE    YES,CODE 1 OF 8 AS 3 OF 6        @VA06101 00561230
+NOTEMUL  N     R10,F7         ISOLATE 3-BIT ID FROM SENSE      @VA06101 00561250
+         TM    MDRSENS+4,X'40' IS THIS 2ND OR 4TH CONTROL      @VA06101 00561270
+*                             UNIT ?                                    00561290
+         BNO   GETADDR        NO, BYPASS ADDRESS INCREMENT     @VA06101 00561310
+         A     R10,F8         YES, BUMP ADDRESS BY 8           @VA06101 00561330
+         B     GETADDR        GO SET PHYSICAL ADDRESS          @VA06101 00561350
+DEV2314  CLI   RDEVTYPE,TYP2314 IS DEVICE 2314 ?               @VA06101 00561370
+         BNE   NOTDASD        NO, HANDLE OTHER DEVICE TYPE     @VA06101 00561390
+         SR    R10,R10        CLEAR R10 FOR WORK REG           @VA06101 00561410
+         IC    R10,MDRSENS+4  YES, GET DRIVE ID FROM SENSE     @VA06101 00561430
+         N     R10,F15        ISOLATE 4-BIT ID FROM SENSE      @VA06101 00561450
+GETADDR  EQU   *                                               @VA06101 00561470
+         N     R1,=X'0000FFF0' CLEAR MODULE/DRIVE ID           @VA06101 00561490
+         OR    R1,R10         GET PHYSICAL DEVICE ADDRESS      @VA06101 00561510
+         STCM  R1,3,MDRCUA1   SAVE PHYSICAL ADDRESS IN MDR     @VA06101 00561530
+NOTDASD  EQU   *                                               @VA06101 00561550
+         B     VERRSTEX       NO MORE TO DO                    @V1D0226 00562000
+         EJECT                                                          00563000
+COMCVT30 EQU   *                                               @V1D0226 00564000
+         SPACE                                                          00565000
+         USING OBRRECN,R9                                      @V1D0226 00566000
+         SLR   R1,R1          ZERO WORK REG                    @V1D0226 00567000
+         ICM   R1,7,OBRCUAIN  LOAD CUA OF FAILING DEVICE       @V1D0226 00568000
+         TM    OBRSWSN+1,X'20' IS THIS A SHORT OBR RECORD      @VA03358 00569000
+         BZ    *+8            NO, BYPASS                       @VA03358 00570000
+         ICM   R1,7,OBRCUA    GET CUA FROM RECORD              @VA03358 00571000
+         BAL   R5,CNVTVR      CONVERT TO REAL ADDRESS          @V1D0226 00572000
+         TM    OBRSWSN+1,X'20' IS THIS A SHORT OBR RECORD      @VA03358 00573000
+         BO    COMCVT40       YES, BYPASS SAVING CUA           @VA03358 00574000
+         STCM  R1,7,OBRCUAIN  AND STORE INTO RECORD            @V1D0226 00575000
+         B     COMCVT60       DO REST OF COMMON CONVERTS       @VM08506 00576000
+         SPACE                                                          00577000
+COMCVT90 EQU   *                                               @V1D0226 00578000
+COMCVT70 EQU   COMCVT90                                        @V1D0226 00579000
+         TM    OBRKEYN,X'90'  MDR ???                          @V1D0226 00580000
+         BO    MDRPRIM        YES - GO CONVERT PRIM DEV ADR    @V1D0226 00581000
+         SPACE                                                          00582000
+MIHPRIM  EQU   *                                               @V1D0226 00583000
+         SPACE                                                          00584000
+         USING MIHREC,R9                                       @V1D0226 00585000
+         SPACE                                                          00586000
+         ICM   R1,7,MIHCUA1   LOAD PRIMARY ADDRESS             @V1D0226 00587000
+         LA    R1,0(,R1)      ZIP THE HIGH BYTE                @V1D0226 00588000
+         BAL   R5,CNVTVR      CONVERT TO REAL                  @V1D0226 00589000
+         STCM  R1,7,MIHCUA1   AND STORE BACK                   @V1D0226 00590000
+         B     COMCVT60       . .. .                           @V1D0226 00591000
+         SPACE                                                          00592000
+MDRPRIM  EQU   *                                               @V1D0226 00593000
+         SPACE                                                          00594000
+         USING MDRREC,R9                                       @V1D0226 00595000
+         SPACE                                                          00596000
+         LH    R1,MDRCUA1     LOAD DEVICE ADDRESS              @V1D0226 00597000
+         BAL   R5,CNVTVR      AND CONVERT TO REAL              @V1D0226 00598000
+         STH   R1,MDRCUA1     AND STORE BACK TO THE RECORD     @V1D0226 00599000
+         B     COMCVT40       BRANCH TO CONVERT CPUID          @V1D0226 00600000
+         SPACE                                                          00601000
+COMCVT60 EQU   *                                               @V1D0226 00602000
+         SPACE                                                          00603000
+         USING OBRRECN,R9                                      @V1D0226 00604000
+         SPACE                                                          00605000
+         MVC   OBRPGMN(8),VMUSER MOVE USER ID TO RECORD        @V1D0226 00606000
+         SPACE                                                          00607000
+COMCVT40 EQU   *                                               @V1D0226 00608000
+         MVC   OBRCPIDN(8),CPUID MOVE REAL CPUID TO RECORD     @V1D0226 00609000
+         NI    OBRSWSN,(X'FF'-X'08') RESET TIME MACRO          @VM08585 00610000
+         OI    OBRSWSN,X'40'  AND SET NS CLOCK                 @VM08585 00611000
+         BR    R10            RETURN TO CALLER                 @V1D0226 00612000
+         EJECT                                                          00613000
+CNVTVR   EQU   *                                               @V1D0226 00614000
+         CALL  DMKSCNVU       GET ADDRESSES OF VDEVBLOK        @V1D0226 00615000
+         BNZ   VERERREX       IF CAN'T FIND - DON'T RECORD     @V1D0226 00616000
+         SPACE                                                          00617000
+         USING VDEVBLOK,R8                                     @V1D0226 00618000
+         SPACE                                                          00619000
+         ST    R8,SAVEWRK4    SAVE VDEVBLOK ADDRESS FOR LATER  @V1D0226 00620000
+         TM    VDEVSTAT,VDEVDED    DEDICATED VIRTUAL DEVICE ?  @VM08839 00621000
+         BO    GETREAL             YES - VDEVREAL IS VALID     @VM08839 00622000
+         CLI   VDEVTYPC,CLASDASD   SHARED VIRTUAL DASD ?       @VM08839 00623000
+         BNE   VERERREX            NO -- CAN'T RECORD FAKE DEV @VM08839 00624000
+GETREAL  EQU   *                                               @V1D0226 00625000
+         L     R8,VDEVREAL    LOAD RDEVBLOK ADDRESS            @V1D0226 00626000
+         CALL  DMKSCNRD       GET REAL DEVICE ADDRESS          @V1D0226 00627000
+         ST    R1,SAVEWRK5    SAVE THE REAL ADDRESS FOR LATER  @V1D0226 00628000
+         BR    R5             AND RETURN TO CALLER             @V1D0226 00629000
+         EJECT                                                          00630000
+TRNSTEST EQU   *                                               @VM08585 00631000
+         TM    VMPSW+1,EXTMODE ECMODE V.M. ??                  @VM08585 00632000
+         BCR   8,R10          IF NOT RETURN                    @VM08585 00633000
+         TM    VMPSW,TRANMODE IN TRANSLATE MODE ??             @VM08585 00634000
+         BCR   8,R10          RETURN IF NOT                    @VM08585 00635000
+         STM   R0,R2,SAVEWRK4 SAVE THE PARM REGS.              @VM08585 00636000
+         CALL  DMKVATRN       BRING IN THE RECORD              @VM08585 00637000
+         LTR   R0,R0          BETTER BE ZERO                   @VM08585 00638000
+         BNZ   PSARETRN       IF NOT CAN'T RECORD              @VM08585 00639000
+         OI    SAVEWRK1,VVADR FLAG AS V-V PROCESSING           @VM08585 00640000
+         ST    R2,SAVEWRK7    SAVE REAL ADDRESS OF RECORD      @VM08585 00641000
+         BR    R10            AND RETURN                       @VM08585 00642000
+         SPACE 1                                                        00643000
+EMULCODE LA    R14,1          INITIAL SHIFT COUNTER            @V304498 00644000
+         LR    R15,R1         OBTAIN 1 OF 8 2ODE (EMUL 3330)   @V304498 00645000
+SHIFT    SRA   R15,1          START TO COUNT NO OF SHIFTS      @V304498 00646000
+         BZ    EMULDONE       FINISHED SHIFT COUNT             @V304498 00647000
+         LA    R14,1(0,R14)   INCREASE SHIFT COUNT BY ONE      @V304498 00648000
+         B     SHIFT          CONTINUE TO COUNT 1 OF 8 CODE    @V304498 00649000
+EMULDONE LA    R15,7          INITIALIZE TO CREATE 3 OF 6 CODE @V304498 00650000
+         MR    R14,R14        CREATE 3 OF 6 CODE               @V304498 00651000
+         LR    R1,R15         CONTINUE WITH 3 OUT 0F 6 CODE    @V304498 00652000
+         BR    R7             RETURN TO DEVICE ADDRESS PROCESS @V304498 00653000
+         USING OBRRECN,R9                                      @VA04327 00653050
+CKOBRLEN EQU   *                                               @VA04327 00653100
+         TM    SAVEWRK1,OS        THIS A OS TYPE OBR RECORD ?  @VA04327 00653150
+         BNOR  R10                NO, DON'T DO LENGTH CHECKING @VA04327 00653200
+         SLR   R1,R1              YES, START BY ZEROING R1     @VA04327 00653250
+         LA    R1,OBRLSIZE        GET LENGTH OF BASE RECORD    @VA04327 00653300
+         TM    OBRSWSN+1,X'20'    SHORT OBR RECORD ?           @VA04327 00653350
+         BZ    CKOBRBAS           NO                           @VA04327 00653400
+         LA    R1,OBRSSIZE        YES, USE SHORT BASE LENGTH   @VA04327 00653450
+CKOBRBAS EQU   *                                               @VA04327 00653500
+         CL    R1,SAVEWRK8        BASE LENGTH > CALLER SIZE ?  @VA04327 00653550
+         BH    VERERREX           YES, CAN'T RECORD            @VA04327 00653600
+         TM    OBRSWSN+1,X'20'    SHORT OBR RECORD ?           @VA04327 00653650
+         BOR   R10                YES, NO MORE CHECKING NEEDED @VA04327 00653700
+         SLR   R1,R1              NO, MORE CHECKING BY DEVICE  @VA04327 00653750
+         ICM   R1,7,OBRCUAIN      LOAD CUA OF FAILING DEVICE   @VA04327 00653800
+         TM    OBRSWSN+1,X'20'    SHORT OBR RECORD ?           @VA04327 00653850
+         BZ    GETRDEV1           NO, GET REAL DEVICE BLOCK    @VA04327 00653900
+         ICM   R1,7,OBRCUA        YES, THIS IS CUA OF DEVICE   @VA04327 00653950
+GETRDEV1 EQU   *                                               @VA04327 00654000
+         BAL   R5,CNVTVR          GO GET REAL DEV. BLOCK       @VA04327 00654050
+         USING RDEVBLOK,R8                                     @VA04327 00654100
+         CLI   RDEVTYPC,CLASDASD  IS IT DASD TYPE ?            @VA04327 00654150
+         BNER  R10                NO, DONE LENGTH CHECKING     @VA04327 00654200
+         SLR   R1,R1              ZERO R1 AGAIN                @VA04327 00654250
+         CLI   RDEVTYPE,TYP2314   2314 TYPE ?                  @VA04327 00654300
+         BNE   COMP33XX           NO, GO CHECK OTHER DASD      @VA04327 00654350
+         LA    R1,OBR2SIZE        YES, GET 2314 LENGTH         @VA04327 00654400
+         B     COMPDASD           GO DO COMPARE                @VA04327 00654450
+COMP33XX EQU   *                                               @VA04327 00654500
+         LA    R1,OBR3SIZE        GET OTHER DASD LENGTH        @VA04327 00654550
+COMPDASD EQU   *                                               @VA04327 00654600
+         CL    R1,SAVEWRK8        LENGTH > CALLER LENGTH ?     @VA04327 00654650
+         BH    VERERREX           YES, CAN'T RECORD            @VA04327 00654700
+         BR    R10                NO, RETURN TO OBR PROCESSING @VA04327 00654750
+         EJECT                                                 @VA04327 00654800
+*                                                                       00655000
+*        CONSTANT AREA                                                  00656000
+*                                                                       00657000
+MSG575   EQU   *                                               @V1D0226 00658000
+         DC    C'DMKVER575I I/O ERROR ADD='                    @V1D0226 00659000
+MSG575AD DC    C'   '                                          @V1D0226 00660000
+         DC    C', USERID='                                    @V1D0226 00661000
+MSG575ID DC    CL8' '                                          @V1D0226 00662000
+MSG575LN EQU   *-MSG575       MESSAGE LENGTH                   @V1D0226 00663000
+         SPACE                                                          00664000
+         EJECT                                                          00665000
+         LTORG                                                 @V1D0226 00666000
+         EJECT                                                          00667000
+         COPY  OBRRECN                                         @V1D0226 00668000
+         COPY  MDRREC                                          @V1D0226 00669000
+         COPY  MIHREC                                          @V1D0226 00670000
+         COPY  DDRREC                                          @V1D0226 00671000
+         PSA                                                   @V1D0226 00672000
+         COPY  EQU                                             @V1D0226 00673000
+         COPY  SAVE                                            @V1D0226 00674000
+         COPY  VMBLOK                                          @V1D0226 00675000
+         COPY  VBLOKS                                          @V1D0226 00676000
+         COPY  RBLOKS                                          @V1D0226 00677000
+         COPY  DEVTYPES                                        @V1D0226 00678000
+         COPY  IOBLOKS                                         @V1D0226 00679000
+         END                                                            00680000

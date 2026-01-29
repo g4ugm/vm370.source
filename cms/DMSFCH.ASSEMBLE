@@ -1,0 +1,1020 @@
+FCH      TITLE 'DMSFCH     (CMS)       VM/370 - RELEASE 6'              00001000
+         SPACE 2                                                        00002000
+*.                                                                      00003000
+* MODULE NAME                                                           00004000
+*                                                                       00005000
+*        DMSFCH  ( FETCH ROUTINE )                                      00006000
+*                                                                       00007000
+* FUNCTION                                                              00008000
+*                                                                       00009000
+*        PROVIDE THE FACILITY TO BRING INTO STORAGE A                   00010000
+*        SPECIFIED PHASE FROM THE SYSTEM/PRIVATE CORE                   00011000
+*        IMAGE LIBRARY OR FROM A CMS 'DOSLIB' LIBRARY.                  00012000
+*        THIS ROUTINE IS ENTERED AS A RESULT OF AN SVC                  00013000
+*        1, 2, OR 4 (DOS/VS SVC) FROM A DOS/VS PROGRAM,                 00014000
+*        OR FROM THE CMS/DOS 'FETCH' COMMAND.                           00015000
+*                                                                       00016000
+* ATTRIBUTES                                                            00017000
+*                                                                       00018000
+*        CMSDOS SEGMENT RESIDENT MODULE                                 00019000
+*        REENTRANT                                                      00020000
+*                                                                       00021000
+* ENTRY POINTS                                                          00022000
+*                                                                       00023000
+*        DMSFCH                                                         00024000
+*                                                                       00025000
+* ENTRY CONDITIONS                                                      00026000
+*                                                                       00027000
+*        THIS ROUTINE IS CALLED BY DMSDOS VIA BALR R14,R15              00028000
+*                                                                       00029000
+*        R14 =  RETURN ADDRESS                                          00030000
+*        R15 =  ENTRY  POINT                                            00031000
+*        R0  =  OVERRIDE LOAD ADDRESS                                   00032000
+*        R1  =  PHASE DIRECTORY LIST                                    00033000
+*                                                                       00034000
+*        DC    CL8'PHASENM'              NAME OF PHASE TO LOAD          00035000
+*        DC    F'11'                     NUMBER HALF WORDS IN LIST      00036000
+*        DC    XL4'0'                    NOT REFERENCED BY DMSFCH       00037000
+*        DC    XL1'0' OR XL1'1'          IF 1, DO NOT LOAD PHASE        00038000
+*        DC    XL17'0'                   REST OF DIRECTORY LIST         00039000
+*                                                                       00040000
+* EXIT CONDITIONS                                                       00041000
+*                                                                       00042000
+*        RETURN TO CALLER WITH RETURN CODE IN R15                       00043000
+*                                                                       00044000
+*        RETURN CODES  AND  MESSAGES:                                   00045000
+*                                                                       00046000
+*            100 - SPECIFIED DISK NOT ATTACHED                          00047000
+*            100 - INPUT ERROR ON SYSRES OR SYSCLB                      00048000
+*            100 - ERROR READING DOSLIB FILE FROM DISK                  00049000
+*            104 - VIRTUAL STORAGE CAPACITY EXCEEDED                    00050000
+*            104 - DOS PARTITION TOO SMALL TO ACCOMMODATE FETCH REQUEST 00051000
+*                                                                       00052000
+* CALLS TO OTHER ROUTINES                                               00053000
+*                                                                       00054000
+*        DMSFRE, DMSSTT, DMSSOP, DMSSVT                                 00055000
+*        DMSSBS, DMSSCT, DMKGIO, DMSERR                                 00056000
+*                                                                       00057000
+* EXTERNAL REFERENCES                                                   00058000
+*                                                                       00059000
+*        NUCON, DCBD, CMSCB, OSFST, BGCOM                               00060000
+*                                                                       00061000
+* TABLES/WORK AREAS                                                     00062000
+*                                                                       00063000
+*        FCHSECT                                                        00064000
+*                                                                       00065000
+* NOTES                                                                 00066000
+*                                                                       00067000
+*        DMSFCH WILL DESTROY THE CALLER'S REG. 7 THROUGH 11             00068000
+*                                                                       00069000
+* REGISTER USAGE                                                        00070000
+*                                                                       00071000
+*        R0    WORK & PHASE DIRECTORY POINTER UPON EXIT                 00072000
+*        R1    WORK & PHASE ENTRY POINT ADDRESS UPON EXIT               00073000
+*        R2    WORK                                                     00074000
+*        R3    WORK                                                     00075000
+*        R4    WORK                                                     00076000
+*        R5    WORK                                                     00077000
+*        R6    FCHSECT ADDRESSABILITY                                   00078000
+*        R7    DOSLIB DCB POINTER & WORK                                00079000
+*        R8    WORK                                                     00080000
+*        R9    WORK                                                     00081000
+*        R10   INTERNAL LINKAGE & WORK                                  00082000
+*        R11   WORK                                                     00083000
+*        R12   DMSFCH ADDRESSABILITY                                    00084000
+*        R13   SAVE AREA POINTER                                        00085000
+*        R14   EXTERNAL LINKAGE & RETURN REGISTER                       00086000
+*        R15   ADDRESS OF EXTERNAL LINKAGE & RETURN CODE                00087000
+*                                                                       00088000
+* OPERATION                                                             00089000
+*                                                                       00090000
+*        1. SET UP NECESSARY ADDRESSABILITIES AND SAVE                  00091000
+*           SOME REGISTERS. ACQUIRE WORK AREA FROM FREE                 00092000
+*           STORAGE. INITIALIZE WORK AREA AND CHECK IF                  00093000
+*           USER DOES NOT WANT THE PHASE LOADED ( USED                  00094000
+*           TO VERIFY IF THE PHASE EXISTS ).                            00095000
+*                                                                       00096000
+*        2. VERIFY IF THE PRIVATE CORE IMAGE LIBRARY IS                 00097000
+*           ASSIGNED, AND IF SO, LOCATE THE LIBRARY DOSCB.              00098000
+*           CALL STATE TO VERIFY IF THE LIBRARY EXISTS AND              00099000
+*           USING THE LIBRARY OSFST, GET THE STARTING DISK              00100000
+*           ADDRESS OF THE LIBRARY AND THE VIRTUAL DEVICE               00101000
+*           ADDRESS OF WHERE THE LIBRARY RESIDES.                       00102000
+*                                                                       00103000
+*        3. IF THE PRIVATE CORE IMAGE LIBRARY IS NOT ACTIVE             00104000
+*           OR DOES NOT CONTAINS THE PHASE TO BE LOADED,                00105000
+*           THE DOSLIB DCB IS OPENED TO SEARCH THROUGH THE              00106000
+*           CHAIN OF DOSLIB'S GLOBALED. IF THE DCB DID OPEN             00107000
+*           OK, A 'FIND' ( O/S SVC ) IS ISSUED TO SEE IF THE            00108000
+*           PHASE RESIDES ON ANY OF THE GLOBALED DOSLIB'S.              00109000
+*                                                                       00110000
+*        4. IF NEITHER PRIVATE CORE IMAGE LIBRARY OR DOSLIB             00111000
+*           LIBRARIES CONTAIN THE PHASE TO BE LOADED, DMSFCH            00112000
+*           VERIFIES IF THE SYSRES VOLUME IS ACTIVE. IF THE             00113000
+*           VOLUME IS ACTIVE, A SEARCH IS MADE TO LOCATE THE            00114000
+*           SPECIFIED PHASE ON THE SYSTEM CORE IMAGE LIBRARY.           00115000
+*                                                                       00116000
+*        5. ONCE THE PHASE HAS BEEN LOCATED, THE PHASE HEADER           00117000
+*           (DIRECTORY) RECORD IS READ. THE NUMBER OF TEXT              00118000
+*           BLOCKS IN THE PHASE IS COMPUTED AND THE LENGTH OF           00119000
+*           THE PHASE IS DETERMINED. IF THE PHASE RESIDES ON            00120000
+*           A DOS/VS FORMATTED DISK, THE DISK ADDRESS OF THE            00121000
+*           PHASE IS COMPUTED.                                          00122000
+*                                                                       00123000
+*        6. THE PHASE LOAD POINT AND ENTRY POINT IS COMPUTED            00124000
+*           USING THE INFORMATION ON THE PHASE HEADER RECORD            00125000
+*           AND THE USER SPECIFIED LOAD ADDRESS, IF ANY. THE            00126000
+*           RELOCATION FACTOR  (IF THE PHASE IS RELOCATABLE)            00127000
+*           IS THEN COMPUTED AND THE ENDING ADDRESS OF THE              00128000
+*           PHASE IS SAVED IN THE COMMUNICATIONS REGION.                00129000
+*           NEXT, THE SIZE OF THE USER'S VIRTUAL PARTITION IS           00130000
+*           COMPUTED (USING THE SPECIFIED DOSKPART - IF ANY).           00131000
+*           IF THE PHASE TO BE LOADED WILL EXCEED 'PPEND'- THE          00132000
+*           FETCH IS NOT ALLOWED AND MESSAGE 777S IS PRODUCED.          00133000
+*                                                                       00134000
+*                                                                       00135000
+*        7. ALL OF THE PHASE'S TEXT BLOCKS (DATA BLOCKS) ARE            00136000
+*           READ AND MOVED TO THEIR SPECIFIC LOCATION IN THE            00137000
+*           VIRTUAL PARTITION. IF THE PHASE IS RELOCATABLE,             00138000
+*           THE NUMBER OF 'RLD' ITEMS TO RELOCATE IS ACQUIRED           00139000
+*           FROM THE HEADER RECORD, AND THE PHASE IS RELOCATED          00140000
+*           BY READING THE RLD ITEMS AND USING THE RELOCATION           00141000
+*           FACTOR COMPUTED EARLY TO RELOCATE ALL OF THE PHASE'S        00142000
+*           RELOCATABLE ITEMS.                                          00143000
+*                                                                       00144000
+*        8. WHEN THE PHASE HAS BEEN LOADED (AND RELOCATED IF            00145000
+*           NEEDED) THE DOSLIB DCB IS CLOSED, THE DMSFCH WORK           00146000
+*           AREA IS RETURN TO FREE STORAGE, AND A RETURN TO             00147000
+*           CALLER IS MADE PASSING BACK THE FOLLOWING INFO.             00148000
+*               R0.  POINTS TO THE UPDATED PHASE DIRECTORY              00149000
+*               R1.  CONTAINS THE PHASE ENTRY POINT                     00150000
+*               R15. CONTAINS THE RETURN CODE OF THIS ROUTINE.          00151000
+*.                                                                      00152000
+         EJECT                                                          00153000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 00154000
+*                                                                     * 00155000
+*        SET UP ADDRESSABILITIES , ACQUIRE WORK AREA FROM             * 00156000
+*        FREE STORAGE, AND INITIALIZE SOME FIELDS.                    * 00157000
+*                                                                     * 00158000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 00159000
+         SPACE 2                                                        00160000
+DMSFCH   CSECT                                                 @V305001 00161000
+         USING DMSFCH,R9      TEMP ADDRESSABILITY              @V305001 00162000
+         USING NUCON,R0       ...                              @V305001 00163000
+         LR    R8,R14         SAVE RETURN POINT                @V305001 00164000
+         LR    R9,R15         SAVE ENTRY POINT                 @V305001 00165000
+         LR    R10,R0         SAVE LOAD ORIGIN                 @V305001 00166000
+         LR    R11,R1         SAVE DIRECTORY                   @V305001 00167000
+         LA    R0,FCHLEN      GET WORK AREA LENGTH             @V305001 00168000
+         DMSFREE DWORDS=(0),TYPCALL=BALR                       @V305001 00169000
+         USING FCHSECT,R1     ...                              @V305001 00170000
+         XC    FCHSECT(256),FCHSECT     ZERO ENOUGH AT TOP     @V305001 00171000
+         XC    FCHDCB,FCHDCB      CLEAR DCB AREA, TOO          @VA04915 00172000
+         LR    R14,R8         RESTORE RETURN ADDRESS           @V305001 00173000
+         STM   R10,R11,USERLD      SAVE ORIGIN AND DIRECTORY   @V305001 00174000
+         STM   R12,R14,FCHREG1     SAVE REGS 12 - 14           @V305001 00175000
+         STM   R2,R7,FCHREG2       SAVE REGS 02 - 07           @V305001 00176000
+         DROP  R1,R9                                           @V305001 00177000
+         LR    R6,R1          WORK AREA ADDRESS TO R6          @V305001 00178000
+         LR    R12,R9         SET UP OUR BASE REGISTER         @V305001 00179000
+         USING FCHSECT,R6                                      @V305001 00180000
+         USING DMSFCH,R12                                      @V305001 00181000
+         MVC   DIRNAME(DIRLEN),0(R11)   MOVE DIRECTORY TO WORK @V305066 00182000
+         LA    R1,FCHBUF      GET BEGIN WORK BUFFER            @V305001 00183000
+         LA    R1,1024(,R1)   COMPUTE END OF BUFFER            @V305001 00184000
+         ST    R1,FCHBUFE     SAVE FOR LATER                   @V305001 00185000
+         LA    R13,FCHSAVE    POINT TO O/S SAVE AREA           @V305001 00186000
+         OC    FCHSW,DIRC     REMEMBER DIRC BITS FOR LATER     @V305001 00187000
+     NI FCHSW,FIFTEEN MUST RESET CMS BIT                       @VA05887 00188000
+         EJECT                                                          00189000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 00190000
+*                                                                     * 00191000
+*        VERIFY IF PRIVATE C.I.L. IS ASSIGNED, AND IF SO, ISSUE       * 00192000
+*        DUMMY DLBL FOR IJSYSCL TO ACQUIRE USER ISSUED DLBL.            00193000
+*        VERIFY THAT AN OSFST EXIST TO GET THE STARTING CCHHR OF      * 00194000
+*        THE DATA SET AND THE VIRTUAL DEVICE ADDRESS.                 * 00195000
+*                                                                     * 00196000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 00197000
+         SPACE 2                                                        00198000
+CKPCIL   EQU   *                                               @V305001 00199000
+         LA    R3,SYSCLB      GET SYSCLB LUB INDEX NO.         @V305001 00200000
+         BAL   R10,TSTUNIT    SEE IF UNIT ASSIGNED             @V305001 00201000
+         BZ    CKDOSL         BRANCH IN NOT ASSIGNED           @V305001 00202000
+         MVC   FCHTYP,4(R3)        SAVE DASD DEVICE TYPE       @V305066 00203000
+         SR    R9,R9          ...                              @V305001 00204000
+         ICM   R9,M7,DOSFIRST+1    GET DOSCB CHAIN ADDRESS     @V305066 00205000
+         USING FCBSECT,R9                                      @V305001 00206000
+CKPCIL1  BZ    CKDOSL         IF ZERO, NO MORE DOSCB           @V305001 00207000
+         CLC   IJSYSCL,FCBDD  MATCHING DDNAME ?                @V305001 00208000
+         BE    CKPCIL2        YES, BRANCH                      @V305001 00209000
+         ICM   R9,M7,1(R9)    GET NEXT DOSCB ADDRESS           @V305066 00210000
+         B     CKPCIL1        KEEP LOOKING                     @V305001 00211000
+CKPCIL2  CLI   FCBDEV,FCBDSK  IS DEVICE DISK ?                 @V305001 00212000
+         BNE   CKDOSL         NO, BRANCH                       @V305001 00213000
+         LA    R1,FCBOP       USE FCB FOR STATE PLIST          @V305001 00214000
+         L     R15,ASTATE     GET STATE ADDRESS                @V305001 00215000
+         BALR  R14,R15        GO STATE PRIVATE LIBRARY         @V305001 00216000
+         LA    R14,RC28       SET R14 TO RETURN CODE 28        @VA04898 00217000
+         CLR   R15,R14        IS RETURN CODE 28 ?              @VA04898 00218000
+         BZ    ERRMSG         YES, GO ISSUE ERRMSG             @VA04898 00219000
+         LTR   R15,R15        RESET CONDITION CODE             @VA04898 00220000
+         BNZ   CKDOSL         IF ERRORS, GO TO SEARCH DOSLIB   @V305001 00221000
+         L     R9,FCBOSFST    GET OSFST FOR P.C.I.L.           @V305001 00222000
+         DROP  R9                                              @V305001 00223000
+         LTR   R9,R9          ANY AVAILABLE ?                  @V305001 00224000
+         BZ    CKDOSL         NO, BRANCH                       @V305001 00225000
+         USING OSFST,R9                                        @V305001 00226000
+         MVC   FCHCHR(4),OSFSTXTN+2  SAVE P.C.I.L. CCHH        @V305001 00227000
+         MVI   FCHR,ONE                   RECORD NUMBER TO 1   @V305066 00228000
+         MVC   FCHCUU(2),OSFSTDSK    SAVE P.C.I.L. CUU         @V305001 00229000
+         DROP  R9                                              @V305001 00230000
+         OI    FCHSW,PCILA    SET PCIL FLAG IN FCHSW           @V305001 00231000
+         B     CILCOMM        GO TO COMMON C.I.L. CODE         @V305001 00232000
+ERRMSG   DMSERR TEXT='NO PRIVATE CORE IMAGE LIBRARY                    X00233000
+               FOUND',NUM=16,LET=E                                      00234000
+         B     DONE           GET OUT                          @VA04898 00235000
+         EJECT                                                          00236000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 00237000
+*                                                                     * 00238000
+*        SEE IF ANY DOSLIB LIBRARIES HAVE BEEN GLOBALED, AND          * 00239000
+*        IF SO, OPEN THE DOSLIB DCB. THEN ISSUE THE O/S FIND          * 00240000
+*        SVC TO SEE IF THE PHASE EXISTS ON ANY OF THE GLOBALED        * 00241000
+*        DOSLIB'S. IF THE PHASE IS FOUND, SET THE 'CMS READ'          * 00242000
+*        FLAG ON, AND GO TO THE PHASE FOUND ROUTINE.                  * 00243000
+*                                                                     * 00244000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 00245000
+         SPACE 2                                                        00246000
+CKDOSL   CLC   DOSLIBL,FENCE  ANY DOSLIB LIBRARY GLOBALED ?    @V305066 00247000
+         BE    CKSCIL         NO, CHECK FOR SYSTEM C.I.L.      @V305001 00248000
+         LA    R9,DOSLIBL         POINT TO DOSLIB NAMES        @VA04915 00249000
+         MVC   STDOSFT,DOSLIB     SET UP PLIST                 @VA04915 00250000
+         MVC   STDOSEND,FENCE     MOVE FENCE TO PLIST          @VA04915 00251000
+STDOSL   EQU   *                                               @VA04915 00252000
+         MVC   STDOSNM,0(R9)      MOVE IN THE NAME             @VA04915 00253000
+         LA    R1,STDOSLST        POINT TO LIST                @VA04915 00254000
+         L     R15,ASTATE         GET STATE ADDRESS            @VA04915 00255000
+         BALR  R14,R15            GO STATE DOSLIB              @VA04915 00256000
+         BZ    OPENDOSL           BRANCH IF FOUND              @VA04915 00257000
+         LA    R9,8(,R9)          POINT TO NEXT NAME           @VA04915 00258000
+         CLC   FENCE,0(R9)        IS THERE ONE?                @VA04915 00259000
+         BE    CKSCIL             BRANCH IF NOT                @VA04915 00260000
+         B     STDOSL             CHECK THIS ONE               @VA04915 00261000
+OPENDOSL EQU   *                                               @VA04915 00262000
+         NI    DOSFLAGS,255-DOSSVC CLEAR DOSSVC FLAG FOR NOW   @V305001 00263000
+         MVC   FCHDCB,SYSLIB  MOVE DCB TO WORK AREA            @V305066 00264000
+         LA    R7,FCHDCB      GET DCB BASE                     @V305001 00265000
+         USING IHADCB,R7      ...                              @V305001 00266000
+         MVI   DCBBUFCB+3,ZERO     TELL OPEN DON'T GET BUFFER  @V305066 00267000
+         LA    R9,ERR104      GET ERROR ADDRESS                @V305001 00268000
+         ST    R9,DCBEODAD    SAVE IN DCB EODAD                @V305001 00269000
+         ST    R9,DCBSYNAD    SAVE IN DCB SYNAD                @V305001 00270000
+         MVI   FCHBUF,RENT    SET OPEN PLIST AS RE-ENTRANT     @V305066 00271000
+         LA    R1,FCHBUF      GET OPEN PLIST                   @V305001 00272000
+         OPEN  ((7)),MF=(E,(1))    OPEN DOSLIB                 @V305001 00273000
+         TM    DCBOFLGS,OPNOK DCB OPEN SUCCESSFUL ?            @V305066 00274000
+         BZ    CKSCIL         NO, CHECK FOR SYSTEM C.I.L.      @V305001 00275000
+         LA    R15,EIGHT      SET RETURN CODE TO 8.            @V305066 00276000
+         FIND  (7),DIRNAME,D  DO A FIND ON THE MEMBER          @V305001 00277000
+         LTR   R15,R15        WAS THE MEMBER FOUND ?           @V305001 00278000
+         BNZ   CKSCIL         NO, CHECK FOR SYSTEM C.I.L.      @V305001 00279000
+         LA    R8,DIRNAME     GET BUFFER AREA FOR DIRECTORY    @V305001 00280000
+         L     R9,DIRBLOCK    GET MAX LENGTH DIRECTORY         @V305001 00281000
+         NI    FCHSW,255-DOSREAD   RESET DOS READ FLAG         @V305001 00282000
+         BAL   R10,READ       READ DIRECTORY (1ST RECORD)      @V305001 00283000
+         B     PHSEFND        GO PROCESS PHASE                 @V305001 00284000
+         DROP  R7             ...                              @V305001 00285000
+         EJECT                                                          00286000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 00287000
+*                                                                     * 00288000
+*        ACQUIRE THE CUU OF SYSRES FORM THE SYSRES LUB/PUB.           * 00289000
+*        SET UP THE SYSTEM C.I.L. CCHHR  AND FALL THROUGH C.I.L.      * 00290000
+*        COMMON CODE. BOTH THE PRIVATE C.I.L. AND THE SYSTEM          * 00291000
+*        C.I.L. WILL USE THIS CODE. A READ DIRECTORY CHANNEL          * 00292000
+*        PROGRAM IS USED TO LOCATE THE DIRECTORY ENTRY FOR THE        * 00293000
+*        PHASE. ONCE THE DIRECTORY FOR THE PHASE IS FOUND,            * 00294000
+*        THE DIRECTORY IS MOVED TO THE FETCH WORK AREA.               * 00295000
+*                                                                     * 00296000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 00297000
+         SPACE 2                                                        00298000
+CKSCIL   EQU   *                                               @V305001 00299000
+         LA    R3,SYSRES      GET SYSRES LUB INDEX NO.         @V305001 00300000
+         BAL   R10,TSTUNIT    SEE IF UNIT ASSIGNED             @V305001 00301000
+         BZ    PHNFND         BRANCH IF NOT ASSIGNED           @V305001 00302000
+         MVC   FCHTYP,4(R3)        SAVE DASD DEVICE TYPE       @V305066 00303000
+         MVC   FCHCUU,0(R3)        SAVE SYSRES CUU             @V305066 00304000
+         MVC   FCHCHR(5),SCILCHR   INIT SYSRES DIRECTORY PTR.  @V305001 00305000
+CILCOMM  MVC   FCHORG(4),FCHCHR    SAVE LIBRARY ORIGIN CCHH    @V305001 00306000
+         LA    R9,FCHHDR      GET PROPER CHANNEL PGM           @V305001 00307000
+         ST    R9,FCHCCWA     SAVE IN WORK AREA                @V305001 00308000
+         OI    FCHSW,DOSREAD+DACTIVE  SET APPROP FLAGS         @VA04754 00309000
+         BAL   R10,READ       GO GET DIRECTORY                 @V305001 00310000
+         NI    FCHSW,255-DACTIVE  DIRECTORY SEARCH IS OVER     @VA04754 00311000
+         LA    R9,FCHTXT      GET TEXT CHANNEL PGM             @V305001 00312000
+         ST    R9,FCHCCWA     SAVE IN WORK AREA                @V305001 00313000
+         LA    R2,FCHBUF      POINT TO BUFFER READ             @V305001 00314000
+         USING DIRNAME,R2     ...                              @V305001 00315000
+         LA    R2,2(,R2)      ...                              @V305001 00316000
+         SR    R3,R3          ...                              @V305001 00317000
+BUMP     AR    R2,R3          BUMP TO NEXT ENTRY               @V305001 00318000
+         SR    R3,R3          ZERO REG 3                       @V305001 00319000
+         IC    R3,DIRN        GET NUMBER HALF WORDS            @V305001 00320000
+         LA    R3,DIRTT-DIRNAME(R3,R3)                         @V305001 00321000
+         CLC   DIRNAME,PHNAME(R6)  DO NAMES MATCH ?            @V305001 00322000
+         BE    PHFOUND        YES, BRANCH                      @V305001 00323000
+         BL    BUMP           NO, KEEP LOOKING                 @V305001 00324000
+         DROP  R2             ...                              @V305001 00325000
+         TM    FCHSW,PCILA    LOOKINK IN P.C.I.L. ?            @V305001 00326000
+         BZ    PHNFND         NO, PHASE NOT FOUND              @V305001 00327000
+         NI    FCHSW,255-PCILA     RESET P.C.I.L. FLAG         @V305001 00328000
+         B     CKDOSL         TRY DOSLIB LIBRARY NOW..         @V305001 00329000
+         EJECT                                                          00330000
+         USING DIRNAME,R2     ...                              @V305001 00331000
+PHFOUND  SR    R3,R3          ...                              @V305001 00332000
+         IC    R3,DIRN        GET NO. HALF WORDS INFO.         @V305001 00333000
+         SLL   R3,ONE         MULTIPLY BY 2,                   @V305066 00334000
+         LA    R3,11(,R3)     AND ADD CONSTANT.                @V305066 00335000
+         EX    R3,MOVEDIR     MOVE DIRECTORY TO WORK           @V305001 00336000
+         DROP  R2             ...                              @V305001 00337000
+         SPACE 2                                                        00338000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 00339000
+*                                                                     * 00340000
+*        THE NUMBER OF TEXT BLOCKS FOR THE PHASE IS COMPUTED,         * 00341000
+*        AND THE LENGTH OF THE PHASE IS DETERMINED. IF THE PHASE      * 00342000
+*        RESIDES ON A DOS DISK, THE SEEK/SEARCH ADDRESS FOR THE       * 00343000
+*        PHASE IS COMPUTED.                                           * 00344000
+*                                                                     * 00345000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 00346000
+         SPACE 2                                                        00347000
+PHSEFND  TM    FCHSW,NOTEXT   TEXT = NO SPECIFIED ?            @V305001 00348000
+         BO    RLDEXIT        YES, ALL DONE....                @V305001 00349000
+         LH    R9,DIRTT       GET NUMBER 1024 BLOCKS           @V305001 00350000
+         BCTR  R9,0           LESS LAST ONE                    @V305001 00351000
+         SLA   R9,TEN         MULTIPLY BY 1024                 @V305066 00352000
+         AH    R9,DIRLL       ADD LENGTH LAST BLOCK            @V305001 00353000
+         ST    R9,PHASELN     SAVE AS PHASE LENGTH             @V305001 00354000
+         TM    FCHSW,DOSREAD  DOING I/O VIA DIAGNOSE ?         @V305001 00355000
+         BZ    CMSREAD        NO, BRANCH                       @V305001 00356000
+         MVC   FCHR(1),DIRTTR+2    MOVE RECORD NUMBER FROM TTR @V305001 00357000
+         LH    R3,DIRTTR      GET RELATIVE HEAD                @V305001 00358000
+         AH    R3,FCHORG+2    ADD TO ORIGIN HEAD               @V305001 00359000
+         SR    R2,R2          ...                              @V305001 00360000
+         LH    R5,TC3340      GET 3340 DEVICE CONSTANT         @V305001 00361000
+         CLI   FCHTYP,T3350          IS DEVICE 3350            @VA08343 00361100
+         BNE   TST3330               NO CHECK 3330             @VA08343 00361200
+         LH    R5,TC3350             GET 3350 DEV TYPE         @VA08343 00361300
+         B     CMSEEK                GO COMPUTE SEEK ADDR      @VA08343 00361400
+TST3330  EQU   *                                               @VA08343 00361500
+         CLI   FCHTYP,T3330   IS DEVICE 3330 ?                 @V305001 00362000
+         BNE   TSTMOD11              IF NOT THEN CHECK 3330-11 @VA08343 00363000
+         LH    R5,TC3330      GET 3330 DEVICE CONSTANT         @V305001 00364000
+         B     CMSEEK         GO COMPUTE SEEK ADDRESS          @V305001 00365000
+TSTMOD11 EQU   *                                               @VA08343 00365100
+         CLI   FCHTYP,MOD11          IS DEVICE 3330-11         @VA08343 00365200
+         BNE   TST2314               NO CHECK FOR 2314         @VA08343 00365300
+         LH    R5,TC3330             GET 3330 DEVICE CONSTANT  @VA08343 00365400
+         B     CMSEEK                GO COMPUTE SEEK ADDR      @VA08343 00365500
+TST2314  CLI   FCHTYP,T2314   IS DEVICE 2314 ?                 @V305001 00366000
+         BNE   CMSEEK         NO, BRANCH                       @V305001 00367000
+         LH    R5,TC2314      GET 2314 DEVICE CONSTANT         @V305001 00368000
+CMSEEK   DR    R2,R5          COMPUTE ABSOLUTE HEAD NUMBER     @V305001 00369000
+         STH   R2,FCHCHR+2    SAVE FOR SEEK                    @V305001 00370000
+         LH    R2,FCHORG      GET ORIGIN CYLINDER NUMBER       @V305001 00371000
+         AR    R3,R2          COMPUTE ABSOLUTE CYL NUMBER      @V305001 00372000
+         STH   R3,FCHCHR      SAVE FOR SEEK                    @V305001 00373000
+         EJECT                                                          00374000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 00375000
+*                                                                     * 00376000
+*        THE PHASE LOAD POINT AND ENTRY POINT IS COMPUTED AND         * 00377000
+*        THE RELOCATION FACTOR (IF PHASE IS RELOCATABLE) IS           * 00378000
+*        COMPUTED TOO. THE ENDING ADDRESS OF THE PHASE IS SAVED       * 00379000
+*        IN THE COMMUNICATIONS REGION .                               * 00380000
+*                                                                     * 00381000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 00382000
+         SPACE 2                                                        00383000
+CMSREAD  SR    R8,R8          ...                              @V305001 00384000
+         SR    R9,R9          ...                              @V305001 00385000
+         ICM   R8,M7,DIRPPP   GET PHASE LOAD POINT             @V305066 00386000
+         ICM   R9,M7,DIRAAA   GET DOS PARTITION BEGIN          @V305066 00387000
+         SR    R8,R9          COMPUTE RELATIVE DOS PPBEG       @V305001 00388000
+         BNM   GETLDAD        IF NOT MINUS, BRANCH             @V305001 00389000
+         SR    R8,R8          ZERO RELATIVE DISPLACEMENT       @V305001 00390000
+GETLDAD  ICM   R2,M7,USERLD+1 GET USER SUPPLIED R0.            @V305066 00391000
+         BNP   GETLDP         IF NOT SUPPLIED, USE DEFAULT     @V305101 00392000
+         CLC   DIRNAME(3),=CL3'$$B'     LOADING $$B-TRANS ?    @V305101 00393000
+         BE    SAVELD         YES, DO NOT CHECK FOR 20000,     @V305101 00394000
+         B     SAVELDP        ELSE SEE IF LOADPOINT >= 20000.  @V305101 00395000
+GETLDP   L     R2,AUSRAREA    GET BEGINNING OF USERAREA        @V305066 00396000
+         LA    R2,0(R8,R2)    COMPUTE RELATIVE CMS PPBEG       @V305066 00397000
+         TM    DIRC,RELPHSE   RELOCATABLE PHASE?               @V305066 00398000
+         BO    SAVELD         YES, FETCH PHASE AT 20000+       @V305066 00399000
+         ICM   R2,M7,DIRPPP   DOS LOAD POINT TO R2             @V305066 00400000
+SAVELDP  C     R2,AUSRAREA    IS THE LOAD POINT < 20000 ?      @V305066 00401000
+         BL    ERR115E        YES, GIVE ERROR...               @V305066 00402000
+SAVELD   ST    R2,PHASELD     SAVE CMS PHASE LOAD POINT        @V305066 00403000
+         ICM   R8,M7,DIRPPP   GET PHASE LKED LOAD POINT        @V305066 00404000
+         ICM   R9,M7,DIREEE   GET PHASE LKED ENTRY POINT       @V305066 00405000
+         SR    R2,R8          GET RELOCATION FACTOR            @V305001 00406000
+         AR    R9,R2          RELOCATE ENTRY POINT             @V305001 00407000
+         ST    R9,PHASEEP     SAVE PHASE CMS ENTRY POINT       @V305001 00408000
+         ST    R2,RELFACT     SAVE RELO FACTOR                 @V305001 00409000
+         L     R3,PHASELD     GET PHASE LOAD POINT             @V305001 00410000
+         L     R2,PHASELN     GET PHASE LENGTH                 @V305001 00411000
+         AR    R2,R3          COMPUTE END ADDRESS              @V305001 00412000
+         BCTR  R2,0           LESS ONE                         @V305001 00413000
+         TM    DOSFLAGS,VSMINSTL   ARE WE INSTALLING VSAM ?    @V305101 00414000
+         BO    CKPHASE        YES, DO NOT CHECK FOR $$B.       @V305101 00415000
+         CLC   DIRNAME(3),=CL3'$$B'     LOADING $$B-TRANS ?    @V305101 00416000
+         BE    CK$$BHI        YES, CHECK IF > THAN TRANS AREA  @V305101 00417000
+CKPHASE  C     R2,FREELOWE    EXCEEDS AVAILABLE STORAGE ?      @V305101 00418000
+         BNL   NOCORE         YES, GIVE ERROR MESSAGE          @V305001 00419000
+         L     R9,ASYSREF     GET ADDRESS OF BGCOM             @VA04646 00420000
+         USING BGCOM,R9                                        @VA04646 00421000
+         ICM   R3,15,PPEND    WILL THE REAL PPEND STAND UP?    @VA04646 00422000
+         BNZ   AVAILPT        GOTCHA                           @VA04646 00423000
+         DROP  R9                                              @VA04646 00424000
+*                                                                       00425000
+* ALSO COMPUTE WHETHER PHASE WOULD EXCEED VIRTUAL PARTITION             00426000
+* SIZE AT EXECUTION TIME...                                             00427000
+*                                                                       00428000
+         LH    R9,FRERESPG        GET NO. PP'S TO SAVE FOR CMS @VA04299 00429000
+         SLL   R9,12              CONVERT PAGES TO BYTES       @VA04299 00430000
+         LR    R4,R9              AND PUT IT IN R4.            @VA04299 00431000
+         LR    R5,R4              ALSO IN R5                   @VA04299 00432000
+         TM    VSAMFLG1,VSAMRUN+VSAMSERV  VSAM AND/OR AMSERV?  @VA04299 00433000
+         BNZ   ADDANCH            YES- CONSIDER ANCHOR TAB     @VA04299 00434000
+         TM    DOSFLAGS,DOSVSAM   WILL BE RUNNING VSAM??       @VA04299 00435000
+         BZ    CVPART             NO- SKIP AROUND              @VA04299 00436000
+ADDANCH  LA    R5,ANCHSIZ(,R4)    RES SPACE FOR ANCHOR TABLE   @VA04299 00437000
+CVPART   L     R3,FREELOWE        GET TOT AMT OF SPACE         @VA04299 00438000
+     S    R3,MAINSTRT    IN PARTITION                          @VA04826 00439000
+         SR    R3,R9              BACK OUT RESERVED AMT.       @VA04299 00440000
+         CLR   R4,R5              NOW, WAS VSAM A FACTOR?      @VA04299 00441000
+         BE    NOVSM              NO- SKIP ADD'L CALCS         @VA04646 00442000
+         LR    R1,R3              SIZE INTO R1 FOR WORK        @VA04299 00443000
+         LH    R4,PCTVSAM         PERCENT TO RES FOR VSAM      @VA04299 00444000
+         MR    R0,R4              CALC HOW MUCH ROOM TO LEAVE  @VA04299 00445000
+         D     R0,=F'100'         FOR GETVIS/FREEVIS USE       @VA04299 00446000
+         LR    R3,R1              RELOAD R3- FORGET REMAINDER  @VA04299 00447000
+         LA    R5,ANCHSIZ         SIZE OF ANCHOR TABLE INTO WORK        00448000
+         SR    R3,R5              BACK IT OUT                  @VA04646 00449000
+*                                                                       00450000
+* IF PARTITION SIZE IS TOO BIG- USER WILL GET DEFAULT , I.E., A         00451000
+* SIZE SMALLER THAN WHAT WAS SPECIFIED IN DOSPART. EITHER AN            00452000
+* ACCEPTED DOSPART SIZE OR THIS 'SMALLER' AMOUNT IS THEN CHECKE         00453000
+* AGAINST THE SIZE OF THE PHASE TO BE LOADED. IF THE PHASE WILL         00454000
+* EXCEED THE END OF THE USER'S VIRTUAL DOS PARTITION, THEN THE          00455000
+* FETCH IS NOT ALLOWED AND AN ERROR MESSAGE IS PRODUCED.                00456000
+*                                                                       00457000
+NOVSM    A     R3,MAINSTRT        CALC NEW MAINHIGH            @VA04646 00458000
+         BCTR  R3,R0              MINUS ONE = PPEND            @VA04646 00459000
+         SR    R9,R9              CLEAR WORK REG               @VA04299 00460000
+         ICM   R9,3,DOSKPART      GET USER REQ'D PART. SIZE    @VA04299 00461000
+         BZ    AVAILPT            IF 'NONE' USE DEFAULT SCHEME @VA04299 00462000
+         SLL   R9,10              CONVERT TO BYTES             @VA04299 00463000
+         A     R9,MAINSTRT        GET USER'S NOTION OF PPEND   @VA04646 00464000
+         CR    R3,R9              WILL USER'S SIZE FIT?        @VA04299 00465000
+         BNH   AVAILPT            NO- USE WHAT'S AVAILABLE     @VA04299 00466000
+         LR    R3,R9              GO ALONG WITH USER'S WISHES  @VA04299 00467000
+AVAILPT  EQU   *                                               @VA04299 00468000
+         CR    R2,R3              WILL PHASE BEING LOADED      @VA04646 00469000
+*                                 EXCEED THIS?                          00470000
+         BNH   CKPH01         NO - GO GET IT                   @VA07269 00471000
+         CL    R2,MAINHIGH    IS IT WITHIN GETVIS?             @VA07269 00472000
+         BH    ERPART         ITS OUT OF OUR AREA              @VA07269 00473000
+         L     R3,MAINLIST    GET FREE LIST POINTER            @VA07269 00474000
+         LA    R3,0(R3)       CLEAR HIGH ORDER BYTE            @VA07269 00475000
+         LTR   R3,R3          IS PIONTER ZERO?                 @VA07269 00476000
+         BZ    CKPH01         YES - ITS ALL OURS               @VA07269 00477000
+CKFRE    EQU   *                                               @VA07269 00478000
+         LR    R4,R3          BRING IN THE FIRST POINTER       @VA07269 00479000
+         CL    R4,PHASELD     IS IT HIGHER THAN LOAD POINT?    @VA07269 00480000
+         BH    CKMORE         YES - SEE IF THE PHASE WILL FIT  @VA07269 00481000
+         A     R4,4(R4)       ADD FREE AREA LENGTH             @VA07269 00482000
+         BCTR  R4,R0          SUBTRACT ONE TO GET TRUE LENGTH  @VA07269 00483000
+         CL    R4,PHASELD     ARE WE LOADING IN THIS FREE AREA?@VA07269 00484000
+         BNL   ERPART         YES - THAT IS AN ERROR           @VA07269 00485000
+         L     R3,0(R3)       GET THE NEXT POINTER             @VA07269 00486000
+         LTR   R3,R3          IS THIS THE END OF FREE LIST?    @VA07269 00487000
+         BZ    CKPH01         YES - GO LOAD IT                 @VA07269 00488000
+         B     CKFRE          AND GO LOOK AT THIS ONE          @VA07269 00489000
+CKMORE   EQU   *                                               @VA07269 00490000
+         CR    R4,R2          HIGHER THAN LOAD PT +LENGTH?     @VA07269 00491000
+         BNL   CKPH01         YES - IT FITS GO GET IT          @VA07269 00492000
+         B     ERPART         NO - ITS OUT OF OUR PARTITION    @VA07269 00493000
+CKPH01   EQU   *                                               @VA07269 00494000
+         ST    R2,LASTLOAD    SAVE END OF LAST PHASE LOADED    @VA07269 00495000
+         B     TXTREAD        GO READ TEXT BLOCKS              @V305001 00496000
+CK$$BHI  LA    R3,TRANSLN     $$B-TRANS AREA LENGTH            @V305066 00497000
+         A     R3,DOSTRANS    COMPUTE WHERE DOSTRANS ENDS      @V305101 00498000
+         CR    R2,R3          WILL $$B-TRANS EXCEED AREA ?     @V305101 00499000
+         BH    NOCORE         YES, GIVE ERROR MESSAGE          @V305101 00500000
+         USING BGCOM,R1                                        @VA06035 00501000
+         L     R1,ASYSREF                                      @VA06035 00502000
+         MVC   LASTLOAD(4),HIPHAS                              @VA06035 00503000
+         EJECT                                                          00504000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 00505000
+*                                                                     * 00506000
+*        THIS ROUTINE JUST LOOPS UNTIL ALL TEXT BLOCKS HAVE           * 00507000
+*        BEEN READ. ALL BLOCKS ARE READ INTO A WORK BUFFER AND        * 00508000
+*        MOVED TO THEIR SPECIFIC LOCATION IN CORE.                    * 00509000
+*                                                                     * 00510000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 00511000
+         SPACE 2                                                        00512000
+TXTREAD  LH    R11,DIRTT      GET NUMBER BLOCKS TO READ        @V305001 00513000
+         BCTR  R11,0          LESS LAST ONE                    @V305001 00514000
+         L     R2,PHASELD     GET BEGIN ADDRESS OF PHASE       @V305001 00515000
+NEXTREC  LA    R8,FCHBUF      GET FETCH BUFFER                 @V305001 00516000
+         L     R9,TXTBLOCK    GET LENGTH FETCH BUFFER          @V305001 00517000
+         LTR   R11,R11        ONLY ONE BLOCK ?                 @V305001 00518000
+         BZ    RDLAST         YES, READ AS LAST BLOCK          @V305001 00519000
+         LR    R4,R8          TEMP SAVE IN R4                  @V305001 00520000
+         LR    R3,R9          TEMP SAVE IN R3                  @V305001 00521000
+         LR    R5,R3          ...                              @V305001 00522000
+         BAL   R10,READ       GO READ TEXT BLOCK               @V305001 00523000
+         MVCL  R2,R4          MOVE TEXT TO PHASE AREA          @V305001 00524000
+         BCT   R11,NEXTREC    GO GET NEXT RECORD               @V305001 00525000
+RDLAST   BAL   R10,READ       READ LAST BLOCK (SHORT)          @V305001 00526000
+         LA    R4,FCHBUF      GET BUFFER ADDRESS               @V305001 00527000
+         LH    R3,DIRLL       GET LENGTH LAST BLOCK            @V305001 00528000
+         LR    R5,R3          ...                              @V305001 00529000
+         MVCL  R2,R4          MOVE TEXT TO PHASE AREA          @V305001 00530000
+         EJECT                                                          00531000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 00532000
+*                                                                     * 00533000
+*        DETERMINE IF PHASE IS RELOCATABLE, AND IF SO SET UP          * 00534000
+*        THE RLD BUFFER AND NUMBER OF ITEMS TO RELOCATE.              * 00535000
+*                                                                     * 00536000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 00537000
+         SPACE 2                                                        00538000
+         L     R1,PHASELD     GET PHASE CMS LOAD POINT         @V305001 00539000
+         ICM   R5,M15,RELFACT GET RELOCATION FACTOR            @V305066 00540000
+         TM    DIRC,RELPHSE   PHASE RELOCATABLE ?              @V305001 00541000
+         BZ    RLDEXIT        NO, DON'T RELOCATE               @V305001 00542000
+         LTR   R5,R5          RELOCATION FACTOR ZERO ?         @V305001 00543000
+         BZ    RLDEXIT        YES, BRANCH                      @V305001 00544000
+         LH    R2,DIRLL       GET LENGTH LAST BLOCK            @V305001 00545000
+         LA    R2,3(,R2)      PLUS 3 FOR ALIGNMENT             @V305001 00546000
+         N     R2,=A(X'FFFFFC')    ALIGN TO FULL WORD          @V305001 00547000
+         LA    R4,FCHBUF      GET BUFFER ADDRESS               @V305001 00548000
+         AR    R2,R4          POINT TO RLD ITEMS               @V305001 00549000
+         ST    R2,RLDPTR      SAVE ADDRESS                     @V305001 00550000
+         L     R11,LASTLOAD   GET END ADDRESS OF PHASE         @V305001 00551000
+         LH    R3,DIRRR       GET NUMBER RLD ITEMS             @V305001 00552000
+         LTR   R3,R3          IF NONE, BRANCH                  @V305001 00553000
+         BZ    RLDEXIT        ...                              @V305001 00554000
+         EJECT                                                          00555000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 00556000
+*                                                                     * 00557000
+*        THE RDL BLOCKS ARE READ ONE AT A TIME, AND ALL RLD           * 00558000
+*        ITEMS ARE RELOCATED USING THE COMPUTED RELO FACTOR.          * 00559000
+*                                                                     * 00560000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 00561000
+         SPACE 2                                                        00562000
+         L     R4,RLDPTR      GET BEGIN RLD ITEMS              @V305001 00563000
+NXTRLD   C     R4,FCHBUFE     ARE WE AT BUFF END ?             @V305001 00564000
+         BL    NXTRLD1        NO, BRANCH                       @V305001 00565000
+READRLD  LA    R8,FCHBUF      GET BUFFER ADDR                  @V305001 00566000
+         L     R9,TXTBLOCK    GET RECORD LEN                   @V305001 00567000
+         BAL   R10,READ       GET NEXT RLD BLOCK               @V305001 00568000
+         LA    R4,FCHBUF      GET BUFFER BEGIN                 @V305001 00569000
+         ST    R4,RLDPTR      SAVE AS NEW RLD POINTER          @V305001 00570000
+NXTRLD1  ICM   R7,M15,0(R4)   GET RLD ITEM.                    @V305066 00571000
+         BZ    RLDEXIT        IF ZERO, ALL DONE                @V305001 00572000
+NXTRLD2  AR    R7,R5          ADD RELOCATION FACTOR            @V305001 00573000
+         LA    R2,0(,R7)      POINT TO CORE LOCATION           @V305001 00574000
+         SRL   R7,27          CREATE MASK                      @V305001 00575000
+         IC    R14,MASKCON(R7)     GET MASK FOR ICM/STCM       @V305001 00576000
+         AR    R7,R2          LAST BYTE OF ADCON               @V305001 00577000
+         CR    R7,R11         BEYOND END PHASE ?               @V305001 00578000
+         BH    RLDEXIT        YES, BRANCH                      @V305001 00579000
+         EX    R14,IADCON     LOAD USER ADCON INTO R7          @V305001 00580000
+         TM    0(R4),ONE      ADD OR SUBTRACT ?                @V305066 00581000
+         LR    R4,R5          SET TO ADD RELO                  @V305001 00582000
+         BZ    NXTRLD3        BRANCH IF ADD                    @V305001 00583000
+         LCR   R4,R5          SET TO SUBTRACT RELO             @V305001 00584000
+NXTRLD3  AR    R7,R4          ADD/SUB RELO FACTOR              @V305001 00585000
+NXTRLD4  EX    R14,SADCON     STORE USER ADCON                 @V305001 00586000
+         L     R4,RLDPTR      RLD POINTER                      @V305001 00587000
+         LA    R4,4(,R4)      BUMP TO NEXT RLD ITEM            @V305001 00588000
+         ST    R4,RLDPTR      SAVE POINTER                     @V305001 00589000
+         BCT   R3,NXTRLD      GO PROCESS NEXT RLD              @V305001 00590000
+RLDEXIT  EQU   *              DONE                             @V305001 00591000
+         SR    R9,R9          ZERO RETURN CODE                 @V305001 00592000
+         EJECT                                                          00593000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 00594000
+*                                                                     * 00595000
+*        THE DOSLIB  DCB IS CLOSED (IF PREVIOUSLY OPEN),              * 00596000
+*        AND THE FETCH WORK AREA IS RETURNED TO FREE STORAGE.         * 00597000
+*        CONTROL THEN RETURNS TO THE CALLER.                          * 00598000
+*                                                                     * 00599000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 00600000
+         SPACE 2                                                        00601000
+DONE     NI    FCHSW,FIFTEEN  CLEAR UPPER 4 BITS OF FCHSW.     @V305066 00602000
+         OC    DIRC,FCHSW     SET UP DIRC AS UPON ENTRY        @V305001 00603000
+         LA    R7,FCHDCB      GET DOSLIB DCB ADDR              @V305001 00604000
+         USING IHADCB,R7                                       @V305001 00605000
+         TM    DCBOFLGS,OPNOK DOSLIB DCB OPEN ?                @V305066 00606000
+         BZ    DONE2          NO, BRANCH                       @V305001 00607000
+         DROP  R7                                              @V305001 00608000
+         MVI   FCHBUF,RENT    SET OPEN PLIST AS RE-ENTRANT     @V305066 00609000
+         LA    R1,FCHBUF      GET OPEN LIST                    @V305001 00610000
+         CLOSE ((7)),MF=(E,(1))   CLOSE DOSLIB DCB             @V305001 00611000
+DONE2    OI    DOSFLAGS,DOSSVC     SET DOSSVC FLAG ON          @V305001 00612000
+         L     R10,USERDE     GET USER'S DIRECTORY             @V305001 00613000
+         MVC   0(DIRLEN,R10),DIRNAME    MOVE WORK DIRECTORY    @V305066 00614000
+         TM    DIRC,PNOTFND   PHASE FOUND ?                    @V305001 00615000
+         BNO   DONE3          YES, BRANCH                      @V305001 00616000
+         SR    R11,R11        ENTRY POINT ZERO                 @V305001 00617000
+         B     DONE4          BRANCH AROUND                    @V305001 00618000
+         EJECT                                                          00619000
+DONE3    L     R11,PHASEEP    GET PHASE ENTRY POINT            @V305001 00620000
+         LTR   R9,R9          ANY ERRORS ?                     @V305001 00621000
+         BNZ   DONE4          YES, BRANCH                      @V305001 00622000
+         L     R1,ASYSREF     GET BGCOM ADDRESS                @V305001 00623000
+         USING BGCOM,R1       ...                              @V305001 00624000
+         MVC   HIPHAS,LASTLOAD    SET END PHASE JUST LOADED    @V305001 00625000
+         CLC   DIRNAME(3),COMNAME  SHOULD HIPROG BE UPDATED ?  @V305001 00626000
+         BNE   DONE4          NO, LEAVE ALONE                  @V305001 00627000
+         CLC   HIPROG,HIPHAS  IS THIS LONGEST PHASE ?          @V305001 00628000
+         BH    DONE4          NO, LEAVE ALONE                  @V305001 00629000
+         MVC   HIPROG,HIPHAS  SET LONGEST SO FAR...            @V305001 00630000
+         DROP  R1             ...                              @V305001 00631000
+DONE4    LA    R0,FCHLEN      WORK AREA LEN TO R0              @V305001 00632000
+         LR    R1,R6          WORK AREA TO R1                  @V305001 00633000
+         LR    R15,R12        TEMP. ADDRESSABILITY             @V305001 00634000
+         DROP  R12                                             @V305001 00635000
+         USING DMSFCH,R15                                      @V305001 00636000
+         LM    R12,R14,FCHREG1     RESTORE DMSDOS REGISTERS    @V305001 00637000
+         LM    R2,R7,FCHREG2       ...                         @V305001 00638000
+         LR    R8,R14         RETURN ADDRESS TO R8             @V305001 00639000
+         DMSFRET DWORDS=(0),LOC=(1),TYPCALL=BALR               @V305001 00640000
+         LR    R0,R10         GET DIRECTORY ADDR IN R0         @V305001 00641000
+         LR    R1,R11         GET ENTRY POINT IN R1            @V305001 00642000
+         LR    R15,R9         GET RETURN CODE                  @V305001 00643000
+         LR    R14,R8         GET RETURN ADDRESS               @V305001 00644000
+         BR    R14            RETURN TO DMSDOS                 @V305001 00645000
+         DROP  R15                                             @V305001 00646000
+         USING DMSFCH,R12                                      @V305001 00647000
+PHNFND   OI    DIRC,PNOTFND   SET PHASE NOT FOUND              @V305001 00648000
+         SR    R9,R9          ZERO RETURN CODE                 @V305001 00649000
+         B     DONE           BRANCH                           @V305001 00650000
+         EJECT                                                          00651000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 00652000
+*                                                                     * 00653000
+*        READING IS DONE FROM CMS DISKS USING O/S MACROS,             * 00654000
+*        OR FROM DOS DISKS VIA DIAGNOSE TO CP.                        * 00655000
+*                                                                     * 00656000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 00657000
+         SPACE 2                                                        00658000
+READ     EQU   *                                               @V305001 00659000
+         TM    FCHSW,DOSREAD  READING FROM DOS DISK ?          @V305001 00660000
+         BO    READ2          YES, BRANCH                      @V305001 00661000
+         READ  FCHDECB,SF,FCHDCB,(8),(9),MF=E                  @V305001 00662000
+         CHECK FCHDECB                                         @V305001 00663000
+         BR    R10            RETURN TO CALLER                 @V305001 00664000
+         EJECT                                                          00665000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 00666000
+*                                                                     * 00667000
+*        FOR FIRST PASS ONLY, THE CHAN PROGRAMS ARE MOVED TO          * 00668000
+*        THE ACQUIRED WORK AREA, AND ALL CCW'S ARE RELOCATED.         * 00669000
+*                                                                     * 00670000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 00671000
+         SPACE 2                                                        00672000
+READ2    TM    FCHSW,CCWREL   CCW'S RELOCATED ?                @V305001 00673000
+         BO    READ3          YES, BRANCH                      @V305001 00674000
+         MVC   FCHTXT(TXTLEN),TXTCCW    MOVE CCW'S TO WORK AREA@V305066 00675000
+         LA    R14,FCHTXT     GET FIRST CHAIN CCW'S            @V305066 00676000
+         LA    R15,FCHBB      GET BBCCHHR ADDRESS              @V305066 00677000
+         STCM  R15,M7,1(R14)  STORE ADDR PORTION CCW           @V305066 00678000
+         LA    R14,8(,R14)    BUMP TO NEXT CCW                 @V305066 00679000
+         LA    R15,FCHCHR     GET CCHHR ADDRESS                @V305066 00680000
+         STCM  R15,M7,1(R14)  STORE ADDR PORTION CCW           @V305066 00681000
+         STCM  R14,M7,9(R14)  STORE ADDR PORTION CCW           @V305066 00682000
+         LA    R14,16(,R14)   BUMP TO NEXT CCW                 @V305066 00683000
+         LA    R15,FCHBUF     GET BUFFER ADDRESS               @V305066 00684000
+         STCM  R15,M7,1(R14)  STORE ADDR PORTION CCW           @V305066 00685000
+         LA    R14,8(,R14)    BUMP TO NEXT CCW                 @V305066 00686000
+         LA    R15,FCHCHR     GET CCHHR ADDRESS                @V305066 00687000
+         STCM  R15,M7,1(R14)  STORE ADDR PORTION CCW           @V305066 00688000
+         LA    R14,FCHHDR     GET SECOND CHAIN CCW'S           @V305066 00689000
+         LA    R15,FCHBB      GET BBCCHHR ADDRESS              @V305066 00690000
+         STCM  R15,M7,1(R14)  STORE ADDR PORTION CCW           @V305066 00691000
+         LA    R14,8(,R14)    BUMP TO NEXT CCW                 @V305066 00692000
+         LA    R15,FCHCHR     GET CCHHR ADDRESS                @V305066 00693000
+         STCM  R15,M7,1(R14)  STORE ADDR PORTION CCW           @V305066 00694000
+         STCM  R14,M7,9(R14)  STORE ADDR PORTION CCW           @V305066 00695000
+         LA    R14,16(,R14)   BUMP TO NEXT CCW                 @V305066 00696000
+         LA    R15,DIRNAME    GET KEY ADDRESS                  @V305066 00697000
+         STCM  R15,M7,1(R14)  STORE ADDR PORTION CCW           @V305066 00698000
+         STCM  R14,M7,9(R14)  STORE ADDR PORTION CCW           @V305066 00699000
+         LA    R14,16(,R14)   BUMP TO NEXT CCW                 @V305066 00700000
+         LA    R15,FCHBUF     GET BUFFER ADDRESS               @V305066 00701000
+         STCM  R15,M7,1(R14)  STORE ADDR PORTION CCW           @V305066 00702000
+         OI    FCHSW,CCWREL   INDICATE CCW'S RELOCATED         @V305001 00703000
+         EJECT                                                          00704000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 00705000
+*                                                                     * 00706000
+*        THE LABEL FCHCCWA CONTAINS THE ADDRESS OF THE CORRECT        * 00707000
+*        CHANNEL PROGRAM TO EXECUTE. LABEL FCHCUU CONTAINS THE        * 00708000
+*        VIRTUAL DEVICE ADDRESS OF THE DISK.                          * 00709000
+*                                                                     * 00710000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 00711000
+         SPACE 2                                                        00712000
+READ3    LH    R9,FCHCUU      GET VIRTUAL DEVICE ADDRESS       @V305001 00713000
+         L     R0,FCHCCWA     GET PROPER CHANNEL PGM           @V305001 00714000
+         XC    CSW,CSW        ZERO OUT CSW                     @V305066 00715000
+         DC    X'83900020'    DIAGNOSE I/O TO CP               @V305001 00716000
+         BZR   R10            RETURN CODE = 0                  @V305001 00717000
+         BM    NODISK         DISK NOT ATTACHED                @V305001 00718000
+         BP    DSKERR         I/O ERROR                        @V305001 00719000
+         STH   R0,SENSDATA    SAVE SENSE INFO.                 @V305001 00720000
+         TM    SENSDATA,NOT1  ANY SENSE BITS NOT ALLOWED ?     @V305066 00721000
+         BNZ   DSKERR         I/O ERROR                        @V305001 00722000
+         TM    SENSDATA+1,NOT2     ANY MORE BITS NOT ALLOWED ? @V305066 00723000
+         BNZ   DSKERR         I/O ERROR                        @V305001 00724000
+         MVC   SENSBYTE(1),SENSDATA     SET UP SENSE BYTE      @V305001 00725000
+         OC    SENSBYTE(1),SENSDATA+1   ...                    @V305001 00726000
+         TM    SENSBYTE,NOREC+OVFLW     NO RECORD OR OVERFLOW ?@V305066 00727000
+         BNZR  R10            YES, RETURN                      @V305001 00728000
+         TM    SENSBYTE,EOC   END OF CYLINDER ?                @V305066 00729000
+         BZR   R10            NO, RETURN                       @V305001 00730000
+         LH    R9,FCHCHR      GET CYLINDER NUMBER              @V305001 00731000
+         LA    R9,1(,R9)      UP IT BY ONE                     @V305001 00732000
+         STH   R9,FCHCHR      SAVE NEW CYLINDER NUMBER         @V305001 00733000
+         SR    R9,R9          ...                              @V305001 00734000
+         STH   R9,FCHCHR+2    RESET HEAD TO ZERO               @V305001 00735000
+         MVI   FCHCHR+4,ONE   AND RECORD NUMBER TO 1           @V305066 00736000
+         TM    FCHSW,DACTIVE      IS THIS DIRECTORY SEARCH?    @VA04754 00737000
+         BZR   R10                NO, THEN RETURN TO CALLER    @VA04754 00738000
+         B     READ3          GO READ NEXT CYLINDER            @VA04639 00739000
+         EJECT                                                          00740000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 00741000
+*                                                                     * 00742000
+*        CHECK IF SYSCLB OR SYSRES HAS BEEN ASSIGNED.                 * 00743000
+*        REG 3 = 0 MEANS UNIT NOT ASSIGNED, OTHERWISE REG 3           * 00744000
+*        CONTAINS THE POINTER TO THE CORRECT PUB ENTRY.               * 00745000
+*                                                                     * 00746000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 00747000
+         SPACE 2                                                        00748000
+TSTUNIT  EQU   *                                               @V305001 00749000
+         USING BGCOM,R1                                        @V305001 00750000
+         L     R1,ASYSREF     GET BGCOM ADDRESS                @V305001 00751000
+         AH    R3,LUBPT       POINT TO CORRECT LUB ENTRY       @V305001 00752000
+         TM    0(R3),NOASSGN  UNIT ASSIGNED ?                  @V305066 00753000
+         BO    NOTASSGN       NO, BRANCH                       @V305001 00754000
+         LH    R3,0(,R3)      LUB ENTRY TO REG 3               @V305001 00755000
+         SRL   R3,8           ISOLATE PUB POINTER              @V305001 00756000
+         SLL   R3,3           MULTIPLY BY 8                    @V305001 00757000
+         AH    R3,PUBPT       POINT TO CORRECT PUB ENTRY       @V305001 00758000
+         LTR   R3,R3          SET CONDITION CODE               @V305001 00759000
+         BR    R10            RETURN TO CALLER                 @V305001 00760000
+NOTASSGN SR    R3,R3          ZERO REG 3                       @V305001 00761000
+         LTR   R3,R3          SET CONDITION CODE               @V305001 00762000
+         BR    R10            RETURN TO CALLER                 @V305001 00763000
+         DROP  R1                                              @V305001 00764000
+         EJECT                                                          00765000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 00766000
+*                                                                     * 00767000
+*        ERROR MESSAGES                                               * 00768000
+*                                                                     * 00769000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 00770000
+         SPACE 2                                                        00771000
+NOCORE   DMSERR TEXT='VIRTUAL STORAGE CAPACITY EXCEEDED',LET=S,NUM=109  00772000
+         LA    R9,RC104       RETURN CODE                      @V305066 00773000
+         B     DONE           GET OUT                          @V305001 00774000
+         SPACE 1                                                        00775000
+NODISK   LH    R9,FCHCUU      GET DISK ADDRESS                 @V305001 00776000
+         DMSERR TEXT='DISK (....) NOT ATTACHED',LET=S,NUM=113, @V305001*00777000
+               SUB=(HEX,(R9))                                  @V305001 00778000
+         LA    R9,RC100       RETURN CODE                      @V305066 00779000
+         B     DONE           GET OUT                          @V305001 00780000
+ERPART   DMSERR TEXT='DOS PARTITION TOO SMALL TO ACCOMMODATE FETCH REQUX00781000
+               EST',LET=S,NUM=777                              @VA04299 00782000
+         LA    R9,RC104           RETURN CODE                  @VA04299 00783000
+         B     DONE               GET OUT                      @VA04299 00784000
+         EJECT                                                          00785000
+DSKERR   LA    R10,CSYSRES    SUBSTITUTION FOR SYSRES          @V305001 00786000
+         TM    FCHSW,PCILA    PRIVATE CORE IMAGE LIB ?         @V305001 00787000
+         BZ    DSKERR2        NO, BRANCH                       @V305001 00788000
+         LA    R10,CSYSCLB    SUBSTITUTION FOR SYSCLB          @V305001 00789000
+DSKERR2  LR    R9,R15         ERROR CODE TO R9                 @V305001 00790000
+         DMSERR TEXT='INPUT ERROR CODE ''..'' ON ''......''',LET=S,    *00791000
+               NUM=411,SUB=(DEC,(R9),CHARA,(R10)),MF=(E,'SYS') @V305066 00792000
+         LA    R9,RC100       RETURN CODE                      @V305066 00793000
+         B     DONE           GET OUT                          @V305001 00794000
+         EJECT                                                          00795000
+ERR104   LA    R2,FCHDCB      GET DCB ADDRESS                  @V305001 00796000
+         USING IHADCB,R2                                       @V305001 00797000
+         L     R2,DCBDEBAD    GET DEB ADDRESS                  @V305001 00798000
+         DROP  R2                                              @V305001 00799000
+         SH    R2,=AL2(IHADEB-FCBINIT)  GET FCB ADDRESS        @V305001 00800000
+         USING FCBSECT,R2                                      @V305001 00801000
+         LA    R2,FCBDSNAM    POINT TO FILEID                  @V305001 00802000
+         DROP  R2                                              @V305001 00803000
+         LH    R3,FCHDECB+2   GET RETURN CODE FROM ECB         @V305001 00804000
+         DMSERR TEXT='ERROR ''..'' READING FILE ''.................... *00805000
+               '' FROM DISK',NUM=104,LET=S,SUB=(DEC,(R3),CHAR8A,(R2)), *00806000
+               MF=(E,'SYS')                                    @V305001 00807000
+         LA    R9,RC100       RETURN CODE                      @V305066 00808000
+         B     DONE           GET OUT                          @V305001 00809000
+ERR115E  EQU   *                                               @V305101 00810000
+         DMSERR TEXT='PHASE LOAD POINT LESS THAN .....',       @V305101*00811000
+               SUB=(HEXA,AUSRAREA),NUM=115,LET=E               @V305101 00812000
+         LA    R9,RC40        RETURN CODE                      @V305066 00813000
+         B     DONE           GET OUT                          @V305101 00814000
+         EJECT                                                          00815000
+SYSLIB   DCB   DDNAME=DOSLIB,DSORG=PO,RECFM=U,BLKSIZE=1024,MACRF=R      00816000
+         EJECT                                                          00817000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 00818000
+*                                                                     * 00819000
+*        CONSTANTS, EXECUTED INSTRUCTIONS AND CHANNEL PROGRAMS        * 00820000
+*                                                                     * 00821000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 00822000
+         SPACE 2                                                        00823000
+DIRBLOCK DC    F'34'          LENGTH DIRECTORY BLOCK           @V305001 00824000
+TXTBLOCK DC    F'1024'        LENGTH FULL TEXT BLOCK           @V305001 00825000
+MASKCON  DC    X'0103070F'    RELOCATION MASK                  @V305001 00826000
+TC2314   DC    H'20'          TRACKS/CYL 2314                  @V305001 00827000
+TC3330   DC    H'19'          TRACKS/CYL 3330                  @V305001 00828000
+TC3340   DC    H'12'          TRACKS/CYL 3340                  @V305001 00829000
+TC3350   DC    H'30'                 TRACKS / CYL ON 3350      @VA08343 00829500
+SCILCHR  DC    X'0000000201'  SYSTEM C.I.L. POINTER            @V305001 00830000
+FENCE    DC    4X'FF'         FENCE CODE                       @V305066 00831000
+IJSYSCL  DC    CL8'IJSYSCL'   SYSCLB DDNAME                    @V305001 00832000
+CSYSRES  DC    CL6'SYSRES'    LITERAL                          @V305001 00833000
+CSYSCLB  DC    CL6'SYSCLB'    LITERAL                          @V305001 00834000
+DOSLIB   DC    CL8'DOSLIB'        DOSLIB LITERAL               @VA04915 00835000
+         SPACE 1                                                        00836000
+IADCON   ICM   R7,0,0(R2)     GET ADCON VALUE                  @V305001 00837000
+SADCON   STCM  R7,0,0(R2)     SAVE RELOCATED ADCON VALUE       @V305001 00838000
+MOVEDIR  MVC   DIRNAME(*-*),0(R2)  MOVE DIRECTORY TO DSECT     @V305001 00839000
+         SPACE 1                                                        00840000
+TXTCCW   CCW   SEEK,0,CC,6                                     @V305001 00841000
+         CCW   SEARCH,0,CC,5                                   @V305001 00842000
+         CCW   TIC,0,0,1                                       @V305001 00843000
+         CCW   READDATA,0,CC,1024                              @V305001 00844000
+         CCW   READCNT,0,0,8                                   @V305001 00845000
+         SPACE 1                                                        00846000
+HDRCCW   CCW   SEEK,0,CC,6                                     @V305001 00847000
+         CCW   SEARCH,0,CC,5                                   @V305001 00848000
+         CCW   TIC,0,0,1                                       @V305001 00849000
+         CCW   SRCHKE,0,CC+SLI,8                               @V305001 00850000
+         CCW   TIC,0,0,1                                       @V305001 00851000
+         CCW   READDATA,0,0,256                                @V305001 00852000
+         SPACE 1                                                        00853000
+TXTLEN   EQU   *-TXTCCW       LENGTH OF ABOVE CCWS             @V305066 00854000
+         EJECT                                                          00855000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 00856000
+*                                                                     * 00857000
+*        WORK AREA DSECT (ACQUIRED FROM FREE STORAGE)                 * 00858000
+*                                                                     * 00859000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 00860000
+         SPACE 2                                                        00861000
+FCHSECT  DSECT                FETCH WORK AREA                  @V305001 00862000
+FCHREG1  DS    3F             DMSDOS REGISTER SAVE             @V305001 00863000
+FCHREG2  DS    6F             DITTO                            @V305001 00864000
+DIRNAME  DS    CL8            PHASE NAME                       @V305001 00865000
+DIRTTR   DS    XL3            PHASE TTR                        @V305001 00866000
+DIRN     DS    XL1            NO. HALF WORDS IN DIRECTRY       @V305001 00867000
+DIRTT    DS    XL2            NO. TEXT BLOCKS IN PHASE         @V305001 00868000
+DIRLL    DS    XL2            LENGTH LAST TEXT BLOCK           @V305001 00869000
+DIRC     DS    XL1            FLAG BYTE                        @V305001 00870000
+DIRT     DS    XL1            RESERVED                         @V305001 00871000
+DIRPPP   DS    XL3            PHASE LOAD POINT                 @V305001 00872000
+DIREEE   DS    XL3            PHASE ENTRY POINT                @V305001 00873000
+DIRRR    DS    XL2            NUMBER RLD ITEMS IN PHASE        @V305001 00874000
+DIRR     DS    XL1            NO. ADDITIONAL RLD BLOCKS        @V305001 00875000
+DIRAAA   DS    XL3            PARTITION START ADDRESS          @V305001 00876000
+DIRK     DS    XL1            UNUSED                           @V305001 00877000
+DIRVEE   DS    XL3            PHASE ENTRY POINT IN SVA         @V305001 00878000
+DIRLEN   EQU   *-DIRNAME      LENGTH OF DIRECTORY              @V305066 00879000
+PHASELN  DS    F              PHASE LENGTH                     @V305001 00880000
+PHASELD  DS    F              PHASE LOAD POINT IN CMS          @V305001 00881000
+PHASEEP  DS    F              PHASE ENTRY POINT IN CMS         @V305001 00882000
+SENSDATA DS    H              SENSE DATA FROM DIAGNOSE         @V305001 00883000
+SENSBYTE DS    H              COMPOUNDED SENSE INFORMATION     @V305001 00884000
+USERLD   DS    F              USER SPECIFIED LOAD ADDR         @V305001 00885000
+USERDE   DS    F              DIRECTORY ADDRESS FOR DMSDOS     @V305001 00886000
+LASTLOAD DS    F              END ADDRESS OF PHASE             @V305001 00887000
+RELFACT  DS    F              RELOCATION FACTOR SAVE           @V305001 00888000
+RLDPTR   DS    F              RLD POINTER SAVE                 @V305001 00889000
+FCHSW    DS    X              FETCH FLAG BYTE                  @V305001 00890000
+FCHTYP   DS    X              DASD DEVICE TYPE                 @V305001 00891000
+FCHCUU   DS    H              VIRTUAL DEVICE ADDR FOR DIAGNOSE @V305001 00892000
+FCHBB    DS    H              BB OF BBCCHHR                    @V305001 00893000
+FCHCHR   DS    2H             CCHH TO SEEK/SEARCH              @V305001 00894000
+FCHR     DS    2H             RECORD NUMBER                    @V305001 00895000
+FCHORG   DS    F              ORIGIN CCHH OF LIBRARY           @V305001 00896000
+FCHCCWA  DS    F              ADDRESS CURRENT CHANNEL PGM      @V305001 00897000
+FCHTXT   DS    5D             CCW'S TO READ TEXT BLOCKS        @V305001 00898000
+FCHHDR   DS    6D             CCW'S TO READ DIRECTORY          @V305001 00899000
+FCHDCB   DS    XL100          DOSLIB DCB                       @V305066 00900000
+FCHDECB  DS    20X            DOSLIB DECB                      @V305001 00901000
+FCHSAVE  DS    18F            O/S SAVE AREA                    @V305001 00902000
+FCHBUFE  DS    F              END OF WORK BUFFER               @V305001 00903000
+FCHBUF   DS    1024X          FETCH WORK BUFFER                @V305001 00904000
+FCHEND   DS    0D                                              @V305001 00905000
+FCHLEN   EQU   (FCHEND-FCHSECT)/8                              @V305001 00906000
+PHNAME   EQU   (DIRNAME-FCHSECT)                               @V305001 00907000
+         ORG   FCHBUF             STATE DOSLIB PLIST           @VA04915 00908000
+STDOSLST DS    D                                               @VA04915 00909000
+STDOSNM  DS    D                                               @VA04915 00910000
+STDOSFT  DS    D                                               @VA04915 00911000
+STDOSEND DS    D                                               @VA04915 00912000
+         EJECT                                                          00913000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 00914000
+*                                                                     * 00915000
+*        IMPORTANT EQUATES                                            * 00916000
+*                                                                     * 00917000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 00918000
+         SPACE 2                                                        00919000
+*        EQUATES FOR DIRC FLAG                                          00920000
+SELFREL  EQU   X'80'          PHASE SELF RELOCATABLE           @V305001 00921000
+RELPHSE  EQU   X'40'          PHASE TO BE RELOCATED            @V305001 00922000
+SVAELIG  EQU   X'20'          PHASE SVA ELIGIBLE               @V305001 00923000
+SVAPHSE  EQU   X'10'          PHASE IN SVA                     @V305001 00924000
+PCLPHSE  EQU   X'08'          PHASE IN PRIV C.I.L.             @V305001 00925000
+PNOTFND  EQU   X'04'          PHASE NOT FOUND                  @V305001 00926000
+DACTIVE  EQU   X'02'          PHASE DIRECTORY ACTIVE           @V305001 00927000
+NOTEXT   EQU   X'01'          TEXT = NO  SPECIFIED             @V305001 00928000
+         SPACE 1                                                        00929000
+*        EQUATES FOR FCHSW FLAG                                         00930000
+DOSREAD  EQU   X'80'          READING FROM LIVE DOS DISK       @V305001 00931000
+PCILA    EQU   X'40'          SEARCHING IN PRIV. C.I.L.        @V305001 00932000
+CCWREL   EQU   X'20'          CCW 'S ARE RELOCATED             @V305001 00933000
+*        EQU   X'01'          RESERVED FOR TEXT = NO                    00934000
+*        EQU   X'02'          RESERVED FOR DIRECTORY ACTIVE             00935000
+*        EQU   X'04'          RESERVED FOR PHASE NOT FOUND              00936000
+*        EQU   X'08'          DO NOT USE                                00937000
+         SPACE 1                                                        00938000
+*        EQUATES FOR CHANNEL PROGRAMS                                   00939000
+SEEK     EQU   X'07'          SEEK COMMAND CODE                @V305001 00940000
+SEARCH   EQU   X'31'          SEARCH ID COMMAND CODE           @V305001 00941000
+TIC      EQU   X'08'          TIC COMMAND CODE                 @V305001 00942000
+READDATA EQU   X'06'          READ DATA COMMAND CODE           @V305001 00943000
+READCNT  EQU   X'92'          READ COUNT COMMAND CODE          @V305001 00944000
+SRCHKE   EQU   X'E9'          SEARCH KEY EQUAL COMMAND CODE    @V305001 00945000
+CC       EQU   X'40'          COMMAND CHAIN FLAG               @V305001 00946000
+SLI      EQU   X'20'          SILI CCW FLAG                    @V305001 00947000
+         SPACE 1                                                        00948000
+*        EQUATES FOR LOGICAL UNITS AND DEVICES                          00949000
+SYSRES   EQU   X'0C'          SYSRES LUB INDEX * 2             @V305001 00950000
+SYSCLB   EQU   X'16'          SYSCLB LUB INDEX * 2             @V305001 00951000
+T2314    EQU   X'62'          2314 DEVICE TYPE                 @V305001 00952000
+T3330    EQU   X'63'          3330 DEVICE TYPE                 @V305001 00953000
+MOD11    EQU   X'65'                 3330-11 DEVICE TYPE       @VA08343 00953100
+T3350    EQU   X'67'                 3350 DEVICE TYPE          @VA08343 00953200
+T3340    EQU   X'68'          3340 DEVICE TYPE                 @V305001 00954000
+         EJECT                                                          00955000
+*        EQUATES FOR SENSE INFORMATION                                  00956000
+CMDREJ   EQU   X'80'          COMMAND REJECT                   @V305066 00957000
+INTREQ   EQU   X'40'          INTERVENTION REQ.                @V305066 00958000
+BUSOUT   EQU   X'20'          BUS. OUT                         @V305066 00959000
+EQCHK    EQU   X'10'          EQUIPMENT CHECK                  @V305066 00960000
+DATACHK  EQU   X'08'          DATA CHECK                       @V305066 00961000
+OVERUN   EQU   X'04'          OVER RUN                         @V305066 00962000
+TRKCHK   EQU   X'20'          TRACK CONDITION CHECK            @V305066 00963000
+SEEKCHK  EQU   X'01'          SEEK CHECK                       @V305066 00964000
+NOT1     EQU   CMDREJ+INTREQ+BUSOUT+EQCHK+DATACHK+OVERUN+SEEKCHK        00965000
+*                                                                       00966000
+CNTCHK   EQU   X'80'          DATA CHECK IN COUNT              @V305066 00967000
+TRKOVFLW EQU   X'40'          TRACK OVERFLOE                   @V305066 00968000
+EOC      EQU   X'20'          END OF CYLINDER                  @V305066 00969000
+INVSEQ   EQU   X'10'          INVALID SEQUENCE                 @V305066 00970000
+NOREC    EQU   X'08'          NO RECORD FOUND                  @V305066 00971000
+FILEPROT EQU   X'04'          FILE PROTECTED                   @V305066 00972000
+SOVERUN  EQU   X'02'          SERVICE OVER RUN                 @V305066 00973000
+OVFLW    EQU   X'01'          OVERFLOW                         @V305066 00974000
+NOT2     EQU   CNTCHK+TRKOVFLW+INVSEQ+SOVERUN                  @V305066 00975000
+         SPACE 1                                                        00976000
+*        OTHER EQUATES                                                  00977000
+ZERO     EQU   X'00'          CONSTANT                         @V305066 00978000
+ONE      EQU   X'01'          CONSTANT                         @V305066 00979000
+EIGHT    EQU   X'08'          CONSTANT                         @V305066 00980000
+TEN      EQU   X'0A'          CONSTANT                         @V305066 00981000
+TWELVE   EQU   X'0C'          CONSTANT                         @V305066 00982000
+FIFTEEN  EQU   X'0F'          CONSTANT                         @V305066 00983000
+M7       EQU   B'0111'        ICM/STCM MASK                    @V305066 00984000
+M15      EQU   B'1111'        ICM/STCM MASK                    @V305066 00985000
+RENT     EQU   X'80'          RENT OPTION BIT                  @V305066 00986000
+OPNOK    EQU   X'10'          DCBOFLGS OPEN BIT                @V305066 00987000
+TRANSLN  EQU   1400                  SIZE OF THE DOS LTA       @VA08226 00988100
+NOASSGN  EQU   X'FE'          LUB VALUE FOR NOT ASSIGNED       @V305066 00989000
+         SPACE 1                                                        00990000
+*        EQUATES FOR RETURN CODES                                       00991000
+RC28     EQU   28             RETURN CODE                      @VA04898 00992000
+RC40     EQU   40             RETURN CODE                      @V305066 00993000
+RC100    EQU   100            RETURN CODE                      @V305066 00994000
+RC104    EQU   104            RETURN CODE                      @V305066 00995000
+         EJECT                                                          00996000
+         NUCON                                                 @V305001 00997000
+         DCBD  DSORG=PS                                        @V305001 00998000
+         EJECT                                                          00999000
+         CMSCB                                                 @V305001 01000000
+         OSFST                                                 @V305001 01001000
+         BGCOM                                                 @V305001 01002000
+         ANCHTAB                                               @VA04299 01003000
+         REGEQU                                                @V305001 01004000
+DMSFCH   CSECT                                                 @V305001 01005000
+         LTORG                                                 @V305001 01006000
+         END                                                            01007000

@@ -1,0 +1,639 @@
+RNE      TITLE 'DMSRNE     (CMS)       VM/370 - RELEASE 6'              00001000
+         SPACE 2                                                        00002000
+*.                                                                      00003000
+* MODULE NAME                                                           00004000
+*                                                                       00005000
+*        DMSRNE                                                         00006000
+*                                                                       00007000
+* FUNCTION                                                              00008000
+*                                                                       00009000
+*        PROVIDE INTERFACE BETWEEN CMS EDITOR AND TSO'S                 00010000
+*        ICDQRNMS ROUTINE. DMSRNE AND ICDQRNMS GENMODED                 00011000
+*        TOGHETER AS 'RENUM' MODULE,  WILL RENUMBER ANY                 00012000
+*        VSBASIC  OR  FREEFORT SOURCE PROGRAM CURRENTLY                 00013000
+*        BEING EDITED.                                                  00014000
+*                                                                       00015000
+* ATTRIBUTES                                                            00016000
+*                                                                       00017000
+*        SERIALLY REUSEABLE                                             00018000
+*        TRANSIENT MODULE                                               00019000
+*        DISK RESIDENT                                                  00020000
+* NOTE:  RENUM MUST BE GENMOD'D WITH THE SYSTEM OPTION                  00020100
+*                                                                       00021000
+* ENTRY POINTS                                                          00022000
+*                                                                       00023000
+*        DMSRNE                                                         00024000
+*                                                                       00025000
+* ENTRY CONDITIONS                                                      00026000
+*                                                                       00027000
+*        R1 =  PARAMETER LIST                                           00028000
+*                                                                       00029000
+*        DC    CL8'RENUM'     COMMAND                                   00030000
+*        DC    CL8'FTYPE'     FILETYPE ( VSBASIC OR FREEFORT )          00031000
+*        DC    CL8'FMODE'     FILEMODE                                  00032000
+*        DS    F              STRTNO                                    00033000
+*        DS    F              INCRNO                                    00034000
+*        DS    F              AINCORE                                   00035000
+*        DS    F              FSIZE                                     00036000
+*                                                                       00037000
+*        PARAMETERS                                                     00038000
+*                                                                       00039000
+*        STRTNO  - STARTING SEQ. NUMBER ( DEFAULTS TO 10 )              00040000
+*        INCRNO  - INCREMENT AMOUNT     ( DEFAULTS TO STRTNO )          00041000
+*        AINCORE - ADDRESS EDITED INCORE FILE                           00042000
+*        FSIZE   - ITEM LENGTH OF EDITED FILE                           00043000
+*                                                                       00044000
+* EXIT CONDITIONS                                                       00045000
+*                                                                       00046000
+*        RETURN TO CALLER WITH RETURN CODE IN R15                       00047000
+*                                                                       00048000
+*        RETURN CODES:                                                  00049000
+*                                                                       00050000
+*              0 AND 100                                                00051000
+*                                                                       00052000
+*        MESSAGES:                                                      00053000
+*                                                                       00054000
+*            - WRONG FILE FORMAT FOR RENUM                              00055000
+*            - SET NEW FILEMODE AND RETRY                               00056000
+*            - MAXIMUM LINE NUMBER EXCEEEDED                            00057000
+*            - VSBASIC STATEMENT OVERFLOW                               00058000
+*            - INVALID SYNTAX IN VSBASIC STATEMENT                      00059000
+*            - INVALID LINE NUMBER REFERENCE                            00060000
+*            - STATEMENT REFERENCED NOT FOUND                           00061000
+*            - ERROR READING/WRITING TO DISK                            00062000
+*                                                                       00063000
+* CALLS TO OTHER ROUTINES                                               00064000
+*                                                                       00065000
+*        DMSERS, DMSLADW, DMSBWR, DMSBRD, DMSFNS,                       00066000
+*        AND ICDQRNMS ( TSO'S CONVERT )                                 00067000
+*                                                                       00068000
+* EXTERNAL REFERENCES                                                   00069000
+*                                                                       00070000
+*        NUCON                                                          00071000
+*                                                                       00072000
+* TABLES/WORK AREAS                                                     00073000
+*                                                                       00074000
+*        INTERNAL                                                       00075000
+*                                                                       00076000
+* REGISTER USAGE                                                        00077000
+*                                                                       00078000
+*        R0    NUCON ADDRESSABILITY                                     00079000
+*        R1    COMMAND ADDRESS                                          00080000
+*        R2    WORK                                                     00081000
+*        R3    WORK AND INCORE COPY ADDRESS                             00082000
+*        R4    WORK                                                     00083000
+*        R5    WORK                                                     00084000
+*        R6    WORK                                                     00085000
+*        R7    WORK                                                     00086000
+*        R8    WORK                                                     00087000
+*        R9    WORK                                                     00088000
+*        R10   INTERNAL LINKAGE                                         00089000
+*        R11   WORK                                                     00090000
+*        R12   RENUM ADDRESSABILITY                                     00091000
+*        R13   SAVE AREA ADDRESS                                        00092000
+*        R14   EXTERNAL LINKAGE                                         00093000
+*        R15   ADDRESS LINKING ROUTINE                                  00094000
+*                                                                       00095000
+* OPERATION                                                             00096000
+*                                                                       00097000
+*        1. SET UP NECESSARY ADDRESSABILITIES AND SAVE                  00098000
+*        THE EDITOR'S REGISTERS.                                        00099000
+*                                                                       00100000
+*        2. ENSURE THE FILETYPE IS VSBASIC  OR  FREEFORT                00101000
+*        AND SAVE THE STRTNO, INCRNO, AINCORE AND FSIZE.                00102000
+*                                                                       00103000
+*        3. COMPUTE THE SIZE OF THE NUMBER TABLE AND INITIA-            00104000
+*        LIZE THE WRBUF PLIST (WORK FILE).                              00105000
+*                                                                       00106000
+*        4. VERIFY THAT THE DISK ORIGIN OF THE INPUT FILE               00107000
+*        IS A READ/WRITE DISK (FOR VSBASIC FILES ONLY).                 00108000
+*                                                                       00109000
+*        5. ACQUIRE THE NUMBER TABLE FORM FREE STORAGE, AND             00110000
+*        INITIALIZE THE TABLE WITH THE OLD NUMBERS BY CON-              00111000
+*        VERTING TO BINARY THE SEQUENCE NUMBER OF EACH RECORD           00112000
+*        IN THE FILE.                                                   00113000
+*                                                                       00114000
+*        6. ONCE THE OLD NUMBERS HAVE BEEN CONVERTED, THE               00115000
+*        NEW NUMBERS ARE COMPUTED FROM THE STRTNO AND INCRNO            00116000
+*        SPECIFIED BY THE USER, AND THE TABLE IS INITIALIZED            00117000
+*        WITH THE COMPUTED NEW NUMBERS. IF PROCESSING A FREE            00118000
+*        FORT FILE, SKIP TO STEP 10.                                    00119000
+*                                                                       00120000
+*        7. ONCE THE NUMBER TABLE IS BUILT, A RECORD IS                 00121000
+*        OBTAINED ( ONE AT A TIME ) AND A CALL IS MADE                  00122000
+*        TO ICDQRNMS TO CONVERT THE LINE USING THE NUMBER               00123000
+*        TABLE PASSED AS A PARAMETER. ICDQRNMS WILL RETURN              00124000
+*        THE UPDATED RECORD IN AN OUTPUT BUFFER, AND ANY                00125000
+*        ERROR CONDITION FOUND IS DETECTED BY CHECKING A                00126000
+*        RETURN CODE IN THE RNMSRC FIELD OF THE ICDQRNMS                00127000
+*        PLIST. THE UPDATED RECORD IS WRITTEN TO A WORK FILE            00128000
+*        WITH THE FILEID 'RENUM CMSUT1 FM'.                             00129000
+*                                                                       00130000
+*        8. WHEN ALL RECORDS HAVE BEEN RENUMBERED, THE OUTPUT           00131000
+*        FILE IS CLOSED.                                                00132000
+*                                                                       00133000
+*        9. NOW, THE WORK FILE IS READ AND THE INCORE COPY IS           00134000
+*        UPDATED TO CONTAIN THE RENUMBERED FILE. THEN THE               00135000
+*        WORK FILE IS ERASED AND CONTROL RETURNS TO EDIT.               00136000
+*                                                                       00137000
+*        10. IF RENUMBERING A FREEFORT FILE, COLUMNS 1 THRU             00138000
+*        8, OF EACH RECORD IN THE INCORE COPY, ARE UPDATED              00139000
+*        TO THE NEW LINE NUMBERS COMPUTED IN STEP 6.                    00140000
+*        THE UPDATE IS DONE IN-PLACE AND CONTROL RETURNS                00141000
+*        TO EDIT.                                                       00142000
+*.                                                                      00143000
+         EJECT                                                          00144000
+*********************************************************************** 00145000
+*                                                                       00146000
+*        ADDRESSABILITY AND REGISTER SAVE                               00147000
+*                                                                       00148000
+*********************************************************************** 00149000
+         SPACE                                                          00150000
+DMSRNE   CSECT                                                 @V242801 00151000
+         USING NUCON,R0       NUCON ADDRESSABILITY             @V242801 00152000
+         USING DMSRNE,R15     TEMP. ADDRESSABILITY             @V242801 00153000
+         STM   R0,R14,SAVREGS SAVE ALL REGISTERS               @V242801 00154000
+         DROP  R15                                             @V242801 00155000
+         USING DMSRNE,R12     RENUM ADDRESSABILITY             @V242801 00156000
+         LR    R12,R15        LOAD BASE REGISTER               @V242801 00157000
+         XC    RCODE,RCODE    CLEAR RETURN CODE                @V242801 00158000
+         XC    RNMSW,RNMSW    CLEAR INTERNAL FLAGS             @V242801 00159000
+         MVC   MAXNO,VBMAX    SET DEFAULT TO VSBASIC'S         @V242801 00160000
+         EJECT                                                          00161000
+*********************************************************************** 00162000
+*                                                                       00163000
+*        CHECK THE FILETYPE AND SAVE THE PARAMETERS                     00164000
+*                                                                       00165000
+*********************************************************************** 00166000
+         SPACE                                                          00167000
+         LA    R3,8(,R1)      POINT TO THE FILETYPE            @V242801 00168000
+         CLC   VSBASIC,0(R3)  VSBASIC FILETYPE SPECIFIED ?     @V242801 00169000
+         BE    FTYPEOK        YES..LOOKS OK                    @V242801 00170000
+         CLC   FREEFORT,0(R3) FREEFORT FILETYPE SPECIFIED ?    @V242801 00171000
+         BNE   ERR1           NO..ERROR                        @V242801 00172000
+         OI    RNMSW,FFORT    SET FREEFORT FLAG                @V242801 00173000
+         MVC   MAXNO,FFMAX    SET MAXNO TO FREEFORT'S          @V242801 00174000
+FTYPEOK  LA    R3,8(,R3)      BUMP TO FILEMODE                 @V242801 00175000
+         MVC   FMODE,0(R3)    FILEMODE TO PLIST                @V242801 00176000
+         LA    R3,4(,R3)      BUMP TO PARAMETERS               @V242801 00177000
+         LM    R4,R7,0(R3)    GET STRT/INCR/AINCORE/FSIZE      @V242801 00178000
+         STM   R4,R6,STRTNO   SAVE STRT/INCR/AINCORE           @V242801 00179000
+         ST    R7,FSIZE       AND THE RECORD LENGTH            @V242801 00180000
+         LTR   R6,R6          ANY RECORDS INCORE ?             @V242801 00181000
+         BZ    END            NO..NULL FILE..JUST RETURN       @V242801 00182000
+         LA    R2,1           INITIALIZE RECORD COUNT          @V242801 00183000
+CHKNOIT  L     R6,0(,R6)      POINT TO NEXT RECORD             @V242801 00184000
+         LTR   R6,R6          DOES IT EXISTS ?                 @V242801 00185000
+         BZ    TABLEN         NO..THIS IS IT THEN              @V242801 00186000
+         LA    R2,1(,R2)      UP COUNT BY ONE                  @V242801 00187000
+         B     CHKNOIT        KEEP COUNTING                    @V242801 00188000
+         EJECT                                                          00189000
+*********************************************************************** 00190000
+*                                                                       00191000
+*        SET-UP THE NUMBER TABLE LENGTH AND INITIALIZE                  00192000
+*        THE ICDQRNMS OUTPTR FIELD                                      00193000
+*                                                                       00194000
+*********************************************************************** 00195000
+         SPACE                                                          00196000
+TABLEN   LA    R2,1(,R2)      PLUS ONE FOR NUMBER TABLE        @V242801 00197000
+         SLL   R2,3           GET SIZE IN BINARY               @V242801 00198000
+         ST    R2,LNUMTAB     SAVE AS NUM TABLE LENGTH         @V242801 00199000
+         TM    RNMSW,FFORT    PROCESSING FREEFORT FILE ?       @V242801 00200000
+         BO    GETNUMT        YES..BRANCH THEN                 @V242801 00201000
+         LA    R2,OUTBUFF     GET OUTPUT BUFFER ADDR           @V242801 00202000
+         ST    R2,FBUFF       SAVE IN WRBUF PLIST              @V242801 00203000
+         LA    R2,5(,R2)      BUMP PAST SEQ. NUMBER            @V242801 00204000
+         ST    R2,OUTPTR      SAVE AS RNMS OUTPUT BUFFER       @V242801 00205000
+         SPACE                                                          00206000
+*********************************************************************** 00207000
+*                                                                       00208000
+*        VERIFY THE DISK ORIGIN IS READ/WRITE                           00209000
+*                                                                       00210000
+*********************************************************************** 00211000
+         SPACE                                                          00212000
+         LA    R1,FMODE-24    GET ADTLKW PLIST                 @V242801 00213000
+         L     R15,VCADTLKW   GET ADTLKW ADDRESS               @VM03093 00214100
+         BALR  R14,R15        CHECK IF R/W DISK                @V242801 00215000
+         BC    2,ERR2         DISK ORIGIN NOT R/W              @V242801 00216000
+         EJECT                                                          00217000
+*********************************************************************** 00218000
+*                                                                       00219000
+*        ACQUIRE THE NUMBER TABLE. TABLE SIZE IS A D-WORD               00220000
+*        FOR EACH RECORD. 1ST WORD TO CONTAIN THE CURRENT               00221000
+*        LINE NUMBER, SECOND WORD TO CONTAIN THE NEW LINE               00222000
+*        NUMBER. THE INPUT FILE IS READ 'TILL EOF AND THE               00223000
+*        FIRST 5 CHAR. ARE ASSUMED TO BE THE LINE NUMBER.               00224000
+*                                                                       00225000
+*********************************************************************** 00226000
+         SPACE                                                          00227000
+GETNUMT  L     R0,LNUMTAB     GET NUMBER TABLE SIZE            @V242801 00228000
+         SRL   R0,3           SIZE IN DBLE. WORDS              @V242801 00229000
+         DMSFREE DWORDS=(0),TYPE=USER                          @V242801 00230000
+         ST    R1,ANUMTAB     SAVE NUMBER TABLE ADDR           @V242801 00231000
+         OI    RNMSW,TABGOT   REMEMBER TABLE ACQUIRED          @V242801 00232000
+         XC    4(4,R1),4(R1)  ZERO 2ND WORD IN TABLE           @V242801 00233000
+         L     R0,LNUMTAB     GET TABLE LENGTH                 @V242801 00234000
+         SH    R0,H8          TABLE SIZE LESS 8 BYTES          @V242801 00235000
+         ST    R0,0(R1)       SAVE AS REAL TABLE LENGTH        @V242801 00236000
+         LH    R5,H5          GET SEQ. NUM LEN (VSBASIC)       @V242801 00237000
+         TM    RNMSW,FFORT    PROCESSING FREEFORT FILE ?       @V242801 00238000
+         BZ    SAVLEN         NO..USE LEN IN R5                @V242801 00239000
+         LH    R5,H8          SEQ. NUM LEN FOR FREEFORT        @V242801 00240000
+SAVLEN   STH   R5,SEQLEN      SAVE THE SEQ. NUM LEN            @V242801 00241000
+         LA    R2,8(,R1)      POINT TO FIRST ENTRY             @V242801 00242000
+         L     R3,AINCORE     GET INCORE FILE ADDRESS          @V242801 00243000
+LOOP     BAL   R10,GETREC     GO GET A RECORD                  @V242801 00244000
+         B     ITISEOF        EOF EXIT FROM GETREC             @V242801 00245000
+         LA    R1,INBUFF      GET BUFFER ADDRESS               @V242801 00246000
+         LH    R5,SEQLEN      GET NUMBER LENGTH                @V242801 00247000
+LOOP1    CLI   0(R1),BLANK    IS DIGIT A BLANK ?               @V242801 00248000
+         BE    DIGITOK        YES..BRANCH THEN                 @V242801 00249000
+         CLI   0(R1),X'F0'    IS DIGIT LESS THAN ZERO ?        @V242801 00250000
+         BL    ERR1           YES..ERROR                       @V242801 00251000
+         CLI   0(R1),X'F9'    IS DIGIT OVER NINE ?             @V242801 00252000
+         BH    ERR1           YES..ERROR                       @V242801 00253000
+DIGITOK  LA    R1,1(,R1)      BUMP TO NEXT DIGIT               @V242801 00254000
+         BCT   R5,LOOP1       CHECK ALL DIGITS                 @V242801 00255000
+         LA    R1,INBUFF      GET BUFFER ADDRESS               @V242801 00256000
+         LH    R5,SEQLEN      GET NUMBER LENGTH                @V242801 00257000
+         BCTR  R5,0           LESS 1 FOR EXECUTE               @V242801 00258000
+         EX    R5,OC          MAKE ALL BLANKS ZEROS            @V242801 00259000
+         EX    R5,PACK        PACK THE LINE NUMBER             @V242801 00260000
+         CVB   R1,WORK        NOW, CONVERT TO BINARY           @V242801 00261000
+         ST    R1,0(,R2)      SAVE IN OLD LIST                 @V242801 00262000
+         LA    R2,8(,R2)      BUMP LIST TO NEXT ENTRY          @V242801 00263000
+         B     LOOP           KEEP READING 'TILL EOF           @V242801 00264000
+         EJECT                                                          00265000
+*********************************************************************** 00266000
+*                                                                       00267000
+*        THE NEW NUMBERS ARE COMPUTED AND THE NUMBER                    00268000
+*        TABLE IS INITIALIZED WITH THE NEW NUMBERS                      00269000
+*                                                                       00270000
+*********************************************************************** 00271000
+         SPACE                                                          00272000
+ITISEOF  L     R2,LNUMTAB     GET NUMBER TABLE LENGTH          @V242801 00273000
+         SRL   R2,3           COMPUTE DOBLE. WORDS             @V242801 00274000
+         BCTR  R2,0           LESS ONE (TABLE HEADER)          @V242801 00275000
+         L     R1,ANUMTAB     GET NUMBER TABLE ADDRESS         @V242801 00276000
+         LA    R1,12(,R1)     POINT TO FIRST ENTRY             @V242801 00277000
+         LM    R3,R4,STRTNO   GET START LINE NO.               @V242801 00278000
+LOOP2    C     R3,MAXNO       EXCEEDS MAX ALLOWED ?            @V242801 00279000
+         BH    ERR3           YES..ERROR                       @V242801 00280000
+         ST    R3,0(,R1)      SAVE AS NEW LINE NUMBER          @V242801 00281000
+         AR    R3,R4          UP LINE NUMBER BY INCR           @V242801 00282000
+         LA    R1,8(,R1)      BUMP TABLE TO NEXT ENTRY         @V242801 00283000
+         BCT   R2,LOOP2       LOOP 'TILL TABLE DONE            @V242801 00284000
+         TM    RNMSW,FFORT    PROCESSING FREEFORT FILE ?       @V242801 00285000
+         BO    RENFREE        YES..GO RENUMBER FILE            @V242801 00286000
+         LA    R1,INBUFF      GET ADDRESS INPUT BUFFER         @V242801 00287000
+         LA    R1,5(,R1)      BUMP PAST SEQ. NUMBER            @V242801 00288000
+         ST    R1,INPTR       SAVE AS RNMS INPUT BUFFER        @V242801 00289000
+         MVC   ERSFILE(18),FNAME   SET UP ERASE FILEID         @V242801 00290000
+         LA    R1,ERASE       GET ERASE PLIST                  @V242801 00291000
+         L     R15,AERASE     ERASE                            @V305066 00292000
+         BALR  R14,R15        (IF ANY)                         @V305066 00292100
+         L     R2,ANUMTAB     GET NUMBER TABLE ADDR            @V242801 00294000
+         LA    R2,8(,R2)      POINT TO 1ST ENTRY               @V242801 00295000
+         L     R3,AINCORE     GET INCORE COPY ADDRESS          @V242801 00296000
+         EJECT                                                          00297000
+*********************************************************************** 00298000
+*                                                                       00299000
+*        THE INPUT FILE IS READ ONE RECORD AT A TIME. RNMS IS           00300000
+*        CALLED TO CONVERT THE RECORD (USING THE NUMBER TABLE)          00301000
+*        AND THE UPDATED RECORD IS WRITTEN TO DISK.                     00302000
+*                                                                       00303000
+*********************************************************************** 00304000
+         SPACE                                                          00305000
+LOOP3    BAL   R10,GETREC     GO GET A RECORD                  @V242801 00306000
+         B     RETURN         EOF EXIT FROM GETREC             @V242801 00307000
+         L     R4,FSIZE       GET RECORD LENGTH                @V242801 00308000
+         SH    R4,H5          LESS LINE NUMBER LENGTH          @V242801 00309000
+         ST    R4,INLEN       SAVE FOR RNMS USE                @V242801 00310000
+         LA    R5,OUTBUFF+5   POINT TO RNMS OUTPUT BUFFER      @V242801 00311000
+         MVI   0(R5),BLANK    PREPARE TO BLANK                 @V242801 00312000
+         EX    R4,MVC1        BLANK ENOUGH FOR THIS LRECL      @V242801 00313000
+         BAL   R10,CALLRNMS   GO CONVERT THIS LINE             @V242801 00314000
+         L     R5,OUTLEN      GET OUTPUT REC LENGTH            @V242801 00315000
+         LA    R5,5(,R5)      ADD LINE NUMBER LENGTH           @V242801 00316000
+         C     R5,FSIZE       IS THERE OVERFLOW ?              @V242801 00317000
+         BNH   RECOK          NO..BRANCH                       @V242801 00318000
+         L     R2,0(,R2)      GET STMNT NUMBER IN ERROR        @V242801 00319000
+         B     ERR4           GIVE ERROR MSG                   @V242801 00320000
+RECOK    L     R5,4(,R2)      GET NEW LINE NUMBER              @V242801 00321000
+         CVD   R5,WORK        CONVERT IT                       @V242801 00322000
+         UNPK  OUTBUFF(5),WORK     UNPACK IT                   @V242801 00323000
+         OI    OUTBUFF+4,X'F0'     SET ZONE                    @V242801 00324000
+         LA    R5,OUTBUFF     GET OUPUT BUFFER ADDR            @V242801 00325000
+LOOP4    CLI   0(R5),X'F0'    IS DIGIT ZERO ?                  @V242801 00326000
+         BNE   WRITEIT        NO..LEADING ZEROS BLANK          @V242801 00327000
+         NI    0(R5),X'4F'    MAKE ZERO A BLANK                @V242801 00328000
+         LA    R5,1(,R5)      BUMP TO NEXT DIGIT               @V242801 00329000
+         B     LOOP4          KEEP LOOKING                     @V242801 00330000
+WRITEIT  LA    R1,PLIST       GET WRBUF PLIST                  @V242801 00331000
+         L     R15,AWRBUF     GET WRBUF ADDRESS                @V242801 00332000
+         BALR  R14,R15        GO TO IT                         @V242801 00333000
+         BNZ   ERR104W        BRANCH IF ERROR                  @V242801 00334000
+         LA    R2,8(,R2)      BUMP TO NEXT ENTRY               @V242801 00335000
+         B     LOOP3          KEEP LOOPING 'TILL EOF           @V242801 00336000
+         EJECT                                                          00337000
+*********************************************************************** 00338000
+*                                                                       00339000
+*        CLOSE THE WORK FILE AND RELEASE THE NUMBER TABLE FROM          00340000
+*        FREE STORAGE. IF RENUMBERING A VSBASIC FILE, THE WORK          00341000
+*        FILE IS READ AND THE INCORE COPY OF THE FILE IS UPDA-          00342000
+*        TED. THEN THE WORK FILE IS ERASED AND CONTROL RETURNS          00343000
+*        TO THE EDITOR.                                                 00344000
+*                                                                       00345000
+*********************************************************************** 00346000
+         SPACE                                                          00347000
+RETURN   LA    R1,PLIST       GET FINIS PLIST                  @V242801 00348000
+         L     R15,AFINIS     FINIS                            @V305066 00349000
+         BALR  R14,R15        ...                              @V305066 00349100
+RETURN2  TM    RNMSW,TABGOT   HAS NUM TABLE BEEN ACQUIRED ?    @V242801 00351000
+         BZ    END            NO..JUST GET OUT                 @V242801 00352000
+         L     R0,LNUMTAB     GET SIZE NUMBER TABLE            @V242801 00353000
+         SRL   R0,3           IN DOBLE. WORDS                  @V242801 00354000
+         L     R1,ANUMTAB     GET NUMBER TABLE ADDRESS         @V242801 00355000
+         DMSFRET DWORDS=(0),LOC=(1)                            @V242801 00356000
+         TM    RNMSW,FFORT    PROCESSING FREEFORT FILE ?       @V242801 00357000
+         BO    END            YES..JUST GET OUT                @V242801 00358000
+         L     R15,RCODE      GET POSSIBLE ERROR CODE          @V242801 00359000
+         LTR   R15,R15        ANY FOUND ?                      @V242801 00360000
+         BNZ   ERSOUT         YES..ERASE OUTPUT FILE           @V242801 00361000
+         L     R2,AINCORE     GET POINTER TO INCORE FILE       @V242801 00362000
+         L     R3,FSIZE       GET LRECL                        @V242801 00363000
+         BCTR  R3,0           LESS 1 FOR LATER EXECUTE         @V242801 00364000
+READNEW  LA    R1,PLIST       GET RDBUF PLIST                  @V242801 00365000
+         L     R15,ARDBUF     GET RDBUF ADDRESS                @V242801 00366000
+         BALR  R14,R15        GO READ A RECORD                 @V242801 00367000
+         BNZ   CHKEOF         POSSIBLE ERROR OR EOF            @V242801 00368000
+         EX    R3,MOVEUP      MOVE RECORD TO INCORE            @V242801 00369000
+         L     R2,0(,R2)      BUMP TO NEXT LOCATION            @V242801 00370000
+         B     READNEW        READ 'TILL EOF                   @V242801 00371000
+CHKEOF   CH    R15,EOF        IS IT END-OF-FILE ?              @V242801 00372000
+         BNE   ERR104R        NO..MUST BE OTHER ERROR          @V242801 00373000
+ERSOUT   LA    R1,ERASE       GET ERASE PLIST                  @V242801 00374000
+         L     R15,AERASE     ERASE                            @V305066 00375000
+         BALR  R14,R15        ...                              @V305066 00375100
+END      L     R15,RCODE      GET ERROR CODE                   @V242801 00377000
+         LM    R0,R14,SAVREGS RESTORE ALL REGS                 @V242801 00378000
+         BR    R14            RETURN TO CALLER                 @V242801 00379000
+         EJECT                                                          00380000
+*********************************************************************** 00381000
+*                                                                       00382000
+*        CONVERT STMNT NUMBERS TO EBCDIC (FOR ERROR MSGS)               00383000
+*                                                                       00384000
+*********************************************************************** 00385000
+         SPACE                                                          00386000
+CONVERT  LA    R4,8           PREPARE TO BLANK                 @V242801 00387000
+         LA    R5,OUTBUFF     SOME OF WORK AREA                @V242801 00388000
+         MVI   0(R5),BLANK    TO LEFT JUSTIFY                  @V242801 00389000
+         EX    R4,MVC1        THE CONVERTED NUMBER.            @V242801 00390000
+         CVD   R2,WORK        NOW CONVERT THE NUMBER           @V242801 00391000
+         UNPK  OUTBUFF(5),WORK     AND UNPACK IT               @V242801 00392000
+         OI    OUTBUFF+4,X'F0'     SET ZONE LAST DIGIT         @V242801 00393000
+LOOP5    CLI   0(R5),X'F0'    CHECK FOR 1ST. NON-ZERO          @V242801 00394000
+         BNER  R10            RETURN IF SO                     @V242801 00395000
+         LA    R5,1(,R5)      BUMP TO NEXT DIGIT               @V242801 00396000
+         B     LOOP5          KEEP LOOKING                     @V242801 00397000
+         SPACE                                                          00398000
+*********************************************************************** 00399000
+*                                                                       00400000
+*        READ A RECORD FROM CORE INTO INBUFF                            00401000
+*                                                                       00402000
+*********************************************************************** 00403000
+         SPACE                                                          00404000
+GETREC   LTR   R3,R3          ANYTHING LEFT                    @V242801 00405000
+         BZR   R10            NO..THAT IS ALL                  @V242801 00406000
+         L     R4,FSIZE       GET RECORD LENGTH                @V242801 00407000
+         BCTR  R4,0           LESS 1 FOR EXECUTE               @V242801 00408000
+         EX    R4,MVEDOWN     MOVE INCORE REC TO BUFFER        @V242801 00409000
+         L     R3,0(,R3)      POINT TO NEXT REC                @V242801 00410000
+         B     4(,R10)        RETURN                           @V242801 00411000
+         EJECT                                                          00412000
+*********************************************************************** 00413000
+*                                                                       00414000
+*        ROUTINE TO CALL RNMS - CONVERT VSBASIC SOURCE                  00415000
+*                                                                       00416000
+*********************************************************************** 00417000
+         SPACE                                                          00418000
+CALLRNMS L     R15,ARNMS      GET RNMS ADDRESS                 @V242801 00419000
+         LA    R13,RNMSAV     GET SAVE AREA ADDR               @V242801 00420000
+         LA    R1,A1RNMSPL    GET RNMS PLIST ADDR/ADDR         @V242801 00421000
+         BALR  R14,R15        GO TO CONVERT LINE               @V242801 00422000
+         L     R5,RNMSRC      GET RETURN CODE                  @V242801 00423000
+         LTR   R5,R5          ANY ERRORS ?                     @V242801 00424000
+CALLOK   BZR   R10            NO..RETURN                       @V242801 00425000
+         L     R2,0(,R2)      GET STMNT NUMBER IN ERROR        @V242801 00426000
+         B     RNMSERR(R5)    GO TO SPECIFIED ERROR MSG        @V242801 00427000
+RNMSERR  B     CALLOK         JUST IN CASE                     @V242801 00428000
+         B     ERR5           RETURN CODE = 4                  @V242801 00429000
+         B     ERR4           RETURN CODE = 8                  @V242801 00430000
+         B     ERR5           RETURN CODE = 12                 @V242801 00431000
+         B     ERR6           RETURN CODE = 16                 @V242801 00432000
+         B     ERR7           RETURN CODE = 20                 @V242801 00433000
+         SPACE                                                          00434000
+*********************************************************************** 00435000
+*                                                                       00436000
+*        ROUTINE TO RENUMBER AND UPDATE THE INCORE COPY                 00437000
+*        OF THE FREEFORT FILE.                                          00438000
+*                                                                       00439000
+*********************************************************************** 00440000
+         SPACE                                                          00441000
+RENFREE  L     R3,AINCORE     GET INCORE COPY ADDRESS          @V242801 00442000
+         LM    R4,R5,STRTNO   GET STRTNO/INCRNO VALUES         @V242801 00443000
+LOOP6    CVD   R4,WORK        CONVERT NUMBER                   @V242801 00444000
+         UNPK  8(8,R3),WORK   UNPACK IT                        @V242801 00445000
+         OI    15(R3),X'F0'   SET ZONE LAST DIGIT              @V242801 00446000
+         L     R3,0(,R3)      BUMP TO NEXT RECORD              @V242801 00447000
+         LTR   R3,R3          IS THIS IT ?                     @V242801 00448000
+         BZ    RETURN2        YES..JUST GET OUT                @V242801 00449000
+         AR    R4,R5          COMPUTE NEXT SEQ. NUMBER         @V242801 00450000
+         B     LOOP6          KEEP LOOPING 'TILL DONE          @V242801 00451000
+         EJECT                                                          00452000
+*********************************************************************** 00453000
+*                                                                       00454000
+*        ERROR MESSAGES                                                 00455000
+*                                                                       00456000
+*********************************************************************** 00457000
+         SPACE                                                          00458000
+ERR1     LA    R15,ERR1LST    GET ERROR LIST ADDRESS           @V242801 00459000
+         ST    R15,RCODE      SAVE AS RETURN CODE              @V242801 00460000
+         B     RETURN2        EXIT                             @V242801 00461000
+*                                                                       00462000
+ERR2     LA    R15,ERR2LST    GET ERROR LIST ADDRESS           @V242801 00463000
+         ST    R15,RCODE      SAVE AS RETURN CODE              @V242801 00464000
+         B     END            EXIT                             @V242801 00465000
+*                                                                       00466000
+ERR3     LA    R15,ERR3LST    GET ERROR LIST ADDRESS           @V242801 00467000
+ERREXIT  ST    R15,RCODE      SAVE AS RETURN CODE              @V242801 00468000
+         B     RETURN         EXIT                             @V242801 00469000
+*                                                                       00470000
+ERR4     LA    R15,ERR4LST    GET ERROR LIST ADDRESS           @V242801 00471000
+         ST    R15,RCODE      SAVE AS RETURN CODE              @V242801 00472000
+         BAL   R10,CONVERT    CONVERT THE STMNT NUMBER         @V242801 00473000
+         MVC   ERR4SUB,0(R5)  MOVE TO MSG AS SUB.              @V242801 00474000
+         B     RETURN         EXIT                             @V242801 00475000
+*                                                                       00476000
+ERR5     LA    R15,ERR5LST    GET ERROR LIST ADDRESS           @V242801 00477000
+         ST    R15,RCODE      SAVE AS RETURN CODE              @V242801 00478000
+         BAL   R10,CONVERT    CONVERT THE STMNT NUMBER         @V242801 00479000
+         MVC   ERR5SUB,0(R5)  MOVE TO MSG AS SUB.              @V242801 00480000
+         B     RETURN         EXIT                             @V242801 00481000
+*                                                                       00482000
+ERR6     LA    R15,ERR6LST    GET ERROR LIST ADDRESS           @V242801 00483000
+         ST    R15,RCODE      SAVE AS RETURN CODE              @V242801 00484000
+         BAL   R10,CONVERT    CONVERT THE STMNT NUMBER         @V242801 00485000
+         MVC   ERR6SUB,0(R5)  MOVE TO MSG AS SUB.              @V242801 00486000
+         B     RETURN         EXIT                             @V242801 00487000
+*                                                                       00488000
+ERR7     LA    R15,ERR7LST    GET ERROR LIST ADDRESS           @V242801 00489000
+         ST    R15,RCODE      SAVE AS RETURN CODE              @V242801 00490000
+         BAL   R10,CONVERT    CONVERT THE STMNT NUMBER         @V242801 00491000
+         MVC   ERR7SUB2,0(R5) MOVE TO MSG AS SUB2.             @V242801 00492000
+         L     R2,OUTLEN      GET TARGET LINE NUMBER           @V242801 00493000
+         BAL   R10,CONVERT    CONVERT THE STMNT NUMBER         @V242801 00494000
+         MVC   ERR7SUB1,0(R5) MOVE TO MSG AS SUB1.             @V242801 00495000
+         B     RETURN         EXIT                             @V242801 00496000
+         EJECT                                                          00497000
+ERR104R  LA    R3,READING     GET OPERATION                    @V242801 00498000
+         LA    R4,FROM        MAKE IT PRETTY                   @V242801 00499000
+         LA    R6,104         GET MESSAGE NUMBER               @V242801 00500000
+         B     ERR104         GIVE MESSAGE                     @V242801 00501000
+ERR104W  CH    R15,DSKFUL     IS IT DISK FULL ?                @V242801 00502000
+         BE    ERREXIT        YES..JUST GET OUT                @V242801 00503000
+         LA    R3,WRITING     GET OPERATION                    @V242801 00504000
+         LA    R4,TO          MAKE IT PRETTY                   @V242801 00505000
+         LA    R6,105         GET MESSAGE NUMBER               @V242801 00506000
+ERR104   LR    R5,R15         GET ERROR CODE IN REG 5          @V242801 00507000
+         LA    R2,PLIST+8     POINT TO FILEID                  @V242801 00508000
+         DMSERR TEXT='ERROR ''....'' ........ FILE ''..................*00509000
+               ..'' .... DISK',NUM=(R6),LET=S,RENT=NO,CSECT=EDI,       *00510000
+               SUB=(DEC,(R5),CHARA,(R3),CHAR8A,(R2),CHARA,(R4))         00511000
+         MVI   RCODE+3,100    SET RETURN CODE                  @V242801 00512000
+         B     RETURN         RELEASE TABLES                   @V242801 00513000
+         EJECT                                                          00514000
+*********************************************************************** 00515000
+*                                                                       00516000
+*        PLISTS FOR RDBUF, WRBUF, RNMS AND ERASE                        00517000
+*                                                                       00518000
+*********************************************************************** 00519000
+         SPACE                                                          00520000
+         DS    0D                                              @V242801 00521000
+PLIST    DC    CL8'FINIS'     RDBUF/WRBUF/FINIS COMMAND        @V242801 00522000
+FNAME    DC    CL8'RENUM'     FILENAME                         @V242801 00523000
+FTYPE    DC    CL8'CMSUT1'    FILETYPE                         @V242801 00524000
+FMODE    DS    CL2            FILEMODE                         @V242801 00525000
+FITNO    DC    H'0'           ITEM NUBER                       @V242801 00526000
+FBUFF    DS    A              BUFFER ADDRESS                   @V242801 00527000
+FSIZE    DS    A              RECORD LENGTH                    @V242801 00528000
+FVF      DC    CL2'F'         FIXED/VARIABLE FLAG              @V242801 00529000
+FNOIT    DC    H'1'           NUMBER OF ITEMS TO READ          @V242801 00530000
+*                                                                       00531000
+RNMSPL   DS    0D                                              @V242801 00532000
+INPTR    DS    F              ADDR INPUT BUFFER                @V242801 00533000
+OUTPTR   DS    F              ADDR OUTPUT BUFFER               @V242801 00534000
+ANUMTAB  DS    F              ADDR NUMBER TABLE                @V242801 00535000
+LNUMTAB  DS    F              LEN  NUMBER TABLE                @V242801 00536000
+INLEN    DS    F              LEN  INPUT BUFFER                @V242801 00537000
+RNMSRC   DS    F              RNMS RETURN CODE                 @V242801 00538000
+OUTLEN   DS    F              LEN  OUTPUT BUFFER               @V242801 00539000
+DS1FLG   DC    AL1(1),AL3(0)  FLAG FOR DATA SET 1              @V242801 00540000
+         DS    14F            RNMS WORK                        @V242801 00541000
+         DS    260CL1         RNMS WORK                        @V242801 00542000
+         DS    260CL1         RNMS WORK                        @V242801 00543000
+*                                                                       00544000
+         DS    0D             ERASE PLIST                      @V242801 00545000
+ERASE    DC    CL8'ERASE'     COMMAND                          @V242801 00546000
+ERSFILE  DC    CL24' '        FILEID                           @V242801 00547000
+         DC    8X'FF'         FENCE                            @V242801 00548000
+         EJECT                                                          00549000
+*********************************************************************** 00550000
+*                                                                       00551000
+*        MESSAGES TEXT AND LENGTH                                       00552000
+*                                                                       00553000
+*********************************************************************** 00554000
+         SPACE                                                          00555000
+ERR1LST  DC    A(LERR1TXT),A(ERR1TXT)  LENGTH AND TEXT ADDRESS @V242801 00556000
+ERR2LST  DC    A(LERR2TXT),A(ERR2TXT)  LENGTH AND TEXT ADDRESS @V242801 00557000
+ERR3LST  DC    A(LERR3TXT),A(ERR3TXT)  LENGTH AND TEXT ADDRESS @V242801 00558000
+ERR4LST  DC    A(LERR4TXT),A(ERR4TXT)  LENGTH AND TEXT ADDRESS @V242801 00559000
+ERR5LST  DC    A(LERR5TXT),A(ERR5TXT)  LENGTH AND TEXT ADDRESS @V242801 00560000
+ERR6LST  DC    A(LERR6TXT),A(ERR6TXT)  LENGTH AND TEXT ADDRESS @V242801 00561000
+ERR7LST  DC    A(LERR7TXT),A(ERR7TXT)  LENGTH AND TEXT ADDRESS @V242801 00562000
+*                                                                       00563000
+ERR1TXT  DC    C'WRONG FILE FORMAT FOR RENUM'                  @V242801 00564000
+LERR1TXT EQU   *-ERR1TXT                                       @V242801 00565000
+*                                                                       00566000
+ERR2TXT  DC    C'SET NEW FILEMODE AND RETRY'                   @V242801 00567000
+LERR2TXT EQU   *-ERR2TXT                                       @V242801 00568000
+*                                                                       00569000
+ERR3TXT  DC    C'MAXIMUM LINE NUMBER EXCEEDED'                 @V242801 00570000
+LERR3TXT EQU   *-ERR3TXT                                       @V242801 00571000
+*                                                                       00572000
+ERR4TXT  DC    C'OVERFLOW AT STMNT '                           @V242801 00573000
+ERR4SUB  DS    CL5                                             @V242801 00574000
+LERR4TXT EQU   *-ERR4TXT                                       @V242801 00575000
+*                                                                       00576000
+ERR5TXT  DC    C'INVALID SYNTAX IN STMNT '                     @V242801 00577000
+ERR5SUB  DS    CL5                                             @V242801 00578000
+LERR5TXT EQU   *-ERR5TXT                                       @V242801 00579000
+*                                                                       00580000
+ERR6TXT  DC    C'INVALID LINE NUMBER REFERENCE IN STMNT '      @V242801 00581000
+ERR6SUB  DS    CL5                                             @V242801 00582000
+LERR6TXT EQU   *-ERR6TXT                                       @V242801 00583000
+*                                                                       00584000
+ERR7TXT  DC    C'LINE '                                        @V242801 00585000
+ERR7SUB1 DS    CL5                                             @V242801 00586000
+         DC    C'REFERENCED IN STMNT '                         @V242801 00587000
+ERR7SUB2 DS    CL5                                             @V242801 00588000
+         DC    C', NOT FOUND'                                  @V242801 00589000
+LERR7TXT EQU   *-ERR7TXT                                       @V242801 00590000
+         EJECT                                                          00591000
+*********************************************************************** 00592000
+*                                                                       00593000
+*        EQUATES, CONSTANTS, WORKAREA AND LITERALS                      00594000
+*                                                                       00595000
+*********************************************************************** 00596000
+         SPACE                                                          00597000
+BLANK    EQU   C' '           BLANK CODE                       @V242801 00598000
+WORK     DS    D              WORK ARE FOR PACK/UNPACK         @V242801 00599000
+RNMSAV   DS    18F            RNMS SAVE AREA                   @V242801 00600000
+A1RNMSPL DC    A(A2RNMSPL)    RNMS PLIST ADDRESS/ADDRESS       @V242801 00601000
+A2RNMSPL DC    A(RNMSPL)      RNMS PLIST ADDRESS               @V242801 00602000
+ARNMS    DC    V(ICDQRNMS)    ADDRESS CONVERT ROUTINE          @V242801 00603000
+SAVREGS  DS    15F            SAVE AREA FOR CALLERS REGS       @V242801 00604000
+RCODE    DS    F              RETURN CODE SAVE                 @V242801 00605000
+STRTNO   DS    F              STARTING SEQ. NO.                @V242801 00606000
+INCRNO   DS    F              INCREMENTS                       @V242801 00607000
+AINCORE  DS    F              ADDRESS EDIT INCORE FILE         @V242801 00608000
+MAXNO    DS    F              MAX STRT/INCR ALLOWED            @V242801 00609000
+VBMAX    DC    F'99999'       MAXNO FOR VSBASIC                @V242801 00610000
+FFMAX    DC    F'99999999'    MAXNO FOR FREEFORT               @V242801 00611000
+EOF      DC    H'12'          END-OF-FILE RETURN CODE          @V242801 00612000
+DSKFUL   DC    H'13'          DISK FULL RETURN CODE            @V242801 00613000
+H5       DC    H'5'           CONSTANT OF FIVE                 @V242801 00614000
+H8       DC    H'8'           CONSTANT OF EIGHT                @V242801 00615000
+SEQLEN   DC    H'0'           SEQ. NUMBER LENGTH               @V242801 00616000
+OC       OC    0(1,R1),ZEROS  CHANGE ALL BLANKS TO ZERO        @V242801 00617000
+PACK     PACK  WORK,0(1,R1)   PACK THE LINE NUMBER             @V242801 00618000
+MVC1     MVC   1(0,R5),0(R5)  MVC TO BLANK PLIST               @V242801 00619000
+MOVEUP   MVC   8(0,R2),OUTBUFF   MVC TO MOVE BUFFER TO INCORE  @V242801 00620000
+MVEDOWN  MVC   INBUFF(1),8(R3)   MVC TO MOVE INCORE TO BUFFER  @V242801 00621000
+*                                                                       00622000
+VSBASIC  DC    CL8'VSBASIC'   FILETYPE FOR VSBASIC INPUT       @V242801 00623000
+FREEFORT DC    CL8'FREEFORT'  FILETYPE FOR FREEFORT INPUT      @V242801 00624000
+READING  DC    CL8'READING'   MSG 104R OPERATION               @V242801 00625000
+WRITING  DC    CL8'WRITING'   MSG 104W OPERATION               @V242801 00626000
+FROM     DC    CL4'FROM'      MSG 104R FROM                    @V242801 00627000
+TO       DC    CL4'TO'        MSG 104W TO                      @V242801 00628000
+ZEROS    DC    CL8'00000000'  CHANGE ALL BLANKS TO ZEROS       @V242801 00629000
+INBUFF   DS    CL133          RNMS INPUT  BUFFER               @V242801 00630000
+OUTBUFF  DS    CL260          RNMS OUTPUT BUFFER               @V242801 00631000
+RNMSW    DS    CL1            INTERNAL SWITCH                  @V242801 00632000
+FFORT    EQU   X'80'          FREEFORT FILE                    @V242801 00633000
+TABGOT   EQU   X'04'          NUMBER TABLE ACQUIRED            @V242801 00634000
+         EJECT                                                          00635000
+         NUCON                                                 @V242801 00636000
+         REGEQU                                                @V242801 00637000
+         END                                                            00638000

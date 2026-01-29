@@ -1,0 +1,1567 @@
+DMP      TITLE 'DMKDMP     (CP)        VM/370 - RELEASE 6'              00001000
+         ISEQ  73,80                                                    00002000
+*.                                                                      00003000
+* MODULE NAME -                                                         00004000
+*                                                                       00005000
+*        DMKDMP                                                         00006000
+*                                                                       00007000
+* FUNCTION -                                                            00008000
+*                                                                       00009000
+*        TO WRITE A DUMP OF MAIN MEMORY, CONTROL REGISTERS, FLOATING    00010000
+*        POINT REGISTERS, GENERAL PURPOSE REGISTERS, CLOCKS, AND        00011000
+*        PREFIX REGISTER TO A PRESPECIFIED DUMP DEVICE                  00012000
+*                                                                       00013000
+* ATTRIBUTES -                                                          00014000
+*                                                                       00015000
+*        NON-REUSABLE, RESIDENT, STAND ALONE PROGRAM, ENTERED VIA A     00016000
+*        GOTO FROM DMKPSA AFTER A RESTART, FROM DMKSVC AFTER            00017000
+*        AN SVC 0, OR FROM DMKPRG                                       00018000
+*                                                                       00019000
+* ENTRY POINTS -                                                        00020000
+*                                                                       00021000
+*        DMKDMPDK - WRITE SYSTEM DUMP TO DUMP DEVICE                    00022000
+*        DMKDMPRS - REIPL SYSTEM                                        00023000
+*                                                                       00024000
+* ENTRY CONDITIONS -                                                    00025000
+*                                                                       00026000
+*        GPR12 = ADDRESS OF ENTRY POINT                                 00027000
+*                                                                       00028000
+* EXIT CONDITIONS -                                                     00029000
+*                                                                       00030000
+*        NORMAL - FOR DUMP DEVICE OF TAPE OR PRINTER, MOVE 'CPCP'       00031000
+*                 TO CPID AND BRANCH TO INTERNAL SUBROUTINE DMKDMPRS    00032000
+*                 TO REIPL AND SHUTDOWN SYSTEM; FOR DUMP DEVICE OF      00033000
+*                 DASD, MOVE 'WARM' TO CPID AND                         00034000
+*                 BRANCH TO INTERNAL SUBROUTINE DMKDMPRS TO REIPL       00035000
+*                 SYSTEM                                                00036000
+*                                                                       00037000
+*        ERROR -  WRITE A MESSAGE TO THE SYSTEM CONSOLE AND LOAD A      00038000
+*                 DISABLED WAIT STATE PSW                               00039000
+*                                                                       00040000
+* CALLS TO OTHER ROUTINES -                                             00041000
+*                                                                       00042000
+*        DMKSCNRD             GET REAL DEVICE ADDRESS (CCU)             00043000
+*                                                                       00044000
+* EXTERNAL REFERENCES -                                                 00045000
+*                                                                       00046000
+*        DMKRIOPR - TABLE OF PRINTER DEVICE ADDRESSES AND RDEVBLOK      00047000
+*                   DISPLACEMENTS                                       00048000
+*        DMKOPRWT - EMERGENCY OPERATOR WRITE ROUTINE                    00049000
+*        DMKSYSRM - REAL MACHINE SIZE                                   00050000
+*        DMKRSPID - NEXT SYSTEM FILE NUMBER                             00051000
+*        DMKSYSCK - ACCOUNTING TOD CLOCK VALUE AT SYSTEM DUMP           00052000
+*                                                                       00053000
+         EJECT                                                          00054000
+*        PSA                                                            00055000
+*                  APUOPER - ATTACHED PROCESSOR MODE                    00056000
+*                  PREFIX - PREFIX REGISTER FOR CURRENT PROCESSOR       00057000
+*                  PREFIXA - PREFIX REGISTER FOR OTHER PROCESSOR        00058000
+*                  DUMPSAVE - SAVE AREA FOR DUMP ROUTINE                00059000
+*                                                                       00060000
+*                                                                       00061000
+* TABLES / WORK AREAS -                                                 00062000
+*                                                                       00063000
+*        WHEN DUMP DEVICE IS DASD, REAL PAGES 1 THRU 3 ARE USED AS      00064000
+*        WORK AREAS FOR THE DMPINREC AND DMPKYRECS                      00065000
+*                                                                       00066000
+* REGISTER USAGE -                                                      00067000
+*                                                                       00068000
+*        GPR8  = DUMP DEVICE RDEVBLOK                                   00069000
+*        GPR12 = BASE REGISTER                                          00070000
+*        GPR13 = 2ND BASE REGISTER                                      00071000
+*        GPR15 = DUMP DEVICE DEVICE ADDRESS                             00072000
+*                                                                       00073000
+*        ALL OTHER REGISTERS ARE USED AS WORK REGISTERS                 00074000
+*                                                                       00075000
+* NOTES -                                                               00076000
+*                                                                       00077000
+*        NONE                                                           00078000
+*                                                                       00079000
+* OPERATION -                                                           00080000
+*                                                                       00081000
+*        1.  OBTAIN DUMP LOCK                                           00082000
+*        2.  STORE CLOCKS.                                              00083000
+*        3.  SAVE CONTROL AND FLOATING POINT REGISTERS.                 00084000
+*        4.  SAVE PREFIX REGISTER.                                      00085000
+*        5.  SAVE ABEND CODE.                                           00086000
+*        6.  SAVE PROCESSOR ADDRESS.                                    00087000
+*        7.  IF ATTACHED PROCESSOR MODE AND RUNNING ON THE              00088000
+*            MAIN PROCESSOR, SIGNAL THE ATTACHED PROCESSOR TO           00089000
+*            STOP AND STORE STATUS AND GO TO STEP 9.                    00090000
+*        8.  IF ATTACHED PROCESSOR MODE AND RUNNING ON THE              00091000
+*            ATTACHED PROCESSOR, SIGNAL THE MAIN PROCESSOR TO           00092000
+*            STOP AND STORE STATUS, SET UP THE RESTART PSW              00093000
+*            FOR STEP 9, SIGNAL THE MAIN PROCESSOR TO RESTART,          00094000
+*            AND SIGNAL SELF TO STOP.                                   00095000
+*        9.  SET UP ZERO PREFIX REGISTER.                               00096000
+*       10.  SAVE LOW CORE.                                             00097000
+*       11.  SET PROGRAM, IO, AND MACHINE CHECK NEW PSWS.               00098000
+*       12.  DISABLE SOFT MACHINE CHECKS.                               00099000
+*       13.  ENABLE CHANNEL 0.                                          00100000
+*       14.  ISSUE MESSAGE TO OPERATOR INDICATING ABEND CODE            00101000
+*            AND TIME OF DUMP.                                          00102000
+*       15.  GET REAL MACHINE SIZE.                                     00103000
+*       16.  LOCATE DUMP DEVICE RDEVBLOK PTR; IF ZERO USE THE FIRST     00104000
+*            PRINTER IN THE DMKRIOPR TABLE; IF NO PRINTERS ARE DEFINED  00105000
+*            IN THE TABLE LOAD A DISABLED WAIT STATE PSW.               00106000
+*       17.  GOTO APPROPRIATE DUMP DEVICE ROUTINE.                      00107000
+*                                                                       00108000
+*        OPERATION SECTION CONTINUED BELOW FOR EACH DUMP DEVICE TYPE    00109000
+*                                                                       00110000
+* ERROR MESSAGES -                                                      00111000
+*                                                                       00112000
+*        nn:nn:nn DMKDMP908I SYSTEM FAILURE; CODE mmmccc PROCESSOR nn   00113000
+*        DMKDMP905W SYSTEM DUMP FAILURE; PROGRAM CHECK                  00114000
+*        DMKDMP906W SYSTEM DUMP FAILURE; MACHINE CHECK, RUN SEREP       00115000
+*        DMKDMP907W SYSTEM DUMP FAILURE; FATAL I/O ERROR                00116000
+*        DMKDMP909W SYSTEM DUMP DEVICE; NOT-READY                       00117000
+*                                                                       00118000
+*.                                                                      00119000
+         EJECT                                                          00120000
+         COPY  OPTIONS                                                  00121000
+         COPY  LOCAL                                                    00122000
+         SPACE 3                                                        00123000
+DMKDMP   START                                                          00124000
+         SPACE                                                          00125000
+         USING PSA,0                                           @V200820 00126000
+         SPACE                                                          00127000
+         ENTRY DMKDMPDK,DMKDMPRC,DMKDMPTR                      @V200820 00128000
+         ENTRY DMKDMPDV,DMKDMPAU                               @V407510 00129000
+         ENTRY DMKDMPSF,DMKDMPSW                               @V200820 00130000
+         ENTRY DMKDMPTD,DMKDMPDT,DMKDMPSD                      @V407510 00131000
+         ENTRY DMKDMPMA,DMKDMPAA                               @V407510 00132000
+         ENTRY DMKDMPSA                                        @V5BC0AB 00132100
+         SPACE                                                          00133000
+         EXTRN DMKOPRWT,DMKRIOPR,DMKRSPID,DMKSCNRD             @V200820 00134000
+         EXTRN DMKSYSRM,DMKSYSCK,DMKSYSRV                      @V200820 00135000
+         EXTRN DMKSYSCH,DMKSCNRU                               @V304298 00136000
+         EXTRN DMKPRGMC                                        @V2B2638 00137000
+         EXTRN DMKSYSVM,DMKRIODV,DMKSYSCS,DMKRSPRD             @V407510 00138000
+         EJECT                                                          00139000
+DMKDMPDK DS    0H                                                       00140000
+         USING DMKDMPDK,R12                                             00141000
+         USING DMKDMP+4096,R13                                 @VA01097 00142000
+         LR    R13,R12        SET 2ND BASE REGISTER            @VA01097 00143000
+         A     R13,PAGESIZE   CALCULATE 2ND BASE REG           @V407510 00144000
+         TS    DMPLOCK        TRY TO GET DUMP LOCK             @V407510 00145000
+         BNZ   LOADWAIT       ALREADY HELD, LOAD WAIT STATE    @V407510 00146000
+         SPACE                                                          00147000
+         STCK  TODCLOCK       SAVE TIME OF DAY CLOCK                    00148000
+         L     R15,=A(DMKSYSCK)    LEAVE TOD CLOCK VALUE HERE           00149000
+         MVC   0(8,R15),TODCLOCK   FOR WARM START ACCOUNTING            00150000
+         STPT  CPUTIMER       SAVE CPU TIMER                            00151000
+         STCKC CLKCOMP        SAVE TIME OF DAY CLOCK COMPARATOR         00152000
+         STCTL C0,C15,CTLREGS SAVE CONTROL REGISTERS                    00153000
+         AIF   (NOT &FLOATPT).NOFP1                                     00154000
+         STD   Y0,FPREGS      SAVE FLOATING POINT REGISTERS             00155000
+         STD   Y2,FPREGS+8    ...                                       00156000
+         STD   Y4,FPREGS+16   ...                                       00157000
+         STD   Y6,FPREGS+24   ...                                       00158000
+.NOFP1   ANOP                                                           00159000
+         MVC   SAVEPR(L'INTPRL+L'INTPR),INTPRL SAVE CODE       @V4M0111 00160000
+         MVC   SAVEPGMN,PRNPSW  SAVE PROGRAM NEW               @V407510 00161000
+         MVC   SAVEPGMO,PROPSW  SAVE PROGRAM OLD               @V407510 00162000
+         MVC   PRNPSW,SPECPGMN  SET UP NEW PGM NEW             @V407510 00163000
+         STAP  PROCA          STORE PROCESSOR ADDRESS          @V4M0124 00164000
+         STPX  PREFRG         ATTEMPT TO STORE PREFIX REG      @V407510 00165000
+PREFSTOR DS    0H                                              @V407510 00166000
+         MVC   PRNPSW,SAVEPGMN  RESTORE PROGRAM NEW            @V407510 00167000
+         MVC   PROPSW,SAVEPGMO  RESTORE PROGRAM OLD            @V407510 00168000
+         MVC   INTPRL(L'INTPRL+L'INTPR),SAVEPR RESTORE CODE    @V4M0111 00169000
+         MVC   ABCODE,CPABEND SAVE ABEND CODE FOR              @V407510 00170000
+*                             ABENDING PROCESSOR               @V407510 00171000
+         MVC   GREGS(GRGLN),DUMPSAVE SAVE GENERAL REGISTERS    @V407510 00172000
+*                             FOR ABENDING PROCESSOR           @V407510 00173000
+         L     R6,=A(DMKSYSRM)  GET REAL STORAGE SIZE          @V407510 00174000
+         L     R6,0(R6)       GET STORAGE SIZE                 @V407510 00175000
+         L     R7,=A(DMKSYSRV)  GET SYSGENED STORAGE SIZE      @V407510 00176000
+         L     R7,0(,R7)      GET STORAG ESIZE                 @V407510 00177000
+         CR    R6,R7          REAL SIZE GREATER THAN SYSGENED? @V407510 00178000
+         BL    SIZEOK         NO, USE REAL SIZE                @V407510 00179000
+         LR    R6,R7          YES, USE SYSGEN SIZE             @V407510 00180000
+SIZEOK   DS    0H                                              @V407510 00181000
+         ST    R6,STORSIZE    SAVE STORAGE SIZE                @V407510 00182000
+         L     R5,PREFRG      GET VALUE STORED                 @V407510 00183000
+         TM    DMPSTAT,DMPUNI UNIPROCESSOR FOR SURE?           @V4M0124 00184000
+         BO    DMP02          YES, BRANCH                      @V4M0124 00185000
+         CLC   DMKDMPMA,DMKDMPAA  PROC ADDRESSES EQUAL?        @V4M0124 00186000
+         BE    DMP02          YES, UNIPROCESSOR...BRANCH       @V4M0124 00187000
+         CLC   PROCA,DMKDMPMA ON MAIN PROCESSOR?               @V4M0124 00192000
+         BNE   DMPATTP        NO, BRANCH                       @V4M0124 00193000
+         MVC   PREFRG,MAINPSA INSURE PREFRG ACCURATE           @V4M0124 00194000
+         MVC   PROCA,DMKDMPMA SAVE PROCESSOR ADDRESS FOR       @V407510 00195000
+*                             ABENDING PROCESSOR               @V407510 00196000
+         LA    R4,RETRY       SET UP LOOP CONTROL              @V407510 00197000
+LOOP1    DS    0H                                              @V407510 00198000
+         SR    R15,R15        CLEAR STATUS REGISTER            @V407510 00199000
+         LH    R0,DMKDMPAA    SIGNAL OTHER PROCESSOR           @V407510 00200000
+         LA    R1,SIGSSS      STOP AND STORE STATUS ORDER CODE @V407510 00201000
+         SIGP  R15,R0,0(R1)   ISSUE SIGNAL                     @V407510 00202000
+         BZ    DMP01          SUCCESSFUL, BR TO COMMON CODE    @V407510 00203000
+         BCT   R4,LOOP1       RETRY 256 TIMES                  @V407510 00204000
+         BAL   R4,DMPERR      ISSUE MESSAGE                    @V407510 00205000
+         B     DMP01          BRANCH TO COMMON CODE            @V407510 00206000
+DMPATTP  DS    0H             ATTATCHED PROCESSOR ABEND        @V407510 00207000
+*                             STOP MAIN PROCESSOR              @V407510 00208000
+         MVC   PREFRG,ATTPSA  INSURE PREFRG ACCURATE           @V4M0124 00209000
+         MVC   PROCA,DMKDMPAA SAVE PROCESSOR ADDRESS FOR       @V407510 00210000
+*                             ABENDING PROCESSOR               @V407510 00211000
+         LA    R4,RETRY       SET UP LOOP CONTROL              @V407510 00212000
+LOOP2    DS    0H                                              @V407510 00213000
+         SR    R15,R15        CLEAR STATUS REGISTER            @V407510 00214000
+         LH    R0,DMKDMPMA    SIGNAL OTHER PROCESSOR           @V407510 00215000
+         LA    R1,SIGSSS      STOP AND STORE STATUS ORDER CODE @V407510 00216000
+         SIGP  R15,R0,0(R1)   ISSUE SIGNAL                     @V407510 00217000
+         BZ    SIGSENS        SUCCESSFUL, ISSUE SENSE          @V4M0127 00218000
+         BCT   R4,LOOP2       RETRY 256 TIMES                  @V407510 00219000
+         BAL   R4,DMPERR      ISSUE MESSAGE                    @V407510 00220000
+SIGSENS  DS    0H                                              @V4M0127 00221000
+         SR    R15,R15        CLEAR STATUS REGISTER            @V4M0127 00222000
+         LH    R0,DMKDMPMA    SIGNAL OTHER PROCESSOR                    00223000
+         LA    R1,SIGSENSE    SENSE ORDER CODE                 @V4M0127 00224000
+         SIGP  R15,R0,0(R1)   SIGNAL SENSE                     @V4M0127 00225000
+         BC    PROCBUSY,SIGSENS  SIGNAL UNTIL NOT BUSY         @V4M0127 00226000
+SIGRSRT  DS    0H                                              @V4M0127 00227000
+         L     R5,PREFRG      GET PREFIX REG FOR ATTACHED      @V407510 00228000
+*                             PROCESSOR                        @V407510 00229000
+         STM   R0,R15,DUMPSAVE-PSA(R5) STORE REGS IN           @V407510 00230000
+*                                 ABSOLUTE ZERO                @V407510 00231000
+         L     R5,MAINPSA     GET PREFIX REG FOR MAIN          @V407510 00232000
+*                             PROCESSOR                        @V407510 00233000
+         MVC   RSRTNPSW-PSA(,R5),RSTPSW  SET UP RESTART PSW    @V407510 00234000
+         LA    R4,RETRY       SET UP LOOP CONTROL              @V407510 00235000
+LOOP3    DS    0H                                              @V407510 00236000
+         SR    R15,R15        CLEAR STATUS REGISTER            @V407510 00237000
+         LH    R0,DMKDMPMA    SIGNAL OTHER PROCESSOR           @V407510 00238000
+         LA    R1,SIGREST     RESTART ORDER CODE               @V407510 00239000
+         SIGP  R15,R0,0(R1)   ISSUE SIGNAL                     @V407510 00240000
+         BZ    SIGPSTOP       SUCCESSFUL, SIGNAL SELF TO STOP  @V407510 00241000
+         BCT   R4,LOOP3       RETRY 256 TIMES                  @V407510 00242000
+         B     LOADWAIT       UNSUCCESSFUL, LOAD WAIT STATE    @V407510 00243000
+SIGPSTOP DS    0H                                              @V407510 00244000
+         SR    R15,R15        CLEAR STATUS REGISTER            @V407510 00245000
+         LH    R0,DMKDMPAA    SIGNAL SELF                      @V407510 00246000
+         LA    R1,SIGSTOP     STOP ORDER CODE                  @V407510 00247000
+         SIGP  R15,R0,0(R1)   ISSUE SIGNAL                     @V407510 00248000
+         B     LOADWAIT       UNSUCCESSFUL, LOAD WAIT STATE    @V407510 00249000
+DMPRST   DS    0H             RESTART ON MAIN PROCESSOR        @V407510 00250000
+         DROP  R12,R13        DROP ORIGINAL BASE REGS          @V4M0105 00251000
+*              NO ADDRESSABILITY UNTIL R12 & R13 RELOADED      @V407510 00252000
+         BALR  R5,0           GET TEMPORARY BASE REG           @V407510 00253000
+         USING *,R5           TEMPORARY ADDRESSABILITY         @V407510 00254000
+         L     R5,MAINPSA     GET MAIN PSA ADDRESS             @V407510 00255000
+         DROP  R5             END TEMPORARY ADDRESSABILITY     @V407510 00256000
+         USING DMKDMP,R12     RESET ORIGINAL ADDRESSABILITY    @V4M0105 00257000
+         USING DMKDMP+PAGE,R13                                 @V4M0105 00258000
+*              NORMAL ADDRESSABILITY WHEN R12 & R13 RELOADED   @V407510 00259000
+         LM    R0,R15,DUMPSAVE-PSA(R5) RESTORE REGS FOR        @V407510 00260000
+*                                   RESTART                    @V407510 00261000
+DMP01    DS    0H             COMMON DUMP PROCESSING           @V407510 00262000
+*                             ON MAIN PROCESSOR                @V407510 00263000
+         SPX   ALLZEROS       SET PREFIX REG TO ZERO           @V407510 00264000
+*                             USING ABSOLUTE 0 AS PSA          @V407510 00265000
+*                             MOVE STATUS INFORMATION FOR      @V407510 00266000
+*                             NON-ABENDING PROCESSOR TO        @V407510 00267000
+*                             ITS PSA                          @V407510 00268000
+         L     R5,MAINPSA     GET MAIN PSA ADDRESS             @V407510 00269000
+         C     R5,PREFRG      ABENDED ON MAIN?                 @V407510 00270000
+         BNE   DMP0150        NO, PUT STATUS INFO INTO MAIN    @V407510 00271000
+         L     R5,ATTPSA      YES, PUT STATUS INFO INTO ATT    @V407510 00272000
+DMP0150  DS    0H             R5 HAS ADDR OF OTHER PSA         @V407510 00273000
+*                             PROCESSOR (NON-ABENDING) PSA     @V407510 00274000
+*                             STOP AND STORE STATUS SIGNAL     @V407510 00275000
+*                             STORES INFORMATION IN ABSOLUTE   @V407510 00276000
+*                             ZERO, SO STATUS INFORMATION      @V407510 00277000
+*                             WILL BE MOVED TO PSA OF          @V407510 00278000
+*                             NON-ABENDING PROCESSOR           @V407510 00279000
+         MVC   CPULOG+SSCLK-PSA(LNTIMER,R5),CPULOG+SSCLK       @V407510 00280000
+*                             MOVE CLOCKS STORED               @V407510 00281000
+*                             TO OWN PSA                       @V407510 00282000
+         MVC   FXDLOG-PSA(LNLOG,R5),FXDLOG                     @V407510 00283000
+*                             MOVE PSW, PREFIX REG, ETC TO              00284000
+*                             OWN PSA                          @V407510 00285000
+         MVC   FPRLOG-PSA(LNREGS,R5),FPRLOG                    @V407510 00286000
+*                             MOVE FPREGS, GPREGS, & CREGS TO  @V407510 00287000
+*                             OWN PSA                          @V407510 00288000
+DMP02    DS    0H                                              @V407510 00289000
+         MVC   LOWCORE(LCLN),PSA  SAVE FIRST 256 BYTES OF      @V407510 00290000
+*                                  LOW CORE                    @V407510 00291000
+         MVC   PRNPSW(IONPSW+4-PRNPSW),DMPPSWS                 @V407510 00292000
+*                             ARRANGE NEW PSWS                 @V407510 00293000
+         LCTL  C14,C15,DISABLMC    DISABLE SOFT MACHINE CHECKS          00294000
+         LCTL  C2,C2,ALLONES RE-ENABLE CHANNEL 0               @V407510 00295000
+         CLC   =C'CPCP',CPID       WARM MACHINE ??                      00296000
+         BE    NOTCOLD        YES -                            @VA07234 00297000
+         MVC   TODATE,ALLZEROS  ZERO 'TODATE' AREA             @V407510 00298000
+         MVC   DMKDMPTD,ALLZEROS  ZERO 'TODATE' AREA           @V407510 00299000
+         OI    DMKDMPSW,ALL   FORCE FULL DUMP                  @VA01097 00300000
+         MVC   CPID,=C'COLD'       INDICATE COLD MACHINE                00301000
+NOTCOLD  DS    0H             CONTINUE                         @VA07234 00302000
+         SLR   R1,R1                                                    00303000
+         IC    R1,ABCODENU    GET ABEND CODE DIGIT             @V407510 00304000
+         CVD   R1,TEMPAD      CONVERT TO DECIMAL                        00305000
+         UNPK  DMPSCOD+3(3),TEMPAD+6(2) UNPACK                          00306000
+         OI    DMPSCOD+5,X'F0'     MAKE UP FOR HARDWARE                 00307000
+         MVC   DMPSCOD(NAMELN),ABCODEMD GET MODULE NAME        @V407510 00308000
+         LM    R0,R1,TODCLOCK GET TIME OF CRASH                         00309000
+         SL    R1,TODATE2W    MINUS MIDNIGHT                   @V407510 00310000
+         BC    11,*+8         NO OFLOW                                  00311000
+         SL    R0,=F'1'       ADJUST                                    00312000
+         SL    R0,DMKDMPTD    FIRST WORD                       @V407510 00313000
+         CL    R0,=X'000141DD' GREATER THAN MAX FOR ONE DAY    @VA01097 00314000
+         BH    DMP03          YES, --'TODATE' INVALID          @V407510 00315000
+         SRDL  R0,12          TIME IN MICROSECONDS                      00316000
+         D     R0,=F'1000000' CONVERT TO SECONDS                        00317000
+         SR    R0,R0          FORGET REMAINDER                          00318000
+         D     R0,=F'3600'    GET HOURS                                 00319000
+         CVD   R1,TEMPAD      IN DEC                                    00320000
+         UNPK  DMPTIME(4),TEMPAD+6(3)   CONVERT                         00321000
+         MVI   DMPTIME+2,C':' EDIT                                      00322000
+         LR    R1,R0          GET SECONDS REMAINING                     00323000
+         SR    R0,R0          CLEAR                                     00324000
+         D     R0,SECPMIN     GET MINUTES                      @V407510 00325000
+         CVD   R1,TEMPAD      CONVERT TO DEC                            00326000
+         UNPK  DMPTIME+3(4),TEMPAD+6(3) CONVERT                         00327000
+         MVI   DMPTIME+5,C':' EDIT                                      00328000
+         CVD   R0,TEMPAD      GET SECONDS                               00329000
+         UNPK  DMPTIME+6(2),TEMPAD+6(2) CONVERT                         00330000
+         OI    DMPTIME+7,X'F0'  SET ZONE                                00331000
+DMP03    DS    0H             CONVERT PROCESSOR ADDRESS        @V407510 00332000
+         LH    R1,PROCA       GET PROCESSOR ADDRESS FOR        @V407510 00333000
+*                             ABENDING PROCESSOR               @V407510 00334000
+         CVD   R1,TEMPAD      CONVERT TO DECIMAL FORM          @V407510 00335000
+         UNPK  DMPROC(L'PROCA),TEMPADLO(L'PROCA)               @V407510 00336000
+*                             CONVERT TWO SIGNIFICANT DIGITS   @V407510 00337000
+         OI    DMPROCL,ZONE   SET ZONE FOR LAST DIGIT          @V407510 00338000
+DMPMSG   EQU   *              HERE TO SEND MESSAGE TO CONSOLE  @VA01097 00339000
+         L     R0,SFCCCW      GET COUNT AND ADDRESS OF MSG     @V200735 00340000
+         BAL   R9,TYPLINE     TYPE LINE ON SYSTEM CONSOLE      @V200735 00341000
+         L     R8,=A(DMKPRGMC) GET ADDR OF MONITOR COMM        @V2B2638 00342000
+         MVC   MONCAD,0(R8)   SAVE IT FOR LATER                @V2B2638 00343000
+         L     R1,DMKDMPDV    GET DUMP DEVICE ADDRESS (CCU)    @V407438 00344000
+         LTR   R1,R1          IS THERE ONE?                    @V407438 00345000
+         BZ    DEFAULT        YES                                       00346000
+         USING RDEVBLOK,R8                                              00347000
+         LM    R9,R10,BALR2        SAV LOW CORE VALUES USED    @VA01876 00348000
+         CALL  DMKSCNRU       FIND RBLOKS                      @V407438 00349000
+         BNZ   DEFAULT        THIS SHOULDN'T HAPPEN            @V407438 00350000
+         STM   R9,R10,BALR2        RESTORE LOW CORE AS IT WAS  @VA01876 00351000
+         LR    R15,R1         AND SAVE IT IN R15               @VA01081 00352000
+         CLI   RDEVTYPC,CLASTAPE   TAPE DEVICE ?                        00353000
+         BE    DMPTAPE        YES                                       00354000
+         CLI   RDEVTYPC,CLASURO    UNIT RECORD OUTPUT DEVICE ?          00355000
+         BNE   TSTDASD        NO                                        00356000
+         TM    RDEVTYPE,TYPPRT     PRINTER TYPE DEVICE ?                00357000
+         BO    DMPPRT         YES                                       00358000
+         B     DEFAULT                                                  00359000
+TSTDASD  CLI   RDEVTYPC,CLASDASD   DASD DEVICE ?                        00360000
+         BE    DMPDASD        YES                                       00361000
+DEFAULT  L     R15,=A(DMKRIOPR)    GET PRINTER TABLE IN RIO             00362000
+         L     R9,0(,R15)     GET NUMBER OF PRINTERS DEFINED IN SYSTEM  00363000
+         LTR   R9,R9          ZERO ?                                    00364000
+         BNZ   *+8            NO                                        00365000
+         BAL   R14,LOADWAIT   ERROR --                                  00366000
+         LH    R8,4(,R15)     GET RDEVBLOK DISPLACEMENT FOR 1ST PRINTER 00367000
+         SLL   R8,3(0)        CONVERT TO BYTE INDEX            @V200820 00368000
+         AL    R8,DMPRIODV    FORM RDEVBLOK ADDRESS            @V407510 00369000
+         LH    R15,6(,R15)    GET FULL DEVICE ADDRESS                   00370000
+         B     DMPPRT                                                   00371000
+         EJECT                                                          00372000
+*.                                                                      00373000
+* OPERATION OF DASD DUMP ROUTINE -                                      00374000
+*                                                                       00375000
+*        1.  SAVE STORAGE KEYS OF PAGES 0 THRU 3.                       00376000
+*        2.  WRITE PAGES 0 THRU 3 TO DUMP FILE RECORDS 5 THRU 8.        00377000
+*        3.  ZERO PAGES 1 THRU 3.                                       00378000
+*        NOTE: AT THIS POINT PAGE 1 IS THE DUMP INFORMATION RECORD      00379000
+*            (DMPINREC), AND PAGES 2 AND 3 ARE THE DUMP KEY             00380000
+*            RECORDS (DMPKYREC).                                        00381000
+*        4.  MOVE REGISTERS, CLOCKS, AND SAVED LOW CORE TO DMPINREC.    00382000
+*        5.  WRITE PAGES 4 THROUGH THE END OF MEMORY TO THE DUMP FILE   00383000
+*            SAVING STORAGE KEYS FOR EACH 2K BLOCK IN THE DMPKYREC.     00384000
+*            IF THE END OF MEMORY IS NOT ON A 4K BOUNDRY TURN THE       00385000
+*            HALFPAGE FLAG ON IN DMPINREC TO INDICATE THAT THE          00386000
+*            LAST RECORD IN THE DUMP FILE REPRESENTS 2K.                00387000
+*        6.  WRITE PAGES 1 THRU 3 TO DUMP FILE RECORDS 2 THRU 4.        00388000
+*        7.  SET ENDING RECORD NUMBER AND SYSTEM FILE NUMBER IN THE     00389000
+*            DUMP FILE SFBLOK.                                          00390000
+*        8.  CHAIN DUMP FILE RECBLOKS ONTO RDEVBLOK RECBLOK CHAIN.      00391000
+*        9.  CHAIN DUMP FILE SFBLOK ONTO SYSTEM READER CHAIN.           00392000
+*            IF THE MONITOR WAS ACTIVE THEN ATTEMPT TO WRITE            00393000
+*            A TAPE MARK AND REWIND/UNLOAD THE TAPE.                    00394000
+*        10. RE-IPL SYSTEM.                                             00395000
+*                                                                       00396000
+*.                                                                      00397000
+         SPACE                                                          00398000
+DMPDASD  EQU   *  HERE TO WRITE DUMP TO A DASD DEVICE                   00399000
+         LA    R5,32          GET NUMBER OF RECS/CYL FOR 2314           00400000
+         TM    RDEVTYPE,TYP2314    2314 ?                               00401000
+         BO    TBLSET         YES                                       00402000
+         LA    R5,57          GET NUMBER OF RECS/CYL FOR 3330           00403000
+         TM    RDEVTYPE,TYP3330    3330 ?                               00404000
+         BO    TBLSET         YES                                       00405000
+         LA    R5,120         GET NUMBER OF RECS/CYL FOR 3350  @V304498 00406000
+         CLI   RDEVTYPE,TYP3350 3350 ?                         @V304498 00407000
+         BE    TBLSET         YES                              @V304498 00408000
+         LA    R5,24          RECS/CYL FOR 2305 AND 3340       @V2A2029 00409000
+TBLSET   L     R3,=A(3*4096+2048)  GET X'3800'                          00410000
+         LA    R10,8          GET CONSTANT OF 8                         00411000
+NXTKEY   ISK   R9,R3          GET KEYS OF INITIAL 4 PAGES               00412000
+         STC   R9,SAVKEY-1(R10)    SAVE KEY                             00413000
+         SL    R3,=F'2048'    GET NEXT 2K BLOCK                         00414000
+         BCT   R10,NXTKEY                                               00415000
+         L     R11,DMKDMPRC   GET CHAIN OF RECBLOKS                     00416000
+         USING RECBLOK,R11                                              00417000
+         LA    R9,DMPMAP-(DMPPGMAP-DMPINREC) TEMP DSECT ADDRESS@VW01525 00418000
+         USING DMPINREC,R9                                              00419000
+         MVC   CYL(2),RECCYL  SET INITIAL CYLINDER NUMBER               00420000
+         LA    R4,1           GET CONSTANT OF 1                         00421000
+         LA    R1,4           WRITE 4 PAGES OUT ONTO DISK               00422000
+         SLR   R3,R3          STARTING WITH PAGE 0                      00423000
+         LA    R2,5           START WITH RECORD 5                       00424000
+NXTPAG   TM    DMKDMPSW,ALL   ALL PAGES TO BE DUMPED ?         @VW01525 00425000
+         BO    NXTPAG1        YES --                           @VW01525 00426000
+         LR    R7,R3          GET THIS PAGE NUMBER             @VW01525 00427000
+         SRL   R7,8           *16                              @VW01525 00428000
+         AL    R7,DMPCORET    ADDR START OF CORTABLE           @V407510 00429000
+         USING CORTABLE,R7                                     @VW01525 00430000
+         CLC   CORFPNT,=C'*VR*' IS IT V=R PAGE ?               @VW01525 00431000
+         BE    SKIPPAG        YES - SKIP THIS PAGE             @VW01525 00432000
+         TM    CORFLAG,CORCP  CP NUCLEUS PAGE ??               @VW01525 00433000
+         BO    NXTPAG1        YES, DUMP IT                     @VW01525 00434000
+         CLC   CORFPNT,=C'FREE' FREE STORAGE PAGE ??           @VW01525 00435000
+         BNE   SKIPPAG        NO, SKIP IT                      @VW01525 00436000
+NXTPAG1  BAL   R14,DSKWTRC1   WRITE OUT PAGE                   @VW01525 00437000
+         ALR   R2,R4          GET NEXT RECORD                  @VW01525 00438000
+SKIPPAG  DS    0H                                              @V407510 00439000
+         AL    R3,PAGESIZE    GET NEXT PAGE ADDRESS            @V407510 00440000
+         BCT   R1,NXTPAG      BRANCH IF NOT 4 PAGES            @VW01525 00441000
+         DROP  R7                                              @VW01525 00442000
+         L     R0,PAGESIZE    ADDRESS OF PAGE 1                @V407510 00443000
+         L     R1,=A(3*4096)  CLEAR 3 PAGES                             00444000
+         SLR   R7,R7          USING ZERO PAD CHARACTER                  00445000
+         MVCL  R0,R6          ...                                       00446000
+         L     R9,PAGESIZE    ADDRESS OF PAGE 1                @V407510 00447000
+         MVC   DMPPGMAP(1),DMPMAP MOVE BIT MAP                 @VW01525 00448000
+         MVC   DMPGPRS(REGLN),GREGS     MOVE GPRS & CRS INTO   @V407510 00449000
+*                                       DMPINREC               @V407510 00450000
+         AIF   (NOT &FLOATPT).NOFP2                                     00451000
+         MVC   DMPFPRS(4*8),FPREGS MOVE FPRS INTO INFO REC              00452000
+.NOFP2   ANOP                                                           00453000
+         MVC   DMPLCORE(256),LOWCORE    MOVE LOW CORE INTO INFO REC     00454000
+         MVC   DMPTODCK(3*8),TODCLOCK   MOVE CLOCKS TO INFO REC         00455000
+         L     R7,=A(DMKSYSRV)     GET GENERATED STORAGE SIZE           00456000
+         L     R7,0(R7)       ..                                        00457000
+         ST    R7,DMPSYSRV    SAVE FOR VDUMP                            00458000
+         MVC   DMPPROCA,PROCA MOVE PROCESSOR ADDRESS TO        @V407510 00459000
+*                                       DMPINREC               @V407510 00460000
+         MVC   DMPPRFRG,PREFRG    MOVE PREFIX REG              @V4M0115 00461000
+         MVC   DMPABEND,ABCODE    MOVE ABEND CODE              @V4M0115 00462000
+         LR    R10,R9         GET PTR TO PAGE 1                         00463000
+         AL    R10,PAGESIZE   ADDR OF PAGE 2                   @V407510 00464000
+         USING DMPKYREC,R10                                             00465000
+         MVC   DMPKEY(8),SAVKEY    MOVE KEYS FOR PAGE 0-3 INTO INFO REC 00466000
+         LR    R1,R3          CURRENT PAGE ADDRESS             @VW01525 00467000
+         SRL   R1,11          GET PAGE NUMBER, THEN TIMES TWO  @VW01525 00468000
+         LA    R10,DMPKEY(R1) GET PTR TO NEXT KEY              @VW01525 00469000
+         DROP  R10                                                      00470000
+         L     R1,=F'2048'    GET CONSTANT OF 2K                        00471000
+NXTPAG3  TM    DMKDMPSW,ALL   ALL PAGES TO BE DUMPED ?         @VW01525 00472000
+         BO    NXTPAG6        YES, DUMP ALL                    @VW01525 00473000
+         LR    R7,R3          GET THIS PAGE NUMBER             @VW01525 00474000
+         SRL   R7,8           PAGE NUMBER * 16                 @VW01525 00475000
+         AL    R7,DMPCORET    ADDR START OF CORTABLE           @V407510 00476000
+         USING CORTABLE,R7                                     @VW01525 00477000
+         CLC   CORFPNT,=C'*VR*' IS IT V=R PAGE ?               @VW01525 00478000
+         BE    NOTCP          YES, SKIP IT                              00479000
+         TM    CORFLAG,CORCP  DOES PAGE BELONG TO CP NUCLEUS ? @VW01525 00480000
+         BO    NXTPAG6        YES, DUMP IT                     @VW01525 00481000
+         CLC   CORFPNT,=C'FREE' FREE STORAGE PAGE ?            @VW01525 00482000
+         BE    NXTPAG6        YES, DUMP IT                     @VW01525 00483000
+         CLC   CORFPNT,DMPSYSVM  IS IT PART OF THE PAGEABLE    @V407510 00484000
+*                                NUCLEUS?                      @V407510 00485000
+         BE    NXTPAG6        YES                              @V408246 00486000
+NOTCP    DS    0H                                              @V407510 00487000
+         AL    R3,PAGESIZE    GET NEXT PAGE ADDRESS            @V407510 00488000
+         LA    R10,2(,R10)    BUMP STORAGE KEY PRT             @VW01525 00489000
+         CL    R3,STORSIZE    AT END OT STORAGE ?              @VW01525 00490000
+         BNL   DSKEND         YES -                            @VW01525 00491000
+         DROP  R7                                              @VW01525 00492000
+         B     NXTPAG3        GET NEXT STORAGE PAGE            @VW01525 00493000
+NXTPAG6  LA    R7,2048(,R3)   CHECK FOR SHORT PAGE             @VW01525 00494000
+         CL    R7,STORSIZE    ...                              @VA01097 00495000
+         BL    NXTPAG5        NO                                        00496000
+         STH   R1,DISKWRIT+6  CHANGE COUNT TO 2K                        00497000
+         OI    DMPFLAG,HALFPAGE    INDICATE THAT LAST RECORD = 2K       00498000
+NXTPAG5  BAL   R14,DSKWTRC1   WRITE OUT PAGE                            00499000
+         ISK   R0,R3          GET STORAGE KEY FOR THIS 2K BLOCK         00500000
+         STC   R0,0(,R10)     SAVE IT                                   00501000
+         ALR   R3,R1          GET NEXT 2K BLOCK                         00502000
+         CL    R3,STORSIZE    AT END OF STORAGE ?              @VA01097 00503000
+         BNL   DSKEND         YES                                       00504000
+         ISK   R0,R3          GET STORAGE FOR THIS 2K BLOCK             00505000
+         STC   R0,1(,R10)     SAVE                                      00506000
+         LA    R10,2(,R10)    BUMP STORAGE KEY PTR                      00507000
+         ALR   R3,R1          AND ADDRESS PTR                           00508000
+         CL    R3,STORSIZE    AT END OF STORAGE ??             @VA01097 00509000
+         BNL   DSKEND         YES, FINISH UP                            00510000
+NXTPAG2  BXLE  R2,R4,NXTPAG3                                            00511000
+         L     R11,RECPNT     GET NEXT RECBLOK                          00512000
+         MVC   CYL(2),RECCYL  GET NEXT CYLINDER                         00513000
+         LR    R2,R4          RESTART WITH RECORD 1                     00514000
+         B     NXTPAG3                                                  00515000
+         SPACE 1                                                        00516000
+DSKEND   EQU   *                                                        00517000
+         ST    R11,TEMPAD     SAVE ADDRESS OF LAST RECBLOK PROCESSED    00518000
+         STH   R9,DISKWRIT+6  CHANGE CHANNEL PROGRAM COUNT BACK TO 4K   00519000
+         L     R11,DMKDMPRC   GET START OF RECBLOK CHAIN                00520000
+         MVC   CYL(2),RECCYL  GET STARTING CYLINDER                     00521000
+         LR    R3,R9          WRITE OUT INFO REC, AND KEY RECS          00522000
+         LA    R1,3           GET CONSTANT OF 3                         00523000
+         LA    R2,2           START WITH RECORD 2                       00524000
+NXTPAG4  BAL   R14,DSKWTRC2   WRITE OUT REC                             00525000
+         AL    R3,PAGESIZE    BUMP PAGE ADDRESS                @V407510 00526000
+         ALR   R2,R4          BUMP RECORD NUMBER                        00527000
+         BCT   R1,NXTPAG4                                               00528000
+         SPACE 1                                                        00529000
+         LA    R10,DMKDMPSF   GET DUMP FILE SPOOL FILE BLOCK            00530000
+         USING SFBLOK,R10                                               00531000
+         L     R1,TEMPAD      GET LAST RECBLOK PROCESSED                00532000
+         IC    R3,SFBSTART+3  GET OWNED LIST DISPLACEMENT               00533000
+         ICM   R3,B'0010',RECUSED-RECBLOK(R1)     GET LAST RECORD USED  00534000
+         ICM   R3,B'1100',RECCYL-RECBLOK(R1) GET CURRENT CYLINDER       00535000
+         ST    R3,SFBLAST     SET LAST CCRD ADDRESS                     00536000
+         L     R3,=A(DMKRSPID)     GET PTR TO SYSTEM FILE NUMBER        00537000
+         LH    R2,0(,R3)      GET SYSTEM FILE NUMBER                    00538000
+         STH   R2,SFBFILID    PLACE IN DUMP FILE SFBLOK                 00539000
+         MVI   SFBTYPE,TYP1403 PRINTER FILE TYPE               @V200930 00540000
+         MVC   SFBDATE,DMKDMPDT   SET DATE OF CRASH            @V407510 00541000
+         MVC   SFBTIME,DMPTIME     SET TIME                             00542000
+         LA    R2,1(,R2)      BUMP (IGNORE OVERFLOW)                    00543000
+         STH   R2,0(,R3)      REPLACE FOR DMKCKP                        00544000
+         LA    R2,RDEVRECS    GET PTR TO SPOOL RECBLOK CHAIN            00545000
+RECSRCH  LR    R1,R2                                                    00546000
+         L     R2,RECPNT-RECBLOK(,R1)   GET FOWARD PTR                  00547000
+RECTST   LTR   R2,R2          ZERO ?                                    00548000
+         BNZ   RECSRCH        NO                                        00549000
+         ST    R2,DMKDMPDV    PREVENT DUPLICATE DUMP FILES     @V304298 00550000
+         ST    R11,0(,R1)     CHAIN DUMP RECBLOK CHAIN TO CURRENT CHAIN 00551000
+         L     R2,DMPRSPRD    GET PTR TO RDR SFBLOK CHAIN      @V407510 00552000
+         L     R3,0(,R2)      GET RDR SFBLOK CHAIN                      00553000
+         ST    R10,0(,R2)     CHAIN DUMP FILE SFBLOK                    00554000
+         ST    R3,SFBPNT      ...                                       00555000
+         SPACE 2                                                        00556000
+* NOW CHECKPOINT THE DUMP FILE SPOOL BLOCK                              00557000
+* WE WILL USE PAGE 1 IN REAL CORE TO READ AND WRITE                     00558000
+*        FROM THE CHECKPOINT CYLINDER                                   00559000
+         MVI   DISKWRIT,X'06' CHANGE IT TO A READ              @V304298 00560000
+         MVC   WRITADDR(3),AL3PAGSZ    READ INTO PAGE 1        @V407510 00561000
+         MVC   WRITLEN(2),HWPAGSZ   4096 BYTES TO READ         @V407510 00562000
+         L     R14,=A(DMKSYSCH) ADDR OF 1ST CHECKPOINT CYLINDER@V304298 00563000
+         MVC   CYL(2),0(R14)  MOVE IT IN                       @V304298 00564000
+CKSBEGIN DS    0H                                              @V304298 00565000
+         LH    R1,DMKDMPSD    ADDR OF IPL DEVICE               @V407510 00566000
+         CALL  DMKSCNRU       FIND ITS RDEVBLOK                @V304298 00567000
+         LA    R14,57         ASSUME A 3330                    @V304298 00568000
+         TM    RDEVTYPE,TYP3330 IS IT?                         @V304298 00569000
+         BO    CKPA1          XFER IF SO                       @V304298 00570000
+         L     R14,120        ASSUME A 3350                    @V304498 00571000
+         CLI   RDEVTYPE,TYP3350 IS IT ?                        @V304498 00572000
+         BE    CKPA1          XFER IF SO                       @V304498 00573000
+         LA    R14,32         ASSUME IT IS A 2314              @V304298 00574000
+         TM    RDEVTYPE,TYP2314 IS IT?                         @V304298 00575000
+         BO    CKPA1          XFER IF SO                       @V304298 00576000
+         LA    R14,24         THEN IT IS A 2305 OR 3340        @V304298 00577000
+CKPA1    DS    0H                                              @V304298 00578000
+         LH    R15,DMKDMPSD   ADDR OF IPL DEVICE               @V407510 00579000
+         LA    R5,1           START AT PAGE 1                  @V304298 00580000
+CKPLOOP  DS    0H                                              @V407510 00581000
+         L     R4,PAGESIZE    START OF PAGE                    @V407510 00582000
+         LA    R9,36          SFBLOKS PER CHECKPOINT PAGE      @V304298 00583000
+         LA    R3,768         SET UP FOR A 3330 OR 2305        @V304298 00584000
+         CLI   RDEVTYPE,TYP3350 IS IT A 3350?                  @V304498 00585000
+         BNE   CKPA14         XFER IF NOT                      @V304498 00586000
+         LA    R3,1024        DIVIDE CONSTANT FOR 3350         @V304498 00587000
+CKPA14   EQU   *              TEST NEXT DASD DEVICE            @V304498 00588000
+         TM    RDEVTYPE,TYP2314 IS IT A 2314?                  @V304298 00589000
+         BNO   *+8            XFER IF NOT                      @V304298 00590000
+         LA    R3,409         SET FOR A 2314                   @V304298 00591000
+         TM    RDEVTYPE,TYP3340 IS IT A 3340 ?                 @V304298 00592000
+         BNO   *+8            XFER IF NOT                      @V304298 00593000
+         LA    R3,512         SET UP FOR A 3340                @V304298 00594000
+         LR    R1,R5          PAGE NUMBER                      @V304298 00595000
+         BCTR  R1,0           RELATIVE TO ZERO                 @V304298 00596000
+         SLL   R1,8           MULTIPLY BY 256                  @V304298 00597000
+         SR    R0,R0          CLEAR FOR DIVIDE                 @V304298 00598000
+         DR    R0,R3          GET THE HEAD NUMBER              @V304298 00599000
+         STH   R1,HHR         STORE IT IN SEEK ADDRESS         @V304298 00600000
+         STC   R5,HHR+2       RECORD NUMBER                    @V304298 00601000
+CKSB4SIO ST    R14,ALTSAVE    SAVE OUR R14                     @V56BDA8 00602000
+         BAL   R14,DSKIOSUB   DO THE DISK IO                   @V56BDA8 00602010
+         L     R14,ALTSAVE    RESTORE R14                      @V56BDA8 00602020
+         SPACE 2                                                        00635000
+CKSINLP  CLI   DISKWRIT,X'05' IS IT A WRITE ?                  @V304298 00636000
+         BE    CKSEND         IF IT IS, WE ARE DONE            @V304298 00637000
+CKSINLP1 DS    0H                                              @V407510 00638000
+         CLC   0(4,R4),ALLONES  EMPTY SLOT?                    @V407510 00639000
+         BE    GOTCKS         XFER IF SO                       @V304298 00640000
+         LA    R4,SFBSIZE*8(R4) POINT TO NEXT SLOT             @V304298 00641000
+         BCT   R9,CKSINLP1    SEE IF IT'S EMPTY                @V304298 00642000
+         LA    R5,1(,R5)      NEXT PAGE                        @V304298 00643000
+         BCT   R14,CKPLOOP    TRY IT FOR SIZE                  @V304298 00644000
+         L     R14,=A(DMKSYSCH) CHECKPOINT CYLINDER RANGE      @V304298 00645000
+         LH    R1,CYL         LOAD PRESENT CYLINDER            @V304298 00646000
+         LA    R1,1(,R1)      GO TO NEXT ONE                   @V304298 00647000
+         STH   R1,CYL         GET NEW ONE IN SEEK ADDRESS      @V304298 00648000
+         CH    R1,2(,R14)     PAST END OF CHECKPOINT CYLS?     @V304298 00649000
+         BNH   CKSBEGIN       XFER IF NOT                      @V304298 00650000
+         B     DMPIOERR       COULDN'T FIND AN EMPTY SLOT      @V304298 00651000
+*                                  CALL IT A DUMP ERROR                 00652000
+         SPACE                                                          00653000
+GOTCKS   MVI   DISKWRIT,X'05' MAKE IT A WRITE CCW              @V304298 00654000
+         MVC   0(SFBSIZE*8,R4),SFBLOK CHECKPOINT THE DUMP FILE @V304298 00655000
+         MVI   0(R4),RDRCHN+CHGSFB SET NECESSARY FLAGS         @V304298 00656000
+         B     CKSB4SIO       WRITE OUT THE PAGE               @V304298 00657000
+         SPACE 2                                                        00658000
+CKSEND   DS    0H                                              @V304298 00659000
+         CLC   CPID(4),=C'CPCP' HOT MACHINE?                   @V304298 00660000
+         MVC   CPID(4),=C'WARM' INDICATE AUTOMATIC RESTART     @V2B2638 00661000
+         BNE   RESTART        NOPE, GO CHKPT/RESTART THE SYS   @V2B2638 00662000
+         B     MONSTOP        YA, HOT MACH, STOP MON IF ACTIVE @V2B2638 00663000
+         EJECT                                                          00664000
+DSKWTRC1 EQU   *  HERE TO WRITE RECORDS TO DUMP FILE                    00665000
+         L     R7,DMPNOREC    GET NUMBER OF RECORDS IN DUMP FILE        00666000
+         ALR   R7,R4          BUMP BY 1                                 00667000
+         ST    R7,DMPNOREC    REPLACE                                   00668000
+         LR    R7,R3          GET CURRENT PAGE ADDRESS                  00669000
+         SRL   R7,12                                                    00670000
+         SLR   R6,R6          CLEAR FOR DIVIDE                          00671000
+         D     R6,BITSPB      DIVIDE BY 8..BITS/BYTE           @V407510 00672000
+         LA    R7,DMPPGMAP(R7)     GET PAGE BIT MAP BYTE                00673000
+         IC    R6,ALOCBIT(R6) GET MASK BYTE                             00674000
+         EX    R6,RECALOC     TURN ON BIT FOR THIS RECORD               00675000
+         SPACE                                                          00676000
+DSKWTRC2 LR    R7,R2          GET CURRENT RECORD PTR                    00677000
+         BCTR  R7,0           -1                                        00678000
+         SLR   R6,R6          CLEAR FOR DIVIDE                          00679000
+         D     R6,BITSPB      DIVIDE BY 8..BITS/BYTE           @V407510 00680000
+         LA    R7,RECMAP(R7)  GET PROPER RECMAP BYTE                    00681000
+         IC    R6,ALOCBIT(R6) GET MASK BYTE                             00682000
+         EX    R6,TSTALOC     ALL READY ALLOCATED FOR THIS RECORD       00683000
+         BO    DSKIO               YES - MULT RESTARTS ON SAME DUMP CYL 00684000
+         EX    R6,RECALOC     TURN ON BIT FOR THIS RECORD               00685000
+         IC    R7,RECUSED     GET NUMBER OF RECORDS USED ON THIS CYL    00686000
+         LA    R7,1(,R7)      BUMP BY 1                                 00687000
+         STC   R7,RECUSED     REPLACE                                   00688000
+         SPACE                                                          00689000
+DSKIO    EQU   *  HERE TO DO DISK I/O                                   00690000
+         LA    R0,768                                                   00691000
+         CLI   RDEVTYPE,TYP3350 3350 DASD DEVICE ?             @V304498 00692000
+         BNE   DSK2314        NO -- BRANCH                     @V304498 00693000
+         LA    R0,1024        DIVIDE CONSTANT FOR 3350         @V304498 00694000
+DSK2314  EQU   *              TEST FOR NEXT DASD DEVICE - 2314 @V304498 00695000
+         TM    RDEVTYPE,TYP2314    2314 ?                               00696000
+         BNO   *+8            NO                                        00697000
+         LA    R0,409         DIVIDE CONSTANT FOR 2314/2319    @V2A2029 00698000
+         TM    RDEVTYPE,TYP3340 3340 DASD DEVICE ?             @V2A2029 00699000
+         BNO   *+8            NO -- BRANCH                     @V2A2029 00700000
+         LA    R0,512         DIVIDE CONSTANT FOR 3340         @V2A2029 00701000
+         LR    R7,R2          GET CURRENT RECORD NUMBER                 00702000
+         BCTR  R7,0           -1                                        00703000
+         SLL   R7,8           *256                                      00704000
+         SLR   R6,R6                                                    00705000
+         DR    R6,R0                                                    00706000
+         STH   R7,HHR         SET HEAD                                  00707000
+         STC   R2,HHR+2       SET RECORD                                00708000
+         STCM  R3,B'0111',DISKWRIT+1    SET DATA ADDRESS IN CCW         00709000
+DSKIOSUB LA    R0,RTCNT1      RETRY COUNT + 1                  @V56BDA8 00710000
+DSKRETRY LA    R7,DISKCCW     ADDRESS OF STANDARD CHANNEL      @V56BDA8 00710050
+*                             PROGRAM                                   00710100
+DISKALTR BCT   R0,*+8         BR IF RETRY COUNT NOT EXHAUSTED  @V56BDA8 00710150
+         B     DMPIOERR       OTHERWISE DUMP I/O ERROR         @V56BDA8 00710200
+DSKSIO   ST    R7,CAW         PUT CHANNEL PRG ADDRESS IN CAW   @V56BDA8 00710250
+         SIO   0(R15)         START IO                         @V56BDA8 00710300
+         BC    2,DSKBWAIT     CC=2, CHANNEL OR SUBCHANNEL BUSY          00714000
+         BC    4,DSKSTOR      CC=1, CSW STORED                          00715000
+         BC    8,*+8          CC=0, STARTED OK                          00716000
+         B     DMPIOERR                                                 00717000
+         MVC   IONPSW+4(4),=A(DSKIOINT) SET I/O NEW PSW FOR DRAINING    00718000
+DSKWAIT  LPSW  IWAIT          LOAD ENABLED WAIT STATE PSW               00719000
+         SPACE                                                          00720000
+DSKIOINT EQU   *  HERE UPON HARDWARE I/O INTERRUPT                      00721000
+         CH    R15,INTTIO     INTERRUPT FOR DUMP DISK ?                 00722000
+         BNE   DSKWAIT        NO                                        00723000
+         CLC   CSW+4(2),=AL1(CE+DE,0)   COMPLETE OK ?                   00724000
+         BCR   8,R14          YES                                       00725000
+TESTUC   TM    CSW+4,UC       UNIT CHECK ?                              00726000
+         BZ    DSKRETRY       NO - RETRY                                00727000
+DSKUC    XC    SENSDATA(24),SENSDATA CLEAR SENSE DATA          @V2B2638 00728000
+         MVC   CAW+1(3),=AL3(SENSE) USE SENSE CCW              @V56BDA8 00729000
+         TIO   0(R15)         TEST IO                                   00731000
+         BC    6,*-4          CLEAR DEVICE                              00732000
+         SIO   0(R15)         START IO (SENSE)                          00733000
+         TIO   0(R15)         WAIT FOR IT                               00734000
+         BC    6,*-4          BRANCH IF BUSY OR STATUS STORED           00735000
+         TM    SENSDATA,INTREQ     INTERVENTION REQUIRED ?              00736000
+         BO    DSKBWAIT       YES - WAIT FOR DEVICE END                 00737000
+         TM    SENSDATA,TRKCONCK TRACK CONDITION CHECK?        @V56BDA8 00738000
+         BZ    DSKRETRY       NO, RETRY                        @V56BDA8 00738010
+         MVC   CAW+1(3),=AL3(READHAR0)                         @V56BDA8 00738020
+         TIO   0(R15)         DRAIN ANY INTERRUPTS             @V56BDA8 00738030
+         BC    7,*-4          LOOP UNTIL READY                 @V56BDA8 00738040
+         SIO   0(R15)         READ R0 FOR ALT TRACK ADDR       @V56BDA8 00738050
+         BC    7,*-4          LOOP UNTIL STARTED               @V56BDA8 00738060
+         TIO   0(R15)         TEST FOR COMPLETION              @V56BDA8 00738070
+         BC    7,*-4          TRY AGAIN                        @V56BDA8 00738080
+         CLC   CSW+4(2),=AL1(CE+DE,0) CLEAN END?               @V56BDA8 00738090
+         BNE   DSKRETRY       NO, ERROR                        @V56BDA8 00738100
+         LA    R7,ALTSEEK     ALTERNATE CHANNEL PROGRAM        @V56BDA8 00738110
+         B     DISKALTR       RESTART ON ALTERNATE TRACK       @V56BDA8 00738120
+         SPACE                                                          00740000
+DSKSTOR  TM    CSW+4,BUSY     DEVICE BUSY ?                             00741000
+         BZ    TESTUC         NO - CHECK FOR UNIT CHECK                 00742000
+         TM    CSW+4,CE+DE+ATTN+CUE  STATUS CLEARED ?                   00743000
+         BZ    DSKBWAIT       NO - WAIT FOR DEVICE INTERRUPT            00744000
+         B     DSKUC          YES - RESTART DEVICE IF POSSIBLE          00745000
+DSKBWAIT EQU   *                                                        00746000
+         MVC   IONPSW+4(4),=A(DSKSIO)   SET I/O NEW PSW FOR RESTART     00747000
+         LPSW  IWAIT          LOAD ENABLED WAIT STATE PSW               00748000
+         SPACE                                                          00749000
+TSTALOC  TM    0(R7),0        EXECUTED TM                               00750000
+RECALOC  OI    0(R7),0        EXECUTED OR                               00751000
+         EJECT                                                          00752000
+         ENTRY DMKDMPRS                                                 00753000
+DMKDMPRS DS    0H                                                       00754000
+         DROP  R13                                             @VA01097 00755000
+         USING *,R12                                                    00756000
+         L     R12,=A(DMKDMPDK)    ESTABLISH ADDRESSABITITY             00757000
+         USING DMKDMPDK,R12   ...                                       00758000
+         USING DMKDMP+4096,R13                                 @VA01097 00759000
+         LR    R13,R12        SET 2ND BASE REGISTER            @VA01097 00760000
+         A     R13,PAGESIZE   CALCULATE 2ND BASE REG           @V407510 00761000
+         L     R15,=A(DMKSYSCK)    POINT TO TOD CLOCK FIELD AND         00762000
+         STCK  0(R15)         SAVE THE TIME FOR ACCOUNTING IN DMKCKP    00763000
+RESTART  DS    0H                                              @V408246 00764000
+         LA    R14,100        RETRY COUNT                      @V408246 00765000
+         LH    R15,DMKDMPSD   IPL DEVICE                       @V407510 00766000
+         LA    R0,IPLREAD     GET IPL CCWS                              00767000
+         ST    R0,CAW         SET CAW                                   00768000
+SIOIPL   SIO   0(R15)                                                   00769000
+         BC    8,TIOIPL       CC=0, STARTED OK                          00770000
+         BC    2,IPLWAIT      CC=2, DEVICE BUSY                         00771000
+         BC    4,SIOSTOR      CC=1, CSW STORED                          00772000
+         BCT   R14,RESTART+4  RETRY                            @V408246 00773000
+         BAL   R14,LOADWAIT   CC=3, NOT OPERATIONAL                     00774000
+TIOIPL   TIO   0(R15)         TEST                                      00775000
+         BNZ   *-4            WAIT                                      00776000
+         STH   R15,INTTIO     SAVE IPL DEVICE ADDRESS                   00777000
+         OI    IPLREAD+4,SKIP+CC   CHANGE IPL SEQUENCE                  00778000
+         SIO   0(R15)         START                                     00779000
+         BNZ   *-4            WAIT                                      00780000
+         TIO   0(R15)         TEST                                      00781000
+         BNZ   *-4            WAIT                                      00782000
+         CLC   CSW+4(2),=XL2'0C00' IS IT CE DE CLEAN ??                 00783000
+         BE    B1             OK                               @V408246 00784000
+         BCT   R14,RESTART+4  RETRY                            @V408246 00785000
+         BAL   R14,LOADWAIT   NO, SOMETHING WENT WRONG                  00786000
+B1       EQU   *                                               @V408246 00787000
+         LPSW  IPLPSW         GO                                        00788000
+         SPACE                                                          00789000
+SIOSTOR  TM    CSW+4,SM+BUSY  CONTROL UNIT BUSY?               @VA04308 00790000
+         BO    IPLWAIT        WAIT FOR IT                      @VA04308 00791000
+         TM    CSW+4,BUSY     DEVICE BUSY?                     @VA04308 00792000
+         BZ    IPLUC          NO -- BRANCH                              00793000
+         TM    CSW+4,CE+DE+ATTN+CUE          STATUS CLEARED ?           00794000
+         BNZ   RESTART             YES -- RESTART CHANNEL PROGRAM       00795000
+IPLUC    TM    CSW+4,UC       UNIT CHECK ?                              00796000
+         BO    B2             OK                               @V408246 00797000
+         BCT   R14,RESTART+4  RETRY                            @V408246 00798000
+         BAL   R14,LOADWAIT   UNEXPLAINED ERROR                         00799000
+B2       EQU   *                                               @V408246 00800000
+         LA    R0,SENSE       ISSUE SENSE COMMAND                       00801000
+         ST    R0,CAW         SET CAW                                   00802000
+         XC    SENSDATA(24),SENSDATA CLEAR SENSE DATA          @V2B2638 00803000
+         SIO   0(R15)         START                                     00804000
+         BNZ   *-4            WAIT                                      00805000
+         TIO   0(R15)         TEST                                      00806000
+         BNZ   *-4            WAIT                                      00807000
+         TM    SENSDATA,INTREQ     INTERVENTION REQUIRED ?              00808000
+         BO    B3             OK                               @V408246 00809000
+         BCT   R14,RESTART+4  RETRY                            @V408246 00810000
+         BAL   R14,LOADWAIT   UNEXPLAINED ERROR                         00811000
+B3       EQU   *                                               @V408246 00812000
+IPLWAIT  EQU   *                                                        00813000
+         MVC   IONPSW+4(4),=A(RESTART)  WHER TO RESTART                 00814000
+         LPSW  IWAIT          LOAD ENABLED WAIT STATE PSW               00815000
+         EJECT                                                          00816000
+*.                                                                      00817000
+* OPERATION OF TAPE DUMP ROUTINE -                                      00818000
+*                                                                       00819000
+*        1.  RESET PRINTER CCWS FOR TAPE.                               00820000
+*        3.  EXECUTE TAPE MODE SET CCWS.                                00821000
+*        4.  JOIN PRINTER CODE BELOW.                                   00822000
+*                                                                       00823000
+*.                                                                      00824000
+         SPACE                                                          00825000
+DMPTAPE  EQU   *  HERE TO WRITE DUMP TO TAPE                            00826000
+         LA    R0,TAPEINIT    GET INITIAL MODE SET TAPE CCWS            00827000
+         CLI   RDEVTYPE,TYP3420 3420 TAPE DRIVE ?              @VA07418 00828000
+         BNE   MODEONE        DON,T CHANGE MODESET             @VA07418 00829000
+         MVI   TAPEINIT,X'C3' SET MODE 1600 BPI                @VA07418 00830000
+MODEONE  EQU   *                                               @VA07418 00831000
+         BAL   R10,CLRCHAN                                              00832000
+         B     DMPPRT         JOIN PRINTER DUMP CODE BELOW              00833000
+         EJECT                                                          00834000
+*.                                                                      00835000
+* OPERATION OF PRINTER DUMP ROUTINE -                                   00836000
+*                                                                       00837000
+*        1.  FORMAT AND PRINT GENERAL PURPOSE REGISTERS.                00838000
+*        2.  FORMAT AND PRINT CONTROL REGISTERS.                        00839000
+*        3.  FORMAT AND PRINT FLOATING POINT REGISTERS.                 00840000
+*        4.  FORMAT AND PRINT TOD CLOCK AND CLOCK COMPARATOR            00841000
+*        5.  FORMAT AND PRINT CPU TIMER AND PREFIX REGISTER             00842000
+*        6.  FORMAT AND PRINT ALL OF MAIN MEMORY (INCLUDING STORAGE     00843000
+*            KEYS AT THE BEGINNING OF EVERY 2K BLOCK.)  DUPLICATE       00844000
+*            STORAGE LOCATIONS WILL BE PRINTED AS ONE LINE WITH AN      00845000
+*            EXPLANATION.                                               00846000
+*        7.  PRINT "*** END OF DUMP ***" MESSAGE.                       00847000
+*        8.  IF DUMP DEVICE IS TAPE WRITE AN END OF FILE MARK.          00848000
+*        9.  IF CPID IS NOT "CPCP" THEN LOAD A NON-ERROR DISABLED       00849000
+*            WAIT STATE.                                                00850000
+*       10.  IF THE VM/MONITOR WAS ACTIVE THEN WRITE A TAPE MARK AND    00851000
+*            REWIND/UNLOAD THE TAPE.                                    00852000
+*            RE-IPL THE SYSTEM (BRING IN DMKCKP)                        00853000
+*            TO CHECK POINT THE SYSTEM AS IT NOW STANDS.                00854000
+*.                                                                      00855000
+         SPACE                                                          00856000
+DMPPRT   EQU   *  HERE TO WRITE DUMP TO PRINTER (OR TAPE)               00857000
+         CLC   RDEVTYPC(2),P3800  IS IT A 3800 ?               @V60B9BA 00857200
+         BNE   NO3800             XFER IF NOT                  @V60B9BA 00857400
+         LA    R0,INIT3800        AN INITIALIZER PRINTER CCW   @V60B9BA 00857600
+         BAL   R10,SETCCW         GO DO THE START I/O          @V60B9BA 00857800
+NO3800   LA    R7,60          SET INITIAL NUMBER OF LINES/PAGE @V60B9BA 00858000
+         MVC   LINEID(DMPSMSGL),DMPSMSG  IDENTIFY DUMP         @V407510 00859000
+         BAL   R14,PRTHD      PRINT IDENTITY MESSAGE           @V407510 00860000
+         LA    R1,GREGS       GET PTR TO GENERAL PURPOSE REGS  @V407510 00861000
+         MVC   LINEID(9),=C'GPRS 0- 7'  SET IDENTIFIER                  00862000
+         BAL   R14,PUTLINE    PRINT LINE                                00863000
+         MVC   LINEID(9),=C'GPRS 8-15'  SET IDENTIFIER                  00864000
+         OI    DMKDMPSW,DOUBLESP   INDICATE DOUBLE SPACING              00865000
+         BAL   R14,PUTLINE    PRINT LINE                                00866000
+         LA    R1,CTLREGS     GET 16 CONTROL REGISTERS                  00867000
+         MVC   LINEID(9),=C'CRS  0- 7'  SET IDENTIFIER                  00868000
+         BAL   R14,PUTLINE    PRINT LINE                                00869000
+         MVC   LINEID(9),=C'CRS  8-15'  SET IDENTIFIER                  00870000
+         OI    DMKDMPSW,DOUBLESP   INDICATE DOUBLE SPACING              00871000
+         BAL   R14,PUTLINE    PRINT LINE                                00872000
+         AIF   (NOT &FLOATPT).NOFP3                                     00873000
+         LA    R1,FPREGS      GET 4 FLOATING POINT REGISTERS            00874000
+         MVC   LINEID(9),=C'FPRS 0- 4'  SET IDENTIFIER                  00875000
+         OI    DMKDMPSW,DOUBLESP   INDICATE DOUBLE SPACING              00876000
+         BAL   R14,PUTLINE    PRINT LINE                                00877000
+.NOFP3   ANOP                                                           00878000
+         MVC   LINEID(9),=C'TOD CLOCK'  SET IDENTIFIER                  00879000
+         LA    R1,TODCLOCK    GET PTR TO TOD CLOCK VALUE                00880000
+         LA    R5,DATA        GET OUTPUT LOCATION                       00881000
+         BAL   R14,CLOCKFMT   FORMAT                                    00882000
+         MVC   DATA+24(14),=C'TOD CLOCK COMP'     SET IDENTIFIER        00883000
+         LA    R1,CLKCOMP     GET PTR TO TOD CLOCK COMPARATOR           00884000
+         LA    R5,DATA+40     GET OUTPUT LOCATION                       00885000
+         BAL   R14,CLOCKFMT   FORMAT                                    00886000
+         BAL   R14,PARTLINE                                             00887000
+         MVC   LINEID(9),=C'CPU TIMER'  SET IDENTIFIER                  00888000
+         LA    R1,CPUTIMER    GET PTR TO CPU TIMER VALUE                00889000
+         LA    R5,DATA        GET OUTPUT LOCATION                       00890000
+         BAL   R14,CLOCKFMT   FORMAT                                    00891000
+         MVC   HALFLINE,=C'PREFIX REG'  SET IDENTIFIER         @V407510 00892000
+         LA    R1,PREFRG      GET PTR TO PREFIX REG            @V407510 00893000
+         LA    R5,HALFDATA    GET PTR TO OUTPUT                @V407510 00894000
+         UNPK  HALFDATA(PKLEN),PREFRG(L'PREFRG+1) UNPACK       @V407510 00895000
+         TR    HALFDATA(TRLEN),TRHEX    TRANSLATE              @V407510 00896000
+         MVI   HALFDATA+TRLEN,BLNK      NEATEN SLACK BYTE      @V407510 00897000
+         BAL   R14,PARTLINE   PRINT LINE                                00898000
+         L     R1,MAINPSA     GET PREFIX REG                   @V407510 00899000
+         LTR   R1,R1          IS THERE PREFIXING?              @V407510 00900000
+         BZ    DUMPCORE       NO, DUMP MAIN STORAGE            @V407510 00901000
+         MVC   LINEID(LN18),=C'MAIN PROCESSOR PSA'  HEADING    @V407510 00902000
+         BAL   R14,PRTHD      PRINT LINE                       @V407510 00903000
+         LR    R4,R1          SET START ADDRESS                @V407510 00904000
+         LA    R11,FULLPAGE   DUMP FULL PAGE                   @V407510 00905000
+         BCTR  R11,0          - LAST LINE WITHOUT SUPPRESSION  @V407510 00906000
+LCPUT0   DS    0H             LOOP TO PUT OUT PAGE             @V407510 00907000
+         BAL   R14,PUTLINE    PRINT ONE LINE AT A TIME         @V407510 00908000
+         BCT   R11,LCPUT0     LOOP UNTIL PAGE FINISHED         @V407510 00909000
+         OI    DMKDMPSW,BREAKSUP  REAK LINE SUPPRESSION        @V407510 00910000
+         BAL   R14,PUTLINE    PRINT LAST LINE                  @V407510 00911000
+         MVC   LINEID(LN22),=C'ATTACHED PROCESSOR PSA' HEADING @V407510 00912000
+         BAL   R14,PRTHD      PRINT LINE                       @V407510 00913000
+         L     R1,ATTPSA      GET OTHER PREFIX REG             @V407510 00914000
+         LR    R4,R1          SET START ADDRESS                @V407510 00915000
+         LA    R11,FULLPAGE   DUMP FULL PAGE                   @V407510 00916000
+         BCTR  R11,0          - LAST LINE WITHOUT SUPPRESSION  @V407510 00917000
+LCPUT00  DS    0H             LOOP TO PUT OUT PAGE             @V407510 00918000
+         BAL   R14,PUTLINE    PRINT ONE LINE AT A TIME         @V407510 00919000
+         BCT   R11,LCPUT00    LOOP UNTIL PAGE FINISHED         @V407510 00920000
+         OI    DMKDMPSW,BREAKSUP  BREAK LINE SUPPRESSION       @V407510 00921000
+         BAL   R14,PUTLINE    PRINT LAST LINE                  @V407510 00922000
+DUMPCORE DS    0H             DUMP MAIN STORAGE                @V407510 00923000
+         MVC   LINEID(LN12),=C'MAIN STORAGE'     HEADING       @V407510 00924000
+         BAL   R14,PRTHD      PRINT LINE                       @V407510 00925000
+         LA    R1,LOWCORE     GET AREA CONTAINING INITIAL 256 BYTES     00926000
+         SLR   R4,R4          SET INITIAL ADDRESS TO LOCATION 0         00927000
+         LA    R11,8          SET LOOP CONSTANT                         00928000
+LCPUT    BAL   R14,PUTLINE    PRINT LINE                                00929000
+         BCT   R11,LCPUT                                                00930000
+         LR    R1,R4          START DUMPING ACTUAL MEMORY NOW           00931000
+DMPNXT   BAL   R14,PUTLINE    PRINT LINE                                00932000
+NEXTPAGE LR    R9,R1          GET ADDRESS                               00933000
+         N     R9,=F'2047'    ON 2K BOUNDRY ?                           00934000
+         BNZ   DMPNXT         NO                                        00935000
+         CL    R1,STORSIZE    AT END OF STORAGE ?              @VA01097 00936000
+         BNL   DMPEND         YES                                       00937000
+         LR    R9,R1          GET ADDRESS                               00938000
+         N     R9,CONS4095    ON 4K BOUNDARY                   @V407510 00939000
+         BNZ   DMPNXT         NO                                        00940000
+         TM    DMKDMPSW,ALL   DUMP ALL OF MEMORY ?                      00941000
+         BO    DMPUP          YES                                       00942000
+         LR    R9,R1          GET ADDRESS                               00943000
+         SRL   R9,8           GET PAGE NUMBER * 16                      00944000
+         AL    R9,DMPCORET    FORM CORTABLE ENTRY ADDR         @V407510 00945000
+         USING CORTABLE,R9                                              00946000
+         TM    CORFLAG,CORCP  DOES PAGE BELONG TO CP NUCLEUS ?          00947000
+         BO    DMPUP          YES                                       00948000
+         CLC   CORFPNT,=C'FREE'    DOES PAGE BELONG TO FREE STORAGE ?   00949000
+         BE    DMPUP          YES                                       00950000
+         CLC   CORFPNT,DMPSYSVM  IS IT PART OF THE PAGEABLE    @V407510 00951000
+*                                NUCLEUS?                      @V407510 00952000
+         BE    DMPUP          YES                              @V408246 00953000
+         TM    DMKDMPSW,SKIPSUP    ANY PAGES SKIPPED BEFORE ?           00954000
+         BO    SKIPON         YES                                       00955000
+         ST    R1,TEMPAD      SAVE FROM ADDRESS                         00956000
+         UNPK  SKIPFROM(7),TEMPAD+1(4)  UNPACK FROM ADDRESS             00957000
+         TR    SKIPFROM(6),TRHEX   TRANSLATE                            00958000
+         MVI   SKIPFROM+6,C' '     NEATEN UP                            00959000
+         OI    DMKDMPSW,SKIPSUP+BREAKSUP                                00960000
+SKIPON   DS    0H                                              @V407510 00961000
+         AL    R1,PAGESIZE    GET NEXT PAGE ADDR               @V407510 00962000
+         B     NEXTPAGE                                                 00963000
+DMPUP    LR    R4,R1          GET ADDRESS                               00964000
+         B     DMPNXT                                                   00965000
+         DROP  R9                                                       00966000
+         EJECT                                                          00967000
+DMPEND   EQU   *  HERE WHEN AT END OF MEMORY FOR PRINTER (OR TAPE)      00968000
+         OI    DMKDMPSW,BREAKSUP   TURN LINE SUPPRESSION OFF            00969000
+         MVC   DATA(19),=C'*** END OF DUMP ***'                         00970000
+         BAL   R14,LASTLINE   PRINT THE LAST LINE                       00971000
+         CLI   RDEVTYPC,CLASTAPE   TAPE ?                               00972000
+         BNE   DRAINEND       NO                                        00973000
+         LA    R0,WRITEOF     GET TAPE MARK CCWS                        00974000
+         BAL   R10,PRIO       WRITE 2 TAPE MARKS                        00975000
+DRAINEND TIO   0(R15)         DRAIN LAST INTERRUPT                      00976000
+         BNZ   *-4            WAIT                                      00977000
+SHUTEND  CLC   CPID,=C'CPCP'  DUMP ON WARM MACHINE ?                    00978000
+         BE    MONSTOP        YA, STOP MONITOR, THEN CHKPT SYS @V2B2638 00979000
+         LPSW  XWAIT1         LOAD NONERROR DISABLED WAIT STATE PSW     00980000
+         SPACE                                                          00981000
+LOADWAIT LPSW  XWAIT2         LOAD ERROR DISABLED WAIT STATE PSW        00982000
+         EJECT                                                          00983000
+CLOCKFMT EQU   *  HERE TO FORMAT AND PRINT A CLOCK VALUE                00984000
+         UNPK  0(9,R5),0(5,R1)     UNPACK FIRST WORD                    00985000
+         TR    0(8,R5),TRHEX  TRANSLATE                                 00986000
+         MVI   8(R5),C' '     NEATEN SLACK BYTE                         00987000
+         UNPK  10(9,R5),4(5,R1)    UNPACK SECOND WORD                   00988000
+         TR    10(8,R5),TRHEX TRANSLATE                                 00989000
+         MVI   18(R5),C' '    NEATEN SLACK BYTE                         00990000
+         BR    R14            RETURN                                    00991000
+******                                                                  00992000
+*                                                                       00993000
+*        HERE TO STOP THE MONITOR IF IT IS ACTIVE                       00994000
+*                                                                       00995000
+******                                                                  00996000
+         SPACE                                                          00997000
+MONSTOP  L     R9,MONCAD      GET ADDRESS OF MONCOM            @V2B2638 00998000
+         LTR   R9,R9          IS THERE ONE? (MONITOR ACTIVE)   @V2B2638 00999000
+         BZ    RESTART        NO, THEN DONE, GO CHKPT THE SYS  @V2B2638 01000000
+         USING MONCOM,R9      ADDRESS THE MONCOM BLOCK         @V2B2638 01001000
+         TM    MONFLAG3,SPOOLED  IS OUTPUT SPOOLED             @VA07888 01001100
+         BO    RESTART          YES, NO TAPE CLEAN UP RQD      @VA07888 01001200
+         L     R8,MONARDB     GET THE TAPE DEVICE BLOCK ADDR   @V2B2638 01002000
+         CALL  DMKSCNRD       GET THE DEVICE ADDR IN CCU FORM  @V2B2638 01003000
+         MVI   MONFLAG2,0     CLEAR FOR DMP USE                @VM01008 01004000
+         TIO   0(R1)          ATTEMPT TO CLEAR PENDING INTS    @VM01008 01005000
+         BC    2,*-4          STILL BUSY, KEEP TRYING          @VM01008 01006000
+         BC    4,ANALYZE      GO FIGURE OUT WHAT HAPPENED      @VM01008 01007000
+SETTRUN  OI    MONFLAG2,TRUN  SET TRUN FLAG TO SAY WE TRIED    @VM01008 01008000
+         L     R2,MONAIOB     GET THE MONITOR TAPE IOB         @VM01008 01009000
+         LA    R0,IOBSIZE*8+8(R2) BUMP UP TO THE WTM/RUN CCWS  @V2B2638 01010000
+         ST    R0,CAW         SET UP FOR SIO                   @V2B2638 01011000
+DOMONSIO SIO   0(R1)          START THE DEVICE                 @V2B2638 01012000
+         BC    2,*-4          BUSY, KEEP TRYING                @V2B2638 01013000
+         BC    1,RESTART      CANT MAKE IT, LEAVE AS IS.       @V2B2638 01014000
+         BC    4,ANALYZE      CC = 1, DO SENSE IF UC           @V2B2638 01015000
+DOTIO    TIO   0(R1)          CLEAR THE STATUS                 @V2B2638 01016000
+         BC    2,*-4          BUSY, KEEP TRYING                @V2B2638 01017000
+         BC    8+1,RESTART    ALL CLEAR, GO CALL CHKPT         @V2B2638 01018000
+ANALYZE  TM    CSW+4,UC       CSW STORED, DID UC OCCUR?        @V2B2638 01019000
+         BZ    CHKTRUN        BE SURE WHERE WE ARE BEFORE EXIT @VM01008 01020000
+         LA    R2,SENSE       YES, SET UP FOR SENSE            @V2B2638 01021000
+         ST    R2,CAW         ...                              @V2B2638 01022000
+         XC    SENSDATA(24),SENSDATA CLEAR SENSE DATA          @V2B2638 01023000
+         B     DOMONSIO       GO ISSUE THE SENSE               @V2B2638 01024000
+CHKTRUN  TM    MONFLAG2,TRUN  HAS REW/UNLOAD BEEN ATTEMPTED YET@VM01008 01025000
+         BZ    SETTRUN        NOPE, GO TRY NOW                 @VM01008 01026000
+         B     RESTART        YES, THEN LEAVE WELL ENOUGH ALONE@VM01008 01027000
+         DROP  R9                                              @V2B2638 01028000
+         EJECT                                                          01029000
+PUTLINE  EQU   *  HERE TO WRITE A LINE TO TAPE OR PRINTER               01030000
+         C     R7,PAGLINE     TEST FOR NEW PAGE                @V407510 01031000
+         BL    CONT                                                     01032000
+         SLR   R7,R7          SET CURRENT LINE TO ZERO                  01033000
+         LA    R0,SKIPCH1     GET SKIP TO CHANNEL 1 CCWS                01034000
+         BAL   R10,SETCCW     SET CONTROL                               01035000
+CONT     LA    R2,4           GET INCREMENT FOR BXLE LOOP               01036000
+         LA    R3,28(,R1)     GET END FOR BXLE LOOP                     01037000
+         MVC   DATATR,0(R1)                                             01038000
+         LA    R5,DATA        GET START OF HEX OUTPUT                   01039000
+NXTWD    L     R6,0(,R1)                                                01040000
+         ST    R6,TEMPAD      SAVE IN TEMPORARY WORK AREA               01041000
+         UNPK  0(9,R5),TEMPAD(5)   UNPACK HEX DATA                      01042000
+         MVI   8(R5),C' '     CLEAR GARBAGE BYTE                        01043000
+         TR    0(8,R5),TRHEX  TRANSLATE TO EBCDIC HEX                   01044000
+         LA    R5,10(,R5)     GET NEXT OUTPUT SLOT                      01045000
+         BXLE  R1,R2,NXTWD                                              01046000
+         MVI   DATATR-1,C'*'                                            01047000
+         MVI   LINEND,C'*'                                              01048000
+         CLI   LINEID+6,C'-'  TEST FOR PREFORMATTED ID                  01049000
+         BE    TRANS                                                    01050000
+         LR    R2,R4          GET CURRENT ADDRESS                       01051000
+         N     R2,=F'2047'    ON 2K BOUNDRY ?                           01052000
+         BNZ   LASTLINE       NO                                        01053000
+         ISK   R3,R4          GET STROAGE KEY                           01054000
+         STC   R3,TEMPAD      PLACE IN TEMPORARY WORK AREA              01055000
+         UNPK  KEY(3),TEMPAD(2)    UNPACK HEX DATA                      01056000
+         MVI   KEY+2,C' '     CLEAR GARBAGE BYTE                        01057000
+         TR    KEY,TRHEX      TRANSLATE TO EBCDIC HEX                   01058000
+         OI    DMKDMPSW,BREAKSUP   TURN SUPPRESSION BREAK ON            01059000
+LASTLINE ST    R4,TEMPAD      SAVE ADDRESS IN TEMPORARY WORK AREA       01060000
+         UNPK  LINEID(7),TEMPAD+1(4)    UNPACK HEX ADDRESS              01061000
+         MVI   LINEID+6,C' '  CLEAR GARBAGE BYTE                        01062000
+         TR    LINEID(6),TRHEX     TRANSLATE TO EBCDIC HEX              01063000
+         MVC   DATA-2(40),DATA     EDIT LINE                            01064000
+         LA    R4,32(,R4)     GET NEXT MEMORY ADDRESS                   01065000
+         CLC   HOLD,DATATR    CHECK FOR DUPLICATE CORE LOCATIONS        01066000
+         MVC   HOLD,DATATR    SAVE THIS LINE                            01067000
+         BNE   NOTSAME        NOT EQUAL                                 01068000
+         TM    DMKDMPSW,BREAKSUP   SUPPRESSION TURNED OFF ?             01069000
+         BO    NOTSAME        YES                                       01070000
+         TM    DMKDMPSW,LINESUP    SUPPRESSION ACTIVE ?                 01071000
+         BO    CLEARL         YES                                       01072000
+         OI    DMKDMPSW,LINESUP    SET SUPPRESSION ACTIVE               01073000
+         MVC   SUPFROM,LINEID SAVE STARTING ADDRESS                     01074000
+         B     CLEARL                                                   01075000
+NOTSAME  NI    DMKDMPSW,X'FF'-BREAKSUP  TURN BREAK SUPPRESSION FLAG OFF 01076000
+         TM    DMKDMPSW,LINESUP    SUPPRESSION ACTIVE ?                 01077000
+         BNO   SKIPTST        NO                                        01078000
+         NI    DMKDMPSW,X'FF'-LINESUP   TURN FLAG OFF                   01079000
+         MVC   SUPTO,LINEID   SET ENDING ADDRESS                        01080000
+         TM    DMKDMPSW,SKIPSUP    PAGES SKIPPED ?                      01081000
+         BNO   *+10           NO                                        01082000
+         MVC   SUPTO,SKIPFROM USE THIS VALUE                            01083000
+         LA    R0,SUPCCW      GET LINE SUPPRESSION MESSAGE CCW          01084000
+         BAL   R10,SETCCW     SET CONTROL                               01085000
+         LA    R7,1(,R7)      BUMP NUMBER OF LINES PTR                  01086000
+SKIPTST  TM    DMKDMPSW,SKIPSUP    LINES SKIPPED BECAUSE OF NUCLEUS ?   01087000
+         BNO   TRANS          NO                                        01088000
+         NI    DMKDMPSW,X'FF'-SKIPSUP   TURN FLAG OFF                   01089000
+         MVC   SKIPTO,LINEID  SET TO ADDRESS                            01090000
+         LA    R0,SKIPCCW     GET CCW                                   01091000
+         BAL   R10,SETCCW     SET CONTROL                               01092000
+         SLR   R7,R7          RESET LINE COUNTER                        01093000
+TRANS    TR    DATATR,DMKDMPTR     TRANSLATE TO EBCDIC                  01094000
+         LA    R0,PRLINE      GET PRINT 1 LINE CCW                      01095000
+         TM    DMKDMPSW,DOUBLESP   DOUBLE SPACE AFTER THIS LINE ?       01096000
+         BNO   ONESPC         NO                                        01097000
+         NI    DMKDMPSW,X'FF'-DOUBLESP  TURN FLAG OFF                   01098000
+PARTLINE LA    R0,PRLINESP    GET PRINT 1 LINE AND SPACE CCW            01099000
+         LA    R7,1(,R7)      BUMP NUMBER OF LINES PTR                  01100000
+ONESPC   BAL   R10,SETCCW     SET CONTROL                               01101000
+         LA    R7,1(,R7)      BUMP NUMBER OF LINES PTR                  01102000
+CLEARL   MVI   LINE,C' '      BLANK OUT THE OUTPUT BUFFER               01103000
+         MVC   LINE+1(LINEL-1),LINE     ...                             01104000
+         BR    R14            RETURN                                    01105000
+PRTHD    DS    0H             PRINT PAGE HEADER                @V407510 01106000
+         SR    R7,R7          START NEW PAGE                   @V407510 01107000
+         LA    R0,SKIPCH1     FORCE EJECT                      @V407510 01108000
+         BAL   R10,SETCCW     SET CONTROL                      @V407510 01109000
+         B     PARTLINE       PRINT HEADER LINE                @V407510 01110000
+         SPACE 2                                                        01111000
+SETCCW   CLI   RDEVTYPC,CLASTAPE   IS DUMP UNIT A TAPE ??               01112000
+         BNE   PRIO           NO, PRINTER                               01113000
+         LR    R9,R0          GET OP CODE                               01114000
+         IC    R0,0(R9)       ..                                        01115000
+         L     R2,0(R9)       GET ADDRESS OF DATA                       01116000
+         LA    R2,0(R2)       CLEAR HI BYTE                             01117000
+         BCTR  R2,R0          MINUS ONE                                 01118000
+         STC   R0,0(R2)       PUT OP CODE IN DATA BUFFER                01119000
+         ST    R2,TAPCCW      SET CCW ADDRESS                           01120000
+         LH    R2,6(R9)       GET CCW COUNT                             01121000
+         LA    R2,1(R2)       UP THE COUNT BY ONE                       01122000
+         STH   R2,TAPCCW+6    SET CCW COUNT                             01123000
+         MVI   TAPCCW,X'01'   WRITE OP FOR TAPE                         01124000
+         LA    R0,TAPCCW      CCW LIST                                  01125000
+         B     PRIO           DO IO                                     01126000
+         EJECT                                                          01127000
+CLRCHAN  EQU   * HERE TO INSURE THAT PATH TO DEVICE IS FREE             01128000
+         TIO   0(R15)         IS CHAN/CONTROL UNIT/DEVICE FREE ?        01129000
+         BC    8+4+2,*+8      BR. ON CC= 0/1/2/                         01130000
+         BAL   R14,LOADWAIT   TRACER ADDRESS ON FATAL I/O CONDITION     01131000
+         BC    8,PRIO         CC=0, PATH TO DEVICE IS FREE              01132000
+         BC    2,WAITPRT      CC=2, CHANNEL IS STILL BUSY               01133000
+CHKSTAT  CLI   CSW+4,UC       ANYTHING IN CSW BE-SIDES UC               01134000
+         BNE   PRIO           YES - PRINT THE LINE                      01135000
+         ST    R0,DMPR0       SAVE R0                                   01136000
+         ST    R14,DMPR14     ...  R14                                  01137000
+         ST    R15,DMPR15     ...  R15                                  01138000
+         L     R0,INTQMSG     GET COUNT AND ADDRESS OF INTREQ  @V200735 01139000
+         BAL   R9,TYPLINE     TELL OPERATOR TO MAKE READY      @V200735 01140000
+         L     R0,DMPR0       RESTORE R0                                01141000
+         L     R14,DMPR14     ...     R14                               01142000
+         L     R15,DMPR15     ...     R15                               01143000
+         TIO   0(R15)         DRAIN INTERRUPT                  @VA04469 01144000
+         BC    2,*-4          LOOP ON BUSY                     @VA04469 01145000
+         BC    8+4,*+8        BR. ON CC= 0/1                   @VA04469 01146000
+         BAL   R14,LOADWAIT   TRACE @ FOR FATAL I/O ,, CC=3    @VA04469 01147000
+WAITPRT  MVC   IONPSW+4(4),=A(WAITRET) SET UP RETURN @         @VA04469 01148000
+         LPSW  IWAIT          SET ENABLED WAIT                 @VA04469 01149000
+         SPACE                                                          01150000
+WAITRET  CH    R15,INTTIO     INTERRUPT FORM RIGHT DEVICE ?    @VA04469 01151000
+         BE    CLRCHAN        YES, INSURE PATH IS FREE         @VA04469 01152000
+         LPSW  IWAIT          NO, KEEP UP THE VIGIL ...        @VA04469 01153000
+         SPACE                                                          01154000
+PRIO     EQU   *  HERE TO DO I/O FOR PRINTER AND TAPE OPERATIONS        01155000
+         ST    R0,CAW         SET CAW                                   01156000
+         TIO   0(R15)         TEST                                      01157000
+         BC    2,*-4          CC=2; CHANNEL STILL BUSY                  01158000
+         BC    8+4,*+8        CC=0 OR CC=1 ; TAKE THE BRANCH            01159000
+         BAL   R14,LOADWAIT   CC=3, NOT OPERATIONAL                     01160000
+PRSIO    SIO   0(R15)         START                                     01161000
+         BC    8+4+2,*+8      BR. ON CC= 0/1/2/                         01162000
+         BAL   R14,LOADWAIT   TRACER ADDRESS ON FATAL I/O CONDITION     01163000
+         BC    2,CLRCHAN      CC=2, CHANNEL STILL BUSY                  01164000
+         BC    8,GOTIO        CC=0, GOOD SIO STATUS                     01165000
+         CLI   CSW+4,UC       IS DEVICE IN A NOT-READY CONDITION        01166000
+         BE    CHKSTAT        YES - GO TELL THE OPERATOR                01167000
+         SPACE                                                          01168000
+GOTIO    TIO   0(R15)         ISSUE TIO TO 'DUMP' DEVICE                01169000
+         BC    2,*-4          CC=2, CHANNEL STILL BUSY; LOOP UNTIL FREE 01170000
+         BC    8,*+16         CC=0, STATUS HAS BEEN CLEARED             01171000
+         CLI   CSW+4,UC       IS DEVICE IN A NOT-READY STATE            01172000
+         BE    CHKSTAT        YES - TELL THE OPERATOR                   01173000
+         B     GOTIO          RE-ISSUE THE TIO                          01174000
+         NC    CSW+4(2),=AL1(X'FF'-CE-DE-UE,X'FF')     ANY ERRORS ?     01175000
+         BCR   8,R10          NO -- RETURN                              01176000
+         CLI   RDEVTYPC,CLASTAPE   TAPE ?                               01177000
+         BCR   7,R10          NO -- RETURN                              01178000
+         TM    CSW+4,CUE      CONTROL UNIT END ?                        01179000
+         BCR   1,R10          YES --                                    01180000
+         L     R9,CSW         GET CSW CCW PTR                           01181000
+         S     R9,CCWLN       -8...ADDR OF CCW                 @V407510 01182000
+         CLI   0(R9),X'01'    WRITE CCW ?                               01183000
+         BE    WRITERR        YES                                       01184000
+         CLI   0(R9),X'1F'    WRITE TAPE MARK ?                         01185000
+         BNE   PRERSIO        NO -- RE-EXECUTE THE FAILING CCW          01186000
+         LA    R9,TAPERR2     GET BACK SPACE AND REWRITE TAPE MARK CCWS 01187000
+         B     PRERSIO                                                  01188000
+WRITERR  DS    0H                                                       01189000
+         LA    R9,TAPERR1     GET TAPE ERROR CCWS                       01190000
+PRERSIO  ST    R9,CAW         SET CAW                                   01191000
+         B     PRSIO                                                    01192000
+         EJECT                                                          01193000
+DMPPRGCK EQU   *  HERE WHEN A PROGRAM CHECK OCCURRS                     01194000
+         MVI   DMPABMC,C'5'   SET MESSAGE NUMBER                        01195000
+         MVC   DMPABMT(13),=C'PROGRAM CHECK'                            01196000
+         B     DMPAB                                                    01197000
+         SPACE 1                                                        01198000
+DMPMCHCK EQU   *  HERE WHEN A MACHINE CHECK OCCURRS                     01199000
+         MVI   DMPABMC,C'6'   SET MESSAGE NUMBER                        01200000
+         MVC   DMPABMT(24),=C'MACHINE CHECK, RUN SEREP'                 01201000
+         B     DMPAB                                                    01202000
+         SPACE 1                                                        01203000
+DMPIOERR EQU   *  HERE WHEN A FATAL I/O ERROR OCCURRS                   01204000
+         MVI   DMPABMC,C'7'   SET MESSAGE NUMBER                        01205000
+         MVC   DMPABMT(15),=C'FATAL I/O ERROR'                          01206000
+         SPACE 1                                                        01207000
+DMPAB    L     R0,ABCCW       GET COUNT AND ADDRESS OF MSG     @V200735 01208000
+         BAL   R9,TYPLINE     WRITE OUT MESSAGE                @V200735 01209000
+         B     SHUTEND        SHUT SYSTEM DOWN                          01210000
+DMPERR   DS    0H             ERROR SIGNALLING PROCESSOR TO    @V407510 01211000
+*                             STOP & STORE STATUS              @V407510 01212000
+         L     R5,PREFRG      GET OWN PREFIX REGISTER          @V407510 01213000
+         STM   R0,R15,GRLOG-PSA(R5)  SAVE BAD STATUS REGS      @V407510 01214000
+         L     R0,DERRMSG     GET COUNT AND ADDR OF MSG        @V407510 01215000
+         BAL   R9,TYPLINE     WRITE OUT MESSAGE                @V407510 01216000
+         BR    R4             RETURN TO CALLER                 @V407510 01217000
+DMPUNIP  DS    0H             STPX FAILED..UNIPROCESSING       @V4M0124 01218000
+         OI    DMPSTAT,DMPUNI INDICATE UNIPROCESSING           @V4M0124 01219000
+         B     PREFSTOR       CONTINUE PROCESSING              @V4M0124 01220000
+         EJECT                                                          01221000
+TYPLINE  EQU   *              HERE TO TYPE A LINE ON THE       @V200735 01222000
+*                             SYSTEM CONSOLE                            01223000
+         ST    R0,DATACCW     STORE LINE COUNT AND ADDRESS     @V200735 01224000
+         LA    R3,TYPELIST    POINT TO TYPE LIST               @V200735 01225000
+         LR    R5,R1          SAVE CONTENT OF REGISTER 1       @VM08555 01226000
+TYPELP1  LA    R2,ALARM       PARM = ALARM                     @V200735 01227000
+TYPELP   EQU   *              CONSOLE MESSAGE LOOP             @V200820 01228000
+         SR    R0,R0          CLEAR COUNT                      @V200735 01229000
+         SR    R1,R1          AND ADDRESS REGS                 @V200735 01230000
+         ICM   R1,B'0111',1(R3) ADDRESS OF LINE TO WRITTEN     @V200735 01231000
+         BZ    TYPMSGE        BRANCH IF ADDRESS IS ZERO        @VM08555 01232000
+         IC    R0,0(R3)       GET LINE COUNT                   @V200735 01233000
+         CALL  DMKOPRWT       CALL TO OUTPUT THE MESSAGE LINE  @V200820 01234000
+         BC    2+1,TYPMSGE    EXIT IF CONSOLE BUSY OR MISSING  @VA03871 01235000
+         SR    R2,R2          CLEAR PARM REG                   @V200735 01236000
+         LA    R3,4(R3)       POINT TO NEXT COUNT AND LINE     @V200735 01237000
+         ICM   R0,B'1111',4(R3) IS THIS THE LAST ONE ?         @V200735 01238000
+         BZ    TYPELP1        YES -- ADD ALARM TO PARM REG     @V200735 01239000
+         B     TYPELP         GO WRITE NEXT LINE               @V200735 01240000
+TYPMSGE  EQU   *                                               @VM08555 01241000
+         LR    R1,R5          GET REGISTER 1 CONTENT           @VM08555 01242000
+         BR    R9             RETURN TO IN LINE CODE           @VM08555 01243000
+         EJECT                                                          01244000
+*        CONSTANTS AND LITERAL POOL                                     01245000
+         SPACE 1                                                        01246000
+PAGESIZE DC    F'4096'        SIZE OF 1 PAGE                   @V407510 01247000
+*                             THIS CONSTANT MUST REMAIN IN 1ST @V407510 01248000
+*                             PAGE OF DMKDMP BECAUSE IT IS     @V407510 01249000
+*                             USED TO SET UP ADDRESSABILITY TO @V407510 01250000
+*                             THE SECOND PAGE                  @V407510 01251000
+AL3PAGSZ EQU   PAGESIZE+1     3 BYTE PAGESIZE                  @V407510 01252000
+HWPAGSZ  EQU   PAGESIZE+2     HALFWORD PAGESIZE                @V407510 01253000
+         SPACE                                                          01254000
+         DS    0D             ALIGN                                     01255000
+IPLREAD  CCW   X'02',IPLPSW-PSA,SILI,24 READ DATA                       01256000
+         CCW   X'08',IPLCCW1-PSA,0,0    TIC                             01257000
+         SPACE                                                          01258000
+TAPEINIT CCW   X'93',0,CC+SILI,1   SET MODE 800,TR ON, D/C OFF          01259000
+         CCW   X'2F',0,SILI,1 BACKSPACE FILE                            01260000
+         SPACE                                                          01261000
+TAPERR2  CCW   X'27',0,CC+SILI,1   BACK SPACE RECORD                    01262000
+WRITEOF  CCW   X'1F',0,CC+SILI,1   WRITE TAPE MARK                      01263000
+         CCW   X'1F',0,SILI,1 WRITE TAPE MARK                           01264000
+         SPACE                                                          01265000
+TAPERR1  CCW   X'27',0,CC+SILI,1   BACK SPACE RECORD                    01266000
+         CCW   X'17',0,CC+SILI,1   ERASE RECORD GAP                     01267000
+         SPACE 1                                                        01268000
+TAPCCW   CCW   X'01',*,SILI,0                                           01269000
+         SPACE 1                                                        01270000
+         SPACE                                                          01271000
+PRLINE   CCW   X'09',LINE,SILI,LINEL    PRINT AND SPACE 1 LINE          01272000
+         SPACE                                                          01273000
+SUPCCW   CCW   X'09',SUPMSG,SILI,SUPMSGL     PRINT AND SPACE 1 LINE     01274000
+         SPACE                                                          01275000
+SKIPCCW  CCW   X'89',SKIPMSG,SILI,SKIPMSGL                              01276000
+         SPACE                                                          01277000
+PRLINESP CCW   X'11',LINE,SILI,LINEL    PRINT AND SPACE 2 LINES         01278000
+         SPACE                                                          01279000
+SKIPCH1  CCW   X'89',BLANK,CC+SILI,20                                   01280000
+         CCW   X'03',0,SILI,1 NOP                                       01281000
+         SPACE 1                                               @V60B9BA 01281100
+INIT3800 CCW   X'37',0,SILI+CC,1   INITIALIZE PRINTER          @V60B9BA 01281200
+         CCW   X'03',0,SILI,1      NOP                         @V60B9BA 01281300
+         SPACE                                                          01282000
+SENSE    CCW   X'04',SENSDATA,SILI,24   SENSE                           01283000
+         SPACE                                                          01284000
+DISKCCW  CCW   X'07',SEEK,CC,6     SEEK                                 01285000
+ALTSRCH  EQU   *              RESUME POINT AFTER ALTERNATE SEEK@V56BDA8 01285100
+         CCW   X'31',CYL,CC,5 SEARCH                                    01286000
+         CCW   X'08',*-8,0,0  TIC                                       01287000
+DISKWRIT CCW   X'05',0,CC+SILI,4096     WRITE                           01288000
+         CCW   X'03',0,SILI,1 NOP                                       01289000
+WRITADDR EQU   DISKWRIT+1     ADDRESS TO WRITE FROM            @V407510 01290000
+WRITLEN  EQU   DISKWRIT+6     LENGTH OF DATA TO BE WRITTEN     @V407510 01291000
+         SPACE 1                                                        01291100
+READHAR0 CCW   7,SEEK,CC,6                                     @V56BDA8 01291150
+         CCW   26,0,CC+SILI+SKIP,5                             @V56BDA8 01291200
+         CCW   22,ALTR0ADD,SILI,4                              @V56BDA8 01291250
+         SPACE 1                                                        01291300
+ALTSEEK  CCW   07,ALTSKADD,CC+SILI,6                           @V56BDA8 01291350
+         CCW   08,ALTSRCH,0,0                                  @V56BDA8 01291400
+ALTSAVE  DS    F              SAVE AREA FOR R14                @V56BDA8 01291450
+ALTSKADD DC    XL2'0'         BB                               @V56BDA8 01291500
+ALTR0ADD DS    XL4            CCHH FROM RECORD 0 COUNT         @V56BDA8 01291550
+         EJECT                                                          01292000
+         DS    0F                                              @V56BDA8 01292100
+TYPELIST DC    AL1(1),AL3(MSGBLK)                              @V200735 01293000
+         DC    AL1(1),AL3(MSGBLK)                              @V200735 01294000
+         DC    AL1(1),AL3(MSGBLK)                              @V200735 01295000
+DATACCW  DC    A(0)                                            @V200735 01296000
+         DC    AL1(1),AL3(MSGBLK)                              @V200735 01297000
+         DC    AL1(1),AL3(MSGBLK)                              @V200735 01298000
+         DC    A(0)                                            @V200735 01299000
+         SPACE                                                          01300000
+ABCCW    DC    AL1(DMPAMSGL),AL3(DMPAMSG)                      @V200735 01301000
+         SPACE                                                          01302000
+INTQMSG  DC    AL1(INTQLMSG),AL3(INTQAMSG)                     @V200735 01303000
+         SPACE                                                          01304000
+SFCCCW   DC    AL1(DMPSMSGL),AL3(DMPSMSG)                      @V200735 01305000
+         SPACE                                                          01306000
+DERRMSG  DC    AL1(DMPERRML),AL3(DMPERRM)                      @V407510 01307000
+         SPACE                                                          01308000
+         DS    0D             FOR PSW ALIGNMENT                         01309000
+XWAIT1   DC    A(WAITON,4)    WAIT STOP                                 01310000
+XWAIT2   DC    A(WAITON,3)    LOADED IN CASE OF ERROR                   01311000
+         SPACE                                                          01312000
+IWAIT    DC    AL1(IOMASK),AL3(WAITON),A(0)                             01313000
+         SPACE                                                          01314000
+DMPPSWS  DC    A(MCHEKENB,DMPPRGCK)                                     01315000
+         DC    A(XMODEON,DMPMCHCK)                                      01316000
+         DC    A(MCHEKENB)                                              01317000
+DMPR0    DC    F'0'           SAVE AREA FOR GPR-0                       01318000
+DMPR14   DC    F'0'           SAVE AREA FOR GPR-14                      01319000
+DMPR15   DC    F'0'           SAVE AREA FOR GPR-15                      01320000
+         SPACE                                                          01321000
+TEMPAD   DS    D              TEMPORARY WORK AREA                       01322000
+TEMPADLO EQU   TEMPAD+6       SIGNIFICANT DIGITS AFTER UNPACK  @V407510 01323000
+RSTPSW   DC    A(MCHEKENB,DMPRST)       RESTART PSW FOR MAIN   @V407510 01324000
+SAVEPGMN DC    D'0'           SAVE PROGRAM NEW PSW             @V407510 01325000
+SAVEPGMO DC    D'0'           SAVE PROGRAM OLD PSW             @V407510 01326000
+SAVEPR   DC    F'0'           SAVE INTPRL AND INTPR            @V4M0111 01327000
+SPECPGMN DC    A(MCHEKENB,DMPUNIP) PROGRAM NEW FOR STPX        @V4M0124 01328000
+         SPACE                                                          01329000
+LOWCORE  DC    256X'00'       LOW MEMORY SAVE AREA                      01330000
+*        FOLLOWING AREAS ARE FOR THE ABENDING PROCESSOR        @V407510 01331000
+GREGS    DC    16F'0'         16 GENERAL PURPOSE REGISTERS     @V407510 01332000
+CTLREGS  DC    16F'0'         16 CONTROL REGISTERS                      01333000
+         AIF   (NOT &FLOATPT).NOFP4                                     01334000
+FPREGS   DC    4D'0'          4 FLOATING POINT REGISTERS                01335000
+.NOFP4   ANOP                                                           01336000
+TODCLOCK DC    D'0'           TIME OF DAY CLOCK                         01337000
+CPUTIMER DC    D'0'           CPU TIMER                                 01338000
+CLKCOMP  DC    D'0'           TIME OF DAY CLOCK COMPARATOR              01339000
+PROCA    DC    H'0'           PROCESSOR ADDRESS                @V407510 01340000
+PREFRG   DC    F'0'           PREFIX REGISTER                  @V407510 01341000
+ALLONES  DC    F'-1'          X'FFFFFFFF'                      @V407510 01344000
+CONS4095 DC    F'4095'        PAGE SIZE - 1                    @V407510 01345000
+ALLZEROS DC    F'0'           X'00000000'                      @V407510 01346000
+CCWLN    DC    F'8'           LENGTH OF CCW                    @V407510 01347000
+BITSPB   EQU   CCWLN          8...BITS PER BYTE                @V407510 01348000
+PAGLINE  DC    F'60'          X'0000003C' 60 LINES PER PAGE    @V407510 01349000
+SECPMIN  EQU   PAGLINE        60...SECONDS PER MINUTE          @V407510 01350000
+ABCODE   DS    0F             ABEND CODE                       @V407510 01351000
+ABCODEMD DC    3C' '          MODULE NAME                      @V407510 01352000
+ABCODENU DC    1X'0'          ABEND DIGIT                      @V407510 01353000
+P3800    DC    X'1045'        3800 RDEVTYPC,RDEVTYPE           @V60B9BA 01353100
+MONCAD   DC    F'0'           SAVED ADDRESS OF MONCOM          @V2B2638 01354000
+         SPACE                                                          01355000
+         DS    0F                                                       01356000
+DISABLMC DC    AL1(HARDSTOP+DAMAGRPT),AL3(0) MASK TO DISABLE   @VA01130 01357000
+         DC    A(512)         SOFT M.C. RECORDING AND RESET LOGOUT      01358000
+         SPACE                                                          01359000
+***************************************************************@V407510 01360000
+*              THE FOLLOWING FIELDS ARE INITIALIZED BY DMKCPI  @V407510 01361000
+*              DMKDMPMA, DMKDMPAA AND DMKDMPSA ARE ALSO INITIALIZED     01361010
+*              BY DMKCPU                                                01361020
+         SPACE                                                          01362000
+DMKDMPDV DC    A(0)           PTR TO DUMP DEVICE RDEVBLOK               01363000
+DMKDMPAU DC    A(0)           PTR TO AUTOMATIC DUMP DEVICE RDEVBLOK     01364000
+DMKDMPRC DC    A(0)           PTR TO RECBLOK CHAIN FOR AUTOMATIC DUMP  *01365000
+                              DEVICE                                    01366000
+DMKDMPTD DC    D'0'           TOD CLOCK AT 00.00.00 TODAY      @V407510 01367000
+TODATE2W EQU   DMKDMPTD+4     SECOND WORD OF TODATE            @V407510 01368000
+DMKDMPDT DC    D'0'           DATE - MM/DD/YY - EDITED EBCDIC  @V407510 01369000
+DMKDMPSD DC    H'0'           SYSTEM IPL DEVICE                @V407510 01370000
+*        DMKDMPMA & DMKDMPAA ARE EQUAL IN UNIPROCESSOR MODE    @V4M0124 01371000
+DMKDMPMA DC    H'0'           MAIN PROCESSOR ADDRESS           @V407510 01372000
+DMKDMPAA DC    H'0'           ATTACHED PROCESSOR ADDRESS       @V407510 01373000
+*              DMKDMPSA IS EQUAL ZERO IN UNIPROCESSOR MODE              01373100
+DMKDMPSA DC    D'0'           SAVE AREA FOR THE PSA ADDRESSES  @V5BC0AB 01373110
+         ORG   DMKDMPSA                                                 01373120
+MAINPSA  DS    F              ADDRESS OF THE MAIN PSA          @V5BC0AB 01373130
+ATTPSA   DS    F              ADDRESS OF THE APU PSA           @V5BC0AB 01373140
+***************************************************************@V407510 01374000
+DMPSTAT  DC    X'0'           STATUS OF SYSTEM..UP OR AP       @V4M0124 01375000
+         SPACE                                                          01376000
+DMPSYSVM DC    V(DMKSYSVM)    ADDR SYSTEM VMBLOK               @V407510 01377000
+DMPRIODV DC    V(DMKRIODV)    ADDR FIRST RDEVBLOK              @V407510 01378000
+DMPCORET DC    V(DMKSYSCS)    ADDR OF SYSTEM CORE TABLE        @V407510 01379000
+DMPRSPRD DC    V(DMKRSPRD)    ADDR OF SYSTEM RDR FILE CHAIN    @V407510 01380000
+STORSIZE DC    F'0'           SPACE FOR STORAGE SIZE           @VA01097 01381000
+         SPACE                                                          01382000
+ALOCBIT  DC    X'8040201008040201'                                      01383000
+         SPACE                                                          01384000
+DMKDMPSW DC    X'00'          FLAG BYTE                                 01385000
+DMPMAP   DC    X'00'          BIT MAP FOR PAGES 0-3            @VW01525 01386000
+         SPACE                                                          01387000
+HOLD     DC    CL32' '                                                  01388000
+         SPACE                                                          01389000
+SENSDATA DC    24X'00'        SENSE BYTES                               01390000
+         SPACE                                                          01391000
+SAVKEY   DC    8X'00'                                                   01392000
+         SPACE                                                          01393000
+SEEK1    DC    X'0000'        BB                                        01394000
+IPL1     DC    X'0000000001'  CC, HH, R                                 01395000
+TAPOP4   DC    X'00'          FOR TAPE DUMP                             01396000
+BLANK    DC    CL20' '                                                  01397000
+         DS    0H             ALIGN                                     01398000
+         SPACE                                                          01399000
+SEEK     DC    7X'00'                                                   01400000
+         ORG   SEEK                                                     01401000
+BB       DS    2X             BIN                                       01402000
+CYL      DS    2X             CYLINDER                                  01403000
+HHR      DS    3X             HEAD & RECORD                             01404000
+DMPLOCK  DC    X'00'          DMKDMP LOCK                      @V407510 01405000
+*        END OF DATA FOR ABENDING PROCESSOR                    @V407510 01406000
+         EJECT                                                          01407000
+*        TRANSLATE TABLE ALSO USED BY DMKCDB                            01408000
+DMKDMPTR DC    64C'.'         UNPRINTABLE CHARACTERS                    01409000
+         DC    C' '           BLANK                                     01410000
+         DC    10C'.'                                                   01411000
+         DC    C'.<(+|&&'                                               01412000
+         DC    10C'.'                                                   01413000
+         DC    C'$*);^-/'                                               01414000
+         DC    9C'.'                                                    01415000
+         DC    X'6B6C'        'COMMA' & 'PERCENT' SIGNS                 01416000
+         DC    C'_>?'                                                   01417000
+         DC    10C'.'                                                   01418000
+         DC    C':'                                                     01419000
+         DC    X'7B7C'        'POUND' & 'AT' SIGNS                      01420000
+         DC    C'''="'                                                  01421000
+         DC    64C'.'                                                   01422000
+         DC    C'.ABCDEFGHI'                                            01423000
+         DC    7C'.'                                                    01424000
+         DC    C'JKLMNOPQR'                                             01425000
+         DC    8C'.'                                                    01426000
+         DC    C'STUVWXYZ'                                              01427000
+         DC    6C'.'                                                    01428000
+         DC    C'0123456789'                                            01429000
+         DC    6C'.'                                                    01430000
+         SPACE                                                          01431000
+TRHEX    EQU   *-C'0'                                                   01432000
+         DC    C'0123456789ABCDEF'                                      01433000
+         EJECT                                                          01434000
+TAPOP1    DC   X'00'     FOR TAPE DUMP                                  01435000
+LINE     EQU   *                                                        01436000
+LINEID   DC    CL11' '        DATA ADDRESS & LINE IDENTIFIER            01437000
+         DC    CL1' '                                                   01438000
+DATA     DC    8CL10' '       DATA                                      01439000
+KEY      DC    CL2' '         KEY                                       01440000
+         DC    C'   '                                                   01441000
+DATATR   DC    CL32' '        TRANSLATED DATA                           01442000
+LINEND   DC    C' '                                                     01443000
+LINEL    EQU   *-LINE         LENGTH OF OUTPUT LINE                     01444000
+         SPACE                                                          01445000
+TAPOP2    DC   X'00'     FOR TAPE DUMP                                  01446000
+SUPMSG   EQU   *                                                        01447000
+SUPFROM  DC    CL6' '                                                   01448000
+         DC    C' TO '                                                  01449000
+SUPTO    DC    CL6' '                                                   01450000
+         DC    C'    SUPPRESSED LINE(S) SAME AS ABOVE .....'            01451000
+SUPMSGL  EQU   *-SUPMSG       LENGTH OF SUPPRSSED MESSAGE               01452000
+         SPACE                                                          01453000
+TAPOP3    DC   X'00'     FOR TAPE DUMP                                  01454000
+SKIPMSG  EQU   *                                                        01455000
+SKIPFROM DC    CL6' '                                                   01456000
+         DC    C' TO '                                                  01457000
+SKIPTO   DC    CL6' '                                                   01458000
+MSGBLK   EQU   *                                               @V200735 01459000
+         DC    C'    SUPPRESSED NON-CONTROL-PROGRAM PAGE(S) .....'      01460000
+SKIPMSGL EQU   *-SKIPMSG      LENGTH OF PAGES SUPPRESSED MESSAGE        01461000
+         SPACE                                                          01462000
+DMPAMSG  DC    C'DMKDMP90'                                     @V200735 01463000
+DMPABMC  DC    C' '                                                     01464000
+         DC    C'W SYSTEM DUMP FAILURE; '                               01465000
+DMPABMT  DC    CL24' '                                                  01466000
+DMPAMSGL EQU   *-DMPAMSG      LENGTH OF DUMP ABEND MESSAGE              01467000
+         SPACE 1                                                        01468000
+DMPERRM  DC    C'DMKDMP913I SYSTEM DUMP FAILURE; '             @V407510 01469000
+         DC    C'STATUS NOT STORED FOR NON-ABENDING PROCESSOR' @V407510 01470000
+DMPERRML EQU   *-DMPERRM      LENGTH OF ERROR MESSAGE          @V407510 01471000
+INTQAMSG DC    C'DMKDMP909W SYSTEM DUMP DEVICE; NOT-READY'     @V200735 01472000
+INTQLMSG EQU   *-INTQAMSG     LENGTH OF NOT-READY MESSAGE               01473000
+         SPACE                                                          01474000
+DMPSMSG  EQU   *                                               @V200735 01475000
+DMPTIME  DC    CL9'00:00:00 ' TIME OF DUMP                     @VA01097 01476000
+         DC    C'DMKDMP908I SYSTEM FAILURE; CODE '                      01477000
+DMPSCOD  DC    C'MMMCCC'                                                01478000
+         DC    C' PROCESSOR '                                  @V407510 01479000
+DMPROC   DC    CL2'NN'        PROCESSOR ADDRESS                @V407510 01480000
+DMPROCL  EQU   DMPROC+1       LAST DIGIT OF PROCESSOR ADDRESS  @V407510 01481000
+DMPSMSGL EQU   *-DMPSMSG                                                01482000
+*        EQUATES                                               @V407510 01483000
+DBL      EQU   8              DOUBLE WORD MOVE LENGTH          @V407510 01484000
+RETRY    EQU   256            RETRY SIGP 256 TIMES             @V407510 01485000
+NAMELN   EQU   3              LENGTH OF ABENDED MODULE NAME    @V407510 01486000
+GRGLN    EQU   16*4           LENGTH OF GENERAL REGS           @V407510 01487000
+REGLN    EQU   32*4           LENGTH OF GPREGS AND CREGS       @V407510 01488000
+GPREG5   EQU   4*5            R5 SLOT IN DUMPSAVE              @V407510 01489000
+ZONE     EQU   X'F0'          ZONE TO CLEAR SIGN FIELD         @V407510 01490000
+HALFLINE EQU   DATA+24        MID-LINE AREA                    @V407510 01491000
+HALFDATA EQU   DATA+40        MID-LINE DATA AREA               @V407510 01492000
+BLNK     EQU   X'40'          BLANK                            @V407510 01493000
+FULLPAGE EQU   128            NUMBER LINES FOR 4096 PAGE       @V407510 01494000
+TRLEN    EQU   8              TRANSLATE LENGTH                 @V407510 01495000
+PKLEN    EQU   9              UNPK LENGTH                      @V407510 01496000
+LNTIMER  EQU   16             LENGTH OF CPU TIMER &            @V407510 01497000
+*                             CLOCK COMPARATOR                 @V407510 01498000
+SSCLK    EQU   88             AREA CLOCKS ARE STORED FOR SSS   @V407510 01499000
+LNLOG    EQU   16             LENGTH OF PSW, PREFIX REGISTER   @V407510 01500000
+*                             AND MODEL DEPENDENT FEATURE      @V407510 01501000
+LNREGS   EQU   4*8+4*16+4*16  LENGTH OF FLOATING POINT REGS,   @V407510 01502000
+*                             GENERAL REGS, & CONTROL REGS     @V407510 01503000
+LN12     EQU   12             LENGTH OF HEADING                @V407510 01504000
+LN18     EQU   18             LENGTH OF HEADING                @V407510 01505000
+LN22     EQU   22             LENGTH OF HEADING                @V407510 01506000
+LCLN     EQU   256            LENGTH OF LOWCORE SAVED          @V407510 01507000
+PAGE     EQU   4096                                            @V4M0105 01508000
+DMPUNI   EQU   X'80'          INDICATE UNIPROCESSOR MODE       @V4M0124 01509000
+PROCBUSY EQU   2              CONDITION CODE 2 INDICATES BUSY  @V4M0127 01510000
+         EJECT                                                          01511000
+         LTORG                                                          01512000
+         EJECT                                                          01513000
+         COPY  EQU                                                      01514000
+         SPACE                                                          01515000
+WAITON   EQU   (EXTMODE+MCHEK+WAIT)*X'10000'                            01516000
+MCHEKENB EQU   (MCHEK+EXTMODE)*X'10000'                                 01517000
+XMODEON  EQU   EXTMODE*X'10000'                                         01518000
+         SPACE                                                          01519000
+*        BITS DEFINED IN DMPSW                                          01520000
+ALL      EQU   X'80'          ON MEANS DUMP ALL OF MEMORY               01521000
+BREAKSUP EQU   X'40'          ON MEANS TURN SUPPRESSION MECHANISM OFF   01522000
+LINESUP  EQU   X'20'          ON MEANS SUPPRESSION MECHANISM ACTIVE     01523000
+DOUBLESP EQU   X'10'          ON MEANS DOUBLE SPACE AFTER THIS LINE     01524000
+SKIPSUP  EQU   X'08'          ON MEANS LINES BEING SUPPRESSED BECAUSE  *01525000
+                              PAGES ARE NOT CONTROL PROGRAM PAGES       01526000
+         SPACE 1                                                        01526100
+RTCNT1   EQU   65             RETRY COUNT + 1 FOR 3340/3344    @V56BDA8 01526200
+TRKCONCK EQU   X'02'          TRACK CONDITION CHECK            @V56BDA8 01526300
+         EJECT                                                          01527000
+         COPY  DEVTYPES                                                 01528000
+         COPY  IOBLOKS                                         @V2B2638 01529000
+         COPY  MONBLOKS                                        @V2B2638 01530000
+         PSA                                                            01531000
+         COPY  RBLOKS                                                   01532000
+         COPY  CORE                                                     01533000
+         COPY  ALLOC                                                    01534000
+         COPY  SPOOL                                                    01535000
+         COPY  DMPBLOKS                                                 01536000
+         EJECT                                                          01537000
+DMKDMP   CSECT                                                          01538000
+         SPACE                                                          01539000
+DMKDMPSF DC    (SFBSIZE)D'0'  SFBLOK FOR AUTOMATIC DUMP DEVICE          01540000
+         ORG   DMKDMPSF+(SFBRECSZ-SFBLOK)                               01541000
+         DC    H'4096'                                                  01542000
+         ORG   DMKDMPSF+(SFBFLAG-SFBLOK)                                01543000
+         DC    AL1(SFBDUMP)                                             01544000
+         ORG   DMKDMPSF+(SFBRECNO-SFBLOK)                               01545000
+DMPNOREC DC    F'4'           NUMBER OF RECORDS IN DUMP FILE   @VW01525 01546000
+         ORG   DMKDMPSF+(SFBFNAME-SFBLOK)                               01547000
+         DC    CL12'CPDUMP'                                    @VA04431 01548000
+         ORG   DMKDMPSF+(SFBFTYPE-SFBLOK)                               01549000
+         DC    CL12'FILE'                                      @VA04431 01550000
+         ORG   DMKDMPSF+(SFBCLAS-SFBLOK)                                01551000
+         DC    C'D'                                                     01552000
+         ORG   DMKDMPSF+(SFBDIST-SFBLOK)                       @VA04431 01553000
+         DC    CL8' '                                          @VA04431 01554000
+         ORG                                                            01555000
+         SPACE                                                          01556000
+         END                                                            01557000

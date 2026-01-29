@@ -1,0 +1,1019 @@
+BTP      TITLE 'DMSBTP     (CMS)       VM/370 - RELEASE 6'              00001000
+         SPACE 2                                                        00002000
+*  MODULE NAME:                                                         00003000
+*                                                                       00004000
+*         DMSBTP - CMS BATCH MONITOR PROCESSOR                          00005000
+*                                                                       00006000
+*  FUNCTION:                                                            00007000
+*                                                                       00008000
+*         TO EXECUTE READS FROM THE VIRTUAL CARD READER                 00009000
+*         EACH TIME CMS TRIES TO EXECUTE A CONSOLE READ, THEREBY        00010000
+*         EFFECTING A CMS BATCH VIRTUAL MACHINE.                        00011000
+*                                                                       00012000
+*  ATTRIBUTES:                                                          00013000
+*                                                                       00014000
+*         DISK RESIDENT IN RELOCATABLE (TEXT) FORM; LOADED INTO         00015000
+*         NUCLEUS FREE STORAGE BY DMSBTB.                               00016000
+*                                                                       00017000
+*  ENTRY POINTS:                                                        00018000
+*                                                                       00019000
+*         DMSBTP - MAIN ENTRY CALLED FROM DMSCRD (CMS CONSOLE READ)     00020000
+*                                                                       00021000
+*         DMSBTPAB - ENTRY FOR ABNORMAL CONDITIONS DURING USER JOB;     00022000
+*                    (1) JOB EXECUTION ABEND (FROM DMSABN)              00023000
+*                    (2) JOB LIMIT EXCEEDED (FROM DMSITE,DMSCIO,DMSPIO) 00024000
+*                    (3) DISABLED CMS COMMAND (FROM THE COMMAND)        00025000
+*                                                                       00026000
+*         DMSBTPLM - NON-EXECUTABLE USER JOB LIMIT TABLE REFERENCED BY  00027000
+*                    DMSITE, DMSPIO AND DMSCIO                          00028000
+*                                                                       00029000
+*  ENTRY CONDITIONS:                                                    00030000
+*                                                                       00031000
+*         DMSBTP - GPR1 POINTS TO DMSCRD (ENTRY) PLIST                  00032000
+*                                                                       00033000
+*         DMSBTPAB - GPR14 POINTS TO CMS RETURN ADDRESS WHEN CALLED     00034000
+*                    FROM DISABLED CMS COMMAND                          00035000
+*                                                                       00036000
+*  EXIT CONDITIONS:                                                     00037000
+*                                                                       00038000
+*         N/A                                                           00039000
+*                                                                       00040000
+*  CALLS TO OTHER ROUTINES:                                             00041000
+*                                                                       00042000
+*         DMSCWT (CONWAIT) - DRAIN ALL CONSOLE I/O                      00043000
+*         DMSSCNN (NEW SCAN) - SCAN A RAW INPUT LINE                    00044000
+*         DMSCRD (CONREAD) - EXECUTE AN ACTUAL CONSOLE READ             00045000
+*         BATEXIT1 - GIVE CONTROL TO USER 'READ' ROUTINE, IF IT EXISTS  00046000
+*         BATEXIT2 - GIVE CONTROL TO USER JOB CARD ROUTINE  ''          00047000
+*                                                                       00048000
+*  EXTERNAL REFERENCES:                                                 00049000
+*                                                                       00050000
+*         WAITD - FOR DEVICE END INTERRUPT ON THE READER                00051000
+*         DMSERR - FOR CMS ERROR MESSAGES                               00052000
+*         FVS - FOR FILE MANAGEMENT INFO. DSECT                         00053000
+*         LINEDIT - FOR CONSOLE MESSAGES AND CP CALLS                   00054000
+*         NUCON - FOR NUCLEUS STORAGE AREA DSECT                        00055000
+*         REGEQU - FOR SYMBOLIC REGISTER NAMES                          00056000
+*         RDCARD - FOR CARD READER READS                                00057000
+*                                                                       00058000
+*  TABLES/WORKAREAS:                                                    00059000
+*                                                                       00060000
+*         CARD - CARD READ BUFFER                                       00061000
+*         CPTAB - TABLE OF ALLOWABLE CP COMMANDS                        00062000
+*         RDRTAB - TABLE OF VALID SYMBOLIC NAMES AND DEVICE ADDRS. FOR  00063000
+*                  SPOOL DEVICES                                        00064000
+*         KEYS - TABLE OF /SET CARD KEYWORDS                            00065000
+*         DMSBTPLM - USER JOB LIMITS TABLE (BATLIMIT MACRO)             00066000
+*                                                                       00067000
+*  REGISTER USAGE:                                                      00068000
+*                                                                       00069000
+*         R3  - ADDRESS OF CONSOLE READ BUFFER                          00070000
+*         R11 - ADDRESS OF DMSCRD (ENTRY) PLIST                         00071000
+*         R12 - DMSBTP ADDRESSABILITY                                   00072000
+*                                                                       00073000
+*  NOTES:                                                               00074000
+*                                                                       00075000
+*         NONE                                                          00076000
+*                                                                       00077000
+*  OPERATION:                                                           00078000
+*                                                                       00079000
+*                   UPON RECEIVING CONTROL, DMSBTP CHECKS THE BATCPEX   00080000
+*         FLAG IN CASE DMSCPF IS CALLING TO VALIDATE A CP COMMAND       00081000
+*         ISSUED VIA EXEC OR SVC. IF THE FLAG IS SET ON, BTP BRANCHES   00082000
+*         DIRECTLY TO CP TRAP ROUTINE DESCRIBED BELOW. OTHERWISE,       00083000
+*         DMSBTP HAS RECEIVED CONTROL FROM DMSCRD AND SO IT CLEARS      00084000
+*         THE  ACTUAL  CMS CONSOLE  READ  BUFFER  AND CHECKS  FOR  ANY  00085000
+*         FINISHED READS FOR THE REAL BATCH  CONSOLE. IF THE NUMBER OF  00086000
+*         FINISHED READS IS NOT ZERO, CONTROL IS RETURNED TO DMSCRD TO  00087000
+*         PROCESS  THE REAL  CONSOLE READ.  IF THERE  ARE NO  FINISHED  00088000
+*         READS, A RECORD IS READ FROM THE BM VIRTUAL CARD READER INTO  00089000
+*         THE CARD BUFFER VIA AN SVC CALL TO CARDRD (DMSCIO). IF THE    00090000
+*         READER RECORD IS NOT CARD-IMAGE (80), IT IS FLUSHED.          00091000
+*         ‡‡                                                            00092000
+*                   THE RECORD IN THE READER  BUFFER (CARD) IS SCANNED  00093000
+*         TO  COMPUTE ITS  LENGTH WITH  TRAILING  BLANKS DELETED.  THE  00094000
+*         RECORD IS THEN MOVED TO THE  CMS CONSOLE READ BUFFER AND THE  00095000
+*         COMPUTED  LENGTH STORED  IN  THE  ORIGINAL DMSCRD  PARAMETER  00096000
+*         LIST,  THE ADDRESS  OF WHICH  IS  PASSED BY  DMSCRD WHEN  IT  00097000
+*         INITIALLY PASSES CONTROL TO DMSBTP.                           00098000
+*         ‡‡                                                            00099000
+*                   IF THE  FIRST USER  RECORD IS NOT  A /JOB  CARD AN  00100000
+*         ERROR  MESSAGE (DMSBTP105E)  IS ISSUED  AND NORMAL  CLEAN-UP  00101000
+*         PERFORMED WITH NO RE-IPL (BATTERM FLAG SET ON). READS TO THE  00102000
+*         CARD READER  ARE THEN  ISSUED UNTIL  THE NEXT  /JOB CARD  IS  00103000
+*         FOUND.                                                        00104000
+*         ‡‡                                                            00105000
+*                   OTHERWISE,  DMSBTP  BRANCHES  TO   ITS  /JOB  CARD  00106000
+*         PROCESSING ROUTINE  WHICH FIRST  CALLS DMSSCNN  VIA BALR  IN  00107000
+*         ORDER THAT THE /JOB CARD BE  SCANNED AND TOKENIZED BY CMS. A  00108000
+*         CHECK IS  MADE FOR THE EXISTENCE  OF THE USERID  AND ACCOUNT  00109000
+*         NUMBER ON THE CARD. IF THE  FIELDS EXIST, A CP DIAGNOSE '4C'  00110000
+*         IS ISSUED TO START ACCOUNTING  RECORDING FOR THAT USERID AND  00111000
+*         ACCOUNT NUMBER. IF AN ERROR IS  RETURNED FROM CP DENOTING AN  00112000
+*         INVALID USERID, OR IF THE USERID  OR ACCOUNT NO. FIELDS WERE  00113000
+*         MISSING ON THE  /JOB CARD, AN ERROR  MESSAGE (DMSBTP106E) IS  00114000
+*         ISSUED AND NORMAL CLEANUP PERFORMED  WITH NO RE-IPL (BATTERM  00115000
+*         FLAG SET ON).                                                 00116000
+*         ‡‡                                                            00117000
+*                   THE JOBNAME, IF PROVIDED ON THE JOB CARD, IS SAVED  00118000
+*         AND A CP MSG  IS ISSUED VIA SVC TO INFORM  THE SOURCE USERID  00119000
+*         THAT  THEJOB HAS  STARTED. NEXT,  THE  SPOOLING DEVICES  ARE  00120000
+*         CLOSED  AND RE-SPOOLED  FOR CONTINUOUS  OUTPUT,  A CP  QUERY  00121000
+*         FILES IS ISSUED FOR INFORMATION  PURPOSES AND THE IMPLIED-CP  00122000
+*         FUNCTION  UNDER CMS  IS  DISABLED VIA  AN  SVC  CALL TO  SET  00123000
+*         (DMSSET) AND  THE BATPROF EXEC IS  EXECUTED VIA SVC  CALL TO  00124000
+*         EXEC. THE  BATNOEX FLAG SET BY  DMSBTB TO SUPPRESS  USER JOB  00125000
+*         EXECUTION UNTIL  THE /JOB CARD IS  DETECTED, IS SET  OFF AND  00126000
+*         FINALLY, A  BRANCH IS TAKEN TO  READ THE NEXT CARD  FROM THE  00127000
+*         READER FILE (USER JOB).                                       00128000
+*         ‡‡                                                            00129000
+*                   HAVING  READ  THE  /JOB   CARD,  DMSBTP  CONTINUES  00130000
+*         READING AND  CHECKS FOR  A */  CARD, A  /SET CARD  AND A  CP  00131000
+*         COMMAND. IF A  CARD IS NONE OF THESE,  DMSBTP PASSES CONTROL  00132000
+*         BACK TO CMS (DMSINT) FOR PROCESSING OF THE COMMAND (OR        00133000
+*         DATA).                                                        00134000
+*         ‡‡                                                            00135000
+*                   IF A /*  IS READ AND IT  IS THE FIRST CARD  OF THE  00136000
+*         NEW JOB,  IT IS  ASSUMED TO BE  A PRECAUTIONARY  MEASURE AND  00137000
+*         THUS IGNORED BY DMSBTP WHICH THEN READS THE NEXT CARD. IF IT  00138000
+*         IS NOT THE FIRST CARD A CHECK  IS MADE FOR THE BATMOVE FLAG.  00139000
+*         IF THE FLAG  IS ON, THE /* SIGNIFIES AN  END-OF-FILE FOR THE  00140000
+*         MOVEFILE  OPERATION   FROM  THE  CONSOLE  (READER)   AND  IS  00141000
+*         CONSEQUENTLY TRANSLATED TO A NULL LINE FOR MOVEFILE COMMAND.  00142000
+*         IF  THE BATMOVE  FLAG IS  NOT ON,  THE /*  IS AN  END-OF-JOB  00143000
+*         INDICATOR AND AN IMMEDIATE BRANCH IS TAKEN TO THE END-OF-JOB  00144000
+*         ROUTINE FOR CLEAN-UP AND RE-IPL.                              00145000
+*         ‡‡                                                            00146000
+*                   WHEN ENCOUNTERING A CP  COMMAND DMSBTP BRANCHES TO  00147000
+*         A  ROUTINE  WHICH  FIRST  CHECKS A  TABLE  OF  ALLOWABLE  CP  00148000
+*         COMMANDS UNDER  BM. IF  THE COMMAND IS  ALLOWED, A  CHECK IS  00149000
+*         MADE FOR A READER OR OTHER SPOOL DEVICE IN THE COMMAND LINE.  00150000
+*         IF THE CP COMMAND IS ALLOWED BUT ALTERS THE STATUS OF THE BM  00151000
+*         READER  (OR OTHER  SPOOL  DEVICE, IN  ONE  CASE)  OR IF  THE  00152000
+*         COMMAND IS NOT ALLOWED AT ALL, AN ERROR MESSAGE (DMSBTP107E)  00153000
+*         IS ISSUED AND THE NEXT CARD IS READ.                          00154000
+*         ‡‡                                                            00155000
+*                   IF THE CP COMMAND IS A LINK, THE DEVICE ADDRESS IS  00156000
+*         STORED IN  A TABLE SO THAT  DMSBTP CAN DETACH ALL  USER DISK  00157000
+*         DEVICES AT THE END OF THE JOB.                                00158000
+*         ‡‡                                                            00159000
+*                   A  CP DETACH  COMMAND  IS  EXAMINED FOR  A  DEVICE  00160000
+*         ADDRESS CORRESPONDING TO THE SYSTEM  DISK, THE IPL DISK, THE  00161000
+*         BM 195 WORK  DISK OR ANY SPOOL  DEVICE. IF THE DEVICE  TO BE  00162000
+*         DETACHED IS SUCH, THEN AN  ERROR MESSAGE (DMSBTP107E) ISSUED  00163000
+*         AND THE NEXT CARD IS READ.                                    00164000
+*              OTHERWISE, DMSBTP RETURNS CONTROL TO CMS (DMSINT)        00165000
+*         FOR PROCESSING OF THE COMMAND.                                00166000
+*         ‡‡                                                            00167000
+*                   WHEN A /SET CONTROL CARD  IS ENCOUNTERED, THE CARD  00168000
+*         IS CHECKED  FOR VALID KEYWORDS,  VALID INTEGER  VALUES (LESS  00169000
+*         THAN OR EQUAL TO THE INSTALLATION  DEFAULT VALUES) AND IF AN  00170000
+*         ERROR IS DETECTED, AN ERROR  MESSAGE (DMSBTP108E) IS ISSUED,  00171000
+*         AN ABEND MESSAGE IS SENT TO THE SOURCE USERID AND THE JOB IS  00172000
+*         TERMINATED WITH  NORMAL CLEAN-UP  PERFORMED. IF  THE CONTROL  00173000
+*         CARDVALUES ARE VALID, THE APPROPRIATE  FIELDS ARE UPDATED IN  00174000
+*         THE USER JOB LIMIT TABLE DMSBTPLM AND THE NEXT CARD IS READ.  00175000
+*         ‡‡                                                            00176000
+*                   WHEN DMSBTP DETECTS A 'NOT READY' CONDITION AT THE  00177000
+*         READER A MESSAGE IS TYPED AT  THE BM CONSOLE STATING THAT BM  00178000
+*         IS WAITING  FOR READER INPUT.  DMSBTP THEN ISSUES  THE WAITD  00179000
+*         MACRO TO LISTEN FOR A READER INTERRUPT. WHEN FIRST DETECTING  00180000
+*         THE EMPTY READER DMSBTP CALLS THE CP ACCOUNTING ROUTINES VIA  00181000
+*         A CP DIAGNOSE '4C' TO CHARGE THE WAIT TIME TO THE BM USERID.  00182000
+*         ‡‡                                                            00183000
+*                   UPON DETECTING A  HARD ERROR AT THE  READER DMSBTP  00184000
+*         SENDS 'INTERVENTION REQUIRED'  CP MSG TO THE  SYSTEM CONSOLE  00185000
+*         AND BRANCHES  TO ITS  ABEND ROUTINE  AND THEN  WAITS FOR  AN  00186000
+*         INTERRUPT FROM THE READER BY ISSUING THE WAITD MACRO.         00187000
+*         ‡‡                                                            00188000
+*                   WHEN A /* CARD IS READ  (WITH BATMOVE FLAG OFF) OR  00189000
+*         WHEN THE END-OF-FILE CONDITION OCCURS  AT THE READER, DMSBTP  00190000
+*         BRANCHES  TO THE  CLEANUP  ROUTINE  WHICH SENDS  THE  SOURCE  00191000
+*         USERID  A CP  MSG STATING  THAT  THE JOB  ENDED NORMALLY  OR  00192000
+*         ABNORMALLY (IF CLEANING UP AFTER AN ABEND). CONWAIT (DMSCWT)  00193000
+*         IS THEN CALLED  VIA SVC TO ALLOW ALL CONSOLE  I/O TO FINISH,  00194000
+*         THE SPOOLING DEVICES ARE CLOSED  (INCLUDING CONSOLE) AND ALL  00195000
+*         DISKS LINKED TO DURING THE USER JOB ARE CP DETACHED VIA SVC.  00196000
+*         ‡‡                                                            00197000
+*                   AT  THIS  POINT  DMSBTP  RELINQUISHES  CONTROL  BY  00198000
+*         ISSUING  THE CP  IPL COMMAND  WITH THE  'PARM BATCH'  OPTION  00199000
+*         WHICH LOADS A NEW CMS NUCLEUS EITHER FROM THE                 00200000
+*         IPL DEVICE OR FROM A SHARED SEGMENT.  THE NEXT                00201000
+*         JOB IS STARTED WHEN CMS ATTEMPTS ITS FIRST READ               00202000
+*         TO THE CONSOLE.                                               00203000
+*         ‡‡                                                            00204000
+*                   THE ABEND  ROUTINE IN  DMSBTP IS  BRANCHED TO  (AS  00205000
+*         DESCRIBED ABOVE) WHEN DMSBTP ITSELF  DETECTS AN I/O ERROR AT  00206000
+*         THE READER. HOWEVER,  THE PRIMARY PURPOSE OF  THE ROUTINE IS  00207000
+*         TO RECEIVE CONTROL NOT ONLY FROM  DMSABN WHEN THERE IS A CMS  00208000
+*         ABEND DURING THE USER JOB, BUT  ALSO FROM DMSITE, DMSPIO AND  00209000
+*         DMSCIO WHEN A  USER JOB EXCEEDS ONE OF THE  BATCH JOB LIMITS  00210000
+*         (BATXLIM FLAG  IS ON). THIS  ROUTINE, ENTRY  POINT DMSBTPAB,  00211000
+*         CALLS THE CP  DUMP ROUTINE VIA SVC AND THEN  BRANCHES TO THE  00212000
+*         CLEANUP ROUTINE DESCRIBED ABOVE WHICH  WILL RE-IPL AND TREAT  00213000
+*         THE REMAINDER OF THE  CURRENT JOB AS A NEW JOB  WITH NO /JOB  00214000
+*         CARD. THIS HAS  THE EFFECT OF FLUSHING THE  REMAINDER OF THE  00215000
+*         JOB.                                                          00216000
+*                   THIS ENTRY POINT IS ALSO  USED BY THE CMS COMMANDS  00217000
+*         WHICH ARE DISABLED UNDER BM. IN  THIS CASE (BATDCMS FLAG SET  00218000
+*         ON) AN ERROR MESSAGE IS ISSUED AND CONTROL RETURNED TO CMS.   00219000
+*         ‡‡                                                            00220000
+*                                                                       00221000
+*         _N_O_T_E:     WHEN A  CP COMMAND IS 'CALLED VIA  SVC' IN  00222000
+*        DMSBTP, EITHER THE CMS 'CP' MODULE (DMSCPF) IS ACTUALLY        00223000
+*        CALLED TO ISSUE THE DIAGNOSE INSTRUCTION TO INVOKE THE CP      00224000
+*        COMMAND OR THE LINEDIT MACRO IS ISSUED WITH THE 'CPCOMM'       00225000
+*        OPTION WHICH ALSO GENERATES A DIAGNOSE.                        00226000
+*                                                                       00227000
+         EJECT                                                          00228000
+         MACRO                                                          00229000
+         CPF   &LINE                                                    00230000
+         LINEDIT DOT=NO,TYPCALL=SVC,DISP=CPCOMM,TEXT=&LINE              00231000
+         MEND                                                           00232000
+         EJECT                                                          00233000
+DMSBTP   CSECT                                                          00234000
+         USING DMSBTP,R12                                               00235000
+         USING NUCON,R0                                                 00236000
+         LR    R10,R12             SAVE, IN CASE CPF CALLING            00237000
+         LR    R12,R15                                                  00238000
+         ST    R10,SAVCPF+48                                            00239000
+         TM    BATFLAGS,BATCPEX    IS THIS 'CP' COMMAND                 00240000
+         BO    CPTRAP              IF SO, DMSCPF CALLING...             00241000
+         LR    R11,R1              R11 -> DMSCRD PLIST                  00242000
+         L     R3,8(,R1)           R3 -> ADDRESS OF CONSOLE READ BUFFER 00243000
+         ST    R14,SAVE14          SAVE REG 14                          00244000
+         SPACE                                                          00245000
+*********************************************************************** 00246000
+*                                                                       00247000
+*        MAIN ROUTINE TO READ FROM THE BATCH CARD READER                00248000
+*                                                                       00249000
+*********************************************************************** 00250000
+RDCARD   EQU   *                                                        00251000
+         L     R1,AFVS                                                  00252000
+         USING FVSECT,R1                                                00253000
+         TM    UFDBUSY,ABNBIT      ARE WE ABENDING?                     00254000
+         BO    ABEND                                                    00255000
+         MVI   0(R3),C' '          ASSUME BLANK-FILL FOR CLEARING BUFFR 00256000
+         TM    12(R11),X'01'       IS IT BLANK-FILL CODE IN PLIST?      00257000
+         BZ    *+8                 SKIP IF SO                           00258000
+         MVI   0(R3),X'00'         FILE WITH ZEROES                     00259000
+         MVC   1(129,R3),0(R3)     PROPOGATE THE CHARACTER TO CLEAR     00260000
+         CLC   NUMFINRD,ZERO       IS THE CONSOLE STACK EMPTY?          00261000
+         BNE   RDSTACK             GO READ CONSOLE IF IT IS NOT         00262000
+         RDCARD CARD,ERROR=NONZERO                                      00263000
+         B     READOK              NO PROBLEMS READING CARD             00264000
+NONZERO  CH    R15,H5              READER RECORD = 80?                  00265000
+         BNE   ERR                 IF SO, FIND THE REAL PROBLEM         00266000
+         B     RDCARD              IF NOT= 80, FLUSH IT...              00267000
+READOK   EQU   *                                                        00268000
+         TM    BATFLAGS,BATMOVE+BATNOEX  IF 'MOVE' EXECUTING OR '/JOB'  00269000
+         BNZ   NOSHOW              DON'T BOTHER SHOWING ON CONSOLE      00270000
+         WRTERM CARD,80,EDIT=NO                                         00271000
+         SPACE                                                          00272000
+NOSHOW   EQU   *                                                        00273000
+         TM    BATFLAGS,BATTERM    FLUSHING BECAUSE NO '/JOB' CARD?     00274000
+         BZ    DELMCHK             NO                                   00275000
+         CLC   CARD(5),LJOB        IF SO, IS THIS NEW JOB CARD?         00276000
+         BNE   RDCARD              NO, CONTINUE FLUSHING JOB...         00277000
+         DMSKEY NUCLEUS                                        @VA05160 00278000
+         NI    BATFLAGS,255-BATTERM IF SO, START THE NEW JOB            00279000
+         DMSKEY RESET                                          @VA05160 00280000
+         B     COPY                                                     00281000
+         SPACE                                                          00282000
+H5       DC    H'5'                                                     00283000
+CARD     DC    CL80' '                                                  00284000
+LSLSTAR  DC    CL80'/*'                                                 00285000
+LNULLINE DC    CL80' '                                                  00286000
+ZERO     DC    F'0'                                                     00287000
+ACARD    DC    A(CARD)                                                  00288000
+         SPACE                                                          00289000
+DELMCHK  EQU   *                                                        00290000
+         CLC   CARD(80),LSLSTAR    IS THIS THE SPECIAL DELIMITER?       00291000
+         BNE   COPY                IF NOT, CONTINUE...                  00292000
+         TM    BATFLAGS,BATNOEX    IF SO, IS IT 1ST CARD?               00293000
+         BO    RDCARD              YES, READ ANOTHER                    00294000
+         TM    BATFLAGS,BATMOVE    COULD BE 'MOVEFILE' DELIMITER        00295000
+         BZ    EOJ                 IF NOT, END-OF-JOB INDICATOR         00296000
+         XR    R1,R1               IF SO,SIMULATE NULL LINE FOR DMSMVE  00297000
+         B     COPY1                                                    00298000
+         SPACE                                                          00299000
+COPY     EQU   *                                                        00300000
+         SR    R1,R1               ZERO LENGTH FOR NULL CARD            00301000
+         CLC   LNULLINE,CARD       IS IT A NULL CARD?                   00302000
+         BNE   NOTBLANK                                                 00303000
+         TM    BATFLAGS,BATMOVE    IS 'MOVE' FROM CONSOLE ACTIVE?       00304000
+         BZ    COPY1               IF NOT, TRANSL. TO NULL LINE         00305000
+         LA    R1,CARD+79          OTHERWISE, ACCEPT THE BLANK RECORD   00306000
+         B     COPYIT                                                   00307000
+NOTBLANK EQU   *                                                        00308000
+         LA    R1,CARD+79          POINT TO LAST BYTE IN CARD           00309000
+         SPACE                                                          00310000
+* TRUNCATE BLANKS OFF THE END OF THE CARD                               00311000
+COPYL    EQU   *                                                        00312000
+         CLI   0(R1),C' '          BLANK CHAR?                          00313000
+         BNE   COPYIT              FINISHED TRUNCATING IF NOT           00314000
+         BCT   R1,COPYL            LOOP IF SO                           00315000
+COPYIT   EQU   *                                                        00316000
+         S     R1,ACARD            COMPUTE (LINE LENGTH) - 1            00317000
+         EX    R1,MOVE             MOVE IT INTO THE CALLER'S BUFFER     00318000
+         LA    R1,1(,R1)           INCREMENT TO GET REAL LENGTH         00319000
+         SPACE                                                          00320000
+COPY1    EQU   *                                                        00321000
+         STCM  R1,B'0111',13(R11)  STORE LENGTH INTO DMSCRD PLIST       00322000
+         TM    BATFLAGS,BATMOVE                                @VM28811 00323000
+         BO    EX1CHEK        GIVE WHOLE RECORD TO 'MOVE'      @VM28811 00324000
+         TM    BATFLAGS,BATNOEX    '/JOB' CARD ALREADY READ?            00325000
+         BZ    CHEKCP              YES, SKIP THRU                       00326000
+         CLC   CARD(5),LJOB        START OF JOB?                        00327000
+         BE    NEWJOB         YES: SPECIAL CLEANUP                      00328000
+         B     ERR105E             ERROR IF NOT                         00329000
+         SPACE                                                          00330000
+MOVE     MVC   0(*-*,R3),CARD      LENGTH FILLED BY EX                  00331000
+LJOB     DC    CL5'/JOB'                                                00332000
+LSET     DC    CL5'/SET'                                                00333000
+ABATEX1  DC    V(BATEXIT1)                                              00334000
+         SPACE                                                          00335000
+CHEKCP   EQU   *                                                        00336000
+         LA    R2,CARD        GET ADDRESS OF CARD              @VA03572 00337000
+BLK      CLI   0(R2),C' '     BLANK CHARACTER?                 @VA03572 00338000
+         BNE   CHEKCP1        NO, SEE IF CP COMMAND            @VA03572 00339000
+         LA    R2,1(,R2)      GET NEXT POSITION                @VA03572 00340000
+         B     BLK            CHECK NEXT POSITION              @VA03572 00341000
+CHEKCP1  CLC   0(3,R2),CPLIST CP COMMAND?                      @VA03572 00342000
+         BE    NEWJOB              IF SO, GO TO DMSSCN CALL             00343000
+         CLC   CARD(5),LSET        /SET CONTROL CARD?                   00344000
+         BE    NEWJOB              YES, GO SCAN IT...                   00345000
+EX1CHEK  EQU   *                                                        00346000
+         L     R15,ABATEX1         CHECK FOR CONTROL EXIT               00347000
+         LTR   R15,R15             IF 'BATEXIT1 TEXT' NOT LOADED,       00348000
+         BZ    RETURN              NO EXIT TAKEN                        00349000
+         LA    R1,CARD             IF LOADED, POINT TO READ BUFFER...   00350000
+         BALR  R14,R15             AND PASS CONTROL                     00351000
+         LTR   R15,R15             IF RC ^= 0,...                       00352000
+         BNZ   RDCARD              IGNORE THE RECORD AND GET NEXT.      00353000
+*                                  OTHERWISE, CONTINUE AS USUAL...      00354000
+RETURN   EQU   *                                                        00355000
+         L     R14,SAVE14          RESTORE REG 14                       00356000
+         BR    R14                 RETURN TO CMS (DMSINT)               00357000
+SAVE14   DS    F                   SAVE REGISTER 14 HERE                00358000
+         EJECT                                                          00359000
+*********************************************************************** 00360000
+*                                                                       00361000
+*        HANDLE ALL 'CP' REQUESTS HERE                                  00362000
+*                                                                       00363000
+*********************************************************************** 00364000
+CPTRAP   EQU   *                                                        00365000
+*                                                                       00366000
+*        FIRST CHEK FOR ALLOWABLE CP COMMAND WHICH                      00367000
+*        DOES NOT CHANGE THE READER(00C) STATUS...                      00368000
+*                                                                       00369000
+         STM   R13,R14,SAVCPF+52   SAVE DMSCPF ENVIRONMENT              00370000
+         STM   R0,R11,SAVCPF                                            00371000
+CPVALID  EQU   *                   ENTER HERE IF READER COMMAND         00372000
+         TM    8(R1),X'FF'         IF 'CP' ALONE, DON'T ALLOW IT        00373000
+         BO    ERR107EA                                        @VM01530 00374000
+         LA    R7,CPTAB            PREPARE TO BXLE THRU ALLOW. CMNDS    00375000
+         LA    R9,ENDCPTAB                                              00376000
+         LA    R8,10                                                    00377000
+CPCHEK   LA    R2,8(,R1)           POINT TO NAMED COMMAND               00378000
+         LA    R10,8               MAX. CHARACTERS                      00379000
+         XR    R6,R6                                                    00380000
+         IC    R6,9(R7)            PICK UP MINIMUM NO.CHARS             00381000
+         AR    R2,R6               SET MINIMUM ABBREVIATION             00382000
+         BCTR  R6,0                SUB 1 FOR 'EXECUTE'                  00383000
+MINCHEK  EQU   *                                                        00384000
+         EX    R6,COMPCP           COMPARE  ABBREVIATION                00385000
+         BNE   CPBXLE              IF NOT=, GO TO NEXT COMMAND          00386000
+         CLI   0(R2),C' '          END OF NAMED COMMAND?                00387000
+         BE    FLAGCHK             THAT'S GOOD ENOUGH...                00388000
+         LA    R2,1(,R2)           BUMP BOTH POINTERS                   00389000
+         LA    R6,1(,R6)                                                00390000
+         BCT   R10,MINCHEK         GO BACK AND COMP ONE MORE CHAR.      00391000
+CPBXLE   BXLE  R7,R8,CPCHEK                                             00392000
+         B     ERR107E             TELL USER IF NOT ALLOWED             00393000
+         SPACE 1                                                        00394000
+FLAGCHK  TM    8(R7),X'FF'         CAN THIS CP CMD CHANGE RDR STATUS?   00395000
+         BZ    LINKCHK             IF NOT, GO TO NEXT CHEK...           00396000
+         BM    ALLSPOOL            RESTRICT ALL SPOOL DEVICES           00397000
+         LA    R9,RDR              RESTRICT ONLY READER                 00398000
+         BAL   R14,DEVCHEK         CHEK POSSIBLE ABBREVIATION           00399000
+         LA    R9,ENDRTAB          NOW PREP FOR DEV ADDR SCAN           00400000
+         B     SCANDEV                                                  00401000
+ALLSPOOL EQU   *                                                        00402000
+         LA    R9,PUN              RESTRICT ALL SPOOL DEVICES           00403000
+         BAL   R14,DEVCHEK         CHEK THE ABBREV'S.                   00404000
+         LA    R9,ENDSTAB          PREP FOR DEV ADDR SCAN               00405000
+SCANDEV  EQU   *                                                        00406000
+         LA    R7,RDRTAB           PREPARE TO BXLE THRU DEVICE NAMES    00407000
+         LA    R8,8                                                     00408000
+RDRCHK   CLC   16(8,R1),0(R7)      IS DEVICE ILLEGAL UNDER BATCH?       00409000
+         BE    ERR107E             IF SO, TELL USER IT'S A NO NO        00410000
+         BXLE  R7,R8,RDRCHK                                             00411000
+         B     DETCHK              IF NOT FOUND, CONTINUE CHECKS        00412000
+         EJECT                                                          00413000
+RDR      DC    CL8'READER',AL1(1)                                       00414000
+PRT      DC    CL8'PRINTER',AL1(1)                                      00415000
+PUN      DC    CL8'PUNCH',AL1(2)                                        00416000
+         SPACE                                                          00417000
+COMPDEV  CLC   0(*-*,R7),16(R1)  BATCH DEV TABLE VS. USER DEVICE        00418000
+RDRTAB   EQU   *                   POSSIBLE NAMES FOR SPOOL DEVICES     00419000
+         DC    CL8'RDR'                                                 00420000
+         DC    CL8'00C'                                                 00421000
+ENDRTAB  DC    CL8'C'                                                   00422000
+         DC    CL8'PRT'                                                 00423000
+         DC    CL8'00E'                                                 00424000
+         DC    CL8'E'                                                   00425000
+         DC    CL8'PCH'                                                 00426000
+         DC    CL8'00D'                                                 00427000
+ENDSTAB  DC    CL8'D'                                                   00428000
+         SPACE 2                                                        00429000
+CPTAB    EQU   *                   TABLE OF ALLOWABLE CP COMMANDS       00430000
+*                                                                       00431000
+*        FLAG BYTE = X'FF' INDICATES COMMAND COULD CHANGE STATUS OF RDR 00432000
+*        FLAG BYTE = X'F0' INDICATES RESTRICTION OF ALL SPOOL DEVICES   00433000
+*        NUMBER BYTE IS MINIMUM CP ABBREVIATION                         00434000
+*                                                                       00435000
+         DC    CL8'CHANGE',X'FF',AL1(2)                                 00436000
+         DC    CL8'CLOSE',X'FF',AL1(1)                                  00437000
+         DC    CL8'DETACH',X'F0',AL1(3)                                 00438000
+         DC    CL8'DUMP',X'00',AL1(4)                                   00439000
+         DC    CL8'DISPLAY',X'00',AL1(1)                                00440000
+         DC    CL8'LINK',X'00',AL1(4)                                   00441000
+         DC    CL8'MSG',X'00',AL1(1)                                    00442000
+         DC    CL8'QUERY',X'00',AL1(1)                                  00443000
+         DC    CL8'REWIND',X'00',AL1(3)                                 00444000
+         DC    CL8'SPOOL',X'FF',AL1(2)                                  00445000
+         DC    CL8'STORE',X'00',AL1(2)                                  00446000
+         DC    CL8'TAG',X'00',AL1(3)                                    00447000
+ENDCPTAB EQU   *-10                                                     00448000
+         EJECT                                                          00449000
+DEVCHEK  DS    0H                  SAME AS 'CPCHEK' IN FUNCTION         00450000
+         LA    R7,RDR              START OF SYMBOLIC DEVICE NAMES       00451000
+         LA    R8,9                SIZE OF NAME + ABBREV                00452000
+DEVNEXT  LA    R2,16(,R1)          POINT TO DEVICE ENTERED              00453000
+         LA    R10,8               MAX. CHARACTERS                      00454000
+         XR    R6,R6                                                    00455000
+         IC    R6,8(R7)            PICK UP MINIMUM NO. CHARS            00456000
+         AR    R2,R6               SET MIN ABBREVIATION                 00457000
+         BCTR  R6,0                SUB 1 FOR 'EXECUTE'                  00458000
+MINCHEK2 EQU   *                                                        00459000
+         EX    R6,COMPDEV          COMPARE ABBREVIATION                 00460000
+         BNE   DEVBXLE             IF NOT=, GO TO NEXT DEVICE           00461000
+         CLI   0(R2),C' '          END OF NAMED DEVICE?                 00462000
+         BE    ERR107E             THAT'S BAD ENOUGH...                 00463000
+         LA    R2,1(,R2)           BUMP BOTH POINTERS                   00464000
+         LA    R6,1(,R6)                                                00465000
+         BCT   R10,MINCHEK2        GO BACK AND COMP ONE MORE CHARACTER  00466000
+DEVBXLE  BXLE  R7,R8,DEVNEXT                                            00467000
+         BR    R14                 RETURN TO 'NOT FOUND' INSTRUCTIONS   00468000
+         SPACE                                                          00469000
+COMPCP   CLC   0(*-*,R7),8(R1)     BATCH CP TABLE VS. USER COMMAND      00470000
+LINK     DC    CL8'LINK'                                                00471000
+H3       DC    H'3'                                                     00472000
+         SPACE 2                                                        00473000
+LINKCHK  CLC   8(8,R1),LINK        CP 'LINK' COMMAND?                   00474000
+         BNE   DETCHK              IF NOT, GO TO NEXT CHEK...           00475000
+         LA    R7,8(,R1)           POINT TO 1ST DEVICE ADDR (ALMOST)    00476000
+         L     R8,FENCE                                                 00477000
+         LA    R9,56(,R1)          POINT TO POSITION FENCE SHOULD BE IN 00478000
+LINKFORM LA    R7,8(,R7)           POINT TO NEXT ENTRY                  00479000
+         LA    R4,LINKPARM         POINT TO INVALID (FOR BATCH) PARMS   00480000
+         LA    R5,LINKEND          END OF SAME                          00481000
+CHKPARM  CLC   0(6,R7),0(R4)       INVALID LINK PARM?                   00482000
+         BE    ERR107E             ERROR IF SO...                       00483000
+         LA    R4,6(,R4)           LOOK AT NEXT ONE IN TABLE            00484000
+         CR    R4,R5               END OF TABLE?                        00485000
+         BNH   CHKPARM             CONTINUE TO CHEK IF NOT              00486000
+         C     R8,0(,R7)           END OF 'LINK' COMMAND?               00487000
+         BNE   LINKFORM            NOT YET, KEEP LOOKING...             00488000
+         CR    R7,R9               IF SO, ARE THERE CORRECT NO.ENTRIES  00489000
+         BNE   ERR107E             IF NOT, DON'T ALLOW IT.              00490000
+*                                                                       00491000
+*        KEEP A TABLE OF ALL DEVICES LINKED TO DURING USER              00492000
+*        JOB SO THAT ALL CAN BE DETACHED AT COMPLETION OF JOB           00493000
+*                                                                       00494000
+         LR    R2,R1          SAVE R1 POINTER                  @VM28811 00495000
+         LA    R1,16(,R1)     BUMP TO 'LINK' DEVICE            @VM28811 00496000
+         BAL   R8,DISKCHEK    CHEK FOR ILLEGAL LINKS           @VM28811 00497000
+         LR    R1,R2          RESTORE R1 POINTER               @VM28811 00498000
+         LH    R8,LINKPTR          IF SO, GET NO. LINKS AND             00499000
+         LA    R8,1(,R8)           ADD ONE MORE                         00500000
+         LA    R9,LINKMAX     MAX NO. ENTRIES ALLOWED          @VA02329 00501000
+         CR    R8,R9          HAVE WE TOO MANY?                @VA02329 00502000
+         BH    ERR107E        YES-ERROR EXIT                   @VA02329 00503000
+         STH   R8,LINKPTR          SAVE NEW NO. ENTRIES                 00504000
+         BCTR  R8,0                SUB 1 FOR TABLE STORE                00505000
+         MH    R8,H3               EACH ENTRY IS 3 BYTES                00506000
+         LA    R9,LINKTAB                                               00507000
+         AR    R8,R9               POINT TO NEXT AVAIL. SPACE           00508000
+         MVC   0(3,R8),32(R1)      INSERT 'LINK' DEVICE ADDR IN TAB     00509000
+         B     RETCP               GO PROCESS COMMAND                   00510000
+         SPACE 1                                                        00511000
+LINKPARM DC    CL6'AS'             TABLE OF 'LINK' OPTIONAL PARMS       00512000
+         DC    CL6'TO'             NOT ALLOWED UNDER BATCH              00513000
+         DC    CL6'PASS='                                               00514000
+         DC    CL6'A'                                                   00515000
+LINKEND  DC    CL6'T'                                                   00516000
+         SPACE 1                                                        00517000
+DETCHK   CLC   8(3,R1),DETLIST     CP 'DETACH' COMMAND?                 00518000
+         BNE   RETCP               IF NOT, ALL THRU...GO PROCESS        00519000
+         LA    R8,CHECKDET    DROP THRU IF VALID               @VA02329 00520000
+*                                                                       00521000
+*        DON'T ALLOW USER TO DETACH SYSTEM OR IPL DISKS                 00522000
+*                                                                       00523000
+DISKCHEK EQU   *                                               @VM28811 00524000
+         UNPK  UNIPLD(9),IPLADDR(5)  GET BOTH DEV ADDRESSES FROM NUCON  00525000
+         TR    UNIPLD(8),CVTAB     TRANSLATE TO EBCDIC                  00526000
+         CLC   UNIPLD+1(3),16(R1)  FOR COMPARISON                       00527000
+         BE    ERR107E             TELL USER HE CAN'T                   00528000
+         CLC   UNIPLD+5(3),16(R1)                                       00529000
+         BE    ERR107E                                                  00530000
+         CLC   ADISK(4),16(R1)     DON'T ALLOW BATCH WORK DISK EITHER.. 00531000
+         BE    ERR107E                                         @VM03203 00532000
+         BR    R8             RETURN TO CALLER (OR DROP THRU)  @VM03203 00533000
+* NOW WE MUST REMOVE DISK HE IS DETACHING FROM LIST                     00534000
+* OF THOSE WE MUST DETACH                                               00535000
+*                                                                       00536000
+CHECKDET LH    R8,LINKPTR     GET NO. OF ENTRIES               @VM03203 00537000
+         LA    R9,LINKTAB     START OF TABLE                   @VM03203 00538000
+         MH    R8,H3          POINT BEYOND LAST ENTRY          @VM03203 00539000
+         AR    R8,R9          ENTRY AFTER LAST                 @VM03203 00540000
+TRYNEXT  CLC   0(3,R9),16(R1) LOOK FOR DISK ADDRESS            @VM03203 00541000
+         BE    GOTIT                                           @VM03203 00542000
+         LA    R9,3(R9)       BUMP THRU TABLE                  @VM03203 00543000
+         CR    R9,R8          PAST LAST ENTRY?                 @VM03203 00544000
+         BL    TRYNEXT                                         @VM03203 00545000
+         B     RETCP          YES- DROP THRU                   @VM03203 00546000
+GOTIT    MVC   0(27,R9),3(R9)  MOVE SUBSEQUENT ENTRIES BACK    @VM03203 00547000
+         LH    R9,LINKPTR     PICK UP ENTRY COUNT AGAIN        @VM03203 00548000
+         BCTR  R9,0           REDUCE BY ONE                    @VM03203 00549000
+         STH   R9,LINKPTR     AND PUT BACK                     @VM03203 00550000
+RETCP    EQU   *                                               @VM03203 00551000
+         TM    BATFLAGS,BATCPEX    COMMAND ENTERED THRU READER?         00552000
+         BZ    EX1CHEK             IF SO, PASS IT TO CMS...             00553000
+         XR    R15,R15             ZERO RET CODE                        00554000
+RETCPERR EQU   *                   COME HERE IF CP CMND NOT ALLOWED     00555000
+         LR    R3,R15         SAVE RETURN CODE ACROSS SVC203   @VA07507 00555100
+         DMSKEY NUCLEUS                                        @VA05160 00556000
+         NI    BATFLAGS,255-BATCPEX  RESET                              00557000
+         DMSKEY RESET                                          @VA05160 00558000
+         LR    R15,R3         RESTORE RETURN CODE              @VA07507 00558100
+         LM    R0,R14,SAVCPF       RESTORE DMSCPF ENVIRONMENT           00559000
+         BR    R14                 AND RETURN TO DMSCPF                 00560000
+         SPACE                                                          00561000
+SAVCPF   DC    15F'0'              SAVE AREA FOR DMSCPF REGS            00562000
+         SPACE                                                          00563000
+ADISK    DC    CL4'195'                                                 00564000
+LINKPTR  DC    H'0'                NO. ENTRIES IN LINK TABLE            00565000
+LINKTAB  DC    CL30' '             LINK DEVICE TABLE (10 ENTRIES MAX.)  00566000
+GARB     DC    CL30' '        BUFFER AREA                      @VA02329 00567000
+LINKMAX  EQU   (*-GARB)/3     MAX ENTRIES ALLOWED              @VA02329 00568000
+ABATEX2  DC    V(BATEXIT2)         EXIT FOR USER 'JOB' CARD CHECK       00569000
+         EJECT                                                          00570000
+*********************************************************************** 00571000
+*                                                                       00572000
+*        VALIDATE THE '/JOB' CARD AND INITIALIZE JOB IF VALID           00573000
+*                                                                       00574000
+*********************************************************************** 00575000
+NEWJOB   EQU   *                                                        00576000
+         LA    R1,CARD        SCAN THE JOB CARD                         00577000
+         L     R10,12(R11)    PROVIDE LINE COUNT                        00578000
+         LA    R0,0(,R10)     CLEAR HIGH ORDER BYTE                     00579000
+         L     R15,ASCANN                                               00580000
+         BALR  R14,R15        CALL DMSSCNN                              00581000
+         CLC   0(3,R1),CPLIST      PROCESSING A 'CP' COMMAND?           00582000
+         BE    CPVALID             IF SO, VALIDATE CP COMMAND           00583000
+         CLC   0(5,R1),LSET                                             00584000
+         BE    SETCARD                                                  00585000
+         SPACE 1                                                        00586000
+         L     R15,ABATEX2         CHECK FOR 'JOB' CARD EXIT            00587000
+         LTR   R15,R15             IF 'BATEXIT2 TEXT' NOT LOADED        00588000
+         BZ    JOBCHEK             NO EXIT TAKEN                        00589000
+         BALR  R14,R15             IF LOADED, PASS CONTROL              00590000
+         LTR   R15,R15             IF RC ^= 0,                          00591000
+         BNZ   ERR106E             PROVIDE ERR MSG FOR HIM              00592000
+         SPACE 1                                                        00593000
+JOBCHEK  EQU   *                   NORMAL BATCH 'JOB' CARD CHECK        00594000
+         TM    8(R1),X'FF'         USERID?                              00595000
+         BO    ERR106E             ERROR IF NOT                         00596000
+         TM    16(R1),X'FF'                                             00597000
+         BO    ERR106E             ERROR IF NO ACCOUNT NO.              00598000
+         MVC   CPACNT(16),8(R1)    PROVIDE ACCT. INFO TO CP             00599000
+         LA    R2,CPACNT           POINT TO IT...                       00600000
+         LA    R4,4                TELL CP IT'S USERID AND NO.          00601000
+         DC    X'8324004C'         PUNCH LAST JOB INFO & START NEW JOB  00602000
+         BC    2,ERR106E           INVALID USERID                       00603000
+         MVC   ID(8),8(R1)         OTHERWISE, SPREAD THE USERID         00604000
+         TM    24(R1),X'FF'        JOB NAME?                            00605000
+         BO    STARTMSG            NO, USE DEFAULT                      00606000
+         MVC   JNAME(8),24(R1)     YES, USE IT.                         00607000
+*                                                                       00608000
+STARTMSG EQU   *                                                        00609000
+         LINEDIT DISP=CPCOMM,SUB=(CHARA,ID,CHARA,JNAME),RENT=NO,       *00610000
+               TEXT='MSG ........ JOB ''........'' STARTED'             00611000
+         CPF   'QUERY FILES'                                            00612000
+         B     INIT                                                     00613000
+         SPACE 2                                                        00614000
+CPACNT   DS    0D                  ACCOUNT. INFO FOR CP DIAGNOSE        00615000
+         DC    CL8'USERID'                                              00616000
+         DC    CL8'ACCT.NO.'                                            00617000
+         SPACE 2                                                        00618000
+*********************************************************************** 00619000
+*        RESET SPOOLING DEVICES INCLUDING TAG RECORDS                   00620000
+*********************************************************************** 00621000
+INIT     EQU   *                                                        00622000
+         CPF   'TAG DEV CONSOLE'                                        00623000
+         CPF   'READY 00D'                                     @VA05468 00624000
+         CPF   'READY 00E'                                     @VA05468 00625000
+         CPF   'SPOOL CONSOLE START OFF NOTERM CLASS T'        @VA02756 00626000
+         CPF   'SPOOL RDR CLASS * CONT NOHOLD'                 @VA02757 00627000
+         CPF   'SPOOL PRT CLASS A NOCONT COPY 1 OFF CLOSE'              00628000
+         CPF   'SPOOL PUN CLASS A NOCONT COPY 1 OFF CLOSE'              00629000
+         CPF   'SPOOL PRT CONT'                                         00630000
+         CPF   'SPOOL PUN CONT'                                         00631000
+         EJECT                                                          00632000
+         CPF   'TAG DEV PRT'                                            00633000
+         CPF   'TAG DEV PUN'                                            00634000
+         LA    R1,SETLIST           SET IMPLIED-CP OFF                  00635000
+         SVC   202                                                      00636000
+         LA    R1,PROFLIST         'BATPROF' EXEC                       00637000
+         SVC   202                                                      00638000
+         DC    AL4(*+4)                                                 00639000
+         SPACE                                                          00640000
+         DMSKEY NUCLEUS                                        @VA05160 00641000
+         NI    BATFLAGS,255-BATTERM-BATNOEX (IN CASE NO IPL)            00642000
+         OI    BATFLAGS,BATUSEX    SIGNAL USER JOB START                00643000
+         DMSKEY RESET                                          @VA05160 00644000
+         B     RDCARD              GET NEXT CARD                        00645000
+         SPACE                                                          00646000
+PROFLIST DS    0F                                                       00647000
+         DC    CL8'EXEC'                                                00648000
+         DC    CL8'BATPROF'                                             00649000
+FENCE    DC    8X'FF'                                                   00650000
+         SPACE                                                          00651000
+SETLIST  DC    CL8'SET'                                                 00652000
+         DC    CL8'IMPCP'                                               00653000
+         DC    CL8'OFF'                                                 00654000
+         DC    8X'FF'                                                   00655000
+         EJECT                                                          00656000
+*********************************************************************** 00657000
+*                                                                       00658000
+* COME HERE FROM DMSABN OR DMSERR WITH 'DIE' OPTION.                    00659000
+* ALSO FROM DMSITE, DMSPIO AND DMSCIO WHEN JOB LIMIT EXCEEDED           00660000
+* AND FROM CMS COMMANDS WHICH ARE DISABLED UNDER BATCH                  00661000
+*                                                                       00662000
+*********************************************************************** 00663000
+         SPACE                                                          00664000
+         ENTRY DMSBTPAB                                                 00665000
+DMSBTPAB EQU   *                                                        00666000
+         BALR  R15,0                                                    00667000
+         USING *,R15                                                    00668000
+         L     R12,ADMSBTP          SET BASE REG                        00669000
+         DROP  R15                                                      00670000
+         TM    BATFLAG2,BATDCMS+BATXLIM SPECIAL ABEND?                  00671000
+         BZ    ABEND               NO                                   00672000
+         TM    BATFLAG2,BATXLIM    YES, USER JOB LIMIT?                 00673000
+         BO    ERR109E             YES                                  00674000
+         ST    R14,SAVE14          SAVE CMS RETURN ADDR                 00675000
+         B     ERR107EA            DISABLED CMS COMMAND        @VM01530 00676000
+         SPACE                                                          00677000
+ABEND    EQU   *                                                        00678000
+         MVC   ID+8(8),JNAME       COMPLETE DUMP ID                     00679000
+         LA    R1,CPDUMP                                                00680000
+         SVC   202                 DUMP THE MACHINE                     00681000
+         DC    AL4(*+4)                                        @VM28811 00682000
+ABENDMSG EQU   *                   COME HERE WHEN NO DUMP REQUIRED      00683000
+         LA    R2,LABEND                                                00684000
+         B     FINISH                                                   00685000
+         SPACE                                                          00686000
+ADMSBTP  DC    A(DMSBTP)                                                00687000
+LABEND   DC    CL8'ABEND'                                               00688000
+LENDED   DC    CL8'ENDED'                                               00689000
+         SPACE                                                          00690000
+CPDUMP   DC    CL8'CP'                                                  00691000
+         DC    CL8'DUMP'                                                00692000
+         DC    CL8'0-END'                                               00693000
+         DC    CL8'*'                                          @VM28811 00694000
+ID       DC    CL8'CMSBATCH'       USER ID (DEFAULT)                    00695000
+         DC    CL8' '                                                   00696000
+         DC    8X'FF'                                                   00697000
+         SPACE                                                          00698000
+CONWAIT  DC    CL8'CONWAIT'                                             00699000
+         EJECT                                                          00700000
+*********************************************************************** 00701000
+*                                                                       00702000
+*        COME HERE WHEN END-OF-JOB DETECTED                             00703000
+*                                                                       00704000
+*********************************************************************** 00705000
+EOJ      EQU   *                                                        00706000
+         LA    R2,LENDED                                                00707000
+         SPACE 2                                                        00708000
+FINISH   EQU   *                                                        00709000
+         LINEDIT DISP=CPCOMM,RENT=NO,                                  *00710000
+               SUB=(CHARA,ID,CHARA,JNAME,CHARA,(R2)),                  *00711000
+               TEXT='MSG ........ JOB ''........'' ........'            00712000
+         SPACE                                                          00713000
+FIN1     EQU   *                                                        00714000
+         DMSKEY NUCLEUS                                        @VA05160 00715000
+         NI    BATFLAGS,255-BATUSEX     SIGNAL USER JOB END             00716000
+         DMSKEY RESET                                          @VA05160 00717000
+         LINEDIT SUB=(CHARA,(R2)),                                     *00718000
+               TEXT='CMSBATCH ........'                                 00719000
+         LA    R1,CONWAIT     WAIT FOR CONSOLE TO RELAX                 00720000
+         SVC   202                                                      00721000
+         CPF   'SPOOL PRT NOCONT NOHOLD'                                00722000
+         CPF   'SPOOL PUN NOCONT NOHOLD'                                00723000
+         MVC   CLOSDEV(8),PRT       BUILD 'CLOSE' PLIST                 00724000
+         LA    R1,CPLIST                                                00725000
+         SVC   202            CLOSE THE PRINTER                         00726000
+         MVC   CLOSDEV(8),PUN       BUILD 'CLOSE' PLIST                 00727000
+         LA    R1,CPLIST                                                00728000
+         SVC   202            CLOSE THE PUNCH                           00729000
+         CPF   'SPOOL RDR CLASS * CONT'                        @VA02757 00730000
+         CPF   'SPOOL PRT CLASS A NOCONT COPY 1 OFF'                    00731000
+         CPF   'SPOOL PUN CLASS A NOCONT COPY 1 OFF'                    00732000
+         EJECT                                                          00733000
+*********************************************************************** 00734000
+*        CLEAR THE SPOOL DEVICE TAG RECORDS                             00735000
+*********************************************************************** 00736000
+         CPF   'TAG DEV PRT'                                            00737000
+         CPF   'TAG DEV PUN'                                            00738000
+         SPACE 1                                                        00739000
+         EJECT                                                          00740000
+*********************************************************************** 00741000
+*        NOW DETACH ALL DISKS THAT USER JOB LINKED TO                   00742000
+*********************************************************************** 00743000
+         LH    R7,LINKPTR          NO. ENTRIES IN LINK TABLE            00744000
+         LTR   R7,R7                                                    00745000
+         BZ    NOLINKS             SKIP THRU IF NO LINKS WERE MADE      00746000
+         LA    R8,LINKTAB                                               00747000
+         MVC   CPCMD(24),DETLIST                                        00748000
+DETPROC  MVC   CPCMD+8(3),0(R8)    PREPARE 'DETACH' PLIST               00749000
+         LA    R1,CPLIST                                                00750000
+         SVC   202                 DETACH THE DISK                      00751000
+         DC    AL4(*+4)            O.K. IF USER DETACHED IT             00752000
+         LA    R8,3(,R8)           POINT TO NEXT LINK ENTRY             00753000
+         BCT   R7,DETPROC          LOOP UNTIL ALL ENTRIES DETACHED      00754000
+NOLINKS  EQU   *                                                        00755000
+*********************************************************************** 00756000
+*        RESET THE SPOOLED CONSOLE INCLUDING TAG RECORD                 00757000
+         CPF   'SPOOL CONS STOP NOCONT'                        @VA05657 00758000
+         CPF   'CLOSE CONS NAME BATCH CONSOLE'                          00759000
+         CPF   'TAG DEV CONSOLE'                                        00760000
+         CPF   'SPOOL CONSOLE NOHOLD CLASS T COPY 1'           @VA05657 00761000
+         TM    BATFLAGS,BATRERR    TROUBLE AT READER?                   00762000
+         BZ    REIPL                                                    00763000
+         DMSKEY NUCLEUS                                        @VA05160 00764000
+         NI    BATFLAGS,255-BATRERR IF SO,GO BACK AND WAIT FOR OPERATOR 00765000
+         DMSKEY RESET                                          @VA05160 00766000
+         B     WAITMSG                                                  00767000
+         EJECT                                                          00768000
+REIPL    EQU   *                                                        00769000
+         TM    BATFLAG2,BATSTOP    WAS 'HB' ENTERED TO STOP ME?@V2D2721 00770000
+         BZ    NEXTJOB             IF NOT, REIPL FOR NEXT JOB  @V2D2721 00771000
+         XR    R1,R1          IF SO,  GENERATE LAST JOB ACCTG  @V2D2721 00772000
+         DC    X'8310004C'         BEFORE LOGOUT...            @V2D2721 00773000
+         CPF   'LOGOUT'            LOGOUT THE BATCH MACHINE    @V2D2721 00774000
+NEXTJOB  EQU   *                                               @V2D2721 00775000
+         TM    BATFLAGS,BATTERM    FLUSHING THE JOB?                    00776000
+         BO    RDCARD                                                   00777000
+         CLI   SYSNAME,OFF    SAVED SYSTEM IN USE ?            @V305066 00778000
+         BE    DEVIPL         NO, USE DEVICE IPL               @V305614 00779000
+         MVC   IPLDEV(8),SYSNAME   USE SAVED SYSTEM NAME       @V305614 00780000
+SETSEG   L     R4,ASYSNAMS    POINT TO SYSNAMES TABLE          @V305614 00781000
+         USING SYSNAMES,R4    .....                            @V305614 00782000
+         MVC   IPLSEG(8),CMSSEG    PASS ALONG CMSSEG ENTRY     @V305614 00783000
+         B     IPLIT               NOW IPL, EVERYBODY...       @V2D2721 00784000
+DEVIPL   EQU   *                                               @V2D2721 00785000
+         UNPK  UNIPLD(5),IPLADDR(3)  GET IPL DEVICE ADDR                00786000
+         TR    UNIPLD(4),CVTAB     AND CONVERT TO EBCDIC                00787000
+         MVC   IPLDEV(3),UNIPLD+1  AND IPL IT AGAIN                     00788000
+         B     SETSEG         GO GET CMSSEG ENTRY              @V305614 00789000
+IPLIT    EQU   *                                               @V2D2721 00790000
+         LA    R1,IPLIST                                                00791000
+         LA    R4,IPLENGTH                                     @V2D2721 00792000
+         DC    X'83140008'         DIAGNOSE THE IPL            @V2D2721 00793000
+         SPACE                                                          00794000
+UNIPLD   DS    CL9                                                      00795000
+         DC    C'0123456789ABCDEF' TRANSLATE TABLE                      00796000
+CVTAB    EQU   *-X'FF'-1                                                00797000
+         SPACE 1                                                        00798000
+IPLIST   DS    0F                                                       00799000
+         DC    CL4'IPL'                                        @V2D2721 00800000
+IPLDEV   DC    CL9' '                                          @V2D2721 00801000
+         DC    CL7'PARM'                                       @V2D2721 00802000
+IPLCODE  DC    CL8'BATCH'                                      @V2D2721 00803000
+         DC    CL4'SEG='                                       @V305614 00804000
+IPLSEG   DC    CL8'CMSSEG'                                     @V305614 00805000
+IPLENGTH EQU   *-IPLIST                                        @V2D2721 00806000
+         SPACE                                                          00807000
+CPLIST   DS    0D             FOR CP CALLS WITH SUBSTITUTION            00808000
+         DC    CL8'CP'                                                  00809000
+CPCMD    DC    CL8'CLOSE'                                               00810000
+CLOSDEV  DC    CL8' '                                                   00811000
+         DC    CL8'NAME'                                                00812000
+         DC    CL8'CMSBATCH'                                            00813000
+JNAME    DC    CL8'JOB'                                                 00814000
+         DC    8X'FF'                                                   00815000
+         SPACE 1                                                        00816000
+DETLIST  DC    CL8'DETACH'                                              00817000
+         DC    CL8' '                                                   00818000
+         DC    8X'FF'                                                   00819000
+         SPACE 1                                                        00820000
+H1       DC    H'1'                                                     00821000
+H2       DC    H'2'                                                     00822000
+OFF      EQU   X'00'                                           @V305066 00823000
+         EJECT                                                          00824000
+*********************************************************************** 00825000
+*                                                                       00826000
+*        COME HERE WHEN NON-ZERO (OTHER THAN '5') RETURN FROM CARDIO    00827000
+*                                                                       00828000
+*********************************************************************** 00829000
+ERR      EQU   *                                                        00830000
+         CH    R15,H1              END OF FILE?                         00831000
+         BNE   UNITCHEK                                                 00832000
+         TM    BATFLAGS,BATNOEX    COULD BE AN EMPTY READER             00833000
+         BO    WAITMSG             IT IS...                             00834000
+         B     EOJ                 OTHERWISE, END OF FILE               00835000
+UNITCHEK EQU   *                                                        00836000
+         CH    R15,H2              NOT READY?                           00837000
+         BE    WAITMSG             READER EMPTY                         00838000
+         DMSKEY NUCLEUS                                        @VA05160 00839000
+         OI    BATFLAGS,BATRERR    SOMETHING WRONG WITH READER...       00840000
+         DMSKEY RESET                                          @VA05160 00841000
+         CPF   'MSG OP HARD RDR ERROR ..INTERVENTION REQUIRED          X00842000
+                ON BATCH MACHINE'                              @VA02633 00843000
+         B     ABEND               DUMP, CLEAN UP, AND RETURN BELOW     00844000
+WAITMSG  EQU   *                                                        00845000
+         XR    R1,R1               RX = 0 MEANS USE CALLING USERID      00846000
+         DC    X'8310004C'         CHARGE BATCH FOR WAIT TIME           00847000
+         LINEDIT TEXT='WAITING FOR READER'                              00848000
+         WAITD RDR1                                                     00849000
+         B     RDCARD                                                   00850000
+         EJECT                                                          00851000
+*********************************************************************** 00852000
+*                                                                       00853000
+*        VALIDATE THE /SET CARD AND UPDATE JOB LIMIT TABLE IF VALID     00854000
+*                                                                       00855000
+*********************************************************************** 00856000
+SETCARD  EQU   *                   PROCESS THE /SET CONTROL CARD        00857000
+         LA    R6,8                KEYWORD TABLE ENTRY SIZE             00858000
+         LA    R7,ENDKEYS                                               00859000
+         SPACE                                                          00860000
+CARDSCAN EQU   *                                                        00861000
+         LA    R1,8(,R1)           POINT TO NEXT KEYWORD                00862000
+         TM    0(R1),X'FF'                                              00863000
+         BO    RDCARD              ALL DONE, GET NEXT CARD              00864000
+         LA    R5,KEYS             POINT TO ALLOWABLE LIMIT KEYWORDS    00865000
+         XR    R4,R4               USE R4 FOR TABLE INDEX               00866000
+TABLOOP  EQU   *                   LOOP THRU KEYWORD TABLE              00867000
+         CLC   0(8,R5),0(R1)       TABLE ENTRY = CARD PARM?             00868000
+         BE    NUMCHEK             HIT, GO VALIDATE                     00869000
+         LA    R4,1(,R4)           KEEP TRACK OF KEYWORD                00870000
+         BXLE  R5,R6,TABLOOP       AND KEEP LOOKING...                  00871000
+         B     ERR108E             STRANGE KEYWORD                      00872000
+         SPACE                                                          00873000
+NUMCHEK  EQU   *                                                        00874000
+         LA    R1,8(,R1)           POINT TO INTEGER VALUE               00875000
+         TM    0(R1),X'FF'                                              00876000
+         BO    ERR108E             NO-NO IF NOT THERE                   00877000
+         BAL   R14,CONVERT         OTHERWISE, CHEK THE INTEGER          00878000
+         LA    R10,DMSBTPLM        VALID INTEGER...PUT IT IN LIMIT TABL 00879000
+         SLL   R4,2                R4 * 4 = LIMIT TABLE DISPLACMT.      00880000
+         LH    R9,0(R4,R10)        R9 -> DEFAULT LIMIT                  00881000
+         CR    R8,R9               USER LIMIT > DEFAULT LIMIT?          00882000
+         BH    ERR108E             ERROR IF SO                          00883000
+         STH   R8,0(R4,R10)        STORE THE NEW USER LIMIT             00884000
+         B     CARDSCAN            O.K., GET NEXT PARM ON CARD          00885000
+         SPACE                                                          00886000
+KEYS     EQU   *                   /SET CARD KEYWORD TABLE              00887000
+         DC    CL8'TIME'           ORDER OF KEYWORDS MUST CORRESPOND    00888000
+         DC    CL8'PRINT'          TO THE ORDER IN DMSBTPLM ('BATLIMIT' 00889000
+         DC    CL8'PUNCH'                                               00890000
+ENDKEYS  EQU   *                                                        00891000
+         SPACE                                                          00892000
+CONVERT  EQU   *                                                        00893000
+         LA    R8,CHARMAX+1       SET R8 WITH MAX CHAR COUNT + 1        00894000
+         LA    R9,CHARMAX         SET R9 TO MAX CHAR COUNT              00895000
+         LR    R10,R1               SAVE PLIST POINTER                  00896000
+*                                                                       00897000
+* SEARCH FOR THE FIRST BLANK IN THE STRING TO GET THE COUNT.            00898000
+*                                                                       00899000
+CONV1    CLI   1(R10),BLANK       ? FIND 1ST BLANK ?                    00900000
+         BE    CONV2              YES, CONTINUE PROCESSING              00901000
+         LA    R10,1(,R10)        UPDATE TO NEXT CHARACTER              00902000
+         BCT   R9,CONV1           DO THIS MAX-1 TIMES, I.E.,            00903000
+*                             THE 1ST CHAR COULD NOT HAVE BEEN BLANK.   00904000
+         B     ERR108E        TOO MANY CHARACTERS, ERROR EXIT.          00905000
+*                                                                       00906000
+* NOW CHECK TO MAKE SURE ALL CHARACTERS ENTERED ARE NUMERICS.           00907000
+* PLIST NOW POINTS TO THE LAST CHARACTER (DIGIT).                       00908000
+*                                                                       00909000
+CONV2    SR    R8,R9              GET COUNT OF CHAR IN R8               00910000
+         LR    R2,R8              IN R2 ALSO                            00911000
+CONV3    CLI   0(R10),C'0'        ? IS IT NUMERIC ?                     00912000
+         BL    ERR108E            NO, ERROR EXIT                        00913000
+         CLI   0(R10),C'9'                                              00914000
+         BH    ERR108E             DITTO                                00915000
+         BCTR  R10,R0             BACK UP TO PREVIOUS CHAR              00916000
+         BCT   R2,CONV3           DO THIS FOR EACH CHARACTER            00917000
+*                                                                       00918000
+* NOW PUT IN THE DECIMAL SIGN AND PACK THE NUMERICS.                    00919000
+* PLIST NOW POINTS TO THE CHARACTER BEFORE THE FIRST ONE.               00920000
+*                                                                       00921000
+         AR    R10,R8             POINT PLIST TO LAST CHARACTER         00922000
+         NI    0(R10),X'CF'       PUT IN DECIMAL + SIGN                 00923000
+         BCTR  R8,R0              DECREMENT CHARACTER COUNT TO:         00924000
+         SR    R10,R8             1. POINT PLIST TO 1ST CHARACTER, AND  00925000
+*                                 2. REDUCE PACK COUNT FOR EXECUTE      00926000
+         EX    R8,EXPACK          PACK THE NUMERICS IN THE PLIST        00927000
+         CVB   R8,PACK            CONVERT THIS TO BINARY                00928000
+         C     R8,NUMAX           COMPARE IT TO THE MAX ALLOWED         00929000
+         BH    ERR108E            TOO BIG FOR HALFWORD                  00930000
+         BR    R14                RETURN TO INVOKER                     00931000
+         SPACE                                                          00932000
+EXPACK   PACK  PACK(8),0(0,R10)                                         00933000
+PACK     DC    D'0'                                                     00934000
+NUMAX    DC    F'32767'                                                 00935000
+CHARMAX  EQU   5                                                        00936000
+BLANK    EQU   X'40'                                                    00937000
+         SPACE 2                                                        00938000
+         BATLIMIT CSECT                                                 00939000
+         EJECT                                                          00940000
+*********************************************************************** 00941000
+*                                                                       00942000
+*        VARIOUS ERROR MESSAGES                                         00943000
+*                                                                       00944000
+*********************************************************************** 00945000
+ERR107EA EQU   *                                               @VM01530 00946000
+         LR    R2,R1               R1 -> INVALID PLIST         @VM01530 00947000
+         B     ERR107EB            PRINT THE MSG               @VM01530 00948000
+ERR107E  EQU   *                                                        00949000
+         LA    R2,8(,R1)           POINT TO CP/CMS COMMAND              00950000
+ERR107EB EQU   *                                               @VM01530 00951000
+         DMSERR NUM=107,LET=E,SUB=(CHAR8A,(R2)),                       *00952000
+               TEXT='CP/CMS COMMAND ''................'' NOT ALLOWED'   00953000
+         TM    BATFLAG2,BATDCMS    IS IT CMS COMMAND                    00954000
+         BNZ   RETCMS              YES, DROP THRU                       00955000
+         TM    BATFLAGS,BATCPEX    COMMAND ENTERED THRU READER?         00956000
+         BZ    RDCARD              IF SO, CANCEL IT AND READ NEXT ONE   00957000
+         LA    R15,88              IF NOT, LOAD ERROR CODE              00958000
+         B     RETCPERR            AND RETURN                           00959000
+RETCMS   EQU   *                                                        00960000
+         DMSKEY NUCLEUS                                        @VA05160 00961000
+         NI    BATFLAG2,255-BATDCMS     RESET                           00962000
+         DMSKEY RESET                                          @VA05160 00963000
+         LA    R15,88              SET CMS RETURN CODE                  00964000
+         B     RETURN              RETURN TO CMS...                     00965000
+         SPACE 1                                                        00966000
+ERR105E  EQU   *                                                        00967000
+         DMSERR NUM=105,LET=E,TEXT='NO JOB CARD PROVIDED'               00968000
+         B     FLUSHFLG            BETTER FLUSH THE JOB                 00969000
+         EJECT                                                          00970000
+ERR106E  EQU   *                                                        00971000
+         DMSERR NUM=106,LET=E,TEXT='/JOB CARD FORMAT INVALID'           00972000
+FLUSHFLG EQU   *                   COME HERE TO FLUSH REMAINDER OF JOB  00973000
+         DMSKEY NUCLEUS                                        @VA05160 00974000
+         OI    BATFLAGS,BATTERM                                         00975000
+         DMSKEY RESET                                          @VA05160 00976000
+         LA    R2,LENDED           INSURE PROPER MSG                    00977000
+         B     FIN1                CLEAN-UP AND FLUSH                   00978000
+         SPACE                                                          00979000
+ERR108E  EQU   *                                                        00980000
+         DMSERR NUM=108,LET=E,TEXT='/SET CARD FORMAT INVALID'           00981000
+         B     ABENDMSG                                                 00982000
+         SPACE                                                          00983000
+ERR109E  EQU   *                                                        00984000
+         TM    BATFLAG2,BATXCPU                                         00985000
+         BZ    PRTX                                                     00986000
+         LA    R2,CPU              USER CPU LIMIT EXCEEDED              00987000
+         B     XMSG                                                     00988000
+CPU      DC    CL8'CPU'                                                 00989000
+PRTX     TM    BATFLAG2,BATXPRT                                         00990000
+         BZ    PUNX                                                     00991000
+         LA    R2,PRT              PRINTED LINES LIMIT EXCEEDED         00992000
+         B     XMSG                                                     00993000
+PUNX     LA    R2,PUN              PUNCHED CARD LIMIT EXCEDED           00994000
+         EJECT                                                          00995000
+XMSG     DMSERR NUM=109,LET=E,SUB=(CHARA,(R2)),                        *00996000
+               TEXT='........ LIMIT EXCEEDED'                           00997000
+         B     ABENDMSG                                                 00998000
+         EJECT                                                          00999000
+*********************************************************************** 01000000
+*                                                                       01001000
+* IF THE CONSOLE STACK IS NON-EMPTY, THEN WE CALL WAITRD FOR REAL.      01002000
+*                                                                       01003000
+*********************************************************************** 01004000
+RDSTACK  EQU   *                                                        01005000
+         LR    R1,R11              RESTORE DMSCRD PLIST POINTER         01006000
+         L     R15,ADMSCRD                                              01007000
+         L     R14,SAVE14          RESTORE REG 14                       01008000
+         LR    R12,R15             ALTERNATE BASE REG, IF NEEDED        01009000
+         BR    R15                 GO READ FROM CONSOLE STACK           01010000
+         EJECT                                                          01011000
+         LTORG                                                          01012000
+         REGEQU                                                         01013000
+         NUCON                                                          01014000
+         SYSNAMES                                            , @V305614 01015000
+         FVS                                                            01016000
+         END                                                            01017000

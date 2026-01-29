@@ -1,0 +1,650 @@
+ACM      TITLE 'DMSACM     (CMS)       VM/370 - RELEASE 6'              00001000
+         SPACE 2                                                        00002000
+*.                                                                      00003000
+*                                                                       00004000
+*                                                                       00005000
+*                                                                       00006000
+*                                                                       00007000
+* MODULE NAME:                                                          00008000
+*                                                                       00009000
+*        DMSACM (READMFD)                                               00010000
+*                                                                       00011000
+* FUNCTION:                                                             00012000
+*                                                                       00013000
+*        TO READ  THE MASTER  FILE DIRECTORY  (MFD) AND  OTHER          00014000
+*        INFORMATION INTO CORE FROM DISK.                               00015000
+*                                                                       00016000
+* ATTRIBUTES:                                                           00017000
+*                                                                       00018000
+*        TRANSIENT, REENTRANT                                           00019000
+*                                                                       00020000
+* ENTRY POINTS:                                                         00021000
+*                                                                       00022000
+*         READMFD                                                       00023000
+*                                                                       00024000
+* ENTRY CONDITIONS:                                                     00025000
+*                                                                       00026000
+*        R0   MUST POINT TO ACTIVE DISK TABLE                           00027000
+*                                                                       00028000
+* EXIT CONDITIONS:                                                      00029000
+*                                                                       00030000
+*        NORMAL RETURN                                                  00031000
+*                                                                       00032000
+*        R15=0     (AND CONDITION-CODE = 0)                             00033000
+*                                                                       00034000
+*        ERROR RETURNS                                                  00035000
+*                                                                       00036000
+*        R15 = 1:    DISK ERROR READING MFD, OR FIRST WORD              00037000
+*                    OF MFD = 0                                         00038000
+*        R15 = 2:    DISK NOT ATTACHED                                  00039000
+*        R15 = 3:    UNRECOGNIZABLE DASD DEVICE (NOT A 2314, 2311       00040000
+*                    3330, 3340, OR 3350)                               00041000
+*        R15 = 4:    DISK IS FOUND TO BE READ-ONLY (NON-FATAL)          00042000
+*        R15 = 5:    INSUFFICIENT FREE STORAGE                          00043000
+*       R15 = 28:    DMSROS TEXT NOT FOUND - O/S DISK ACCESS            00044000
+*                                                                       00045000
+* CALLS TO OTHER ROUTINES:                                              00046000
+*                                                                       00047000
+*        DMSFREE, DMSFRET, DMSDIOR, DMSDIOW, DMSROS                     00048000
+*                                                                       00049000
+*                                                                       00050000
+*                                                                       00051000
+* EXTERNAL REFERENCES:                                                  00052000
+*                                                                       00053000
+*        DMSNVC, ADTSECT, FVSECT                                        00054000
+*                                                                       00055000
+* TABLES/WORKAREAS                                                      00056000
+*                                                                       00057000
+*        MFD BUFFER                                                     00058000
+*        QMSK BUFFER                                                    00059000
+*        QQMSK BUFFER                                                   00060000
+*                                                                       00061000
+* REGISTER USAGE:                                                       00062000
+*                                                                       00063000
+*        R13  FVSECT                                                    00064000
+*        R12  BASE                                                      00065000
+*        R11  ADTSECT                                                   00066000
+*        REST WORK                                                      00067000
+*                                                                       00068000
+* OPERATION:                                                            00069000
+*                                                                       00070000
+*        DMSACF AND DMSACM WHEN USED TOGETHER                           00071000
+*        ARE CALLED BY  DMSACC OR DMSING TO BRING  ALL OR PART          00072000
+*        OF A USER FILE DIRECTORY INTO STORAGE OR TO READ THE           00073000
+*        LABEL OF THE O/S DISK BEING ACCESSED. DMSACM DOES              00074000
+*        NOT BRING IN ANY FST  HYPERBLOCKS (THAT BEING DONE BY          00075000
+*        DMSACF), AND  IS THEREFORE CALLED DIRECTLY  BY DMSACC          00076000
+*        WHEN ACCESSING A DISK USING THE (ERASE) OPTION.                00077000
+*                                                                       00078000
+*        DMSACM DOES THE FOLLOWING:                                     00079000
+*                                                                       00080000
+*        A DIAGNOSE IS ISSUED TO CP FOR THE DEVICE TYPE OF THE          00081000
+*        ADDRESS SPECIFIED. AN ERROR CODE IS RETURNED TO THE            00082000
+*        CALLER IF A NON-ZERO CONDITION CODE IS RETURNED FROM           00083000
+*        DIAGNOSE(I.E. THE DEVICE IS NOT ATTACHED).                     00084000
+*        REGISTER 15 FROM DIAGNOSE IS INTERROGATED FOR THE FOLLOWING:   00085000
+*            1) IF IT IS NOT A DASD DEVICE, AN ERROR CODE OF 3          00086000
+*               IS RETURNED TO THE CALLER;                              00087000
+*            2) IF THE LOW ORDER BYTE OF R15 INDICATES THAT THE         00088000
+*               DEVICE IS A 3330(X'10'), 2314(X'40'), 3340(X'01') OR    00089000
+*               3350(X'08'), A X'09', X'08', X'07', OR X'0B'            00090000
+*               RESPECTIVELY, IS STORED IN THE FOURTH BYTE OF THE       00091000
+*        12-BYTE DEVICE-TABLE  ENTRY IN  THE NUCON  TABLE, FOR          00092000
+*        THE PARTICULAR DEVICE GIVEN BY THE ACTIVE DISK TABLE.          00093000
+*               IF THE DEVICE IS NONE OF THESE, CONTROL IS              00094000
+*               RETURNED TO THE USER WITH AN ERROR CODE OF 3.           00095000
+*                                                                       00096000
+*        THEN THE DISK LABEL (RECORD NO. 3 - THAT IS, CYLINDER          00097000
+*        0, HEAD 0, RECORD 3) IS READ FROM DISK AND A TEST IS           00098000
+*        MADE TO DETERMINE IF THE DISK IS A CMS OR AN O/S DISK.         00099000
+*        IF THE DISK IS O/S, CONTROL GOES TO A SPECIAL ROUTINE.         00100000
+*                                                                       00101000
+*        NEXT, THE MASTER FILE DIRECTORY  (RECORD NO. 4 - THAT          00102000
+*        IS, CYLINDER 0,  HEAD 0, RECORD 4) IS  READ FROM DISK          00103000
+*        INTO A BUFFER  OBTAINED FROM FREE STORAGE.   (ERROR 1          00104000
+*        IF CANNOT BE READ  SUCCESSFULLY).  THE FIRST HALFWORD          00105000
+*        OF THE  MFD IS  CHECKED TO  MAKE SURE  DATA IS  THERE          00106000
+*        (ERROR 1 IF NOT).                                              00107000
+*                                                                       00108000
+*        THE DISK  ADDRESSES AT THE  BEGINNING OF THE  MFD ARE          00109000
+*        THEN  CHECKED, SCANNING  FOR  AN  ENDING SENTINEL  OF          00110000
+*        FFFF,  FFFE,   FFFD,  TO   DETERMINE  HOW   MANY  FST          00111000
+*        HYPERBLOCKS  ARE   ON  DISK,   AND  WHERE   THE  QMSK          00112000
+*        EXTENSIONS (IF ANY)  ARE STORED ON DISK.   THE NUMBER          00113000
+*        OF FST HYPERBLOCKS IS STORED  ON DISK.  THE NUMBER OF          00114000
+*        FST HYPERBLOCKS  IS STORED AD  ADTHBCT IN  THE ACTIVE          00115000
+*        DISK TABLE FOR  FUTURE USE (USUALLY BY  DMSRCF).  THE          00116000
+*        DISK COUNTS  ADTNUM, ETC., ARE  STORED IN  THE ACTIVE          00117000
+*        DISK  TABLE  FROM  MFD,  ALONG  WITH  THE  NUMBER  OF          00118000
+*        CYLINDERS.                                                     00119000
+*                                                                       00120000
+*        AT THIS  POINT, IF THE  READ-ONLY FLAG-BIT  ADTFRO IN          00121000
+*        THE ADTFLG1 FLAG IS SET,  DMSACM ACCEPTS THE DISKS AS          00122000
+*        READ-ONLY, LEAVES  THE MFD  BLOCK IN  A FREE  STORAGE          00123000
+*        BUFFER  OR  JUST  ENOUGHT SIZE  TO  INCLUDE  ALL  THE          00124000
+*        DISK-ADDRESSES  AT THE  BEGINNING, AND  EXITS TO  THE          00125000
+*        CALLER, NORMALLY DMSACF.                                       00126000
+*                                                                       00127000
+*        IF THE DISK IS NOT FLAGGED READ-ONLY, DMSACM ATTEMPTS          00128000
+*        TO WRITE THE                                                   00129000
+*        MFD EXACTLY AS  IS RIGHT BACK ON  DISK USING DMSDIOW.          00130000
+*        IF UNSUCCESSFUL  BECAUSE THE  DISK IS  READ-ONLY 9(AN          00131000
+*        ERROR 6 FROM DMSDIOW), DMSACM                                  00132000
+*        FINISHES UP AS DESCRIBED IN  THE ABOVE PARAGRAPH (THE          00133000
+*        READ-ONLY   BIT  BEING   SET   NOW),   AND  EXIT   IS          00134000
+*        SUBSEQUENTLY MADE WITH ERROR 4 (NONFATAL).                     00135000
+*                                                                       00136000
+*        IF THE MFD WAS SUCCESSFULLY WRITTEN BACK ON DISK, THE          00137000
+*        READ-WRITE  FLAG-BIT IS  SET,  AND DMSACM  CONTINUES.          00138000
+*        NEXT THE RIGHT AMOUNT OF FREE STORAGE IS OBTAINED FOR          00139000
+*        THE QMSK BIT-MASK (DEPENDING ON  THE SIZE OF ADTNUM -          00140000
+*        THE TOTAL NUMBER OF RECORDS  ON DISK).  THEN THE QMSK          00141000
+*        EXTNESIONS (IF  ANY) ARE READ  INTO THE  FREE STORAGE          00142000
+*        AREA,  DOUBLE-WORD  ALIGNED,  AND  WITH  AN  INTEGRAL          00143000
+*        NUMBER  OF DOUBLE-WORDS  IN THE  READ  (TO PREVENT  A          00144000
+*        POSSIBLE CHAINING CHECK WHEN RUNNING ON CP), AND THEN          00145000
+*        MOVED TO  THE PROPER  PLACE IN  THE QMSK  BUFFER: THE          00146000
+*        FIRST 215 BYTES  OF THE QMSK ARE THEN  MOVED FROM THE          00147000
+*        MFD TO THE  QMSK IN CORE.  (IF THE QMSK  IS LESS THAN          00148000
+*        215  BYTES,  ONLY  THE CORRECT  NUMBER  OF  BYTES  IS          00149000
+*        MOVED).  WHEN THROUGH,  THE QMSK IS LAID  OUT IN CORE          00150000
+*        AS ONE CONTIGUOUS  TABLE, WITH AN INTEGRAL  NUMBER OF          00151000
+*        BYTES, PADDED (IF NECESSARY) TO AN INTEGRAL NUMBER OF          00152000
+*        DOUBLE WORDS, IN FREE STORAGE.                                 00153000
+*                                                                       00154000
+*        THE LOCATION  OF THE QMSK  IS OF COURSE  STORED WHERE          00155000
+*        NEEDED,  AND   THE  OTHER  COUNTS   (ADTPQM1  THROUGH          00156000
+*        ADTPQM3), COMPUTED  AND STORED. FREE STORAGE  IS THEN          00157000
+*        OBTAINED FOR THE QQMSK, IF A 2314 READ/WRITE DISK AND          00158000
+*        THE 200-BYTE QQMSK TABLE MOVED INTO POSITION FROM THE          00159000
+*        MFD.                                                           00160000
+*                                                                       00161000
+*        LASTLY, AS  MENTIONED ABOVE FOR THE  READ-ONLY CASES,          00162000
+*        JUST  ENOUGH   FREE  STORAGE  IS  OBTAINED   FOR  THE          00163000
+*        INFORMATION  ON  DISK  ADDRESSES   CONTAINED  AT  THE          00164000
+*        BEGINNING OF THE MFD TO BE  KEPT IN CORE, THE CRUCIAL          00165000
+*        DATA IS  MOVED THERETO,  AND THE  800-BYTE BUFFER  IS          00166000
+*        RELEASED.                                                      00167000
+*                                                                       00168000
+*        IF THE DISK IS AN O/S DISK, THE DISK LABEL AND VTOC            00169000
+*        ADDRESS ARE SAVED IN THE ADT BLOCK. A CHECK IS MADE            00170000
+*        TO DETERMINE IF DMSROS HAS BEEN LOADED (BY A PREVIOUS          00171000
+*        ACCESS OF AN O/S DISK) AND IF NOT DMSSTT IS CALLED TO          00172000
+*        VERIFY THAT DMSROS TEXT EXISTS. UPON SUCCESSFUL RETURN         00173000
+*        FROM STATE (IF NOT FOUND, AN ERROR MSG IS ISSUED),             00174000
+*        DMSROS TEXT IS LOADED INTO HIGH STORAGE AREA WITH              00175000
+*        PROTECT KEY OF NUCLEUS AND A BRANCH IS MADE TO THE             00176000
+*        O/S ACCESS ROUTINE OF DMSROS TO READ THE FORMAT 4              00177000
+*        DSCB OF THE DISK. UPON SUCCESSFUL RETURN FROM DMSROS,          00178000
+*        CONTROL IS RETURNED TO THE CALLER. ANY OTHER ERRORS            00179000
+*        ARE TREATED AS GENERAL LOGIN ERRORS.                           00180000
+*        TO SUMMARIZE:                                                  00181000
+*                                                                       00182000
+*        FOR A  READ-WRITE DISK,  DMSACM READS  IN ALL  OF THE          00183000
+*        USER FILE  DIRECTORY EXCEPT  THE FST  HYPERBLOCKS AND          00184000
+*        INITIALIZES ALL APPROPRIATE INFORMATION IN THE ACTIVE          00185000
+*        DISK TABLE.                                                    00186000
+*                                                                       00187000
+*        FOR A R/O CMS DISK, DMSACM READS IN ALL OF THE USER            00188000
+*        FILE DIRECTORY  EXCEPT THE FST HYPERBLOCKS,  THE QMSK          00189000
+*        AND QQMSK TABLES,  AND THE COUNTS IN  THE LATTER HALF          00190000
+*        OF THE ACTIVE DISK TABLE ASSOCIATED WITH THE QMSK AND          00191000
+*        QQMSK  TABLES, WHICH  ARE NOT  NEEDED IN  CORE FOR  A          00192000
+*        READ-ONLY DISK.                                                00193000
+*                                                                       00194000
+*.                                                                      00195000
+         EJECT                                                          00196000
+DMSACM   START 0                                                  P3097 00197000
+         SPACE                                                          00198000
+READMFD  EQU   DMSACM                                             P3097 00199000
+         ENTRY READMFD                                            P3097 00200000
+         SPACE                                                          00201000
+         USING *,R15                                                    00202000
+         USING NUCON,R0                                                 00203000
+         L     R15,AFVS       A(FVS) INTO R15                           00204000
+         USING FVSECT,R15                                               00205000
+         STM   R0,R14,REGSAV0  SAVE R0 THRU 14                          00206000
+         DROP  R15                                                      00207000
+         LR    R13,R15         REFERENCE 'FVS' INFO                     00208000
+         USING FVSECT,R13                                               00209000
+         BALR  R12,0           OUR OWN ADDRESSABILITY                   00210000
+         USING *,R12                                                    00211000
+         OI    UFDBUSY,UPBIT  SET 'OUR' BIT IN 'UFDBUSY' FLAG           00212000
+         LR    R11,R0         REFERENCE ACTIVE-DISK-TABLE               00213000
+         USING ADTSECT,R11    ...                                       00214000
+         L     R10,ADIOSECT        REFERENCE DIOSECT                    00215000
+         USING DIOSECT,R10                                              00216000
+*                                                                       00217000
+         ST    R11,FVSDSKA    STORE ADDRESS OF ACTIVE DISK TABLE        00218000
+         ST    R11,ADTADD     WHERE NEEDED.                             00219000
+         LA    R9,1           1 INTO R9 FOR GENERAL USE                 00220000
+         SR    ZERO,ZERO      CLEAR REGISTER 'ZERO',                    00221000
+         L     R7,ADTDTA     LET R7 POINT TO NUCON 12-BYTE DEVICE-TABLE 00222000
+         LH    R14,DTAD(,R7)  POINT TO THE DEVICE ADDRESS         P3097 00223000
+         DC    X'83EF0024'    DIAGNOSE TO 'CP' FOR THE DEVICE TYPEP3097 00224000
+         BNZ   NOTATT                                             P3097 00225000
+         CLM   R15,B'1000',MDASD        IS IT DASD AT ALL?        P3097 00226000
+         BNE   UNKNOWN        NO IT IS NOT.                       P3097 00227000
+         CLM   R15,B'0100',M3330        IS IT A 3330?             P3097 00228000
+         BE    IS3330         B IF YES                            P3097 00229000
+         CLM   R15,B'0100',M3340 IS IT A 3340 ?                @V2A2014 00230000
+         BE    IS3340         YES..BR                          @V2A2014 00231000
+         CLM   R15,B'0100',M3350 IS IT A 3350 ?                @V304498 00232000
+         BE    IS3350         YES..BR                          @V304498 00233000
+         CLM   R15,B'0100',M2314        IS SOME SORT OF 2314?     P3097 00234000
+         BNE   UNKNOWN        WEIRD DASD.                         P3097 00235000
+         LA    R2,150         GET NUMBER OF RECORDS PER CYL       P3097 00236000
+         MVI   DTADT(R7),T2314 FLAG THE DEVICE TYPE            @V2A2014 00237000
+         B     GETMFD                                             P3097 00238000
+IS3340   LA    R2,96          GET NO. OF RECS PER CYL          @V2A2014 00239000
+         MVI   DTADT(R7),T3340 FLAG THE DEVICE TYPE            @V2A2014 00240000
+         B     GETMFD         CONT.                               P3097 00241000
+IS3350   LA    R2,570         GET NO. OF RECS PER CYL          @V304498 00242000
+         MVI   DTADT(R7),T3350 FLAG THE DEVICE TYPE            @V304498 00243000
+         B     GETMFD         CONTINUE - SAVE VIRT.DEVICE INFO @V304498 00244000
+IS3330   LA    R2,266         GET NUMBER OF REC'S PER CYLINDER.   P3097 00245000
+         MVI   DTADT(R7),T3330 FLAG THE DEVICE TYPE            @V2A2014 00246000
+GETMFD   LR    R7,R15         SAVE VIRT. DEVICE INFO.                   00247000
+         LA    R0,101         INDICATE SIZE OF MFD BUFFER      @VA04381 00248000
+         DMSFREE DWORDS=(0),TYPE=NUCLEUS,ERR=*,TYPCALL=BALR    @VA04381 00249000
+         LTR   R15,R15        TEST THE RETURN CODE FROM FREE   @VA04381 00250000
+         BZ    GOGETMFD       IF RC = 0, CONTINUE              @VA04381 00251000
+         MVI   ERRCOD0,5      SIGNAL FREE STORAGE NOT AVAILABLE@VA04381 00252000
+         B     ERROR          EXIT AFTER CLEANUP               @VA04381 00253000
+         SPACE 1                                                        00254000
+GOGETMFD EQU   *                                               @VA04381 00255000
+         STM   R0,R1,JSR0     SAVE R0 AND R1 FOR LATER FRET CALL        00256000
+         LR    UFD,R1         SAVE MFD BUFFER LOCATION                  00257000
+         ST    UFD,RWMFD     INSERT IN DISK PARAMETER LIST.             00258000
+         MVC   DSKLOC(16),RWMFD    SET UP P-LIST TO READ LABEL-RECP3097 00259000
+         LA    R15,H3         STORE CORE-ADDRESS                  P3097 00260000
+         ST    R15,DSKADR     OF DISK-ADDRESS (WHICH = 0003)      P3097 00261000
+         LA    R1,DSKLST      POINT TO P-LIST,                    P3097 00262000
+         L     R15,ARDTK      READ IT INTO CORE                   P3097 00263000
+         BALR  R14,R15        ...                                 P3097 00264000
+         BNZ   ERROR1         FORGET IT THEN                      P3097 00265000
+         L     R1,DSKLOC      POINT TO THE BUFFER,                P3097 00266000
+         CLC   CMSEQ,0(R1)    IT IT A BONA-FIDE LABEL ?           P3097 00267000
+         BNE   CHKOS          IF NOT, SEE IF O/S LABEL         @V201101 00268000
+         MVC   800(6,R1),4(R1)     MOVE LABEL TO END OF MFD BUFFERP3097 00269000
+         L     R15,ARDTK           CALL RDTK TO GET MFD FROM DISK       00270000
+         LA    R1,RWMFD      PARAMETER LIST                             00271000
+         BALR  R14,R15        ...                                       00272000
+         BNZ   ERROR1         ERROR 1 IF DISK ERROR                     00273000
+*                                                                       00274000
+         CH    ZERO,0(,UFD)   CHECK 1ST HALFWORD OF MFD,                00275000
+         BE    ERROR1         TREAT AS 'UNREADABLE' IF NOTHING IS THERE 00276000
+*                                                                       00277000
+         LH    R15,UFDNUMP(,UFD)   PICK UP NO. CYLINDERS FROM MFD       00278000
+         ST    R15,ADTCYL     STORE NUMBER OF CYLINDERS           P3097 00279000
+         MVI   ADTFLG2,ADTFMFD     INDICATE MFD IS IN CORE.             00280000
+*                                                                       00281000
+         SR    R8,R8          PREPARE TO COUNT FST HYPERBLOCKS          00282000
+*                                                                       00283000
+SCANFST  DS    0H     COUNT PSTAT (1ST FST) OR PSTAT-EXTENSION(S) ...   00284000
+         AR    R8,R9          ADD 1 TO UFD-BLOCK COUNTER,               00285000
+         LA    UFD,2(,UFD)    ADVANCE TO NEXT MFD ADDRESS               00286000
+         LR    R4,UFD         SAVE THIS ADDRESS (NEED SHORTLY)          00287000
+         LH    R15,0(,UFD)    CHECK FOR ENDING-SENTINEL                 00288000
+         CH    R15,FFF        OF 'FFFF'                                 00289000
+         BE    STORSIG        BE IF YES ('SHORT' PQMSK)                 00290000
+         CH    R15,FFD        WATCH OUT FOR NEW (FEB 1969) SENTINEL     00291000
+         BE    YESFFD         INDICATING PQMSK TRACKS WILL FOLLOW.      00292000
+         LH    R15,2(,UFD)    IF NOT THAT, SEE IF 'NEXT' HALFWORD       00293000
+         CH    R15,FFE        = 'FFFE' ?                                00294000
+         BNE   SCANFST        BNE IF NOT, KEEP SCANNING.                00295000
+         LA    R4,2(,R4)      ADJUST R4 TO INCLUDE FFFE SENTINEL        00296000
+         B     WASFFFE        AND GO STORE DISK-ADDRESS                 00297000
+*                                                                       00298000
+*        IF 'FFFD' SENTINEL (FEB 1969) THAT MEANS END OF FST-BLOCKS,    00299000
+*        DISK-ADDRESSES FOR PQMSK-BLOCK(S) WILL FOLLOW.                 00300000
+YESFFD   LA    UFD,2(,UFD)    POINT TO DISK-ADDRESS OF 1ST PQMSK BLOCK  00301000
+         LA    R4,ADTMXBML*2+2(,R4) ADJUST R4 FOR WORST CASE   @VA01990 00302000
+*              (TOGETHER WITH THE "LA  R4,9(,R4)" BELOW, THIS           00303000
+*              SKIPS OVER THE X'FFFD' SENTINEL PLUS THE MAXIMUM         00304000
+*              POSSIBLE NUMBER OF BIT-MAP BLOCKS FOR A 3350,            00305000
+*              ENSURING THAT THE "MFD KEPT IN CORE" WILL HAVE           00306000
+*              AT LEAST ONE HALFWORD OF BINARY 0000 AT THE END.)        00307000
+*                                                                       00308000
+*              COMES HERE IF SENTINEL WAS X'FFFE' ...                   00309000
+WASFFFE  ST    UFD,DSKADR  STORE DISK-ADDRESS FOR READING REM. OF PQMSK 00310000
+*                                                                       00311000
+STORSIG  STH   R15,SIGNAL     STORE SIGNAL OF FFFF, FFFD, OR FFFE       00312000
+         ST    R8,ADTHBCT     SAVE COUNT OF FST HYPERBLOCKS             00313000
+         S     R4,RWMFD       NUMBER OF BYTES IN MFD SO FAR             00314000
+         LA    R4,9(,R4)      +2 INTO (ROUNDED) DOUBLE WORDS            00315000
+         SRA   R4,3           ...                                       00316000
+         L     UFD,RWMFD     RESTORE UFD REGISTER,                      00317000
+*                             (NOTE: 'ADT1ST' WAS CLEARED BY "RELUFD")  00318000
+         MVC   ADTNUM(16),UFDTRKS(UFD)  STORE 'NUMTRKS' THRU 'LASTRK'   00319000
+         STC   ZERO,ERRCOD0   SET RETURN-CODE TO 0                      00320000
+         TM    ADTFLG3,ADTFORCE IS DISK FORCED READ-ONLY ?     @V305032 00321000
+         BO    SETFRO         YES - GO SET ADTFLG1,ADTFRO FLAG @V305032 00322000
+         TM    ADTFLG1,ADTFRW IF NOT, READ-WRITE DISK, THEN ?           00323000
+         BO    GETQMSK        BO IF YES, READ IN PQMSK, ETC.            00324000
+         CLM   R7,B'0001',MRW IS IT READ-WRITE                          00325000
+         BL    ISWRITE        YES.                                      00326000
+         MVI   ERRCOD0,4      SIGNAL (UNEXPECTEDLY) READ-ONLY  @V305032 00327000
+SETFRO   OI    ADTFLG1,ADTFRO AND MARK AS READ-ONLY CMS DISK   @V305032 00328000
+         B     FINUP          ...                                       00329000
+ISWRITE  OI    ADTFLG1,ADTFRW MARK AS READ-WRITE.                       00330000
+*                                                                       00331000
+GETQMSK  EQU   *                  (PQMSIZ & PQMNUM ALREADY CLEAR)       00332000
+         L     R8,ADTNUM           GET NUMTRKS,                @VA03452 00333000
+         LA    R8,7(,R8)           ROUND BEFORE CONVERTING ... @VA03452 00334000
+         SRA   R8,3                CHANGE FROM BITS TO BYTES,           00335000
+         LR    R15,R8              SAVE IN R8, PUT IN R15 ALSO          00336000
+         SH    R15,H215+2          SUBTRACT MINIMUM OF 215 BYTES,       00337000
+         BNP   FREPQ               TRANSFER IF 215 OR LESS.             00338000
+         ST    R15,ADTPQM1         STORE SIZE FOR READ OR WRITE,        00339000
+         SR    R14,R14             DIVIDE                               00340000
+         D     R14,F800            BY 800,                              00341000
+         LTR   R14,R14             CHECK FOR ZERO-REMAINDER             00342000
+         BZ    STR15P              (POSSIBLE ALBEIT UNLIKELY)           00343000
+         AR    R15,R9              ADJUST QUOTIENT (UNLESS REM=0)       00344000
+STR15P   ST    R15,ADTPQM2         STORE NUMBER OF TRACKS NEEDED        00345000
+FREPQ    LA    R0,7(,R8)           NOW GET TOTAL SIZE OF                00346000
+         SRA   R0,3                PQMSK ROUNDED UP TO DBL-WORDS,       00347000
+*             (NOTE - R8 RETAINS TOTAL NO. OF BYTES IN PQMSK FOR LATER) 00348000
+         DMSFREE DWORDS=(0),TYPE=NUCLEUS,ERR=NOSTORE,TYPCALL=BALR 04381 00349000
+         ST    R0,ADTPQM3     STORE NO. DBL-WORDS FREE STORAGE IN PQMSK 00350000
+         LR    QLOC,R1             PLACE IN QLOC                        00351000
+         ST    QLOC,ADTMSK         AND STORE WHERE NEEDED               00352000
+         BCTR  R0,0                OBTAIN                               00353000
+         SLA   R0,3                ADDRESS OF                           00354000
+         AR    R1,R0               VERY LAST DOUBLE-WORD,               00355000
+         XC    0(8,R1),0(R1)       CLEAR IT.                            00356000
+*                                                                       00357000
+         TM    SWTCH,X'FF'    CHECK WHETHER 'SHORT' OR LONG PQMSK       00358000
+         BM    READPQM        BM IF 'LONG', MUST READ REMAINING BYTES.  00359000
+*                                                                       00360000
+         LM    R1,R2,ADTPQM1      CHECK NUMBER OF BYTES (AND BLOCKS)    00361000
+         LTR   R1,R1               ...                                  00362000
+         BNP   STRPQQ              BNP IF NOTHING THERE                 00363000
+         STH   R2,ADTRES          STORE 'ADTPQM2' (IN R2) AS ADTRES     00364000
+         MVI   215(QLOC),00        CLEAR BYTE 215,                      00365000
+         LA    QLOC,216(,QLOC)     NOW WE'RE ALIGNED AT BYTE 216        00366000
+H6       LA    R0,6(R1,0)          COMPUTE BYTE-COUNT LESS 1 + 7        00367000
+         SRA   R0,3                OVER 8 = NO. DBL-WORDS TO CLEAR,     00368000
+         BZ    STRPQQ         BR..IF QMASK EXACTLY 216 BYTES   @VA03713 00369000
+         LA    R1,8                R1=8 FOR 'AR' BELOW,                 00370000
+         SR    R7,R7          CLEAR R7 (R6 = 'ZERO' ALREADY CLEAR)      00371000
+CLR216   STM   R6,R7,0(QLOC)       CLEAR A DBL-WORD,                    00372000
+         AR    QLOC,R1             BUMP BY 8 FOR NEXT TIME,             00373000
+         BCT   R0,CLR216           ITERATE FOR REQUIRED NO. DBL-WORDS   00374000
+         B     STRPQQ         NOW GO STORE PQQMSK, ETC.                 00375000
+*                                                                       00376000
+*                             GET PQMSK AND PQQMSK TABLES               00377000
+*                                                                       00378000
+READPQM  DS    0H             READ IN REMAINDER OF PQMSK (IF > 215)     00379000
+         L     R7,ADTPQM1     GET EXACT BYTE COUNT,                     00380000
+         LA    R6,7(,R7)      ROUND TO                                  00381000
+         SRL   R6,3           MULTIPLE OF 8                             00382000
+         SLL   R6,3           (TO READ AN INTEGRAL NO. OF DBL-WORDS)    00383000
+         STM   R5,R6,DSKLOC  STORE CORE-LOCATION (QLOC=R5) & BYTE-COUNT 00384000
+         LA    R1,DSKLST      READ PQMSK EXTENSION(S) INTO              00385000
+         L     R15,ARDTK      BEGINNING OF PQMSK,                       00386000
+         BALR  R14,R15        (DBL-WORD ALIGNED TO AVOID CHAINING-CHK)  00387000
+         BNZ   ERROR1         BAD NEWS IF ERROR READING BIT-MASK.       00388000
+H215     LA    R15,215        215 INTO A HANDY REGISTER,                00389000
+         LA    R14,0(QLOC,R7) QLOC + BYTE-COUNT INTO R14,               00390000
+         SR    R6,R6          DIVIDE EXACT BYTE-COUNT (IN R7)           00391000
+         DR    R6,R15         BY 215,                                   00392000
+         AR    R7,R9          ROUND QUOTIENT UP 1 (NO MATTER WHAT)      00393000
+MOVQMSK  SR    R14,R15        BACK OFF 215 BYTES ON R14,                00394000
+         MVC   215(215,R14),0(R14) MOVE A 215-BYTE CHUNK 'UP' 215 BYTES 00395000
+         BCT   R7,MOVQMSK     AND ITERATE FOR NUMBER OF CHUNKS NEEDED.  00396000
+*                                                                       00397000
+*        (NOTE - WHEN THRU, THE FIRST 215 BYTES OF BIT-MASK             00398000
+*         WILL BE 'GARBAGE' DUE TO MOVING 'MORE THAN NEEDED' -          00399000
+*         BUT WE'RE INITIALIZING THEM NEXT, SO IT ALL WORKS FINE...)    00400000
+*                                                                       00401000
+*                                                                       00402000
+*        ALL READ-WRITE BRANCHES JOIN HERE .....                        00403000
+STRPQQ   L     UFD,RWMFD      RESTORE 'UFD' REGISTER (R3)               00404000
+         LM    R1,R2,ADTMSK   GET A(PQMSK) AND A(PQQMSK) - IF ANY       00405000
+         BCTR  R8,0           DECREMENT R8 BY 1 FOR EX-MVC,             00406000
+         CH    R8,H214+2      IS NO. OF BYTES TO MOVE > 214 ?           00407000
+         BNH   EXMVC          BNH IF NOT, GO TO IT.                     00408000
+H214     LA    R8,214         SUBSTITUTE 214 IF WAS MORE THAN THAT      00409000
+EXMVC    EX    R8,MOV1STQ     MOVE FIRST PART OF PQMSK TO FREE STORAGE  00410000
+         L     R14,ADTDTA     REFER TO NUCON DEVICE TABLE INFO @VA03452 00411000
+         CLI   DTADT(R14),T2314 IS THIS A 2314 ?               @VA03452 00412000
+         BNE   FINUP          NO - WE DON'T NEED ANY "QQMSK".  @VA03452 00413000
+         LTR   R1,R2        DO WE HAVE A PQQMSK IN CORE? (IN R1 IF YES) 00414000
+         BP    SAVQQ          BP IF YES (NO PROBLEM)                    00415000
+         LA    R0,25          SET FOR 25 DOUBLE-WORDS = 200 BYTES       00416000
+         DMSFREE DWORDS=(0),TYPE=NUCLEUS,ERR=NOSTORE,TYPCALL=BALR 04381 00417000
+         ST    R1,ADTQQM      SAVE THE ADDRESS                          00418000
+         OI    ADTFLG1,ADTFQQF     INDICATE THAT IT'S IN FREE STORAGE   00419000
+SAVQQ    MVC   0(200,R1),600(UFD) GET PQQMSK ENTIRELY FROM MFD          00420000
+*                                                                       00421000
+FINUP    EQU   *              FINISH UP - LEAVE 'MFD' INFO. IN CORE     00422000
+*                   (IN A FREE-STORAGE BLOCK OF ITS OWN OF              00423000
+*                    EXACTLY THE RIGHT SIZE - FOR BEST CORE-MANAGEMENT  00424000
+*                    PERFORMANCE AND PAGING CHARACTERISTICS) ...        00425000
+*        NOTE - R4 STILL HOLDS NO. OF DBL-WORDS OF MFD INFORMATION      00426000
+         L     R2,RWMFD       R2 = A(800-BYTE MFD BLOCK)                00427000
+         LR    R0,R4          NO. OF DOUBLE-WORDS WE NEED INTO R0,      00428000
+         DMSFREE DWORDS=(0),TYPE=NUCLEUS,ERR=NOSTORE,TYPCALL=BALR 04381 00429000
+         STM   R0,R1,ADTMFDN  STORE SIZE & ADDRESS OF 'NEW' MFD BLOCK   00430000
+         LA    R3,8           WE'LL MOVE 8 BYTES AT A TIME              00431000
+MOVEM    LM    R14,R15,0(R2)  PICK UP A DOUBLE-WORD FROM MFD BLOCK,     00432000
+         STM   R14,R15,0(R1)  MOVE TO NEW MFD LOCATION,                 00433000
+         AR    R1,R3          ADD 8                                     00434000
+         AR    R2,R3          ...                                       00435000
+         BCT   R4,MOVEM       ITERATE FOR NO. DBL-WORDS THERE           00436000
+*                                                                       00437000
+         L     R1,JSR0+4      FIND THE ORIGINAL MFD BUFFER        P3097 00438000
+         MVC   ADTID(6),800(R1)    AND GET THE LABEL WE HID EARLIEP3097 00439000
+         CLI   ADTMX,C' '     ARE WE A R/O EXTENSION OF SOME DISK?P3097 00440000
+         BE    RETUFD         TRF IF NOT (FORGET IT).                   00441000
+         LA    R1,ADTMX-24    POINT TO THE LETTER,                      00442000
+         L     R15,VCADTLKP   CALL ADTLKP TO                   @VM03093 00443000
+         BALR  R14,R15        FIND "PARENT" DISK                        00444000
+         BNZ   RETUFD         TRF IF NOT FOUND (KINDA STRANGE)          00445000
+         DROP  R11                                                      00446000
+         USING ADTSECT,R1     REFERENCE "PARENT" DISK                   00447000
+         OI    ADTFLG1,ADTROX SET R/O EXT. FLAG-BIT                     00448000
+         DROP  R1                                                       00449000
+         USING ADTSECT,R11  RESTORE NORMAL DSECT ADDRESSABILITY         00450000
+*                                                                       00451000
+RETUFD   EQU   *                                                        00452000
+         LM    R0,R1,JSR0                                               00453000
+         DMSFRET DWORDS=(0),LOC=(1),TYPCALL=BALR               @VM03083 00454000
+EXIT     NI    UFDBUSY,255-UPBIT   TURN OFF OUR UFDBUSY FLAG-BIT,       00455000
+         LM    R0,R15,REGSAV0 RESTORE R0-R14, RETURN-CODE TO R15        00456000
+         LTR   R15,R15     SET CONDITION-CODE FOR CONVENIENCE OF CALLER 00457000
+         BR    R14            AND EXIT.                                 00458000
+*                                                                       00459000
+MOV1STQ  MVC   0(*-*,R1),UFDPQM(UFD)   MOVES 1ST PART OF PQMSK (VIA R8) 00460000
+         EJECT 1                                                        00461000
+***************************************************************         00462000
+*                                                                       00463000
+*        VERIFY O/S LABEL AND LOAD DMSROS INTO FRRE STORAGE             00464000
+*                                                                       00465000
+***************************************************************         00466000
+*                                                                       00467000
+CHKOS    CLC   VOL1,0(R1)     IS IT O/S VOLUME LABEL ?         @V201101 00468000
+         BNE   ERROR1         NO..FORGET IT THEN               @V201101 00469000
+*                                                                       00470000
+         MVI   ERRCOD0,0      INITIALIZE RETURN CODE           @V201101 00471000
+         MVC   ADTUSED(8),JSR0    SAVE FRET PARAMS FOR LATER US@V201101 00472000
+         MVC   ADTID(6),4(R1)     SAVE VOLID IN ADT            @V201101 00473000
+         MVC   OSADTVTA(5),11(R1) SAVE VTOC ADDR IN ADT        @V201101 00474000
+         L     R15,ADMSROS    GET ADDR OF DMSROS               @V201101 00475000
+         LTR   R15,R15        ANYTHING THERE ?                 @V201101 00476000
+         BP    GOROS          YES..GO TO IT...                 @V201101 00477000
+*                                                                       00478000
+         LA    R0,24              GET SIZE OF SAVE AREA IN DWOR@V201101 00479000
+         DMSFREE DWORDS=(0),TYPE=USER,ERR=NOSTORE,TYPCALL=BALR @VA04381 00480000
+         MVC   0(128,R1),REGSAV0 SAVE REGSAV0-REGSAV1          @V201101 00481000
+         LR    R3,R1          SAVE AREA ADDRESS                @V201101 00482000
+*                                                                       00483000
+         LA    R1,STROS       GET DMSROS STATE LIST            @V201101 00484000
+         SVC   202            ...                              @V201101 00485000
+         DC    AL4(ERROR2)    NOT FOUND..FORGET IT             @V201101 00486000
+*                                                                       00487000
+         L     R1,FVSFSTIL    GET ITEM LENGTH                  @V201101 00488000
+         MH    R1,FVSFSTIC    COMPUTE MODULE SIZE              @V201101 00489000
+         LA    R0,7(,R1)      ROUND TO NEXT DOUBLE WORD        @V201101 00490000
+         SRA   R0,3           GET NUMBER DOUBLE WORDS          @V201101 00491000
+         DMSFREE DWORDS=(0),TYPE=NUCLEUS,ERR=*,TYPCALL=BALR    @VA04381 00492000
+         LTR   R15,R15        CHECK FRET RETURN CODE           @VA04381 00493000
+         BZ    GETROS         IF RETCODE IS ZERO, CONTINUE     @VA04381 00494000
+         MVI   ERRCOD0,5      SIGNAL STORAGE EXHAUSTED         @VA04381 00495000
+         B     ERROR2A        GO TO ERROR CLEANUP              @VA04381 00496000
+         SPACE 1                                                        00497000
+GETROS   LR    R2,R0          SAVE NUMBER OF DWORDS            @VA04381 00498000
+         ST    R1,ADMSROS     SAVE DMSROS ADDRESS              @V201101 00499000
+         STH   R2,LDMSROS     SAVE DMSROS LENGTH               @V201101 00500000
+         XC    TBENT(2),TBENT RESET LDR TBL COUNT              @V201101 00501000
+         OI    MODFLGS,SYSLOAD     ALLOW LOAD ABOVE FREELOWE   @VA04666 00502000
+         L     R10,LOCCNT     SAVE LOCCNT                      @V201122 00503000
+         UNPK  128(9,R3),ADMSROS(5) UNPACK DMSROS ADDRESS      @V201122 00504000
+         TR    128(8,R3),HEXCHAR TRANSLATE TO HEX              @V201122 00505000
+         MVC   136(ENDLDROS-LDROS,R3),LDROS SETUP LDR PLIST    @V201122 00506000
+         MVC   136+HEXLOC-LDROS(8,R3),128(R3)   CONVERT TO HEXL@V201122 00507000
+         LA    R1,136(R3)     GET DMSROS LOAD LIST             @V201122 00508000
+         SVC   202            ...                              @V201122 00509000
+         DC    AL4(*+4)       ...                              @V201101 00510000
+         NI    MODFLGS,255-SYSLOAD RESET LOADER FLAG           @VA04666 00511000
+         ST    R10,LOCCNT     RESTORE LOCCNT                   @V201101 00512000
+         EJECT 1                                                        00513000
+*                                                                       00514000
+         LR    R1,R3          GET SAVEAREA ADDRESS             @V201101 00515000
+         LR    R3,R15         SAVE LOAD RETURN CODE            @V201101 00516000
+         MVC   REGSAV0(128),0(R1) MOVE REGSAV0-REGSAV1 BACK    @V201101 00517000
+         LA    R0,24              GET SIZE IN DWORDS           @V201101 00518000
+         DMSFRET DWORDS=(0),LOC=(1),TYPCALL=BALR               @VM03203 00519000
+         LTR   R15,R3         ANY ERRORS FROM LOAD ?           @V201101 00520000
+         BZ    GETROSAD       NO..GO TO DMSROS                 @V201101 00521000
+         STC   R15,ERRCOD0    SAVE ERROR CODE                  @V201101 00522000
+         B     ERROR3         GIVE ERROR MESSAGE               @V201101 00523000
+*                                                                       00524000
+GETROSAD L     R15,ADMSROS    GET DMSROS ADDRESS               @V201101 00525000
+GOROS    LH    R1,CDMSROS     GET DMSROS COUNT                 @V201101 00526000
+         LA    R1,1(,R1)      UP COUNT BY ONE                  @V201101 00527000
+         STH   R1,CDMSROS     SAVE NEW DMSROS COUNT            @V201101 00528000
+         BALR  R14,R15        GO WITH LUCK...                  @V201101 00529000
+*                                                                       00530000
+         MVC   JSR0(8),ADTUSED RESTORE FRET PARMS              @V201101 00531000
+         LTR   R15,R15        ANY ERRORS IN DMSROS ?           @V201101 00532000
+         BZ    RETUFD         NO..JUST RETURN                  @V201101 00533000
+         MVI   ERRCOD0,1      ERROR READING DISK CODE          @V201101 00534000
+         LH    R1,CDMSROS     GET DMSROS COUNT                 @V201101 00535000
+         BCTR  R1,0           LESS ONE                         @V201101 00536000
+         LTR   R1,R1          ...                              @V201101 00537000
+         BNP   NOROS          IF NOT POSITIVE,REL DMSROS       @V201101 00538000
+         STH   R1,CDMSROS     SAVE NEW COUNT                   @V201101 00539000
+         B     LGINERR        ACCESS ERROR..                   @V201101 00540000
+*                                                                       00541000
+NOROS    MVC   JSR0(8),ADTUSED RESTORE FRET PARMS              @V201101 00542000
+         L     R1,ADMSROS     GET DMSROS ADDRESS               @V201101 00543000
+         LH    R0,LDMSROS     GET DMSROS LENGTH                @V201101 00544000
+         XC    ADMSROS(8),ADMSROS CLEAR ADDR , SIZE & COUNT    @V201101 00545000
+         DMSFRET DWORDS=(0),LOC=(1),TYPCALL=BALR               @VM03203 00546000
+         B     LGINERR        FINALLY DID IT...                @V201101 00547000
+         EJECT                                                          00548000
+**********************************************************************  00549000
+*                                                                       00550000
+*                            ERROR RETURN                               00551000
+*                                                                       00552000
+**********************************************************************  00553000
+         SPACE                                                          00554000
+NOSTORE  MVI   ERRCOD0,5      SET INSUFFICIENT STORAGE RETCODE @VA04381 00555000
+         B     LGINERR        MUST FRET MFD BUFFER ON EXIT     @VA04381 00556000
+NOTATT   MVI   ERRCOD0,2                                          P3097 00557000
+         B     ERROR                                              P3097 00558000
+UNKNOWN  MVI   ERRCOD0,3                                          P3097 00559000
+         B     ERROR                                              P3097 00560000
+ERROR1   MVI   ERRCOD0,01     ERROR 1 FOR ERROR READING DISK            00561000
+*                                                                       00562000
+LGINERR  LM    R0,R1,JSR0      GET FRET PARAMETERS                      00563000
+         DMSFRET DWORDS=(0),LOC=(1),TYPCALL=BALR               @VM03083 00564000
+ERROR    EQU   *             (COMES HERE IF ERROR BUT DIDN'T CALL FREE) 00565000
+         NI    ADTFLG1,255-(ADTFRO+ADTFRW) CLEAR READ-ONLY & READ-WRITE 00566000
+         MVI   ADTFLG2,00     FLAG-BITS, AND INDICATE MFD NOT IN CORE.  00567000
+         MVI   ADTMX,C' '     ALSO BLANK OUT EXTENSION-MODE-LETTER   JS 00568000
+         B     EXIT           GO RESTORE REGISTERS, ETC., AND EXIT.     00569000
+*                                                                       00570000
+H3       DC    H'0003'        LABEL-RECORD = RECORD 3 ON DISK.          00571000
+H80      DC    H'0080'        LABEL-RECORD LENGTH FOR O/S VOL. @V201101 00572000
+         EJECT                                                          00573000
+ERROR2   EQU   *                                               @V201101 00574000
+         DMSERR TEXT='FILE ''DMSROS TEXT'' NOT FOUND',NUM=002,LET=E,   *00575000
+               CSECT=ACC                                       @V201101 00576000
+         MVC   JSR0(8),ADTUSED RESTORE FRET PARAMETERS         @V201101 00577000
+         MVI   ERRCOD0,28     SAVE ERROR CODE                  @V201101 00578000
+ERROR2A  LR    R1,R3          GET SAVEAREA ADDRESS             @VA04381 00579000
+         LA    R0,24          INDICATE SIZE OF AREA TO FRET    @VA04381 00580000
+         DMSFRET DWORDS=(0),LOC=(1),TYPCALL=BALR               @VM03083 00581000
+         B     LGINERR        RETURN TO ACC                    @V201101 00582000
+*                                                                       00583000
+ERROR3   DMSERR TEXT='ERROR LOADING READ OS ROUTINE ''DMSROS TEXT''',  *00584000
+               NUM=240,LET=E,CSECT=ACC                         @V201101 00585000
+         B     NOROS          UNDO WHAT IS DONE                @V201101 00586000
+         EJECT 1                                                        00587000
+*                                                                       00588000
+T3340    EQU   X'07'                                           @V2A2014 00589000
+T2314    EQU   X'08'                                           @V2A2014 00590000
+T3330    EQU   X'09'                                           @V2A2014 00591000
+T3350    EQU   X'0B'          CMS' 3350 DEVICE TYPE            @V304498 00592000
+*                                                                       00593000
+MDASD    DC    X'04'                                              P3097 00594000
+M3330    DC    X'10'                                              P3097 00595000
+M2314    DC    X'40'                                              P3097 00596000
+M3340    DC    X'01'          CP'S 3340 DEVICE TYPE            @V2A2014 00597000
+M3350    DC    X'08'          CP'S 3350 DEVICE TYPE            @V304498 00598000
+M2311    DC    X'80'                                              P3097 00599000
+MRW      DC    X'80'          READ-ONLY INDICATOR                       00600000
+CMSEQ    DC    CL4'CMS='      CMS LABEL ALWAYS START WITH THIS.         00601000
+VOL1     DC    CL4'VOL1'      O/S LABEL ALWAYS START WITH THIS.@V201101 00602000
+*                                                                       00603000
+*                                                                       00604000
+STROS    DS    0D             DMSROS STATE PLIST               @V201101 00605000
+         DC    CL8'STATE'                                      @V201101 00606000
+         DC    CL8'DMSROS'                                     @V201101 00607000
+         DC    CL8'TEXT'                                       @V201101 00608000
+         DC    CL8'*'                                          @V201101 00609000
+         DC    8X'FF'                                          @V201101 00610000
+*                                                                       00611000
+LDROS    DS    0D             DMSROS LOAD PLIST                @V201122 00612000
+         DC    CL8'INCLUDE'                                    @V201122 00613000
+         DC    CL8'DMSROS'                                     @V201122 00614000
+         DC    CL8'('                                          @V201122 00615000
+         DC    CL8'ORIGIN'                                     @V201122 00616000
+HEXLOC   DC    8C'0'                                           @V201122 00617000
+         DC    CL8'NOMAP'                                      @V201122 00618000
+         DC    8X'FF'                                          @V201122 00619000
+ENDLDROS DC    C'0123456789ABCDEF'                             @V201122 00620000
+HEXCHAR  EQU   *-X'FF'-1      START OF TRANSLATE TABLE         @V201122 00621000
+*                                                                       00622000
+         EJECT                                                          00623000
+         NUCON                                                          00624000
+*                                                                       00625000
+         DROP  R12                                                      00626000
+         EJECT                                                          00627000
+*                             DEFINITIONS ...                           00628000
+*                                                                       00629000
+*        DISPLACEMENTS FOR MFD ...                                      00630000
+UFDPQM   EQU   600-216        216 BYTES BEFORE PQQMSK AT 600            00631000
+UFDNUMP  EQU   UFDPQM-2       NUMBER OF CYLINDERS IN MFD BLOCK          00632000
+UFDNUMT  EQU   UFDNUMP-2      TWO BYTES NOT USED AT PRESENT (= 0)       00633000
+UFDTRKS  EQU   UFDNUMT-16     NUMTRKS, QTUSEDP, QTLEFTP, & LASTRK       00634000
+*                                                                       00635000
+         REGEQU                                                         00636000
+*                                                                       00637000
+UFD      EQU   R3                                                       00638000
+QLOC     EQU   R5                                                       00639000
+ZERO     EQU   R6                                                       00640000
+         EJECT                                                          00641000
+         FVS                                                            00642000
+         DROP  R13                                                      00643000
+         EJECT                                                          00644000
+         DIOSECT                                                        00645000
+         DROP  R10                                                      00646000
+         EJECT                                                          00647000
+         ADT                                                            00648000
+         EQUATES                                                        00649000
+         END                                                            00650000

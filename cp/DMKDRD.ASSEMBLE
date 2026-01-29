@@ -1,0 +1,1180 @@
+DRD      TITLE 'DMKDRD     (CP)        VM/370 - RELEASE 6'              00001000
+         ISEQ  73,80          VALIDATE SEQUENCING                       00002000
+         COPY  OPTIONS                                                  00003000
+         COPY  LOCAL                                                    00004000
+*.                                                                      00005000
+* MODULE NAME -                                                         00006000
+*                                                                       00007000
+*        DMKDRD                                                         00008000
+*                                                                       00009000
+* CONTENTS -                                                            00010000
+*                                                                       00011000
+*        DMKDRDER - DIAGNOSE INTERFACE TO INPUT SPOOL FILES             00012000
+*        DMKDRDMP - DIAGNOSE READ OF SYSTEM DUMP SPOOL FILE             00013000
+*        DMKDRDSY - DIAGNOSE READ OF SYSTEM SYMBOL TABLE                00014000
+*        DMKDRDDD - DELETE SYSTEM DUMP SPOOL FILE                       00015000
+*.                                                                      00016000
+         SPACE 2                                                        00017000
+DMKDRD   START                                                          00018000
+         USING SAVEAREA,R13                                             00019000
+         USING DMKDRD,R12                                               00020000
+         USING VMBLOK,R11                                               00021000
+         USING SFBLOK,R10                                               00022000
+         USING VSPLCTL,R9                                               00023000
+         USING VDEVBLOK,R8                                              00024000
+         USING PSA,0                                                    00025000
+         SPACE 2                                                        00026000
+         EXTRN DMKSCNVU,DMKRPAGT,DMKVSPCR                               00027000
+         EXTRN DMKSYSOW,DMKHVCPC,DMKPGTSD                               00028000
+         EXTRN DMKPSASP       CHECK FOR STORAGE PROTECTION     @V202232 00029000
+         EXTRN DMKSYM         CP SYSTEM SYMBOL TABLE                    00030000
+         EXTRN DMKPGTVG,DMKPGTVR                               @V293598 00031000
+         EJECT                                                          00032000
+*.                                                                      00033000
+* SUBROUTINE NAME -                                                     00034000
+*                                                                       00035000
+*        DMKDRDER                                                       00036000
+*                                                                       00037000
+* FUNCTION -                                                            00038000
+*                                                                       00039000
+*        TO MANIPULATE INPUT SPOOL FILES VIA VIRTUAL DIAGNOSE           00040000
+*        CODE X'0014'.                                                  00041000
+*                                                                       00042000
+* ATTRIBUTES -                                                          00043000
+*                                                                       00044000
+*        RE-ENTRANT, PAGEABLE, CALLED VIA SVC FROM DMKHVCAL             00045000
+*                                                                       00046000
+* ENTRY POINT -                                                         00047000
+*                                                                       00048000
+*        DMKDRDER                                                       00049000
+*                                                                       00050000
+* ENTRY CONDITIONS -                                                    00051000
+*                                                                       00052000
+*        GPR 13 = ADDRESS OF STANDARD SAVE AREA                         00053000
+*        GPR 12 = ADDRESS OF DMKDRDER                                   00054000
+*        GPR 11 = ADDRESS OF VMBLOK                                     00055000
+*        GPR  6 = ADDRESS OF DIAGNOSE 'R2' VALUE                        00056000
+*        GPR  5 = ADDRESS OF DIAGNOSE 'R1' VALUE                        00057000
+*                                                                       00058000
+* EXIT CONDITIONS -                                                     00059000
+*                                                                       00060000
+*        GPRS 1,3-15 UNCHANGED                                          00061000
+*        GPR  2 = 0  -  CONDITION CODE IS SET FOR VIRTUAL MACHINE       00062000
+*        GPR  2 > 0  -  SIMULATE PROGRAM INTERRUPT FOR VM, AND          00063000
+*   AND  GPR  0 = INTERRUPT CODE FOR SIMULATED PROGRAM INTERRUPT        00064000
+*                                                                       00065000
+* CALLS TO OTHER ROUTINES -                                             00066000
+*                                                                       00067000
+*        DMKSCNVU - TO LOCATE VIRTUAL DEVICE BLOCKS                     00068000
+*        DMKRPAGT - TO READ SPOOL-FILE BUFFER PAGES                     00069000
+*        DMKVSPCR - TO CLOSE AN ACTIVE SPOOL FILE                       00070000
+*        DMKFREE  - TO OBTAIN FREE STORAGE                              00071000
+*        DMKPTRAN - TO BRING IN VIRTUAL STORAGE PAGES                   00072000
+*        DMKPSASP - TO CHECK FOR STORAGE PROTECTION                     00073000
+*                                                                       00074000
+* EXTERNAL REFERENCES -                                                 00075000
+*                                                                       00076000
+*        DMKHVCPC - TABLE OF PAGES PER CYLINDER, DASD DEVICES           00077000
+*        DMKSYM   - SYSTEM SYMBOL TABLE CSECT                           00078000
+*                                                                       00079000
+         EJECT                                                          00080000
+* TABLES / WORK AREAS -                                                 00081000
+*                                                                       00082000
+*        VDEVBLOK, VSPLCTL, SFBLOK, SPLINK                              00083000
+*                                                                       00084000
+* REGISTER USAGE -                                                      00085000
+*                                                                       00086000
+*        GPRS 14, 15  EXTERNAL LINKAGE REGISTERS                        00087000
+*        GPR 13 = SAVEAREA ADDRESSABILITY                               00088000
+*        GPR 12 = MODULE BASE REGISTER                                  00089000
+*        GPR 11 = VMBLOK ADDRESSABILITY                                 00090000
+*        GPR 10 = SFBLOK ADDRESSABILITY                                 00091000
+*        GPR  9 = VSPLCTL ADDRESSABILITY                                00092000
+*        GPR  8 = VDEVBLOK ADDRESSABILITY                               00093000
+*        GPR  7 = WORK REGISTER                                         00094000
+*        GPR  6 = ADDRESS OF DIAGNOSE 'R2' VALUE                        00095000
+*        GPR  5 = ADDRESS OF DIAGNOSE 'R1' VALUE                        00096000
+*        GPRS 0-4 WORK REGISTERS                                        00097000
+*                                                                       00098000
+* OPERATION -                                                           00099000
+*                                                                       00100000
+*        DIAGNOSE CODE X'0014', PROCESSED BY DMKDRDER, REQUIRES         00101000
+*        THREE REGISTER VALUES FROM THE VIRTUAL MACHINE ISSUING         00102000
+*        THE DIAGNOSE INSTRUCTION, AS FOLLOWS:                          00103000
+*              'R1'   =  DEPENDS ON FUNCTION SUB-CODE                   00104000
+*              'R2'   =  VIRTUAL ADDRESS OF A SPOOL READER DEVICE       00105000
+*              'R2+1' =  FUNCTION SUB-CODE X'000' TO X'018'             00106000
+*                                                                       00107000
+*        (N.B. - SEE BELOW FOR A DESCRIPTION OF AN ADDITIONAL           00108000
+*        SUB-CODE, X'FFF', FOR WHICH THE REGISTER VALUE 'R2' IS         00109000
+*        A SPOOL FILE ID NUMBER, RATHER THAN THE VIRTUAL ADDRESS        00110000
+*        OF A SPOOL READER DEVICE.)                                     00111000
+*                                                                       00112000
+*        THE SUB-CODE IS FIRST EXAMINED FOR VALIDITY, AND A SPECI-      00113000
+*        FICATION EXCEPTION PROGRAM INTERRUPT IS GENERATED IF THE       00114000
+*        CODE IS UNRECOGNIZED OR NOT A MULTIPLE OF 4. SECONDLY, THE     00115000
+*        VIRTUAL DEVICE ADDRESS IS VALIDATED AS TO AVAILABILITY,        00116000
+*        CORRECT DEVICE TYPE, ETC. A VIRTUAL CONDITION CODE 3 IS        00117000
+*        SET WITH THE FOLLOWING ERROR CODES IN THE USER'S 'R2+1':       00118000
+*        CODE = 4  =>  DEVICE ADDRESS INVALID                           00119000
+*        CODE = 8  =>  INVALID DEVICE TYPE                              00120000
+*        CODE = 12 =>  DEVICE BUSY WITH 'SIO' I/O                       00121000
+*        CODE = 16 =>  FATAL PAGING I/O ERROR                           00122000
+*        CODE = 20 => DIAGNOSE 14,BUT PAGE IS ALREADY LOCKED FOR I/O    00122100
+*                                                                       00123000
+*        IF ALL THE ABOVE CHECKS ARE PASSED, THE FUNCTION SUB-CODE      00124000
+*        IS DECODED FOR THE FUNCTIONAL SUBROUTINES, AS FOLLOWS:         00125000
+*                                                                       00126000
+         EJECT                                                          00127000
+* CODE = X'000'        READ NEXT SPOOL BUFFER (ACTIVE FILE)             00128000
+*              'R1' = START ADDRESS OF FULL-PAGE VIRTUAL BUFFER         00129000
+*              'R2' = VIRTUAL SPOOL READER ADDRESS                      00130000
+*                                                                       00131000
+*        THE SPECIFIED DEVICE IS CHECKED FOR AN ALREADY ACTIVE FILE,    00132000
+*        AND IF THERE IS ONE, THE NEXT FULL-PAGE BUFFER IS MADE         00133000
+*        AVAILABLE TO THE VIRTUAL MACHINE VIA A CALL TO DMKRPAGT.       00134000
+*        IF THERE IS NO ACTIVE FILE, THE CHAIN OF READER FILES IS       00135000
+*        SEARCHED FOR A FILE FOR THE CALLING USER AND CONNECTED TO      00136000
+*        THE VIRTUAL DEVICE FOR FURTHER READING. IF NO FILE             00137000
+*        IS FOUND, VIRTUAL CONDITION CODE 2 IS SET. WHEN THE END        00138000
+*        OF AN ACTIVE FILE IS REACHED, THE DEVICE STATUS SETTINGS       00139000
+*        ARE TESTED FOR 'SPOOL CONTINUOUS'. IF NOT SET, VIRTUAL         00140000
+*        CONDITION CODE 1 IS SET, INDICATING END OF FILE. IF THE        00141000
+*        DEVICE IS SET FOR CONTINUOUS INPUT, THE ACTIVE FILE IS         00142000
+*        EXAMINED TO DETERMINE IF IT IS A MULTIPLE-COPY FILE. IF SO,    00143000
+*        READING IS RESTARTED AT THE BEGINNING OF THE FILE. IF NOT,     00144000
+*        THE FILE IS CLOSED VIA DMKVSPCR AND THE READER CHAIN IS        00145000
+*        SEARCHED FOR ANOTHER INPUT FILE. IF NO OTHER FILE IS FOUND,    00146000
+*        VIRTUAL CONDITION CODE 1 IS SET.                               00147000
+*                                                                       00148000
+* CODE = X'004'        READ NEXT PRINT SPOOL FILE BLOCK (SFBLOK)        00149000
+*              'R1' = VIRTUAL ADDRESS OF A 13-DBL-WD BUFFER             00150000
+*              'R2' = VIRTUAL SPOOL READER ADDRESS                      00151000
+*                                                                       00152000
+*        IF THE SPECIFIED DEVICE IS IN USE VIA DIAGNOSE, THE VSPLCTL    00153000
+*        BLOCK IS CHECKED TO SEE IF THIS IS A REPEATED CALL FOR         00154000
+*        PRINTER SFBLOKS. IF YES, THEN THE CHAIN SEARCH CONTINUES       00155000
+*        FROM THE POINT WHERE THE LAST SFBLOK WAS GIVEN TO THE VM.      00156000
+*        IN THIS CASE, CC = 1 IS SET WHEN THERE ARE NO MORE PRINT       00157000
+*        FILES. IF THIS IS THE FIRST CALL FOR AN SFBLOK, OR IF          00158000
+*        THERE HAVE BEEN INTERVENING CALLS FOR FILE READING, THE        00159000
+*        SPOOL INPUT CHAIN IS SEARCHED FROM THE BEGINNING, AND CC = 2   00160000
+*        IS SET IF NO FILES ARE FOUND.                                  00161000
+*   NOTE: THE VIRTUAL BUFFER SPECIFIED VIA 'R1' MUST NOT CROSS A        00162000
+*        PAGE BOUNDARY OR A SPECIFICATION EXCEPTION WILL RESULT.        00163000
+*                                                                       00164000
+* CODE = X'008'        READ NEXT PUNCH SPOOL FILE BLOCK (SFBLOK)        00165000
+*              'R1' = VIRTUAL ADDRESS OF A 13-DBL-WD BUFFER             00166000
+*              'R2' = VIRTUAL SPOOL READER ADDRESS                      00167000
+*        PROCESSING FOR CODE 8 IS THE SAME AS FOR CODE 4, EXCEPT        00168000
+*        THAT ONLY CARD-IMAGE INPUT FILES ARE PROCESSED.                00169000
+*   NOTE: FOR BOTH CODES 4 AND 8, THE FORMAT DEFINITION FOR A VM/370    00170000
+*        SFBLOK CAN BE FOUND IN THE COPY FILE 'SPOOL' IN THE SYSTEM     00171000
+*        MACRO LIBRARY.                                                 00172000
+*                                                                       00173000
+         EJECT                                                          00174000
+* CODE = X'00C'        SELECT SPECIFIC FILE BY FILE ID (SFBFILID)       00175000
+*              'R1' = FILE IDENTIFIER OF REQUESTED FILE                 00176000
+*                                                                       00177000
+*        THE SPOOL INPUT CHAIN IS SEARCHED FOR THE FILE SPECIFIED.      00178000
+*        IF IT IS NOT FOUND, CC = 2 IS SET. IF IT IS FOUND, THE FILE    00179000
+*        IS MOVED TO THE HEAD OF THE CHAIN SUCH THAT IT WILL BE         00180000
+*        THE NEXT FILE PROCESSED BY ANY OF THE OTHER FUNCTIONS.         00181000
+*                                                                       00182000
+* CODE = X'010'        REPEAT ACTIVE FILE 'NNN' TIMES                   00183000
+*              'R1' = NEW COPY COUNT FOR THE ACTIVE FILE                00184000
+*              'R2' = VIRTUAL SPOOL READER ADDRESS                      00185000
+*                                                                       00186000
+*        THE SPECIFIED DEVICE IS CHECKED FOR AN ACTIVE FILE. IF NO      00187000
+*        FILE IS ACTIVE, CC = 2 IS SET. OTHERWISE, THE COPY CPUNT       00188000
+*        FOR THE FILE IS SET TO THE SPECIFIED VALUE, WITH A MAXIMUM     00189000
+*        OF 255. IF THE SPECIFIED COUNT IS NOT POSITIVE, A SPECIFI-     00190000
+*        CATION EXCEPTION IS GENERATED. IF THE COUNT IS GREATER THAN    00191000
+*        255, IT IS ADJUSTED TO MODULO 256.                             00192000
+*                                                                       00193000
+* CODE = X'014'        RESTART ACTIVE FILE AT BEGINNING                 00194000
+*              'R1' = START ADDRESS OF VIRTUAL FULL-PAGE BUFFER         00195000
+*              'R2' = VIRTUAL SPOOL READER ADDRESS                      00196000
+*                                                                       00197000
+*        THE SPECIFIED DEVICE IS CHECKED FOR AN ACTIVE FILE. IF NO      00198000
+*        ACTIVE FILE IS FOUND, CC = 2 IS SET. OTHERWISE, THE VSPLCTL    00199000
+*        POINTERS ARE RESET TO THE BEGINNING OF THE FILE AND THE        00200000
+*        FIRST PAGE RECORD IS GIVEN TO THE USER AS FOR CODE 0.          00201000
+*                                                                       00202000
+* CODE = X'018'        BACKSPACE ONE RECORD IN ACTIVE FILE              00203000
+*              'R1' = START ADDRESS OF VIRTUAL FULL-APGE BUFFER         00204000
+*              'R2' = VIRTUAL SPOOL READER ADDRESS                      00205000
+*                                                                       00206000
+*        THE SPECIFIED DEVICE IS CHECKED FOR AN ACTIVE FILE. IF NO      00207000
+*        ACTIVE FILE IS FOUND, CC = 2 IS SET. OTHERWISE, THE FILE       00208000
+*        IS BACKSPACED ONE RECORD AND THE RECORD IS GIVEN TO THE        00209000
+*        USER AS IN CODE 0. IF THE FILE IS ALREADY POSITIONED AT        00210000
+*        THE FIRST RECORD, THE FIRST RECORD IS GIVEN TO THE USER.       00211000
+*                                                                       00212000
+* CODE = X'01C'        READ NEXT MONITOR SPOOL FILE BLOCK               00212010
+*              'R1' = VIRTUAL ADDRESS OF 13-DBL-WD BUFFER               00212020
+*              'R2' = VIRTUAL READER ADDRESS                            00212030
+*        PROCESSING FOR CODE 1C IS THE SAME AS FOR 8 EXCEPT             00212040
+*        THAT MONITOR SPOOL FILES ONLY ARE HANDLED (AS                  00212050
+*        DISTINGUISHED BY THE SFPFLAG2 SFPMON.                          00212060
+*                                                                       00212070
+* CODE = X'020'        READ SELECTED MONITOR SPOOL FILE BLOCK           00212080
+*              'R1' = FILE IDENTIFIER OF SELECTED FILE                  00212090
+*              'R2' = VIRTUAL SPOOL READER ADDRESS                      00212100
+*        PROCESSING FOR CODE 20 IS THE SAME AS FOR CODE C               00212110
+*        EXCEPT THAT ONLY SPOOL FILES WITH SFBFLAG2 SET TO              00212120
+*        SFBMON ARE HANDLED.                                            00212130
+*                                                                       00212140
+* CODE = X'FFF'        SUCCESSOR FILE DESCRIPTOR                        00213000
+*              'R1' = VIRTUAL ADDRESS OF A 252 BYTE BUFFER              00214000
+*              'R2' = SPOOL FILE ID NUMBER                              00215000
+*                                                                       00216000
+*        IF 'R2' IS NON-ZERO THE SPOOL INPUT CHAIN IS SEARCHED FOR      00217000
+*        A FILE WITH A MATCHING ID NUMBER; IF NONE IS FOUND, OR IF      00218000
+*        ONE IS FOUND WHICH IS OWNED BY A DIFFERENT VIRTUAL MACHINE,    00219000
+*        CC = 2 IS SET.  THE CHAIN SEARCH IS CONTINUED FROM THE         00220000
+*        FILE WHICH WAS FOUND, OR FROM THE ANCHOR IF 'R2' IS ZERO,      00221000
+*        FOR THE NEXT FILE OWNED BY THE CALLER, INDEPENDENT OF FILE     00222000
+*        TYPE, CLASS, 'INUSE' FLAG, ETC.  IF NONE IS FOUND, CC = 1      00223000
+*        IS SET.  OTHERWISE, THE SFBLOK AND THE FIRST RECORD OF THE     00224000
+*        FILE (GENERALLY, THE 'TAG') ARE COPIED TO THE CALLER'S         00225000
+*        VIRTUAL STORAGE BUFFER.                                        00226000
+*.                                                                      00227000
+         EJECT                                                          00228000
+         DC    CL8'DMKDRD'    PAGEABLE MODULE IDENTIFIER                00229000
+         SPACE                                                          00230000
+DMKDRDER RELOC ,              SPECIAL SPOOL-BLOCK READER                00231000
+         SPACE 2                                                        00232000
+         NI    VMPSW+4,X'CF'  SET CONDITION CODE = 0                    00233000
+         NI    VMPSW+2,X'CF'  SET EC-MODE CONDITION CODE = 0   @VA04236 00233100
+         MVI   SAVEWRK6,X'00'      SET TO SKIP DUMP FILES               00234000
+         MVI   SAVEWRK6+1,X'00' NULL OUT MONITOR INDICATOR     @V50A2B5 00234100
+         TM    SAVER6+3,X'07' DBL-WD ALIGNED = EVEN REGISTER            00235000
+         BNZ   DRDSPEC        NOPE - ERROR                              00236000
+         L     R4,4(,R6)      'R2'+1 = FUNCTION SUB-CODE                00237000
+         LTR   R4,R4          RUN THROUGH VALIDITY CHECKING             00238000
+         BM    DRDSPEC        SPECIFICATION ERROR                       00239000
+         CH    R4,=AL2(DRDMAXC)    CHECK AGAINST MAXIMUM                00240000
+         BH    DRDHIGH        CHECK HIGH SUB-CODE SEQUENCE     @V293598 00241000
+         TM    7(R6),X'03'    CHECK ALIGNMENT                           00242000
+         BNZ   DRDSPEC        NO GOOD                                   00243000
+DRDEVAL  EQU   *              VALIDATE DEVICE ADDRESS SPECIFIED         00244000
+         L     R1,0(,R6)      VIRTUAL READER ADDRESS                    00245000
+         MAXDV R15            GET HIGHEST VIRTUAL DEVICE                00246000
+         CLR   R1,R15         CHECK ITS VALIDITY                        00247000
+         BH    DRDEVIC        INVALID ADDRESS                           00248000
+         CALL  DMKSCNVU       FIND VDEVBLOK                             00251000
+         BNZ   DRDEVIC        NOT FOUND                                 00252000
+         CLI   VDEVTYPC,CLASURI    SPOOL INPUT DEVICE?                  00253000
+         BNE   DRDTYPE        NO - INVALID DEVICE TYPE                  00254000
+         TM    VDEVTYPE,TYPRDR     IS IT ALSO A CARD-READER?            00255000
+         BZ    DRDTYPE        NO - DON'T SUPPORT PAPER TAPE, ETC.       00256000
+*   FUNCTION SUB-CODE IS STILL IN GPR 4                                 00257000
+         B     DRDECOD(R4)    GO WHERE IT'S AT                          00258000
+DRDECOD  EQU   *              FUNCTION SELECTION TABLE                  00259000
+         B     NEXTPAG        '000' - GET NEXT DATA BUFFER              00260000
+         B     PRTSFCB        '004' - GET NEXT PRINTER SFBLOK           00261000
+         B     PCHSFCB        '008' - GET NEXT PUNCH SFBLOK             00262000
+         B     SELECTF        '00C' - SELECT SPECIFIC FILE              00263000
+         B     REPEAT         '010' - REPEAT NN TIMES                   00264000
+         B     REREAD         '014' - RESTART AT BEGINNING              00265000
+         B     BACKSPF        '018' - BACKSPACE ONE PAGE                00266000
+         B     PCHSFCB1        '01C' - GET MONITOR PU FILE     @V50A2B5 00266100
+         B     NEXTPAG1        '020' - GET NEXT DATA BUFFER    @V50A2B5 00266200
+DRDMAXC  EQU   *-DRDECOD-4    MAXIMUM DEFINED CODE                      00267000
+PCHSFCB1 MVI   SAVEWRK6+1,X'44' INDICATE MONITOR DIAGNOSE      @V50A2B5 00267100
+         B     PCHSFCB              GO TO NORMAL LOCATION      @V50A2B5 00267200
+         SPACE 1                                                        00267300
+NEXTPAG1 MVI   SAVEWRK6+1,X'44'  INDICATE MONITOR DIAGNOSE     @V50A2B5 00267400
+         B     NEXTPAG               GO TO NORMAL LOCATION     @V50A2B5 00267500
+         EJECT                                                          00268000
+DRDHIGH  LA    R1,X'FFF'      ONLY LEGAL HIGH SUB-CODE         @V293598 00269000
+         CLR   R4,R1          IS THIS SUB-CODE X'FFF'          @V293598 00270000
+         BE    SUCCESS        IT IS INDEED - DO SUCCESSOR      @V293598 00271000
+         B     DRDSPEC        OTHERWISE INVALID SUB-CODE       @V293598 00272000
+DRDEXIT  EQU   *              SUCCESSFUL RETURN                         00273000
+         SLR   R1,R1          RETURN CODE ZERO                          00274000
+DRDERRX  EQU   *              RETURN WITH ERROR                         00275000
+         ST    R1,SAVER2      RETURN CODE BACK VIA GPR 2                00276000
+         EXIT  ,              RETURN TO CALLER                          00277000
+         SPACE 2                                                        00278000
+ADDCHEK  EQU   *              EXAMINE ADDRESS FOR VALIDITY              00279000
+         LA    R1,0(,R1)      24 BITS ONLY                              00280000
+         LRA   R0,0(,R1)      IS IT A VALID ADDRESS ?          @V304635 00281000
+         BC    8+2,ADDCHEK1   CONTINUE IF NOT A SEG EXCEPTION  @V408246 00282100
+*        NOTE: NOBODY ELSE IN DRD USERS SAVEWRK4 AND SAVEWRK5           00282200
+         ST    R2,SAVEWRK4    SAVE REG. DESTROYED BY PARM PASS @V408246 00282300
+         ST    R14,SAVEWRK5   SAVE RETURN REG. NOT SAVED BY PTR@V408246 00282400
+         CALL  DMKPTRAN,PARM=DEFER OTHERWISE LET PTRAN HANDLE  @V408246 00282500
+         L     R2,SAVEWRK4    RESTORE                          @V408246 00282600
+         L     R14,SAVEWRK5                                    @V408246 00282700
+         BC    2,DRDADDR      ADDRESSING ERROR                 @V408246 00282800
+ADDCHEK1 DS    0H                                              @V408246 00282900
+         LA    R15,0(R2,R1)   ADDRESS OF END OF FIELD                   00283000
+         BCTR  R15,0          ...PRECISELY                              00284000
+         L     R0,XPAGNUM     PAGE NUMBER MASK                          00285000
+         NR    R15,R0         ENDING PAGE ADDRESS                       00286000
+         NR    R0,R1          STARTING PAGE ADDRESS                     00287000
+         CLR   R0,R15         DOES IT CROSS A PAGE BOUNDARY ?           00288000
+         BNE   DRDSPEC        YES - ERROR EXCEPTION                     00289000
+         BR    R14            RETURN - EVERYTHING IS O.K.               00290000
+         SPACE 1                                                        00290500
+SETCOD1  LA    R2,X'10'       ESTABLISH CONDITION CODE = 1     @VA04236 00291000
+         B     CCSET          GO SET CONDITION CODE            @VA04236 00291500
+         SPACE 1                                                        00292000
+SETCOD2  LA    R2,X'20'       ESTABLISH CONDITION CODE = 2     @VA04236 00292500
+         B     CCSET          GO SET CONDITION CODE            @VA04236 00293000
+         SPACE 1                                                        00293500
+SETCOD3  L     R2,SAVER6      GPR6 AT ENTRY HAS CODE-REG NUMBER@VA04236 00294000
+         ST    R1,4(,R2)      PASS ERROR IN SUBCODE-REG        @VA04236 00294500
+         LA    R2,X'30'       ESTABLISH CONDITION CODE = 3     @VA04236 00295000
+CCSET    LA    R1,VMPSW+4     CC POSITION FOR BC-MODE PSW      @VA04236 00295500
+         TM    VMESTAT,VMEXTCM IS THIS VM IN EC-MODE?          @VA04236 00296000
+         BZ    *+8            NO.  POSITIONING IS PROPER       @VA04236 00296500
+         LA    R1,VMPSW+2     CC POSITION FOR EC-MODE PSW      @VA04236 00297000
+         EX    R2,DRDSETCC    SET CONDITION CODE IN PSW        @VA04236 00297500
+         B     DRDEXIT        EXIT                             @VA04236 00298000
+         SPACE 1                                                        00298500
+DRDSETCC OI    0(R1),*-*      EXECUTED CONDITION CODE SETTER   @VA04236 00299000
+         SPACE 1                                                        00299500
+DRDIOER  EQU   *              FATAL I/O ERROR FROM DMKRPAGT             00302000
+         LA    R1,16(0,0)     RETURN CODE = 16                          00303000
+         B     SETCOD3        GO SET CC = 3                             00304000
+DRDBUSY  EQU   *              DEVICE IS BUSY                            00305000
+         LA    R1,12(0)       ERROR CODE                                00306000
+         B     SETCOD3        SET CC = 3                                00307000
+DRDEVIC  EQU   *              INVALID OR NONEXISTENT ADDRESS            00308000
+         LA    R1,4(0)        CODE BACK TO USER                         00309000
+         B     SETCOD3        SET CC = 3                                00310000
+DRDTYPE  EQU   *              INVALID DEVICE TYPE                       00311000
+         LA    R1,8(0)        CODE BACK TO USER                         00312000
+         B     SETCOD3        SET CC = 3                                00313000
+DRDLOCK  EQU   *              DIAG.14 AND PAGE LOCKED FOR I/O  @VA07519 00313100
+         LA    R1,20(0)       RETURN CODE = 20                 @VA07519 00313200
+         B     SETCOD3        SET CC = 3                       @VA07519 00313300
+DRDSPEC  EQU   *              SPECIFICATION INTERRUPT                   00314000
+         LA    R1,X'06'       INTERRUPT CODE                            00315000
+         ST    R1,SAVER0      BACK TO DMKHVC IN GPR 0                   00316000
+         B     DRDERRX        ...WITH GPR 2 ALSO NON-ZERO               00317000
+DRDADDR  EQU   *              ADDRESSING EXCEPTION                      00318000
+         LA    R1,X'05'       INTERRUPT CODE                            00319000
+         ST    R1,SAVER0      BACK IN GPR 0...                          00320000
+         B     DRDERRX        ...WITH GPR 2 ALSO NON-ZERO               00321000
+DRDPROT  EQU   *              PROTECTION EXCEPTION                      00322000
+         LA    R1,X'04'       INTERRUPT CODE...                         00323000
+         ST    R1,SAVER0      ...FOR DMKHVC                             00324000
+         B     DRDERRX        EXIT WITH GR2 NON-ZERO                    00325000
+         EJECT                                                          00326000
+*---------------------------------------------------------------------* 00327000
+*        PRTSFCB - CODE '004' - GET NEXT PRINT SPOOL FILE BLOCK       * 00328000
+*---------------------------------------------------------------------* 00329000
+PRTSFCB  EQU   *                                                        00330000
+         LA    R7,TYPPRT      THIS IS THE ONE WE WANT                   00331000
+         B     READSFB        ...SO GO FIND ONE                         00332000
+*---------------------------------------------------------------------* 00333000
+*        PCHSFCB - CODE '008' - GET NEXT PUNCH SPOOL FILE BLOCK       * 00334000
+*---------------------------------------------------------------------* 00335000
+PCHSFCB  EQU   *                                                        00336000
+         LA    R7,TYPPUN      THIS VARIETY FROM HERE                    00337000
+*        B     READSFB        ...SO GO FIND ONE                         00338000
+READSFB  EQU   *              USER WANTS AN SFBLOK                      00339000
+         L     R5,0(,R5)      VIRTUAL ADDRESS OF BUFFER                 00340000
+         LR    R1,R5          ...INTO R1 ALSO                           00341000
+         LA    R2,SFBSIZE*8   FIELD LENGTH                              00342000
+         BAL   R14,ADDCHEK    CHECK PAGE CROSS, ETC.                    00343000
+         LA    R15,SETCOD2    RETURN IF THERE ARE NO FILES              00344000
+         LA    R14,READSCH    RETURN IF ONE IS FOUND                    00345000
+         CLI   VDEVSTAT,X'00' IS THE DEVICE FREE ?                      00346000
+         BE    SEARCHB        YES - FIND AN SFBLOK                      00347000
+         TM    VDEVSFLG,VDEVDIAG   IN USE BY DIAGNOSE ??                00348000
+         BZ    DRDBUSY        NO - CAN'T USE THIS ONE                   00349000
+         L     R9,VDEVSPL     GET VSPLCTL BLOCK                         00350000
+         L     R10,VSPCCW     ...AND WHERE WE LEFT OFF                  00351000
+         LTR   R10,R10        CHECK TO MAKE SURE                        00352000
+         BNP   SEARCHB        WELL... START AT THE BEGINNING            00353000
+         BAL   R15,READNXT    LOOK FOR NEXT SFBLOK                      00354000
+         L     R9,VDEVSPL     GET VSPLCTL BLOCK                         00355000
+         ST    R10,VSPCCW     SET PTR TO ZERO                           00356000
+         B     SETCOD1        AND SET CC = 1 TO INDICATE SOME FOUND     00357000
+READSCH  EQU   *                                                        00358000
+         EX    R7,TESTYPE     IS IT THE RIGHT DEVICE TYPE ?             00359000
+         BZ    READNXT        NO - CONTINUE SEARCHING                   00360000
+         BAL   R6,GETVSPL     GET VSPLCTL BLOCK                         00361000
+         ST    R10,VSPCCW     ...AND REMEMBER WHERE WE STOPPED          00362000
+         TRANS 2,5,OPT=(BRING,DEFER)    GET USER'S BUFFER               00363000
+         CALL  DMKPSASP       CHECK STORAGE PROTECTION KEYS    @V202232 00364000
+         BNZ   DRDPROT        OOPS ... SOME PROBLEM HERE                00365000
+         MVC   0(SFBSIZE*8,R2),SFBLOK   GIVE IT TO HIM                  00366000
+         B     DRDEXIT        SET CONDITION CODE = 0 AND EXIT           00367000
+TESTYPE  TM    SFBTYPE,*-*    EXECUTED FOR TYPE CHECKING                00368000
+         EJECT                                                          00369000
+*---------------------------------------------------------------------* 00370000
+*        SEARCHB - SEARCH READER-FILE CHAIN FOR SFBLOK                * 00371000
+*---------------------------------------------------------------------* 00372000
+SEARCHB  EQU   *                                                        00373000
+*        SEARCH READER-FILE CHAIN FOR SFBLOK FOR THIS USER              00374000
+         L     R10,ARSPRD     ADDRESS OF CHAIN ANCHOR                   00375000
+         B     BEGINB    BRANCH FOR BEGINNING SEARCH           @VA02787 00376000
+READNXT  EQU   *                                                        00377000
+         L     R9,ARSPRD    ADDRESS OF CHAIN ANCHOR            @VA02787 00378000
+         CR    R10,R9     AT PLACE OF PREVIOUS SEARCH          @VA02787 00379000
+         BE    BEGINB      IF YES, BRANCH AND CONTINUE         @VA02787 00380000
+NEXTSF   L     R9,SFBPNT-SFBLOK(,R9)  NEXT SFBLOK IN CHAIN     @VA02787 00381000
+         LTR   R9,R9      ANY MORE?                            @VA02787 00382000
+         BZR   R15        IF NO, TAKE EXIT                     @VA02787 00383000
+         CR    R9,R10    AT PLACE OF PREVIOUS SEARCH?          @VA02787 00384000
+         BNE   NEXTSF    IF NOT, CONTINUE SEARCH               @VA02787 00385000
+BEGINB   EQU   *                                               @VA02787 00386000
+         LR    R9,R10         PREVIOUS BLOCK ADDR. IN R9                00387000
+         L     R10,SFBPNT     NEXT SFBLOK IN CHAIN                      00388000
+         LTR   R10,R10        ANY MORE?                                 00389000
+         BCR   8,R15          NO - TAKE THE ERROR EXIT                  00390000
+         CLC   SFBUSER(8),VMUSER   DOES IT BELONG TO HIM?               00391000
+         BNE   BEGINB     NO - CONTINUE                        @VA02787 00392000
+         TM    SFBFLAG,SFBINUSE+SFBUHOLD INUSE OR HOLD ??      @V200930 00393000
+         BNZ   BEGINB     YES, SKIP THIS ONE                   @VA02787 00394000
+         CLI   VDEVCLAS,C'*'  READ ANY CLASS ??                @V200930 00395000
+         BE    READCHK        YES, TEST TYPE                   @V200930 00396000
+         CLC   VDEVCLAS,SFBCLAS    CORRECT INPUT CLASS ?                00397000
+         BNE   BEGINB     NO - SKIP THIS ONE                   @VA02787 00398000
+READCHK  DS    0H                                              @V200930 00399000
+         CLI   SAVEWRK6,X'00'      SHOULD WE CHECK FOR DUMP FILES ?     00400000
+         BCR   7,R14          NO - GIVE THIS ONE TO USER                00401000
+         TM    SFBFLAG,SFBDUMP     CANNOT USE DUMP FILES                00402000
+         BO    BEGINB      SURE ENOUGH                         @VA02787 00403000
+         TM    SFBFLAG2,SFBMON  IS THIS A MONITOR FILE?        @V50A2B5 00403050
+         BNO   SEEOK                NO                         @V50A2B5 00403100
+         CLI   SAVEWRK6+1,X'00'     DO WE HAVE CORRECT DIAG?   @V50A2B5 00403150
+         BE    BEGINB               NO, NOT A MONITOR DIAG     @V50A2B5 00403200
+         BR    R14                  YES, USE THIS FILE         @V50A2B5 00403250
+SEEOK    CLI   SAVEWRK6+1,X'00'     DO WE HAVE CORRECT DIAG?   @V50A2B5 00403300
+         BNE   BEGINB               NO, ONLY WANT MONITOR      @V50A2B5 00403350
+         BR    R14                                                      00404000
+         SPACE 2                                                        00405000
+*---------------------------------------------------------------------* 00406000
+*        GETVSPL - GET VSPLCTL BLOCK AND CONNECT TO DEVICE            * 00407000
+*---------------------------------------------------------------------* 00408000
+GETVSPL  EQU   *                                                        00409000
+         L     R9,VDEVSPL     IN CASE THERE IS ALREADY A VSPLCTL        00410000
+         LTR   R9,R9          MAKE SURE IT'S THERE                      00411000
+         BNP   GETVSP1        NO - GET ONE                              00412000
+         TM    VDEVSFLG,VDEVDIAG   IN USE BY DIAGNOSE ??                00413000
+         BCR   1,R6           YES - VSPLCTL ALREADY EXISTS              00414000
+GETVSP1  EQU   *              GET VSPLCTL BLOCK                         00415000
+         LA    R0,VSPSIZE     GET VSPLCTL BLOCK                         00416000
+         CALL  DMKFREE        ...                                       00417000
+         LR    R9,R1          ADDRESS VIA GPR 9                         00418000
+         MVC   VSPLCTL(VSPSIZE*8),ZEROES     CLEAR IT                   00419000
+         OI    VDEVSTAT,VDEVBUSY   MARK DEVICE BUSY                     00420000
+         OI    VDEVSFLG,VDEVDIAG   ...AND IN USE BY DIAGNOSE            00421000
+         ST    R9,VDEVSPL     CONNECT VSPLCTL                           00422000
+         BR    R6             ...AND RETURN                             00423000
+         EJECT                                                          00424000
+*---------------------------------------------------------------------* 00425000
+*        SELECTF - SELECT A PARTICULAR FILE FOR NEXT READING          * 00426000
+*---------------------------------------------------------------------* 00427000
+SELECTF  EQU   *                                                        00428000
+         L     R6,0(,R5)      GPR 6 NOW CONTAINS FILE ID                00429000
+         LA    R15,SETCOD2    CC = 2 IF NOT FOUND                       00430000
+         BAL   R14,SEARCHB    FIND AN SFBLOK                            00431000
+         CH    R6,SFBFILID    IS THIS THE RIGHT ONE ?                   00432000
+         BNE   BEGINB         NO - KEEP LOOKING                @VA06358 00433000
+         L     R1,SFBPNT      UNCHAIN THE SFBLOK...                     00434000
+         ST    R1,SFBPNT-SFBLOK(,R9)    ...                             00435000
+         L     R1,ARSPRD      ...AND RE-CHAIN AT THE HEAD               00436000
+         L     R2,0(,R1)      ...OF THE SPOOL-FILE LIST                 00437000
+         ST    R10,0(,R1)     ...SO IT WILL BE PICKED UP                00438000
+         ST    R2,SFBPNT      ...AT THE NEXT READ                       00439000
+         B     DRDEXIT        SET CC = 0 AND EXIT                       00440000
+         SPACE 2                                                        00441000
+*---------------------------------------------------------------------* 00442000
+*        CONNECT - CONNECT SFBLOK TO VSPLCTL BLOCK AND DEVICE         * 00443000
+*---------------------------------------------------------------------* 00444000
+CONNECT  EQU   *                                                        00445000
+         ST    R14,SAVEWRK2   SAVE RETURN REGISTER                      00446000
+         OI    SFBFLAG,SFBINUSE+SFBOPEN+SFBRECER                        00447000
+         BAL   R6,GETVSPL     GET VSPLCTL BLOCK IF NEEDED               00448000
+         ST    R10,VSPSFBLK   CONNECT SFBLOK                            00449000
+         L     R1,SFBSTART    FIRST DASD LOCATION                       00450000
+         ST    R1,VSPDPAGE    ...INTO VSPLCTL                           00451000
+         L     R14,SAVEWRK2   PICK UP RETURN ADDRESS                    00452000
+         BR    R14            ...AND RETURN                             00453000
+         SPACE 2                                                        00454000
+*---------------------------------------------------------------------* 00455000
+*        CHKBUSY - CHECK DEVICE FOR ACTIVE DIAGNOSE SPOOL FILE        * 00456000
+*---------------------------------------------------------------------* 00457000
+CHKBUSY  EQU   *                                                        00458000
+         CLI   VDEVSTAT,VDEVBUSY   IS THE DEVICE ACTIVE?                00459000
+         BCR   7,R15          NO - ERROR EXIT                           00460000
+         TM    VDEVSFLG,VDEVDIAG   IN USE BY DIAGNOSE ??                00461000
+         BCR   8,R15          NO - ERROR EXIT                           00462000
+         L     R9,VDEVSPL     GET VSPLCTL BLOCK                         00463000
+         LTR   R9,R9          DON'T TAKE UNNECESSARY CHANCES            00464000
+         BCR   13,R15         ...IT PAID OFF                            00465000
+         L     R10,VSPSFBLK   GET AT THE SFBLOK ALSO                    00466000
+         LTR   R10,R10        ...                                       00467000
+         BCR   13,R15         NO GOOD - ERROR EXIT                      00468000
+         BR    R14            RETURN TO CALLER - DEVICE IS O.K.         00469000
+         EJECT                                                          00470000
+*---------------------------------------------------------------------* 00471000
+*        NEXTPAG - CODE '000' - GET NEXT PAGE BUFFER IN FILE          * 00472000
+*---------------------------------------------------------------------* 00473000
+NEXTPAG  EQU   *              USER WANTS A DATA PAGE                    00474000
+         L     R5,0(,R5)      VIRTUAL PAGE ADDRESS                      00475000
+         LR    R1,R5          INTO GPR 1 FOR 'ADDCHEK'                  00476000
+         L     R2,F4096       FIELD = ONE PAGE                          00477000
+         BAL   R14,ADDCHEK    VALIDATE ADDRESS                          00478000
+         LA    R15,GETSFCB    IF INACTIVE, CONNECT A BLOCK              00479000
+         BAL   R14,CHKBUSY     SEE IF THE DEVICE IS ACTIVE              00480000
+         TM    SFBFLAG,SFBEOF ALREADY AT END OF FILE?                   00481000
+         BO    EXAMINE        YES - CHECK COPY COUNT, ETC.              00482000
+CHEKNXT  EQU   *                                                        00483000
+         SLR   R1,R1                                                    00484000
+         ST    R1,VSPCCW      CLEAR SFBLOK CHAIN LOCATOR                00485000
+         L     R0,VSPDPAGE    'CCPD' OF DESIRED PAGE                    00486000
+         CL    R0,SFBLAST     IS THIS THE LAST PAGE ?                   00487000
+         BNE   GIVEPAG        NO - GIVE IT TO HIM                       00488000
+         OI    SFBFLAG,SFBEOF AT EOF NEXT TIME AROUND                   00489000
+GIVEPAG  EQU   *              GIVE PAGE TO THE USER                     00490000
+         LR    R1,R5          VIRTUAL ADDRESS IS IN R5                  00491000
+         CALL  DMKRPAGT,PARM=BRING LOCATE + BRING IN THE PAGE           00492000
+         BC    2,DRDPROT      OOPS .. TRIED TO OVERLAY A SHARED PAGE    00493000
+         BC    1,DRDIOER      FATAL I/O ERROR WHILE READING             00494000
+         BC    4,DRDLOCK      PAGE ALREADY IN USE FOR I/O      @VA07519 00494050
+         USING SPLINK,R2      REAL ADDRESS BACK VIA GPR 2               00495000
+         L     R0,SPPREPAG    GET BACK LINKAGE                          00496000
+         ST    R0,VSPCAW      USE 'CAW' FOR BACK LINKAGE IN FILE        00497000
+         L     R4,SPNXTPAG    NEXT LINK IN SPOOL FILE                   00498000
+         ST    R4,VSPDPAGE    ...UPDATE 'NEXT PAGE' DATA                00499000
+         B     DRDEXIT        ALL DONE -- RETURN TO USER                00500000
+         DROP  R2                                                       00501000
+EXAMINE  EQU   *              CHECKING EOF CONDITIONS                   00502000
+         LH    R1,SFBCOPY     PICK UP COPY COUNT NOW                    00503000
+         TM    VDEVSFLG,VDEVCONT   SPOOL CONTINUOUS ??                  00504000
+         BZ    EXAM01         NO                                        00505000
+         S     R1,F1          DECREMENT COPY COUNT                      00506000
+         BNP   EXAM02         NO - GET NEXT FILE                        00507000
+         STH   R1,SFBCOPY     ...                                       00508000
+         L     R1,SFBSTART    FIRST DASD LOCATION                       00509000
+         ST    R1,VSPDPAGE    ...INTO VSPLCTL                           00510000
+         NI    SFBFLAG,X'FF'-SFBEOF     NO LONGER AT EOF                00511000
+         B     CHEKNXT        CONTINUE PASSING DATA                     00512000
+         EJECT                                                          00513000
+EXAM01   EQU   *                                                        00514000
+         S     R1,F1          DECREMENT COPY COUNT                      00515000
+         BNP   SETCOD1        NO - JUST RETURN EOF CONDITION            00516000
+         STH   R1,SFBCOPY     ...                                       00517000
+         L     R1,ARSPRD      ADDR OF START OF CHAIN                    00518000
+         SPACE 1                                                        00519000
+SFBLOOP  EQU   *                                                        00520000
+         L     R2,SFBPNT-SFBLOK(,R1)    GET NEXT SFBLOK ON CHAIN        00521000
+         CR    R2,R10         NEXT .EQ. CURRENT SFBLOK ?                00522000
+         BE    SFBFOUND       YES                                       00523000
+         LR    R1,R2                                                    00524000
+         B     SFBLOOP        SEARCH CHAIN                              00525000
+         SPACE 1                                                        00526000
+SFBFOUND EQU   *                                                        00527000
+         L     R3,SFBPNT      GET NEXT SFBLOK                           00528000
+         ST    R3,SFBPNT-SFBLOK(,R1)    REMOVE CURRENT SFBLOK           00529000
+         L     R1,ARSPRD      ADDR OF START OF CHAIN                    00530000
+         L     R2,0(,R1)      FIRST SFBLOK IN CHAIN                     00531000
+         ST    R10,0(,R1)     PUT THIS ONE FIRST                        00532000
+         ST    R2,SFBPNT      ...SO IT WILL COME UP NEXT                00533000
+         NI    SFBFLAG,X'FF'-(SFBEOF+SFBINUSE+SFBRECER)                 00534000
+         SLR   R1,R1          DISCONNECT VSPLCTL BLOCK                  00535000
+         ST    R1,VSPSFBLK    ...                                       00536000
+         ST    R1,VSPDPAGE    ...                                       00537000
+         ST    R1,VSPCAW      ...                                       00538000
+         B     SETCOD1        RETURN EOF CONDITION                      00539000
+EXAM02   EQU   *              CLOSE THIS FILE AND GET ANOTHER ONE       00540000
+         BAL   R6,DRDLOSE     CLOSE THE SPOOL FILE                      00541000
+         LA    R15,SETCOD1    CC = 1 IF NO MORE FILES                   00542000
+         B     GETSFB1        GO GET ANOTHER SPOOL FILE                 00543000
+         SPACE 2                                                        00544000
+DRDLOSE  EQU   *              CLOSE THE ACTIVE FILE                     00545000
+         MVI   VDEVSTAT,X'00'      FREE UP THE DEVICE FOR CLOSE...      00546000
+         NI    VDEVSFLG,X'FF'-VDEVDIAG  ...                             00547000
+         LR    R7,R10         SFBLOK TO R7 FOR 'VSPCR'                  00548000
+         SL    R8,VMDVSTRT    VDEVBLOK DISPLACEMENT            @VA01460 00549000
+         CALL  DMKVSPCR       CLOSE READER FILE                         00550000
+         AL    R8,VMDVSTRT    VDEVBLOK ADDRESS                 @VA01460 00551000
+         BR    R6             ...AND RETURN                             00552000
+         SPACE 2                                                        00553000
+GETSFCB  EQU   *              FIND ANOTHER SPOOL FILE                   00554000
+         LA    R15,SETCOD2    CC = 2 IF NO FILE FOUND                   00555000
+GETSFB1  EQU   *              ALTERNATE ENTRY                           00556000
+         LA    R14,GETSFB2    RETURN FROM 'SEARCHB'                     00557000
+         CLI   VDEVSTAT,X'00' IS THE DEVICE BUSY?                       00558000
+         BE    SEARCHB        NO - JUST FIND AN SFBLOK                  00559000
+         TM    VDEVSFLG,VDEVDIAG   IN USE BY DIAGNOSE ??                00560000
+         BZ    DRDBUSY        NO - ERROR                                00561000
+         B     SEARCHB        FIND SFBLOK FOR THIS USER                 00562000
+GETSFB2  EQU   *                                                        00563000
+         BAL   R14,CONNECT    CONNECT SFBLOK TO DEVICE                  00564000
+         B     CHEKNXT        ...AND GIVE HIM THE FIRST PAGE            00565000
+         EJECT                                                          00566000
+*---------------------------------------------------------------------* 00567000
+*        REPEAT - CODE '010' - REPEAT THE ACTIVE FILE 'NN' TIMES      * 00568000
+*---------------------------------------------------------------------* 00569000
+REPEAT   EQU   *              REPEAT THE ACTIVE FILE                    00570000
+         LA    R15,SETCOD2    CC = 2 IF NO ACTIVE FILE                  00571000
+         BAL   R14,CHKBUSY    MAKE SURE THE DEVICE IS ACTIVE            00572000
+         L     R5,0(,R5)      REPEAT COUNT IS IN 'R1'                   00573000
+         LTR   R5,R5          CHECK VALIDITY                            00574000
+         BNP   DRDSPEC        BAD - INTERRUPT                           00575000
+         N     R5,F255        ARBITRARY, REASONABLE LIMIT               00576000
+         STH   R5,SFBCOPY     ...AND RESET COPY COUNT                   00577000
+         B     DRDEXIT        SET CC = 0 AND EXIT                       00578000
+         SPACE 2                                                        00579000
+*---------------------------------------------------------------------* 00580000
+*        REREAD - CODE '014' - RESTART ACTIVE FILE AT BEGINNING       * 00581000
+*---------------------------------------------------------------------* 00582000
+REREAD   EQU   *              RESTART THE ACTIVE FILE (REWIND)          00583000
+         LA    R15,SETCOD2    CC = 2 IF NO ACTIVE FILE                  00584000
+         BAL   R14,CHKBUSY    MAKE SURE THE DEVICE IS ACTIVE            00585000
+         L     R1,SFBSTART    'CCPD' OF FIRST PAGE IN CHAIN             00586000
+         ST    R1,VSPDPAGE    STORE AS NEXT PAGE TO READ                00587000
+         SLR   R1,R1                                                    00588000
+         ST    R1,VSPCAW      CLEAR THE 'PREVIOUS PAGE' POINTER         00589000
+         NI    SFBFLAG,X'FF'-SFBEOF NO LONGER AT EOF                    00590000
+         B     DRDEXIT        EXIT WITH CC = 0                          00591000
+         SPACE 2                                                        00592000
+*---------------------------------------------------------------------* 00593000
+*        BACKSPF - CODE '018' - BACK UP ONE PAGE IN ACTIVE FILE       * 00594000
+*---------------------------------------------------------------------* 00595000
+BACKSPF  EQU   *              BACKSPACE ONE PAGE-RECORD                 00596000
+         L     R5,0(,R5)      VIRTUAL PAGE ADDRESS                      00597000
+         LR    R1,R5          INTO GPR 1 FOR 'ADDCHEK'                  00598000
+         L     R2,F4096       FIELD = ONE FULL PAGE                     00599000
+         BAL   R14,ADDCHEK    VALIDATE ADDRESS                          00600000
+         LA    R15,SETCOD2    CC = 2 IF NO ACTIVE FILE                  00601000
+         BAL   R14,CHKBUSY    MAKE SURE THE DEVICE IS ACTIVE            00602000
+         L     R0,VSPCAW      THIS IS 'CCPD' FOR THE PREVIOUS PAGE      00603000
+         LTR   R0,R0          AT BEGINNING OF FILE ?                    00604000
+         BNZ   NOTFRST        NO - CONTINUE                    @VA00812 00605000
+         L     R0,SFBSTART    RESTART AT THE BEGINNING OF FILE          00606000
+         LA    R2,VMPSW+4     ASSUME A BC-MODE PSW             @VA04236 00606400
+         TM    VMESTAT,VMEXTCM IS THIS VM IN EC-MODE?          @VA04236 00606800
+         BZ    *+8            NO, THEN WE ASSUMED CORRECTLY    @VA04236 00607200
+         LA    R2,VMPSW+2     SET UP FOR EC-MODE PSW           @VA04236 00607600
+         OI    0(R2),X'10'    INDICATE CONDITION CODE = 1      @VA04236 00608000
+NOTFRST  EQU   *                                               @VA04236 00608400
+         NI    SFBFLAG,X'FF'-SFBEOF     NO LONGER AT EOF                00609000
+         B     GIVEPAG        ...GIVE THE DATA TO THE USER              00610000
+         EJECT                                                          00611000
+*---------------------------------------------------------------------* 00612000
+*        SUCCESS - X'FFF' - RETURN SUCCESSOR FILE DESCRIPTOR          * 00613000
+*---------------------------------------------------------------------* 00614000
+SUCCESS  EQU   *          FIND AND RETURN SUCCESSOR SPOOL FILE @V293598 00615000
+         L     R10,ARSPRD     ADDRESS OF SPOOL CHAIN ANCHOR    @V293598 00616000
+         L     R0,0(,R6)      'R2' = SPOOL FILE ID NUMBER      @V293598 00617000
+         LTR   R0,R0          WAS ZERO FILE ID SPECIFIED ?     @V293598 00618000
+         BZ    SUCFIND        YES - RETURN FIRST FILE          @V293598 00619000
+         CL    R0,=F'9900'    IS THE ID NUMBER LEGAL ?         @V293598 00620000
+         BH    DRDSPEC        TOO HIGH -RETURN SPEC EXCEPTION  @VA06444 00621000
+SUCPRE   EQU   *                                               @V293598 00622000
+         L     R10,SFBPNT     NEXT SPOOL FILE BLOCK            @V293598 00623000
+         LTR   R10,R10        IS THERE A NEXT BLOCK ?          @V293598 00624000
+         BZ    SETCOD2        NO - RETURN CC = 2               @V293598 00625000
+         CLC   SFBUSER(8),VMUSER  DOES CALLER OWN IT?          @VA03562 00626000
+         BNE   SUCPRE    NO, LOOK AT NEXT ONE                  @VA03562 00627000
+         CH    R0,SFBFILID  IS THIS THE SPECIFIED FILE?        @VA03562 00628000
+         BNE   SUCPRE     NO, LOOK AT NEXT ONE                 @VA03562 00629000
+SUCFIND  EQU   *              SPECIFIED FILE FOUND             @V293598 00630000
+         L     R10,SFBPNT     NEXT SPOOL FILE BLOCK            @V293598 00631000
+         LTR   R10,R10        IS THERE A NEXT BLOCK ?          @V293598 00632000
+         BZ    SETCOD1        NO - SUCCESSOR DOES NOT EXIST    @V293598 00633000
+         CLC   SFBUSER(8),VMUSER  DOES CALLER OWN THIS ONE ?   @V293598 00634000
+         BNE   SUCFIND        NO - KEEP LOOKING FOR SUCCESSOR  @V293598 00635000
+         SL    R8,VMDVSTRT    GET VDEVBLOK DISP                @VM01086 00636000
+         CALL  DMKPGTVG     RESERVE A PAGE OF SYS VIRT STORAGE @V293598 00637000
+         ST    R1,SAVEWRK1    AND SAVE THE ADDRESS             @V293598 00638000
+         LA    R0,SFBSIZE+2+(L'VSPXTAG/8)  WORK BUFFER NEEDED  @V293598 00639000
+         CALL  DMKFREE        RESERVE FREE STORAGE WORK BUFFER @V293598 00640000
+         ST    R1,SAVEWRK2    AND SAVE THE WORK BUFFER ADDRESS @V293598 00641000
+         L     R0,SFBSTART    DASD ADDRESS OF FIRST FILE BUFFER@V293598 00642000
+         L     R1,SAVEWRK1    RESTORE SYS VIRT PAGE ADDRESS    @V293598 00643000
+         CALL  DMKRPAGT,PARM=(BRING+SYSTEM)  READ IT IN        @V293598 00644000
+         BNZ   SUCIOER        QUIT IF I/O ERROR                @V293598 00645000
+         EJECT                                                          00646000
+         AL    R8,VMDVSTRT    GET VDEVBLOK ADDR                @VM01086 00647000
+         L     R3,0(,R5)      CALLER'S VIRTUAL BUFFER ADDRESS  @V293598 00648000
+         L     R5,SAVEWRK2    FREE STORAGE WORK BUFFER         @V293598 00649000
+         MVC   0(SFBSIZE*8,R5),SFBLOK  MOVE THE ENTIRE SFBLOK  @V293598 00650000
+         MVC   SFBSIZE*8(8,R5),16(R2)  MOVE FIRST FILE CCW     @V293598 00651000
+         LA    R5,SFBSIZE*8+8(,R5) UPDATE WORK BUFR LOAD POINT @V293598 00652000
+         TM    20(R2),SKIP    DOES THIS RECORD HAVE DATA ?     @V293598 00653000
+         BO    SUCTOUSR       NO - MOVE IT TO CALLER AS IS     @V293598 00654000
+         LH    R1,22(,R2)     DATA COUNT                       @V293598 00655000
+         LA    R1,3(,R1)      PLUS FOUR FOR THE TIC, -1        @V293598 00656000
+         LA    R6,252-(SFBSIZE*8+8)-1 REMAINING USER BUFFER -1 @V60B9BA 00657000
+         CLR   R1,R6          IS THERE TOO MUCH TO MOVE ?      @V293598 00658000
+         BNH   SUCFITOK       NO - MOVE WHAT IS THERE          @V293598 00659000
+         LR    R1,R6          TRUNCATE TO MAXIMUM COUNT        @V293598 00660000
+SUCFITOK EQU   *                                               @V293598 00661000
+         EX    R1,SUCMOVE   MOVE TIC AND DATA TO WORK BUFFER   @V293598 00662000
+         LA    R5,1(R1,R5)    UPDATE BUFFER LOAD POINT         @V293598 00663000
+SUCTOUSR EQU   *                                               @V293598 00664000
+         L     R7,SAVEWRK2    INITIALIZE FROM ADDR             @V293598 00665000
+         SLR   R5,R7          INITIALIZE MOVE COUNT            @V293598 00666000
+SUCPAGE  EQU   *                                               @V293598 00667000
+         SL    R8,VMDVSTRT    GET VDEVBLOK DISP                @VM01086 00668000
+         TRANS 2,3,OPT=(BRING,DEFER)  GET CALLER'S BUFFER ADDR @V293598 00669000
+         BC    2,SUCADDR      ADDR EXCEPTION IF NON-EXISTENT   @V293598 00670000
+         BC    1,SUCIOER      CC = 3 IF I/O ERROR              @V293598 00671000
+         AL    R8,VMDVSTRT    GET VDEVBLOK ADDR                @VM01086 00672000
+         LR    R6,R2          SET TO ADDR                      @V293598 00673000
+SUCHPAGE EQU   *                                               @V293598 00674000
+         CALL  DMKPSASP       CHECK FOR PROTECTION VIOLATION   @V293598 00675000
+         BNZ   SUCPROT        VIRTUAL PROTECTION CHECK         @V293598 00676000
+         BAL   R4,TO2048  MOVE DATA TO NEXT HALF-PAGE BOUNDARY @V293598 00677000
+         BZ    SUCCOD0        THAT'S ALL - SUCCESSFUL RETURN   @V293598 00678000
+         LR    R2,R6          ASSUME ODD HALF-PAGE FOR NOW     @V293598 00679000
+         LR    R8,R6          NEXT HALF-PAGE ADDR              @V293598 00680000
+         N     R8,XPAGNUM     GET PAGE NUMBER FOR NEXT PIECE   @V293598 00681000
+         CLR   R8,R6          DOES THE ADDRESS CHANGE ?        @V293598 00682000
+         BNE   SUCHPAGE       YES - IT WAS AN ODD HALF-PAGE    @V293598 00683000
+         N     R3,XPAGNUM     GET LAST VIRTUAL PAGE NUMBER     @V293598 00684000
+         AL    R3,F4096       AND BUMP IT UP TO THE NEXT       @V293598 00685000
+         B     SUCPAGE        TRANS, VALIDATE, AND CONTINUE    @V293598 00686000
+         SPACE 2                                                        00687000
+SUCMOVE  MVC   0(0,R5),24(R2)  MOVE DATA RECORD EXECUTED ABOVE @V293598 00688000
+         EJECT                                                          00689000
+SUCIOER  EQU   *                                               @V293598 00690000
+         AL    R8,VMDVSTRT    GET VDEVBLOK ADDR                @VM01086 00691000
+         LA    R3,DRDIOER     EXIT TO I/O ERROR RETURN         @V293598 00692000
+         B     SUCEXIT        RELEASE STORAGE AND QUIT         @V293598 00693000
+         SPACE                                                          00694000
+SUCPROT  EQU   *                                               @V293598 00695000
+         LA    R3,DRDPROT     EXIT TO PROTECTION CHECK SET     @V293598 00696000
+         B     SUCEXIT        RELEASE STORAGE AND QUIT         @V293598 00697000
+         SPACE                                                          00698000
+SUCADDR  EQU   *                                               @V293598 00699000
+         AL    R8,VMDVSTRT    GET VDEVBLOK ADDR                @VM01086 00700000
+         LA    R3,DRDADDR     EXIT TO ADDRESSING CHECK SET     @V293598 00701000
+         B     SUCEXIT        RELEASE STORAGE AND QUIT         @V293598 00702000
+SUCCOD0  EQU   *                                               @V293598 00703000
+         LA    R3,DRDEXIT     EXIT TO SUCCESSFUL RETURN        @V293598 00704000
+SUCEXIT  EQU   *                                               @V293598 00705000
+         LA    R0,SFBSIZE+2+(L'VSPXTAG/8)  FREE STOR. TO RELSE @V293598 00706000
+         L     R1,SAVEWRK2    ADDR OF FREE STORAGE WORK BUFFER @V293598 00707000
+         CALL  DMKFRET        RELEASE THE WORK BUFFER          @V293598 00708000
+         L     R1,SAVEWRK1    ADDR OF SYS VIRTUAL PAGE         @V293598 00709000
+         CALL  DMKPGTVR       RELEASE THE SYS VIRTUAL PAGE     @V293598 00710000
+         BR    R3             RETURN TO PRESET EXIT ROUTINE    @V293598 00711000
+         EJECT                                                          00712000
+*---------------------------------------------------------------------* 00713000
+*        TO2048 - MOVE DATA TO NEXT HALF-PAGE BOUNDARY                * 00714000
+*---------------------------------------------------------------------* 00715000
+TO2048   EQU   *                                               @V293598 00716000
+         LTR   R5,R5          IS REQUESTED COUNT ZERO ?        @V293598 00717000
+         BCR   8,R4           EASILY DONE IF SO                @V293598 00718000
+         LA    R8,2048(,R6)   BUMP UP ONE HALF-PAGE            @V293598 00719000
+         N     R8,X2048BND    ADDR OF NEXT HALF-PAGE BOUNDARY  @V293598 00720000
+         SLR   R8,R6          COUNT TO END OF HALF-PAGE        @V293598 00721000
+         CLR   R8,R5          DOES REQUEST CROSS THE BOUNDARY ?@V293598 00722000
+         BNH   TOBOUND        YES - MOVE JUST THAT FAR         @V293598 00723000
+         LR    R8,R5          SET TO MOVE ONLY REQUESTED COUNT @V293598 00724000
+TOBOUND  EQU   *                                               @V293598 00725000
+         SLR   R5,R8          SET RESIDUAL COUNT FOR RETURN    @V293598 00726000
+         BCTR  R8,0           COUNT TO BE MOVED -1             @V293598 00727000
+TONEXT   EQU   *                                               @V293598 00728000
+         CL    R8,F256        LESS THAN A FULL BLOCK TO GO ?   @V293598 00729000
+         BL    TOFINISH       YES - MOVE REMAINDER             @V293598 00730000
+         MVC   0(256,R6),0(R7)  MOVE A FULL BLOCK              @V293598 00731000
+         LA    R6,256(,R6)    UPDATE TO ADDRESS                @V293598 00732000
+         LA    R7,256(,R7)    UPDATE FROM ADDRESS              @V293598 00733000
+         SL    R8,F256        DECREMENT REMAINING COUNT        @V293598 00734000
+         BNZ   TONEXT         AND MOVE ANOTHER PIECE           @V293598 00735000
+         SPACE                                                          00736000
+TOFINISH EQU   *                                               @V293598 00737000
+         EX    R8,TOMOVE      MOVE REMAINDER                   @V293598 00738000
+         LA    R6,1(R8,R6)    FINAL TO ADDRESS                 @V293598 00739000
+         LA    R7,1(R8,R7)    FINAL FROM ADDRESS               @V293598 00740000
+         LTR   R5,R5          SET RETURN COND CODE             @V293598 00741000
+         BR    R4             RETURN TO CALLER                 @V293598 00742000
+         SPACE 2                                                        00743000
+TOMOVE   MVC   0(0,R6),0(R7)  EXECUTED TO MOVE REMAINDER       @V293598 00744000
+         EJECT                                                          00745000
+*.                                                                      00746000
+* SUBROUTINE NAME -                                                     00747000
+*                                                                       00748000
+*        DMKDRDMP                                                       00749000
+*                                                                       00750000
+* FUNCTION -                                                            00751000
+*                                                                       00752000
+*        TO READ A SYSTEM DUMP SPOOL INPUT FILE VIA DIAGNOSE            00753000
+*        CODE X'0034'                                                   00754000
+*                                                                       00755000
+* ATTRIBUTES -                                                          00756000
+*                                                                       00757000
+*        RE-ENTRANT, PAGEABLE, CALLED VIA SVC FROM DMKHVCAL             00758000
+*                                                                       00759000
+* ENTRY POINT -                                                         00760000
+*                                                                       00761000
+*        DMKDRDMP                                                       00762000
+*                                                                       00763000
+* ENTRY CONDITIONS -                                                    00764000
+*                                                                       00765000
+*        GPR 13 = ADDRESS OF STANDARD SAVE-AREA                         00766000
+*        GPR 12 = ADDRESS OF DMKDRDMP                                   00767000
+*        GPR 11 = ADDRESS OF CALLER'S VMBLOK                            00768000
+*        GPR  6 = ADDRESS OF DIAGNOSE 'R2' VALUE                        00769000
+*        GPR  5 = ADDRESS OF DIAGNOSE 'R1' VALUE                        00770000
+*                                                                       00771000
+* EXIT CONDITIONS -                                                     00772000
+*                                                                       00773000
+*        GPRS 1,3-15 UNCHANGED                                          00774000
+*        GPR  2 = 0  -  CONDITION CODE IS SET FOR VIRTUAL MACHINE       00775000
+*        GPR  2 > 0  -  SIMULATE PROGRAM INTERRUPT FOR VM,              00776000
+*    AND GPR  0 = INTERRUPT CODE FOR SIMULATED PROGRAM INTERRUPT        00777000
+*                                                                       00778000
+* CALLS TO OTHER ROUTINES -                                             00779000
+*                                                                       00780000
+*        DMKSCNVU - TO LOCATE VIRTUAL DEVICE BLOCKS                     00781000
+*        DMKRPAGT - TO PROVIDE DATA PAGES TO THE VIRTUAL MACHINE        00782000
+*                                                                       00783000
+* EXTERNAL REFERENCES -                                                 00784000
+*                                                                       00785000
+*        DMKSYSOW - SYSTEM OWNED-VOLUME VOLID LIST                      00786000
+*        DMKHVCPC - DATA TABLE OF PAGES/CYLINDER ON DASD DEVICES        00787000
+*                                                                       00788000
+* TABLES / WORK AREAS -                                                 00789000
+*                                                                       00790000
+*        VDEVBLOK, VSPLCTL, SFBLOK, VMBLOK                              00791000
+*                                                                       00792000
+         EJECT                                                          00793000
+* REGISTER USAGE -                                                      00794000
+*                                                                       00795000
+*        GPRS 14, 15  LINKAGE REGISTERS                                 00796000
+*        GPR 13 = SAVE-AREA ADDRESSABILITY                              00797000
+*        GPR 12 = MODULE BASE ADDRESSABILITY                            00798000
+*        GPR 11 = VMBLOK ADDRESSABILITY                                 00799000
+*        GPR 10 = SFBLOK ADDRESSABILITY                                 00800000
+*        GPR  9 = VSPLCTL ADDRESSABILITY                                00801000
+*        GPR  8 = VDEVBLOK ADDRESSABILITY                               00802000
+*        GPR  7 = WORK REGISTER                                         00803000
+*        GPR  6 = DIAGNOSE 'R2' VALUE ADDRESS                           00804000
+*        GPR  5 = DIAGNOSE 'R1' VALUE ADDRESS                           00805000
+*        GPRS 0-4 ARE WORK REGISTERS                                    00806000
+*                                                                       00807000
+* OPERATION -                                                           00808000
+*                                                                       00809000
+*        DIAGNOSE CODE X'0034', PROCESSED BY DMKDRDMP, REQUIRES         00810000
+*        TWO REGISTER VALUES FROM THE VIRTUAL MACHINE, AS FOLLOWS:      00811000
+*              'R1' = START ADDRESS OF A FULL-PAGE VIRTUAL BUFFER       00812000
+*              'R2' = ADDRESS OF A VIRTUAL SPOOL INPUT READER           00813000
+*        THE REGISTER VALUES ARE EXAMINED FOR VALIDITY AND THE          00814000
+*        SPECIFIED DEVICE IS EXMAINED FOR AVAILABILITY. ERROR           00815000
+*        RETURN CONDITIONS ARE THE SAME AS FOR DMKDRDER.                00816000
+*        IF ALL CHECKS ARE PASSED, THE DEVICE IS CHECKED FOR AN         00817000
+*        ALREADY ACTIVE DUMP FILE. IF ONE IS FOUND, THE NEXT RECORD     00818000
+*        IS MADE AVAILABLE VIA A CALL TO DMKRPAGT. IF THE END OF        00819000
+*        FILE IS HIT, CC = 1 IS SET. IF NO FILE IS ACTIVE, THE INPUT    00820000
+*        SPOOL FILE CHAIN IS SEARCHED FOR A DUMP FILE FOR THE CALLING   00821000
+*        USER, CC = 2 SET IF NONE ARE FOUND, AND THE FIRST PAGE IS      00822000
+*        MADE AVAILABLE IF ONE IS FOUND. SINCE THE SYSTEM DUMP FILES    00823000
+*        ARE NOT CHAINED RECORDS, AS ARE REGULAR SPOOL FILES, EACH      00824000
+*        SUCCESSIVE RECORD ADDRESS IS CALCULATED FROM THE PREVIOUS      00825000
+*        ADDRESS, USING THE TABLE 'DMKHVCPC' TO DETECT CYLINDER         00826000
+*        CROSS-OVERS.                                                   00827000
+*   NOTE: DMKDRDMP DOES NOT PERFORM ANY AUTOMATIC CLOSE OF THE DUMP     00828000
+*        FILES. THE FILE MUST BE CLOSED VIA THE CONSOLE FUNCTIONS       00829000
+*        'CLOSE' OR 'PURGE', EITHER FROM THE USER'S TERMINAL OR         00830000
+*        VIA DIAGNOSE CODE '0008'.                                      00831000
+*.                                                                      00832000
+         EJECT                                                          00833000
+DMKDRDMP RELOC ,              READ SYSTEM-DUMP SPOOL FILE               00834000
+         SPACE 2                                                        00835000
+         NI    VMPSW+4,X'CF'  SET CONDITION CODE ZERO                   00836000
+         NI    VMPSW+2,X'CF'  SET EC-MODE CONDITION CODE = 0   @VA04236 00836100
+         MVI   SAVEWRK6,X'44'      NON-ZERO => PROCESS DUMP FILES       00837000
+         L     R1,0(,R5)      VIRTUAL ADDRESS TO GPR 1                  00838000
+         LR    R5,R1          ...AND GPR 5                              00839000
+         L     R2,F4096       FULL-PAGE FIELD LENGTH                    00840000
+         BAL   R14,ADDCHEK    CHECK VALIDITY OF ADDRESS                 00841000
+         L     R1,0(,R6)      VIRTUAL READER ADDRESS                    00842000
+         MAXDV R15            GET HIGHEST VIRTUAL DEVICE                00843000
+         CLR   R1,R15         CHECK ITS VALIDITY                        00844000
+         BH    DRDEVIC        INVALID ADDRESS                           00845000
+         LTR   R1,R1          ...                                       00846000
+         BNP   DRDEVIC        INVALID ADDRESS                           00847000
+         CALL  DMKSCNVU       FIND VDEVBLOK                             00848000
+         BNZ   DRDEVIC        NOT FOUND                                 00849000
+         CLI   VDEVTYPC,CLASURI    SPOOL INPUT DEVICE?                  00850000
+         BNE   DRDTYPE        NO - INVALID DEVICE TYPE                  00851000
+         TM    VDEVTYPE,TYPRDR     IS IT ALSO A CARD-READER?            00852000
+         BZ    DRDTYPE        NO - DON'T SUPPORT PAPER TAPE, ETC.       00853000
+         LA    R14,DMPAGET    HERE IF ALREADY ACTIVE                    00854000
+         BAL   R15,CHKBUSY    SEE IF THERE IS AN OPEN FILE              00855000
+*    NOPE - FIND A SYSTEM DUMP FILE                                     00856000
+         LA    R15,SETCOD2    CC = 2 IF THERE AREN'T ANY FILES          00857000
+         BAL   R14,SEARCHB    FIND ANY SFBLOK FOR THIS USER             00858000
+         TM    SFBFLAG,SFBDUMP     THIS A DUMP FILE ?                   00859000
+         BZ    BEGINB         NO - KEEP LOOKING                @VA06358 00860000
+         BAL   R14,CONNECT    CONNECT SFBLOK TO VDEVBLOK                00861000
+DMPAGET  EQU   *              GIVE ONE PAGE OF DATA TO USER             00862000
+         TM    SFBFLAG,SFBEOF AT END OF FILE NOW ?                      00863000
+         BO    SETCOD1        YES - RETURN CC = 1                       00864000
+         L     R0,VSPDPAGE    NEXT PAGE FROM VSPLCTL BLOCK              00865000
+         CL    R0,SFBLAST     IS THIS THE LAST PAGE ?                   00866000
+         BNE   DMPAGEX        NO - GIVE IT TO HIM                       00867000
+         OI    SFBFLAG,SFBEOF AT END OF FILE NEXT TIME                  00868000
+DMPAGEX  EQU   *                                                        00869000
+         LR    R1,R5          VIRTUAL BUFFER ADDRESS                    00870000
+         CALL  DMKRPAGT,PARM=0     HE'LL GET THE PAGE LATER             00871000
+         BC    2,DRDPROT      OOPS .. TRIED TO OVERLAY A SHARED PAGE    00872000
+         BC    1,DRDIOER      FATAL I/O ERROR WHILE READING             00873000
+         LA    R4,VSPDPAGE    POINT TO THE 'CCPD'                       00874000
+         BAL   R7,CMPNEXT     GO COMPUTE NEXT ADDRESS                   00875000
+         B     DRDEXIT        ALL THROUGH FOR NOW                       00876000
+         EJECT                                                          00877000
+CMPNEXT  EQU   *              COMPUTE NEXT PAGE ADDRESS (CCPD)          00878000
+*        GPR 4 = ADDRESS OF 'CCPD' FIELD AT ENTRY                       00879000
+*        GPR 7 = RETURN ADDRESS                                         00880000
+*        'CCPD' IS UPDATED IN PLACE                                     00881000
+*        COMPUTE NEXT PAGE REFERENCE 'CCPD'                             00882000
+         SLR   R2,R2                                                    00883000
+         IC    R2,3(0,R4)     GET DEVICE OWNDLIST INDEX BYTE            00884000
+         SLL   R2,3(0)        CONVERT TO INDEX...                       00885000
+         A     R2,=A(DMKSYSOW)     ...INTO OWNED LIST                   00886000
+         LH    R8,OWNDRDEV-OWNDLIST(,R2)     RDEVBLOK INDEX             00887000
+         SLL   R8,3(0)        CONVERT TO BYTE INDEX            @V200820 00888000
+         A     R8,ARIODV      RDEVBLOK ADDRESS                          00889000
+         USING RDEVBLOK,R8                                              00890000
+         L     R3,=A(DMKHVCPC)     PAGES/CYLINDER TABLE IN 'HVC'        00891000
+         CLI   RDEVTYPE,TYP2305         ZEUS ?                          00892000
+         BE    FNDTYPE        YES                                       00893000
+         CLI   RDEVTYPE,TYP3340 3340 DASD DEVICE ?             @V2A2029 00894000
+         BE    FNDTYPE        YES - 24 PAGES/CYLINDER          @V2A2029 00895000
+         LA    R3,2(,R3)      JUMP TO 3330 ENTRIES             @V200538 00896000
+         CLI   RDEVTYPE,TYP3330         MERLIN ?                        00897000
+         BE    FNDTYPE        YES                                       00898000
+         LA    R3,2(,R3)      JUMP TO 3350 ENTRY               @V304498 00899000
+         CLI   RDEVTYPE,TYP3350 3350 DASD DEVICE ?             @V304498 00900000
+         BE    FNDTYPE        YES - 120 PAGES/CYLINDER         @V304498 00901000
+         LA    R3,1(,R3)      JUMP TO 2314/2319 ENTRY          @V304498 00902000
+         CLI   RDEVTYPE,TYP2319         LAME DUCK ?                     00903000
+         BE    FNDTYPE        YES                                       00904000
+*********                                                               00905000
+         ABEND 1              WOT HOPPEN ?                              00906000
+*********                                                               00907000
+FNDTYPE  EQU   *              DEVICE TYPE IS RECOGNIZABLE               00908000
+         SLR   R1,R1                                                    00909000
+         IC    R1,0(,R3)      GET MAXIMUM PAGE NUMBER ON CYL            00910000
+         SLR   R2,R2                                                    00911000
+         IC    R2,2(0,R4)     CURRENT PAGE NUMBER                       00912000
+         LA    R2,1(,R2)      INCREMENT...                              00913000
+         CR    R1,R2          BEYOND END OF CYLINDER ?                  00914000
+         BL    NEXTCYL        YES - JUMP TO NEXT CYLINDER               00915000
+         STC   R2,2(0,R4)     RESET PAGE NUMBER                         00916000
+         BR    R7             ...RETURN TO CALLER                       00917000
+NEXTCYL  EQU   *              ADVANCE TO NEXT CYLINDER                  00918000
+         MVI   2(R4),X'01'    START AT PAGE ONE...                      00919000
+         LH    R2,0(0,R4)    ...                                        00920000
+         LA    R2,1(,R2)      ...ON THE NEXT CYLINDER                   00921000
+         STH   R2,0(0,R4)     RESET IN ADDRESS FIELD                    00922000
+         BR    R7             RETURN TO CALLER                          00923000
+         EJECT                                                          00924000
+*.                                                                      00925000
+* SUBROUTINE NAME -                                                     00926000
+*                                                                       00927000
+*        DMKDRDDD                                                       00928000
+*                                                                       00929000
+* FUNCTION -                                                            00930000
+*                                                                       00931000
+*        TO DELETE A SYSTEM DUMP SPOOL FILE                             00932000
+*                                                                       00933000
+* ATTRIBUTES -                                                          00934000
+*                                                                       00935000
+*        RE-ENTRANT, PAGEABLE, CALLED VIA SVC FROM DMKVSPCR             00936000
+*                                                                       00937000
+* ENTRY POINT -                                                         00938000
+*                                                                       00939000
+*        DMKDRDDD                                                       00940000
+*                                                                       00941000
+* ENTRY CONDITIONS -                                                    00942000
+*                                                                       00943000
+*        GPR 13 = ADDRESS OF A STANDARD SAVE-AREA                       00944000
+*        GPR 12 = ADDRESS OF DMKDRDDD                                   00945000
+*        GPR 11 = ADDRESS OF CALLER'S VMBLOK                            00946000
+*        GPR  7 = SFBLOK ADDRESS OF FILE TO BE DELETED                  00947000
+*                                                                       00948000
+* EXIT CONDITIONS -                                                     00949000
+*                                                                       00950000
+*        FILE HAS BEEN DELETED, REGISTERS ARE UNCHANGED                 00951000
+*                                                                       00952000
+* CALLS TO OTHER ROUTINES -                                             00953000
+*                                                                       00954000
+*        DMKPGTSD - TO RELEASE A SINGLE DASD RECORD                     00955000
+*                                                                       00956000
+* EXTERNAL REFERENCES -    NONE                                         00957000
+*                                                                       00958000
+* TABLES / WORK AREAS -                                                 00959000
+*                                                                       00960000
+*        SWPTABLE - DUMMY FOR USE BY DMKPGTSD                           00961000
+*        SFBLOK                                                         00962000
+*                                                                       00963000
+* REGISTER USAGE -                                                      00964000
+*                                                                       00965000
+*        GPRS 14, 15 LINKAGE REGISTERS                                  00966000
+*        GPR 13 = SAVE-AREA ADDRESSABILITY                              00967000
+*        GPR 12 = MODULE BASE ADDRESSABILITY                            00968000
+*        GPR 11 = VMBLOK ADDRESSABILITY                                 00969000
+*        GPR 10 = SFBLOK ADDRESSABILITY                                 00970000
+*        GPRS 8, 9 UNUSED                                               00971000
+*        GPR  7 = INTERNAL LINKAGE                                      00972000
+*        GPR  6 = UNUSED                                                00973000
+*        GPR  5 = DUMMY SWPTABLE ENTRY POINTER                          00974000
+*        GPR  4 = POINTER TO 'CCPD' FOR 'CMPNEXT' ROUTINE               00975000
+*        GPRS 0-3 WORK REGISTERS                                        00976000
+*                                                                       00977000
+         EJECT                                                          00978000
+* OPERATION -                                                           00979000
+*                                                                       00980000
+*        EACH RECORD OF THE SYSTEM DUMP FILE IS RELEASED FROM           00981000
+*        SECONDARY STORAGE VIA A CALL TO DMKPGTSD. SUCCESSIVE           00982000
+*        RECORD ADDRESSES ARE COMPUTED VIA THE 'CMPNEXT' SUBROUTINE     00983000
+*        AND THE DMKHVCPC DATA TABLE. WHEN THE LAST RECORD HAS          00984000
+*        BEEN DELETED, AN EXIT IS TAKEN VIA SVC 12.                     00985000
+*.                                                                      00986000
+         SPACE 3                                                        00987000
+DMKDRDDD RELOC ,              DELETE SYSTEM-DUMP SPOOL FILE             00988000
+         SPACE                                                          00989000
+         LR    R10,R7         SFBLOK ADDRESS TO GPR 10                  00990000
+         SLR   R1,R1          USE SAVEWRK2,3 AS DUMMY 'SWPENT'          00991000
+         ST    R1,SAVEWRK2    ...FOR CALLS TO 'DMKPGTSD'                00992000
+         L     R1,SFBSTART    FIRST PAGE IN FILE                        00993000
+         ST    R1,SAVEWRK3    ...                                       00994000
+         ST    R1,SAVEWRK1    SAVE 'CCPD' SAFELY (PGTSD CLEARS IT       00995000
+*                             FROM THE PSEUDO-SWAP-TABLE)               00996000
+         LA    R5,SAVEWRK2    POINT AT SWPENT FOR PGTSD                 00997000
+         CALL  DMKPGTSD       RELEASE ONE PAGE DASD                     00998000
+         CLC   SFBLAST(4),SAVEWRK1 AT END OF FILE YET ?                 00999000
+         BE    DRDEXIT        YES - ALL DONE                            01000000
+         LA    R4,SAVEWRK1    POINT AT 'CCPD' DIRECTLY                  01001000
+         BAL   R7,CMPNEXT     ...TO COMPUTE NEXT ADDRESS                01002000
+DMPDELT  EQU   *              LOOP THROUGH THE FILE                     01003000
+         L     R1,SAVEWRK1    PICK UP NEW 'CCPD'                        01004000
+         ST    R1,SAVEWRK3    ...INTO PSEUDO-SWAP TABLE ENTRY           01005000
+         CALL  DMKPGTSD       DELETE ANOTHER PAGE                       01006000
+         CLC   SFBLAST(4),SAVEWRK1 AT END OF FILE YET ?                 01007000
+         BNE   FNDTYPE        NO - GET NEXT ( R7 IS STILL SET )         01008000
+         B     DRDEXIT        ALL DONE - RETURN TO SPL                  01009000
+         EJECT                                                          01010000
+*.                                                                      01011000
+* SUBROUTINE NAME -                                                     01012000
+*                                                                       01013000
+*        DMKDRDSY                                                       01014000
+*                                                                       01015000
+* FUNCTION -                                                            01016000
+*                                                                       01017000
+*        TO READ THE SYSTEM SYMBOL TABLE CSECT VIA DIAGNOSE             01018000
+*        CODE X'0038'                                                   01019000
+*                                                                       01020000
+* ATTRIBUTES -                                                          01021000
+*                                                                       01022000
+*        RE-ENTRANT, PAGEABLE, CALLED VIA SVC FROM DMKHVCAL             01023000
+*                                                                       01024000
+* ENTRY POINT -                                                         01025000
+*                                                                       01026000
+*        DMKDRDSY                                                       01027000
+*                                                                       01028000
+* ENTRY CONDITIONS -                                                    01029000
+*                                                                       01030000
+*        GPR 13 = ADDRESS OF A STANDARD SAVE-AREA                       01031000
+*        GPR 12 = ADDRESS OF DMKDRDSY                                   01032000
+*        GPR 11 = ADDRESS OF CALLER'S VMBLOK                            01033000
+*        GPR  6 = ADDRESS OF DIAGNOSE 'R2' VALUE                        01034000
+*        GPR  5 = ADDRESS OF DIAGNOSE 'R1' VALUE                        01035000
+*                                                                       01036000
+* EXIT CONDITIONS -                                                     01037000
+*                                                                       01038000
+*        GPRS 1,3-15 UNCHANGED                                          01039000
+*        GPR  2 = 0  -  CONDITION CODE IS SET FOR VIRTUAL MACHINE       01040000
+*        GPR  2 > 0  -  SIMULATE PROGRAM INTERRUPT                      01041000
+*   AND  GPR  0 = INTERRUPT CODE FOR SIMULATED PROGRAM INTERRUPT        01042000
+*                                                                       01043000
+* CALLS TO OTHER ROUTINES -                                             01044000
+*                                                                       01045000
+*        DMKRPAGT - TO PROVIDE THE SYMBOL TABLE PAGE TO THE VM          01046000
+*                                                                       01047000
+* EXTERNAL REFERENCES -                                                 01048000
+*                                                                       01049000
+*        DMKSYM   - SYSTEM SYMBOL TABLE CSECT                           01050000
+*                                                                       01051000
+* TABLES / WORK AREAS -                                                 01052000
+*                                                                       01053000
+*        DMKSYSVM - SYSTEM VMBLOK, SWAPTABLES                           01054000
+*                                                                       01055000
+         EJECT                                                          01056000
+* REGISTER USAGE -                                                      01057000
+*                                                                       01058000
+*        GPRS 14, 15 LINKAGE REGISTERS                                  01059000
+*        GPR 13 = SAVE-AREA ADDRESSABILITY                              01060000
+*        GPR 12 = MODULE BASE ADDRESSABILITY                            01061000
+*        GPR 11 = VMBLOK ADDRESSABILITY                                 01062000
+*        GPR 10 = SYSTEM VMBLOK ADDRESS                                 01063000
+*        GPRS 0-9 ARE WORK REGISTERS                                    01064000
+*                                                                       01065000
+* OPERATION -                                                           01066000
+*                                                                       01067000
+*        DIAGNOSE CODE X'0038', PROCESSED BY DMKDRDSY, REQUIRES A       01068000
+*        SINGLE REGISTER VALUE, AS FOLLOWS:                             01069000
+*              'R1' = START ADDRESS OF FULL-PAGE BUFFER                 01070000
+*        THE ADDRESS IS EXMAINED FOR VALIDITY, AND AN ADDRESSING OR     01071000
+*        SPECIFICATION EXCEPTION SI GENERATED IF THE ADDRESS IS         01072000
+*        INVALID OR NOT PAGE-BOUNDARY ALIGNED. NEXT, THE SYSTEM         01073000
+*        VMBLOK SWAP-TABLE IS REFERENCED TO FIND THE COMPRESSED         01074000
+*        DASD ADDRESS (CCPD) OF THE SYMBOL TABLE CSECT (DMKDYM).        01075000
+*        IF THE CSECT IS NOT DEFINED, CC = 1 IS SET, INDICATING         01076000
+*        THAT NO SYMBOL TABLE IS AVAILABLE. OTHERWISE, THE FULL         01077000
+*        PAGE OF DATA IS MADE AVAILABLE TO THE VIRTUAL MACHINE VIA      01078000
+*        A CALL TO DMKRPAGT, AND VIRTUAL CC = 0 IS SET.                 01079000
+*.                                                                      01080000
+         EJECT                                                          01081000
+DMKDRDSY RELOC ,              READ SYSTEM SYMBOL TABLE PAGE             01082000
+         SPACE                                                          01083000
+         NI    VMPSW+4,X'CF'  SET CONDITION CODE = 0                    01084000
+         NI    VMPSW+2,X'CF'  SET EC-MODE CONDITION CODE = 0   @VA04236 01084100
+         L     R5,0(,R5)      VIRTUAL ADDRESS TO GPR 5                  01085000
+         LR    R1,R5          ...AND GPR 1 ALSO                         01086000
+         L     R2,F4096       FULL-PAGE FIELD                           01087000
+         BAL   R14,ADDCHEK    VALIDATE THE ADDRESS                      01088000
+         L     R10,ASYSVM     SYSTEM VMBLOK                             01089000
+         L     R10,VMSEG-VMBLOK(,R10)   SYSTEM ADDRESS SPACE            01090000
+         L     R9,=A(DMKSYM)  SYMBOL TABLE ADDRESS                      01091000
+         SLR   R8,R8          SET UP A MASK...                          01092000
+         ICM   R8,4,FFS       ...TO GET THE SEGMENT NUMBER              01093000
+         NR    R8,R9          GPR 8 = SEGMENT NUMBER                    01094000
+         XR    R9,R8          GPR 9 = PAGE NUMBER W/IN SEGMENT          01095000
+         SRL   R8,14(0)       CONVERT TO SEGMENT TABLE INDEX            01096000
+         SRL   R9,9(0)        CONVERT TO SWAP-TABLE INDEX               01097000
+         LA    R7,0(R8,R10)   R7 = SEGMENT TABLE ENTRY ADDRESS          01098000
+         TM    3(R7),X'01'    IS THE SEGMENT AVAILABLE ?                01099000
+         BO    SETCOD1        NO - CC = 1                               01100000
+         ICM   R7,7,1(R7)     GET PAGE TABLE ADDRESS                    01101000
+         S     R7,F8          BACK UP TO PAGETABLE HEADER               01102000
+         L     R7,4(0,R7)     PICK UP SWAPTABLE POINTER                 01103000
+         LA    R7,0(R9,R7)    GPR 7 = SWAP-TABLE ENTRY ADDRESS          01104000
+         L     R0,4(,R7)      GPR 0 = 'CCPD' FOR 'DMKSYM'               01105000
+         LTR   R0,R0          SAFETY CHECK                              01106000
+         BNP   SETCOD1        GOOD THING, TOO                           01107000
+         LR    R1,R5          VIRTUAL ADDRESS TO GPR 1                  01108000
+         CALL  DMKRPAGT,PARM=0     USER WILL GET THE PAGE LATER         01109000
+         BC    2,DRDPROT      OOPS .. TRIED TO OVERLAY A SHARED PAGE    01110000
+         BC    1,DRDIOER      FATAL I/O ERROR WHILE READING             01111000
+         B     DRDEXIT        EXIT WITH CC = 0                          01112000
+         SPACE 2                                                        01113000
+         LTORG                                                          01114000
+         EJECT                                                          01115000
+         COPY  SPOOL                                                    01116000
+         COPY  VMBLOK                                                   01117000
+         COPY  SAVE                                                     01118000
+         COPY  EQU                                                      01119000
+         COPY  RBLOKS                                                   01120000
+         COPY  VBLOKS                                                   01121000
+         COPY  ALLOC                                                    01122000
+         COPY  DEVTYPES                                                 01123000
+         PSA                                                            01124000
+         END   DMKDRD                                                   01125000

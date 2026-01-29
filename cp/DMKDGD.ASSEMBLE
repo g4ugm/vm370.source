@@ -1,0 +1,961 @@
+DGD      TITLE 'DMKDGD     (CP)        VM/370 - RELEASE 6'              00001000
+         ISEQ  73,80                                                    00002000
+*.                                                                      00003000
+* MODULE NAME -                                                         00004000
+*                                                                       00005000
+*        DMKDGD - PERFORM SHORT-CUT DISK I/O                            00006000
+*                                                                       00007000
+* FUNCTION -                                                            00008000
+*                                                                       00009000
+*        TO PERFORM SIMPLE DISK I/O OF A STANDARDIZED FORMAT WITH A     00010000
+*        MINIMUM OF CCW-CHAIN MANIPULATION AND INTERRUPT HANDLING.      00011000
+*                                                                       00012000
+* ATTRIBUTES -                                                          00013000
+*                                                                       00014000
+*        ENTERED VIA 'GOTO' FROM DMKHVCAL                               00015000
+*                                                                       00016000
+* ENTRY POINT -                                                         00017000
+*                                                                       00018000
+*        DMKDGDDK                                                       00019000
+*                                                                       00020000
+* ENTRY CONDITIONS -                                                    00021000
+*                                                                       00022000
+*        GPR  1 POINTS TO USER'S "R1" REGISTER                          00023000
+*        GPR  2 POINTS TO USER'S "R2" REGISTER                          00024000
+*        GPR 11 = ADDRESS OF USER'S VMBLOK                              00025000
+*        GPR 12 = ADDRESS OF DMKDGDDK                                   00026000
+*                                                                       00027000
+*        USER'S "R1" REGISTER HOLDS DEVICE-ADDRESS OF THE DISK          00028000
+*                                                                       00029000
+*        USER'S "R2" REGISTER POINTS TO CCW-CHAIN TO READ OR WRITE A    00030000
+*              LIMITED NUMBER OF DISK RECORDS.  EACH READ OR WRITE MUST 00031000
+*              SPECIFY NO MORE THAN 2048 BYTES (USUALLY 800 IS USED),   00032000
+*              AND THE CCW-CHAIN IS OF A STANDARD FORM, AS SHOWN BELOW. 00033000
+*              FOR 3330/3340/3350, A SET SECTOR CMD NORMALLY PRECEDES   00034000
+*              EACH SRCH COMMAND; FOR A 2311/2314/2319, IT IS OMITTED.  00035000
+*                                                                       00036000
+*        USER'S R15 CONTAINS THE NUMBER OF READS OR WRITES IN THE CCW   00037000
+*                   CHAIN (= 2 IN THE EXAMPLE SHOWN BELOW).             00038000
+*                   (SEE ERROR CONDITIONS AND NOTES)                    00039000
+*        TYPICAL CCW STRING (TO READ OR WRITE TWO 800-BYTE RECORDS):    00040000
+*                                                                       00041000
+*        SEEK,A,CC,6                                                    00042000
+*        SET SECTOR,AA,CC,1        (OMITTED FOR 2311/2314/2319)         00043000
+*        SRCH,A+2,CC,5                                                  00044000
+*        TIC,*-8,0,0                                                    00045000
+*        RD OR WRT,DATA,CC+SILI,800     (1ST RD/WRT)                    00046000
+*        SEEK HEAD,B,CC,6          (OMITTED IF HEAD NUMBER UNCHANGED)   00047000
+*        SET SECTOR,BB,CC,1        (OMITTED FOR 2311/2314/2319)         00048000
+*        SRCH,B+2,CC,5                                                  00049000
+*        TIC,*-8,0,0                                                    00050000
+*        RD OR WRT,DATA+800,SILI,800    (2ND = LAST RD/WRT)             00051000
+*        .                                                              00052000
+* A      BBCCHHR   (7 BYTES)  SEEK/SRCH ARGMENTS FOR FIRST RD/WRT       00053000
+* AA     N         (1 BYTE)   SECTOR NUMBER FOR FIRST SET SECTOR        00054000
+* B      BBCCHHR   (7 BYTES)  SEEK/SRCH ARGUMENTS FOR SECOND RD/WRT     00055000
+* BB     N         (1 BYTE)   SECTOR NUMBER FOR SECOND SET SECTOR       00056000
+         EJECT                                                          00057000
+* EXIT CONDITIONS -                                                     00058000
+*                                                                       00059000
+*        AT RETURN TO USER, CONDITIONS ARE AS FOLLOWS:                  00060000
+*                                                                       00061000
+*        CONDITION-CODE (CC) = 0:  I/O COMPLETE WITH NO ERRORS.         00062000
+*              (R15 ALSO = 0)                                           00063000
+*                                                                       00064000
+*        CC = 1:  ERROR CONDITION, PER R15 AS FOLLOWS:                  00065000
+*                 1 = DEVICE NOT ATTACHED                               00066000
+*                 2 = DEVICE NOT DASD - 2311/2314/2319/3330/3340/3350   00067000
+*                 3 = ATTEMPT TO WRITE ON A READ-ONLY DISK              00068000
+*                 4 = CYLINDER NUMBER NOT WITHIN RANGE OF USER'S DISK   00069000
+*                                                                       00070000
+*        CC = 2:  ERROR CONDITION, PER R15 AS FOLLOWS:                  00071000
+*                 5 = POINTER TO USER'S CCW STRING NOT DBL-WORD ALIGNED 00072000
+*                 6 = CCW OR SEEK/SEARCH ARGUMENTS NOT WITHIN USER CORE 00073000
+*                 7 = USER CCW IS INVALID                               00074000
+*                 8 = READ/WRITE BYTE-COUNT = 0                         00075000
+*                 9 = READ/WRITE BYTE-COUNT GREATER THAN 2048           00076000
+*                10 = READ/WRITE BUFFER NOT WITHIN USER CORE            00077000
+*                      (OR ATTEMPT TO READ INTO A SHARED SEGMENT)       00078000
+*                11 = USER'S R15 AT ENTRY NOT POSITIVE NUMBER           00079000
+*                      FROM 1 TO 15 (INCLUSIVE), OR WAS NOT             00080000
+*                      LARGE ENOUGH FOR THE GIVEN CCW STRING.           00081000
+*                12 = CYLINDER NUMBER ON SEEK-HEAD DOES NOT MATCH       00082000
+*                     THE CYLINDER NUMBER ON THE FIRST SEEK.            00083000
+*                                                                       00084000
+*        CC = 3:  UNCORRECTABLE I/O ERROR, AS FOLLOWS:                  00085000
+*                 R15 = 13                                              00086000
+*                 CSW (8 BYTES) RETURNED TO USER;                       00087000
+*                 SENSE BYTES AVAILABLE IF USER DOES A 'SENSE'.         00088000
+*                                                                       00089000
+* CALLS TO OTHER ROUTINES -                                             00090000
+*                                                                       00091000
+*        DMKFREE                                                        00092000
+*        DMKSCNVU                                                       00093000
+*        DMKIOSQV                                                       00094000
+*        DMKPTRUL                                                       00095000
+*        DMKFRET                                                        00096000
+*        DMKSCNVD - TO OBTAIN THE VIRTUAL ADDRESS IN CCU FORM           00096100
+*        DMKPSASC - TO CHECK IF WRITTING FROM A SHARED PAGE             00097000
+*        DMKPSACC - TO CHECK IF SHARED PAGE WAS CHANGED BY RUNUSER      00098000
+*        DMKVMAPS - TO RELEASE A NAMED SYSTEM FROM RUNUSER              00099000
+*        DMKPTRFR - TO OBTAIN A PAGE OF FREE STORAGE                    00100000
+*        DMKPTRFT - TO RELEASE A PAGE OF FREE STORAGE                   00101000
+*                                                                       00102000
+* EXTERNAL REFERENCES -                                                 00103000
+*                                                                       00104000
+*        NONE                                                           00105000
+*                                                                       00106000
+* TABLES / WORK AREAS -                                                 00107000
+*                                                                       00108000
+*        NONE                                                           00109000
+         EJECT                                                          00110000
+* REGISTER USAGE -                                                      00111000
+*                                                                       00112000
+*        GPR  6 = CONSTRUCTED REAL CCWS (RCWCCW)                        00113000
+*        GPR  7 = CONTROL WORDS FOR SEEK/SEARCH ARGUMENTS AND IDAWS     00114000
+*        GPR  8 = ADDRESS OR DISPLACEMENT OF VDEVBLOK                   00115000
+*        GPR  9 = ADDRESS OF RCWTASK                                    00116000
+*        GPR 10 = ADDRESS OF IOBLOK                                     00117000
+*        GPR 11 = ADDRESS OF USER'S VMBLOK                              00118000
+*        GPR 12 = BASE REGISTER                                         00119000
+*        GPR 13 = POINTER TO USER'S 'R2' REGISTER (VIRTUAL CAW)         00120000
+*                                                                       00121000
+*        OTHER REGISTERS ARE USED FOR WORK REGISTERS                    00122000
+*                                                                       00123000
+* NOTES -                                                               00124000
+*                                                                       00125000
+*        THE USER'S "R1" AND "R2" REGISTERS CAN BE ANY TWO              00126000
+*        REGISTERS OTHER THAN R15.                                      00127000
+*                                                                       00128000
+*        THE USER'S R15 REGISTER MUST HOLD THE NUMBER OF READ OR WRITES 00129000
+*        (I.E. NUMBER OF "CCW PACKAGES") IN THE CCW-CHAIN.              00130000
+*        THIS NUMBER MUST BE A POSITIVE NUMBER FROM 1 TO 15 INCLUSIVE   00131000
+*        (ERROR 11 IF NOT).                                             00132000
+*                                                                       00133000
+*        THE CCW CHAIN SPECIFIED BY THE USER MUST SPECIFY I/O ON        00134000
+*        ONLY ONE CYLINDER, UP TO A LIMITED NUMBER OF PAGES,            00135000
+*        AND MUST BE OF THE STANDARD FORMAT.                            00136000
+*                                                                       00137000
+*        FOR 3330/3340/3350, THE SET SECTOR CMD SHOULD PROCEDE          00138000
+*        EACH SEARCH COMMAND; FOR 2311/2314/2319, IT IS OMITTED.        00139000
+*                                                                       00140000
+*        THE CCW-CHAIN ENDS WITH A READ OR WRITE WITHOUT                00141000
+*        A COMMAND-CHAIN.                                               00142000
+*                                                                       00143000
+*        THE CCW CHAIN MUST NOT HAVE ANY INDIRECT DATA LIST (IDA),      00144000
+*        CHAIN-DATA, OR PCI FLAGS;  ERROR 7 IS GIVEN FOR ANY OF THESE.  00145000
+*        DMKDGDDK TAKES CARE OF HANDLING DATA CROSSING 4096-BYTE        00146000
+*        BOUNDARIES, USING INDIRECT DATA LISTS.                         00147000
+*                                                                       00148000
+* OPERATION -                                                           00149000
+*                                                                       00150000
+*        DMKDGDDK IS ENTERED FROM DMKPRVLG WHEN A USER HAS ISSUED A     00151000
+*        "DIAGNOSE" CALL FOR A STANDARDIZED I/O TASK TO BE PERFORMED ON 00152000
+*        A 2311/2314/2319/3340/3330/3350. DMKDGDDK CHECKS FOR VARIOUS   00153000
+*        CALLING ERRORS; IF NONE IS PRESENT, AND, FOR MINIDISKS,        00153500
+*        THE DEVICE IS NOT RESERVED BY ANOTHER USER,                    00154000
+*        AN IOBLOK AND RCWTASK ARE                                      00154500
+*        MADE UP AND SCHEDULED FOR EXECUTION BY CALLS TO DMKIOSQV AND   00155000
+*        DMKDSPCH.  UPON COMPLETION, A CONDITION CODE OF 0 INDICATES    00156000
+*        TO THE USER THAT THE I/O HAS BEEN COMPLETED WITH NO ERRORS     00157000
+*        (NO CSW BEING RETURNED TO THE USER).  ERRORS ARE SIGNALLED TO  00158000
+*        THE USER AS INDICATED UNDER EXIT CONDITIONS.                   00159000
+*.                                                                      00160000
+         EJECT                                                          00161000
+         COPY  OPTIONS                                                  00162000
+         COPY  LOCAL                                                    00163000
+         EJECT                                                          00164000
+DMKDGD   CSECT                -LOADER CONTROL-                          00165000
+*                                                                       00166000
+         ENTRY DMKDGDDK       ENTRY POINT FOR "STANDARD" DISK I/O       00167000
+*                                                                       00168000
+***      EXTRN DMKFREE,DMKFRET                                          00169000
+         EXTRN DMKSCNVD                                        @V407438 00169100
+         EXTRN DMKSCNVU                                                 00170000
+         EXTRN DMKSSSMQ,DMKDSPCH                               @V60B6B8 00170500
+         EXTRN DMKIOSQV                                                 00171000
+***      EXTRN DMKDSPCH                                                 00172000
+         EXTRN DMKPSASC,DMKPSACC,DMKPTRFR,DMKPTRFT             @V60BC11 00173000
+         EXTRN DMKPTRUL                                                 00174000
+         EXTRN DMKVMASH                                        @VA07351 00174100
+*                                                                       00175000
+         USING PSA,R0                                                   00176000
+         USING VMBLOK,R11                                               00177000
+*                                                                       00178000
+         USING DMKDGDDK,R12   - ENTER HERE (FROM DMKPRV) -              00179000
+DMKDGDDK DS    0H             ENTRY POINT FOR "STANDARD" DISK I/O       00180000
+         NI    VMPSW+2,X'CF'       YES - CLEAR USER'S CONDITION CODE    00181000
+DG01     NI    VMPSW+4,X'CF'       CLEAR USER'S CONDITION-CODE          00182000
+         SLR   R10,R10        R10=0 MEANS NO FREE STORAGE OBTAINED YET  00183000
+         L     R5,0(,R1)      LET R5 = USER'S "R1" REG = DEV. ADDRESS   00184000
+         L     R13,0(,R2)     AND R13 = USER'S 'R2' REG = VIRTUAL CAW   00185000
+         TM    3(R2),07       CHECK LAST 3 BITS OF USER'S CAW           00186000
+         BNZ   ERROR5         ERROR IF NOT DOUBLE-WORD ALIGNED.         00187000
+DGDRST2  LR    R1,R5          CHECK DEVICE AND FIND VDEVBLOK   @V407438 00188000
+         CALL  DMKSCNVU       ...                                       00189000
+         BNZ   CHKMOUNT       CHECK FOR MSS MOUNT IN PROCESS   @V60B6B8 00190000
+         USING VDEVBLOK,R8                                              00191000
+         TM    VDEVTYPC,CLASDASD   HOPEFULLY A DASD DEVICE ?            00192000
+         BZ    ERROR2              ERROR IF NOT.                        00193000
+         LA    R1,JNUMOTH     ASSUME 2311 OR 2314/2319                  00194000
+         TM    VDEVTYPE,TYP2311+TYP2314  IS IT ?                        00195000
+         BM    DG02                TRF IF YES, ONE OF THE ABOVE.        00196000
+         TM    VDEVTYPE,TYP3330+TYP3340+TYP3350+TYP2305 VALID  @V304498 00197000
+*                             DASD DEVICE TYPE ?                        00198000
+         BNM   ERROR2              ERROR IF NOT.                        00199000
+         LA    R1,JNUM3330    SET R1 FOR NO. FULL WORDS FOR 3330        00200000
+DG02     L     R3,VMGPRS+R15*4     GET USER'S R15 = NO. OF READS/WRITES 00201000
+         CL    R3,F15         MAKE SURE USER'S R15 WAS NO MORE THAN 15  00202000
+         BH    ERROR11        ERROR 11 IF IT WAS > 15.                  00203000
+         MR    R0,R3          GET NO. OF FULL-WORDS NEEDED FOR CCWS ETC 00204000
+         AL    R1,F1          PRODUCT+1 TO HANDLE ODD NO. OF FULL WORDS 00205000
+         SRA   R1,1           NOW INTO DOUBLE WORDS (AND SET CC)        00206000
+         BNP   ERROR11        ERROR IF NOT PLUS (USER'S R15 AT FAULT)   00207000
+         TM    VDEVSTAT,VDEVCHAN+VDEVBUSY+VDEVPEND ANYTHING    @VA01365 00208000
+*                             HAPPENING?                                00209000
+         BNZ   ERROR51        YES, GIVE ERROR5, CC1            @VA01365 00210000
+         LA    R2,2(,R1)      ADD SIZE OF HEADER, REMEMBER IN R2        00213000
+         TM    VDEVFLG2,VDEVRRF RES/REL FTR ON THIS MDISK?     @V407438 00213005
+         BZ    DEVFREE        NOPE, BR.                        @V407438 00213010
+         L     R4,VDEVRRB     GET THE ADDRESS OF THE VRRBLOK   @V407438 00213015
+         USING VRRBLOK,R4     ADDRESS THE VRRBLOK              @V407438 00213020
+         TM    VDEVFLG2,VDEVRES MDISK RESERVED FOR THIS USER   @V407438 00213025
+         BO    DEVFREE        YES, LET HIM PASS, BR.           @V407438 00213030
+         TM    VRRSTAT,VRRRES ANYONE ELSE HAVE IT RESERVED?    @V407438 00213035
+         BZ    DEVFREE        NOPE, CONTINUE.                  @V407438 00213040
+         LA    R0,CPEXSIZE    SIZE OF A CPEXSIZE               @V407438 00213045
+         CALL  DMKFREE        GET ONE PLEASE                   @V407438 00213050
+         USING CPEXBLOK,R1    ADDRESS THE CPEXBLOK FROM R1     @V407438 00213055
+         STM   R0,R15,CPEXR0  SAVE EVERYTHING JUST AS IT IS    @V407438 00213060
+         ST    R5,CPEXMISC    SAVE DEVICE ADDRESS FOR DMKCFPRD @V407438 00213065
+         LA    R0,DGDRSTRT    ADDRESS TO RESTART WITH PLEASE   @V407438 00213070
+         ST    R0,CPEXADD     ...                              @V407438 00213075
+         L     R0,VRRCPEX     ADDRESS OF THE FIRST QED CPEXBLOK@V407438 00213080
+         ST    R0,CPEXFPNT    PUT THIS CPEXBLOK IN THE CHAIN   @V407438 00213085
+         ST    R1,VRRCPEX     DITTO                            @V407438 00213090
+         OI    VDEVFLG2,VDEVCPEX FLAG WAITING FOR "RELEASE"    @V407438 00213095
+         OI    VMRSTAT,VMIDLE DROP USER FROM QUEUE             @V407438 00213100
+         GOTO  DMKDSPCH       COME BACK WHEN DEVICE IS FREE    @V407438 00213105
+* DROP FROM QUEUE, LEAVE IN EXECUTION WAIT                              00213110
+* IF DEVICE IS RESET, CPEXADD IS SET NEGATIVE, LTR'ED BY DMKDSP         00213115
+DGDRSTRT EQU   *                                               @VA08682 00213117
+         LCTL  C1,C1,VMSEG    LOAD SEG TABLE ADDRESS           @VA08682 00213119
+         BNP   ERROR51        DEVICE WAS RESET ,BR             @VA08682 00213121
+         NI    VMRSTAT,X'FF'-VMIDLE ALLOW IN QUEUE AGAIN       @V407438 00213125
+         NI    VDEVFLG2,X'FF'-VDEVCPEX CFPRR - NOT WTNG ON CPEX@V407438 00213130
+         B     DGDRST2        NOW TRY IT AGAIN SAM             @V407438 00213135
+         DROP  R1,R4          NO MORE CPEXBLOK OR VRRBLOK      @V407438 00213140
+         SPACE                                                          00213145
+DEVFREE  EQU   *              HERE WHEN ACCESS TO MDISK IS FREE@V407438 00213150
+         LA    R0,IOBSIZE     GET STORAGE FOR IOBLOK FIRST              00214000
+         CALL  DMKFREE        ...                                       00215000
+         XC    0(IOBSIZE*8,R1),0(R1)  CLEAR ENTIRE IOBLOK               00216000
+         LR    R10,R1         REFERENCE IOBLOK IN R10                   00217000
+         STH   R5,VMACTDEV    SAVE VIRTUAL DEVICE ADDRESS      @V2B2638 00218000
+         USING IOBLOK,R10     ...                                       00219000
+         ST    R3,IOBMISC2    REMEMBER COUNT OF CCW PACKAGES            00220000
+         L     R1,VDEVREAL    GET PTR TO RDEVBLOK              @V60B6B8 00220100
+         TM    RDEVFTR-RDEVBLOK(R1),VIRTUAL+SYSVIRT IS THE     @V60B6B8 00220200
+*                             REAL DEVICE A 3330V                       00220300
+         BZ    SETLENG        NO                               @V60B6B8 00220400
+         LA    R2,N3(R2)      3 PREFIX CCW'S FOR 3330V         @V60B6B8 00220500
+SETLENG  EQU   *              SET LENGTH FOR DMKFREE           @V60B6B8 00220600
+         LR    R0,R2          NOW GET STORAGE FOR THE RCWTASK           00221000
+         CALL  DMKFREE        ...                                       00222000
+         LR    R9,R1          REFERENCE IN R9                           00223000
+         USING JRCWTASK,R9    ...                                       00224000
+         SLR   R3,R3          CLEAR R3 (R2 IS IMMATERIAL)               00225000
+         LR    R15,R0         TOTAL COUNT INTO R15                      00226000
+         SLL   R15,3          (IN BYTES, PLEASE)                        00227000
+         LR    R14,R9         START OF RCWTASK & CCW CHAIN              00228000
+         MVCL  R14,R2         CLEAR HEADER AND CCW STRING               00229000
+         STH   R0,JRCWCCNT    STORE TOTAL NO. DBL-WORDS USED            00230000
+         SLL   R0,3           MAKE R0 BYTES NOW (FOR USE SHORTLY)       00231000
+         LA    R6,JCCW1ST     R6 = START OF CCW CHAIN WE WILL BUILD     00232000
+         ST    R6,IOBCAW      STORE IN IOBLOK                           00233000
+         USING RCWCCW,R6      USE HANDY DSECT FOR CONSTRUCTING CCWS     00234000
+         L     R1,VDEVREAL    GET REAL DEVICE BLOCK ADDR       @V60B6B8 00234100
+         TM    RDEVFTR-RDEVBLOK(R1),VIRTUAL+SYSVIRT            @V60B6B8 00234200
+         BZ    NOPRE          NO, NO SPECIAL PREFIX            @V60B6B8 00234300
+         MVC   RCWCCW(PREL),MSSPRE MOVE 3-CCW PREFIX           @V60B6B8 00234400
+         LA    R1,PREL(R6)    POINT PAST PREFIX                @V60B6B8 00234500
+         STCM  R1,7,TICOFF(R6) POINT TIC CCW TO FIRST USER CCW @V60B6B8 00234600
+         LR    R6,R1          AND RESET CURRENT CCW PTR        @V60B6B8 00234700
+NOPRE    EQU   *              SET UP RCWTASK                   @V60B6B8 00234800
+         LR    R7,R0          BYTE-COUNT OF AREA INTO R7, AND           00235000
+         ALR   R7,R9          R7 = END OF CONTROL-WORD AREA             00236000
+         SL    R7,FNUMCC      START WITH LAST BYTES IN OUR AREA         00237000
+         USING JSEEKA,R7      REFERENCE CONTROL WORDS TO BE CONSTRUCTED 00238000
+         ST    R13,JRCWVCAW   STORE RCWVCAW                             00239000
+         STCM  R13,B'1000',IOBCAW SET REAL KEY                 @VA03750 00240000
+         L     R14,FFS        STORE FFFF WHERE NEEDED                   00241000
+         STH   R14,JRCWHEAD   ...                                       00242000
+         ALR   R0,R13         COMPUTE END OF AREA USED BY USER @V304635 00243000
+         LR    R1,R0          ADDRESS INTO REG. 1              @V304635 00244000
+         LRA   R1,0(,R1)      IS IT A VALID ADDRESS ?          @V304635 00245000
+         BC    8+2,DG02A      CONTINUE IF NOT A SEG EXCEPTION  @V408246 00246100
+         LR    R1,R0          RESTORE VIRTUAL ADDR.            @V408246 00246200
+         CALL  DMKPTRAN,PARM=DEFER OTHERWISE LET PTRAN HANDLE  @V408246 00246300
+         BC    2,ERROR6       ADDRESSING ERROR                 @V408246 00246400
+DG02A    DS    0H                                              @V408246 00246500
+         LR    R1,R13                                                   00247000
+         BAL   R5,DGTRANS     FIND FIRST USER CCW-COMMAND               00248000
+         MVC   RCWCCW(8),0(R2)     AND OBTAIN IT                        00249000
+         CLI   RCWCOMND,X'07'      FIRST COMMAND MUST BE A 'SEEK'       00250000
+         BNE   ERROR7              "WRONG CCW COMMAND" IF IT AIN'T.     00251000
+*                             HANDLE 1ST COMMAND = "SEEK"               00252000
+         MVI   RCWCTL,00      CLEAR CP'S FLAG BYTE                      00253000
+         L     R1,RCWADDR     COMMAND-CODE & DATA-ADDRESS INTO R1,      00254000
+         LH    R3,RCWCNT      BYTE-COUNT FROM CCW 2ND HALF INTO R3      00255000
+         TM    RCWFLAG,IDA+CD+PCIF ANY INVALID BITS IN CCW ?   @VA01003 00256000
+         BNZ   ERROR7              USER BROKE THE RULES IF YES @VA01003 00257000
+         OI    RCWFLAG,CC     BUT THE CC MUST BE ON                     00258000
+         BAL   R4,DGMOVESK    GO MOVE SEEK ARG                 @VA03176 00259000
+         TM    VDEVSTAT,VDEVDED    IS THIS A DEDICATED DEVICE ?         00260000
+         BO    DG03           IF YES, HANDLE OF SEEK ALMOST DONE.       00261000
+         LH    R14,VDEVBND    NO. OF CYLINDERS USER HAS INTO R14,       00262000
+         CLR   R15,R14        COMPARE SEEK-ADDRESS WITH NO. CYLS        00263000
+         BNL   ERROR4         USE ERROR 4 IF NOT WITHIN RANGE OF DISK.  00264000
+         LH    R14,VDEVRELN   CYLINDER RELOCATION FACTOR INTO R14,      00265000
+         ST    R14,IOBMISC    REMEMBER RELOC. FACTOR FOR SEEK-HEAD USE  00266000
+         ALR   R15,R14        ADD RELOCATION FACTOR                     00267000
+DG03     STH   R15,IOBCYL     STORE RELOCATED CYLINDER NO. IN IOBLOK    00268000
+         MVC   VDEVPOSN(4),JSEEKA+2  REMEMBER VDEVPOSN (CCHH FORM)      00269000
+         B     DG04           GO STORE RELOCATED CYLINDER NUMBER ETC.   00270000
+         SPACE                                                          00271000
+DGCCWLP  DS    0H             LOOP TO PROCESS GROUPS OF CCWS:           00272000
+         ST    R15,IOBMISC2   STORE UPDATED VALUE OF CCW-PKG COUNT      00273000
+         SL    R7,FNUMCC      DECREMENT R7 FOR NEW CONTROL WORDS        00274000
+         AL    R8,VMDVSTRT    LET R8 AGAIN = A(VDEVBLOK)                00275000
+*                                                                       00276000
+DGCCWNXT DS    0H             PROCESS THE 'NEXT' USER CCW:              00277000
+         AL    R6,F8          BUMP ADDESS FOR NEXT CCW TO BUILD@V304735 00278000
+         AL    R13,F8         BUMP ADDRESS FOR NEXT USER CCW   @V304735 00279000
+         CLR   R6,R7          R6 MUST BE < R7                           00280000
+         BNL   ERROR11D       IF NOT, WE RAN OUT OF ROOM.               00281000
+         LR    R1,R13         ADDRESS INTO R1 AND                       00282000
+         BAL   R5,DGTRANS     FIND USER'S NEXT CCW COMMAND              00283000
+         MVC   RCWCCW(8),0(R2)     AND OBTAIN IT                        00284000
+         MVI   RCWCTL,00      CLEAR CP'S FLAG-BYTE                      00285000
+         L     R1,RCWADDR     COMMAND-CODE & DATA-ADDRESS INTO R1,      00286000
+         LH    R3,RCWCNT      BYTE-COUNT FROM CCW 2ND HALF INTO R3      00287000
+         TM    RCWFLAG,IDA+CD+PCIF ANY INVALID BITS IN CCW ?   @VA01003 00288000
+         BNZ   ERROR7              USER BROKE THE RULES IF YES @VA01003 00289000
+         CLI   RCWCOMND,X'06'      READ ?                               00290000
+         BE    DGREAD              YES                                  00291000
+         CLI   RCWCOMND,X'05'      WRITE ?                              00292000
+         BE    DGWRITE             YES                                  00293000
+         CLI   RCWCOMND,X'08' TIC?                             @VM08944 00294000
+         BE    DGTIC          YES                              @VM08944 00295000
+         OI    RCWFLAG,CC          ENSURE COMMAND-CHAIN ON              00296000
+         CLI   RCWCOMND,X'31'      SEARCH ?                             00297000
+         BE    DGSEARCH            YES.                                 00298000
+         CLI   RCWCOMND,X'23'      SET-SECTOR ?                         00299000
+         BE    DGSECTOR            YES.                                 00300000
+         CLI   RCWCOMND,X'1B'      SEEK HEAD ?                          00301000
+         BNE   ERROR7              ERROR IF "NONE OF THE ABOVE".        00302000
+         SPACE                                                          00303000
+DGSEEKHD DS    0H             USER CCW WAS A "SEEK HEAD"                00304000
+         BAL   R4,DGMOVESK    GO MOVE SEEK ARGUMENT            @VA03176 00305000
+         CH    R15,VDEVPOSN   MUST BE THE SAME ONE WE STARTED WITH      00306000
+         BNE   ERROR12        USE ERROR 12 IF NOT.                      00307000
+         AL    R15,IOBMISC    ADD 0 (IF DEDICATED) OR RELOCATION FACTOR 00308000
+DG04     ST    R15,JSEEKA     STORE RELOCATED CYLINDER NUMBER.          00309000
+         STCM  R7,7,RCWADDR+1  ADDRESS OF "JSEEKA" INTO CCW ITSELF      00310000
+         L     R1,VDEVREAL    GET THE REAL DEVICE BLOCK        @V60B6B8 00310150
+         TM    RDEVFTR-RDEVBLOK(R1),VIRTUAL+SYSVIRT            @V60B6B8 00310300
+         BZ    DGCCWNXT       NO, DONE WITH SEEK               @V60B6B8 00310450
+         LA    R1,JCCW1ST     ADDR 3330V PREFIX SEEK           @V60B6B8 00310600
+         STCM  R7,7,1(R1)     SEEK ARG. PTR FOR PREFIX SEEK    @V60B6B8 00310750
+         B     DGCCWNXT       NOW GET NEXT CCW.                         00311000
+         SPACE                                                          00312000
+DGSEARCH DS    0H             USER CCW WAS A "SEARCH"                   00313000
+         CL    R3,F5          BYTE-COUNT MUST BE 5                      00314000
+         BNE   ERROR7         USER GOOFED IF NOT.                       00315000
+         BAL   R5,DGTRANS     NOW GET THE SEARCH ARGUMENT               00316000
+         LNR   R5,R2          HOW MANY BYTES TILL END OF PAGE? @VA03176 00317000
+         N     R5,F4095       R5 CONTAINS THE COUNT            @VA03176 00318000
+         BZ    SCHLNOK        ARGUMENT WAS ON PAGE BOUNDARY    @VA03176 00319000
+         CLR   R5,R3          CHECK AGAINST MAX TO MOVE        @VA03176 00320000
+         BNL   SCHLNOK        ALL ARE PRESENT                  @VA03176 00321000
+         LR    R3,R5          LESS THAN FIVE, SET TO MOVE      @VA03176 00322000
+SCHLNOK  BCTR  R3,0           DECREMENT LENGTH FOR EXECUTE     @VA03176 00323000
+         LA    R5,JSEARCH     ADDRESS TARGET                   @VA03176 00324000
+         EX    R3,EXMVC       MOVE HOWEVER MANY                @VA03176 00325000
+         C     R3,F4          IS THAT ENOUGH?                  @VA03176 00326000
+         BNL   DGSCHXIT       YES, GET OUT                     @VA03176 00327000
+*                                                                       00328000
+         LA    R1,1(R3,R1)    GET NEXT PAGE ADDRESS            @VA03176 00329000
+         BAL   R5,DGTRANS     REALLY                           @VA03176 00330000
+         LA    R5,JSEARCH+1(R3) ADDRESS REMAINDER OF TARGET    @VA03176 00331000
+         S     R3,F3          COMPUTE HOW MUCH TO MOVE         @VA03176 00332000
+         LCR   R3,R3          ...                              @VA03176 00333000
+         EX    R3,EXMVC       MOVE REMAINDER OF SEARCH ARGUMENT@VA03176 00334000
+*                                                                       00335000
+DGSCHXIT LA    R15,JSEARCH    POINT TO SEARCH BYTES            @VA03176 00336000
+         STCM  R15,7,RCWADDR+1     STORE ADDRESS IN CCW                 00337000
+         TM    VDEVTYPE,TYP3330+TYP3340 3330 OR 3340 ?         @VA03832 00338000
+         BZ    DGCCWNXT       NO..CONTINUE...                  @VA03832 00339000
+         CLI   JSEARCH+4,0    SEARCHING ON RECORD O ?          @VA03832 00340000
+         BNE   DGCCWNXT       NO..CONTINUE...                  @VA03832 00341000
+         LH    R15,JSEARCH    PICK UP CYLINDER NUMBER          @VA03832 00342000
+         AL    R15,IOBMISC    RELOCATE TO CORRECT CYL          @VA03832 00343000
+         STH   R15,JSEARCH    REPLACE...                       @VA03832 00344000
+         B     DGCCWNXT       NOW GET NEXT CCW AFTER THE USER'S TIC.    00345000
+         SPACE                                                          00346000
+DGSECTOR DS    0H             USER CCW WAS A "SET SECTOR"               00347000
+         CL    R3,F1          BYTE-COUNT MUST BE 1                      00348000
+         BNE   ERROR7         USER GOOFED IF NOT                        00349000
+         TM    VDEVTYPE,TYP3330+TYP3340+TYP3350+TYP2305 VALID  @V304498 00350000
+*                             DASD DEVICE TYPE ?                        00351000
+         BNM   ERROR7              USER GOOFED IF NOT.                  00352000
+         BAL   R5,DGTRANS     NOW GET THE SET-SECTOR BYTE               00353000
+         IC    R15,0(,R2)     ...                                       00354000
+         STC   R15,JSCTNO     STORE IN OUR AREA                         00355000
+         LA    R15,JSCTNO     POINT TO IT THERE, AND                    00356000
+         STCM  R15,7,RCWADDR+1     STORE ITS ADDRESS IN THE CCW.        00357000
+         B     DGCCWNXT       GO GET NEXT CCW.                          00358000
+         SPACE                                                          00359000
+DGTIC    EQU   *                                               @VM08944 00360000
+         LR    R5,R13         VIRT. ADDR OF CCW                @VM08944 00361000
+         S     R5,F8          MINUS 8                          @VM08944 00362000
+         CLM   R5,7,RCWADDR+1 TIC *-8??                        @VM08944 00363000
+         BNE   ERROR7         NOPE - AGAINST THE RULES.        @VM08944 00364000
+         LR    R5,R6          REAL ADDR OF CCW.                @VM08944 00365000
+         S     R5,F8          MINUS 8.                         @VM08944 00366000
+         STCM  R5,7,RCWADDR+1 PUT INTO REAL CCW                @VM08944 00367000
+         XC    RCWCOMND+4(4),RCWCOMND+4 CLEAR 2ND WD           @VM08944 00368000
+         B     DGCCWNXT       GO GET NEXT CCW                  @VM08944 00369000
+         SPACE                                                          00370000
+DGWRITE  DS    0H             USER CCW WAS A "WRITE"                    00371000
+         TM    VDEVFLAG,VDEVRDO    IS IT A READONLY DISK ?              00372000
+         BO    ERROR3              ERROR 3 IF YES.                      00373000
+*                                                                       00374000
+DGREAD   DS    0H             HANDLE READ (OR WRITE):                   00375000
+         LTR   R3,R3          CHECK BYTE-COUNT                          00376000
+         BZ    ERROR8         USER GOOF IF BYTE-COUNT = 0               00377000
+         CL    R3,F2048       DOES IT EXCEED LIMIT OF 2048 ?            00378000
+         BH    ERROR9         TRF IF YES (USER BROKE THE RULES).        00379000
+         LA    R3,0(R1,R3)    COMPUTE END OF BUFFER (PLUS 1)            00380000
+         SL    R8,VMDVSTRT    MAKE R8 "RELATIVE" ACROSS TRANS CALL(S)   00381000
+         DROP  R8                                                       00382000
+ALTER1   TRANS 2,1,OPT=(BRING,DEFER,LOCK),ADEX=ERROR10 GET PAGE@V304735 00383000
+         CALL  DMKPSACC       CHECK IF SHARED PAGE WAS CHANGED @V304735 00384000
+         BZ    NOTCHG1        NOT CHANGED - CONTINUE           @V304735 00385000
+         CALL  DMKPTRUL       UNLOCK THE PAGE                  @VA07694 00385050
+         CALL  DMKVMASH       FLAG ALL CHANGED SHARED PAGES    @VA07351 00385100
+         B     ALTER1         NOW -REISSUE CURRENT RUNUSER     @V304735 00387000
+NOTCHG1  STCM  R2,7,RCWADDR+1 STORE REAL ADDRESS IN RCWTASK    @V304735 00388000
+         OI    RCWCTL,RCWIO   FLAG AS NEEDING UNLOCK LATER     @VA05378 00389000
+         SR    R5,R5          CLEAR COPYPAGE CALL FLAG         @VA05378 00389100
+         LR    R4,R2          AND REMEMBER IN R4 IN CASE NEEDED LATER   00390000
+         SLR   R0,R0          INDICATE ALLOW STORE ANYWHERE    @V304735 00391000
+         CALL  DMKPSASC       CHECK IF ACCESSING A SHARED PAGE @V304735 00392000
+         BZ    NOTSHR1        CONTINUE IF NOT A SHARED PAGE    @V304735 00393000
+         CLI   RCWCOMND,X'06' IS HE READING INTO A SHARED      @V304735 00394000
+*                             PAGE ?                                    00395000
+         BE    ERROR10P       YES - REFLECT PROTECTION ERROR   @V304735 00396000
+         TM    RCWFLAG,IDA    USING IDA LIST                   @V304735 00397000
+         BO    DG05           IF YES - DON'T COPY PAGE         @V304735 00398000
+         BAL   R14,COPYPAGE   COPY OVER THE ORIGINAL PAGE      @V304735 00399000
+         LA    R5,1           INDICATE COPYPAGE WAS CALLED     @VA05378 00399100
+         STCM  R2,7,RCWADDR+1 STORE NEW REAL ADDRESS           @VA05378 00400000
+         LR    R4,R2          ALSO CHANGE R4                   @V304735 00401000
+NOTSHR1  BCTR  R3,0           R3=ADDR. OF LAST BYTE TO BE      @V304735 00403000
+*                             TRANSFERRED.                              00404000
+         N     R1,XPAGNUM     ISOLATE PAGE-NUMBER OF BEGIN. OF DATA,    00405000
+         N     R3,XPAGNUM     DITTO FOR END OF DATA                     00406000
+         CLR   R1,R3          ARE THEY THE SAME ?                       00407000
+         BE    DG05           IF YES, DOESN'T CROSS PAGE BOUNDARY       00408000
+         LR    R1,R3          BEGINNING OF 2ND VIRT. PAGE INTO R1,      00409000
+ALTER2   TRANS 2,1,OPT=(BRING,DEFER,LOCK),ADEX=ERROR10P GET    @V304735 00410000
+*                             PAGE                                      00411000
+         CALL  DMKPSACC       CHECK IF SHARED PAGE WAS CHANGED @V304735 00412000
+         BZ    NOTCHG2        IF NOT CHANGED - CONTINUE        @V304735 00413000
+         CALL  DMKPTRUL       UNLOCK THE PAGE                  @VA07694 00413050
+         CALL  DMKVMASH       FLAG ALL CHANGED SHARED PAGES    @VA07351 00413100
+         B     ALTER2         NOW REISSUE THE TRANS CALL       @V304735 00415000
+NOTCHG2  OI    RCWFLAG,IDA    SET REAL IDA BIT                 @V304735 00416000
+         LA    R15,JIDAL1     STORE ADDRESS OF IDAW PAIR IN CCW,        00417000
+         STCM  R15,7,RCWADDR+1     ...                                  00418000
+         ST    R4,JIDAL1      STORE 1ST IDAW ADDRESS                    00419000
+         ST    R2,JIDAL2      AND STORE 2ND IDAW ADDRESS                00420000
+         SLR   R0,R0          INDICATE ALLOW STORE ANYWHERE    @V304735 00421000
+         CALL  DMKPSASC       CHECK IF ACCESSING A SHARED PAGE @V304735 00422000
+         BZ    DG05           CONTINUE IF NOT A SHARED PAGE    @V304735 00423000
+         CLI   RCWCOMND,X'06' IS HE READING INTO A SHARED      @V304735 00424000
+*                             PAGE ?                                    00425000
+         BE    ERROR10P       YES - REFLECT PROTECTION ERROR   @V304735 00426000
+         BAL   R14,COPYPAGE   COPY OVER THE ORIGINAL PAGE      @V304735 00427000
+         ST    R2,JIDAL2      NEW 2ND IDAW ADDRESS             @V304735 00428000
+         LTR   R5,R5          WAS FIRST PAGE COPIED            @VA05378 00429000
+         BP    DG05A          YES, DONE WITH THIS CCW          @VA05378 00429100
+         L     R2,JIDAL1      GET FIRST PAGE ADDRESS           @VA05378 00429200
+         BAL   R14,COPYPAGE   COPY THIS PAGE ALSO              @VA05378 00429300
+         ST    R2,JIDAL1      NEW FIRST IDAW ADDRESS           @VA05378 00429400
+         B     DG05A          DONE WITH THIS CCW               @VA05378 00429500
+DG05     TM    RCWFLAG,IDA    IDAL IN USE ??                   @VA05378 00429600
+         BZ    DG05A          NO, DONE WITH THIS CCW           @VA05378 00429700
+         LTR   R5,R5          WAS FIRST PAGE COPIED            @VA05378 00429800
+         BZ    DG05A          NO, DONE WITH THIS CCW           @VA05378 00429900
+         L     R2,JIDAL2      GET 2ND PAGE ADDRESS             @VA05378 00430000
+         BAL   R14,COPYPAGE   COPY THIS PAGE ALSO              @VA05378 00430100
+         ST    R2,JIDAL2      NEW 2ND IDAW ADDRESS             @VA05378 00430200
+DG05A    TM    RCWFLAG,CC     WAS READ/WRITE COMMAND CHAINED ??@VA05378 00430300
+         BZ    DG06           IF NOT, WE SHOULD BE ALL DONE.            00431000
+         L     R15,IOBMISC2   IF COMMAND-CHAINED, RECOVER CCW-PKG COUNT 00432000
+         BCT   R15,DGCCWLP    AND ITERATE LOOP TO NEXT USER CCW.        00433000
+*  IF DROPS THRU BCT, USER'S R15 AT ENTRY WAS TOO SMALL FOR CCW-STRING: 00434000
+         AL    R6,F8          BUMP R6 FOR FINISHED CCW         @V304735 00435000
+         B     ERROR11        MAKE THAT ERROR 11.                       00436000
+         SPACE                                                          00437000
+* FINISHED HANDLING USER CCW-CHAIN:                                     00438000
+DG06     AL    R6,F8          BUMP R6 FOR FINISHED CCW         @V304735 00439000
+         L     R3,IOBCAW      ACCESS REAL CAW                  @VA03750 00440000
+         LA    R3,0(,R3)      CLEAR OUT KEY..ETC               @VA03750 00441000
+         SLR   R6,R3          SUBTRACT START OF CCWS           @VA03750 00442000
+         SRL   R6,3           BYTES TO DBL-WORDS PLEASE                 00443000
+         STH   R6,JRCWRCNT    STORE COUNT OF REAL CCWS                  00444000
+         STH   R6,JRCWVCNT    DITTO VIRTUAL COUNT (SAME NUMBER)         00445000
+         LA    R3,DGRETURN    R3 POINTS TO WHERE-TO-RETURN              00446000
+         ST    R3,IOBIRA      STORE IN IOBLOK,                          00447000
+         ST    R8,IOBMISC     REMEMBER DISPLACEMENT OF VDEVBLOK         00448000
+         AL    R8,VMDVSTRT    IOS NEEDS ADDRESS OF BLOK ..              00449000
+         USING VDEVBLOK,R8                                              00450000
+         ST    R10,VDEVIOB    SAVE ADDRESS OF ACTIVE IOBLOK             00451000
+         OI    VDEVSTAT,VDEVBUSY   AND FLAG DEVICE BUSY                 00452000
+         L     R1,VDEVIOER    SEE IF ANY OLD SENSE BYTES                00453000
+         LTR   R1,R1          ...ARE HANGING AROUND VDEVBLOK            00454000
+         BZ    DG06A          NO - SKIP FRET                            00455000
+         LA    R0,IOERSIZE    SIZE OF IOERBLOK                          00456000
+         USING IOERBLOK,R1                                              00457000
+         AH    R0,IOEREXT     ADD EXTRA SIZE (IF ANY) OF IOERBLOK       00458000
+         DROP  R1                                                       00459000
+         CALL  DMKFRET        RETURN TO FREE STORAGE                    00460000
+         SLR   R1,R1                                                    00461000
+         ST    R1,VDEVIOER    DON'T FRET IT TWICE                       00462000
+         NI    VDEVFLAG,X'FF'-VDEVUC    INDICATE NO SENSE BYTES         00463000
+         DROP  R8                                                       00464000
+DG06A    EQU   *              START UP THE I/O OPERATION                00465000
+         OI    IOBFLAG,IOBHVC INDICATE HYPERVISOR CALL I/O              00466000
+         OI    VMRSTAT,VMIOWAIT    FLAG USER IN "IOWAIT" PLEASE,        00467000
+         LA    R15,1          *    ADD 1 TO THE STARTIO COUNT           00468000
+         AL    R15,VMIOCNT    *    FOR ACCOUNTING                       00469000
+         ST    R15,VMIOCNT    *                                         00470000
+         CALL  DMKIOSQV       USE VIRTUAL I/O ENTRY POINT TO GET STATS  00471000
+*                             (NOTE - DMKIOSQV STORES R11 IN IOBUSER)   00472000
+         GOTO  DMKDSPCH       THEN LET "DISPATCH" TAKE CARE OF IT.      00473000
+*                                                                       00474000
+         EJECT                                                          00475000
+*                                                                       00476000
+*        SUBROUTINE TO BRING IN A PAGE (WITHOUT LOCKING IT)             00477000
+*            (TO SAVE SPACE - CALLED IN SEVERAL PLACES)                 00478000
+*        R5 = RETURN REGISTER.                                          00479000
+*                                                                       00480000
+DGTRANS0 SLR   R1,R1          ENTER HERE TO BRING IN PAGE 0.            00481000
+*                                                                       00482000
+DGTRANS  DS    0H                                                       00483000
+         SL    R8,VMDVSTRT    MAKE R8 "RELATIVE" ACROSS TRANS CALL      00484000
+ALTER3   TRANS 2,1,OPT=(BRING,DEFER),ADEX=ERROR6 GET PAGE      @V304735 00485000
+         CALL  DMKPSACC       CHECK IF SHARED PAGE CHANGED     @V304735 00486000
+         BZ    NOTCHG3        NOT CHANGED - CONTINUE           @V304735 00487000
+         CALL  DMKVMASH       FLAG ALL CHANGED SHARED PAGES    @VA07351 00487100
+         B     ALTER3         NOW - REISSUE THE TRANS CALL     @V304735 00490000
+NOTCHG3  AL    R8,VMDVSTRT    LET R8 AGAIN = (VDEVBLOK)        @V304735 00491000
+         BR    R5             RETURN TO CALLER                 @V304735 00492000
+         EJECT                                                          00493000
+         USING SAVEAREA,R13                                    @V304735 00494000
+COPYPAGE SVC   20             GET A PLACE TO SAVE REGISTERS    @V304735 00495000
+         STM   R0,R11,SAVEREGS SAVE THESE                      @V304735 00496000
+         ST    R14,SAVEWRK9   SAVE RETURN ADDRESS              @V304735 00497000
+         XC    SAVER12,SAVER12 SET UP FOR RELEASE (SVC-16)     @V304735 00498000
+         LA    R15,1          GET INCREMENT OF 1               @V407508 00498100
+         AL    R15,SHRLKCNT   ADD ONE TO CPSHRLK COUNT         @V407508 00498200
+         ST    R15,SHRLKCNT   STORE UPDATED COUNT              @V407508 00498300
+         OI    CPSTAT2,CPSHRLK FREEZE THE SYSTEM               @V304735 00499000
+         CALL  DMKPTRFR       GET A NEW PAGE                   @V304735 00500000
+         L     R15,SHRLKCNT   GET CURRENT CPSHRLK COUNT        @V407508 00500100
+         BCTR  R15,0          DECREMENT COUNT BY 1             @V407508 00500200
+         ST    R15,SHRLKCNT   STORE UPDATED COUNT              @V407508 00500300
+         LTR   R15,R15        TEST IF THE COUNT IS NOW 0       @V407508 00500400
+         BNZ   *+8            NO, SKIP RESET OF CPSHRLK        @V407508 00500500
+         NI    CPSTAT2,X'FF'-CPSHRLK NOW CAN RUN USERS         @V304735 00501000
+         MVI   CORFLAG-CORTABLE(R7),CORFLUSH                   @V408246 00501100
+         OI    RCWCTL,RCWSHR  FLAG GOTTEN FROM DMKPTRFR        @V304735 00502000
+         LR    R4,R7          CORTABLE ADDRESS OF THIS PAGE    @V304735 00503000
+         SL    R4,ACORETBL    LEAVE INDEX PORTION OF CORTABLE  @V304735 00504000
+         SLL   R4,8           R4 = NOW REAL PAGE ADDRESS       @V304735 00505000
+         L     R3,F4096       4096 BYTES TO MOVE               @V304735 00506000
+         LR    R5,R3          ALSO FOR 'R1+1' REGISTER         @V304735 00507000
+         N     R2,XPAGNUM     DROP OFF DISPLACEMENT            @V304735 00508000
+         MVCL  R4,R2          MOVE ORIGINAL TO NEW             @V304735 00509000
+         SL    R4,F4096       'MVCL' CLOBBERED R4              @V304735 00510000
+         L     R2,SAVER2      RESTORE ORIGINAL PAGE ADDRESS    @V304735 00511000
+         LR    R5,R2          GET ORIGINAL PAGE ADDRESS        @V304735 00512000
+         N     R5,XPAGNUM     CLEAR DISPLACEMENT               @V304735 00513000
+         SRL   R5,8           INDEX INTO CORETBL               @V304735 00514000
+         AL    R5,ACORETBL    FIND ACTUAL CORETBL ENTRY        @V304735 00515000
+         L     R5,CORSWPNT-CORTABLE(,R5) POINTER TO SWAP       @V304735 00516000
+         L     R5,SWPFLAG-SWPFLAG(,R5) GET KEYS.               @V304735 00517000
+         N     R5,=A(X'F8F8') CLEAR CHANGE/REFERENCE BITS      @V304735 00518000
+         LA    R4,2048(,R4)   LAST HALF OF NEW PAGE            @V304735 00519000
+         SSK   R5,R4          SET UP THE KEY                   @V304735 00520000
+         SRL   R5,8           POSITION FOR FIRST HALF PAGE     @V304735 00521000
+         N     R4,XPAGNUM     BACK TO BEGINING ADDRESS         @V304735 00522000
+         SSK   R5,R4          SET THE REAL KEY                 @V304735 00523000
+         L     R1,SAVER2      GET ADDRESS OF ORIGINAL PAGE     @V304735 00524000
+         N     R1,F4095       LEAVE JUST THE DISPLACEMENT      @V304735 00525000
+         OR    R1,R4          PUT IN REPLACEMENT PAGE NUMBER   @V304735 00526000
+         ST    R1,SAVER2      THIS BECOMES NEW PAGE ADDRESS    @V304735 00527000
+         CALL  DMKPTRUL       UNLOCK THE ORIGINAL PAGE         @V304735 00528000
+         LM    R0,R11,SAVEREGS RESTORE ALL THE REMAINING       @V304735 00529000
+         NI    RCWCTL,X'FF'-RCWIO RESET LOCK FLAG              @VA05378 00529100
+         L     R14,SAVEWRK9   RESTORE RETURN ADDRESS           @V304735 00530000
+         SVC   16             NOW RELEASE THIS SAVE AREA.      @V304735 00531000
+         BR    R14            RETURN TO CALLER                 @V304735 00532000
+         EJECT                                                          00533000
+DGMOVESK EQU   *                                               @VA03176 00534000
+         SPACE 1                                                        00535000
+*        THIS SUBROUTINE MOVES DATA FROM THE VIRTUAL ADDRESS            00536000
+*        CONTAINED IN R1 TO 'JSEEKA'.  SINCE SIX BYTES OF DATA          00537000
+*        MAY CROSS A PAGE BOUNDARY, A SUBSEQUENT TRANS MAY              00538000
+*        BE NECESSARY.  THE LENGTH OF THE SEEK ARGUMENT IN R3           00539000
+*        IS VALIDATED (MUST BE SIX).  ALSO, THE CYLINDER                00540000
+*        SPECIFICATION IS LOADED INTO R15 PRIOR TO RETURN.              00541000
+*                                                                       00542000
+         CL    R3,F6          VALIDATE PROPER LENGTH           @VA03176 00543000
+         BNE   ERROR7         ERROR IF NOT                     @VA03176 00544000
+         BAL   R5,DGTRANS     BRING IN THE SEEK ARG PAGE       @VA03176 00545000
+         LNR   R5,R2          COMPUTE NUM OF BYTES THIS PAGE   @VA03176 00546000
+         N     R5,F4095       R5 CONTAINS THE COUNT            @VA03176 00547000
+         BZ    SKLNOK         ARGUMENT WAS ON PAGE BOUNDARY    @VA03176 00548000
+         CLR   R5,R3          CHECK AGAINST WHAT'S NEEDED      @VA03176 00549000
+         BNL   SKLNOK         ALL ARE PRESENT                  @VA03176 00550000
+         LR    R3,R5          SET ACCORDINGLY                  @VA03176 00551000
+SKLNOK   BCTR  R3,0           DECREMENT LENGTH FOR EXECUTE     @VA03176 00552000
+         LA    R5,JSEEKA      ADDRESS SEEK ARGUMENT TARGET     @VA03176 00553000
+         EX    R3,EXMVC       MOVE PART OR ALL                 @VA03176 00554000
+         C     R3,F5          DID WE MOVE ALL?                 @VA03176 00555000
+         BNL   DGMVEXIT       YES, GET OUT                     @VA03176 00556000
+*                                                                       00557000
+         LA    R1,1(R3,R1)    SET TO GET NEXT PAGE             @VA03176 00558000
+         BAL   R5,DGTRANS     GET REAL ADDRESS                 @VA03176 00559000
+         LA    R5,JSEEKA+1(R3) RESET FOR REM OF TARGET         @VA03176 00560000
+         S     R3,F4          COMPUTE HOW MUCH TO MOVE         @VA03176 00561000
+         LCR   R3,R3          ...                              @VA03176 00562000
+         EX    R3,EXMVC       MOVE REMAINDER OF SEEK           @VA03176 00563000
+*                                                                       00564000
+DGMVEXIT L     R15,JSEEKA     LOAD CYLINDER SPECIFICATION      @VA03176 00565000
+         BR    R4             RETURN                           @VA03176 00566000
+         SPACE 2                                                        00567000
+EXMVC    MVC   0(0,R5),0(R2)  MOVE ARGUMENT                    @VA03176 00568000
+         DROP  R9,R12         THRU WITH THESE FOR NOW.                  00569000
+         EJECT                                                          00570000
+*                                                                       00571000
+DGRETURN DS    0H             RETURNS HERE WHEN TASK IS FINISHED.       00572000
+*                                                                       00573000
+         USING *,R12          (TEMPORARILY)                             00574000
+         L     R12,=A(DMKDGD)  COMMON ADDRESSABILITY PLEASE             00575000
+         USING DMKDGD,R12      ...                                      00576000
+         USING IOBLOK,R10     R10 & R12 THE ONLY INFO. WE'VE GOT.       00577000
+         USING VMBLOK,R11     R11 = A(VMBLOK) IS ALSO INTACT            00578000
+         CL    R10,IOBLINK    IS IT A COPIED IOBLOK ?          @VA01004 00579000
+         BNE   DG07WAIT       IF YES, WAIT FOR DEVICE END.     @VA01004 00580000
+         NI    VMQLEVEL,X'FF'-(VMCOMP+VMLOPRI)    UNFLAG COMPUTE BOUND  00581000
+         L     R9,IOBCAW      REFERENCE RCWTASK AGAIN                   00582000
+         SL    R9,F16         ...                                       00583000
+         USING JRCWTASK,R9    ...                                       00584000
+         L     R8,IOBMISC     RETRIEVE VDEVBLOK DISPLACEMENT            00585000
+         AL    R8,VMDVSTRT    AND DEVELOP ADDRESS                       00586000
+         USING VDEVBLOK,R8                                              00587000
+         SLR   R15,R15        CLEAR OUT ACTIVE IOBLOK POINTER, AND      00588000
+         ST    R15,VDEVIOB    SET RETURN CODE REGISTER = 0              00589000
+         NI    VDEVSTAT,X'FF'-VDEVBUSY  AND MARK DEVICE NOT BUSY        00590000
+         TM    IOBSTAT,IOBFATAL+IOBCC3       ANY TROUBLE WITH I/O ?     00591000
+         BZ    DG10           NO                                        00592000
+* SOME KIND OF TROUBLE OCCURRED:                                        00593000
+DG07     DS    0H             IF ERROR, RETURN CONDITION-CODE 3 TO USER 00594000
+         TM    VMESTAT,VMEXTCM     IN EXTENDED CONTROL MODE NOW ?       00595000
+         BZ    DG07V               NO.                                  00596000
+         OI    VMPSW+2,X'30'       YES - SET CONDITION-CODE 3           00597000
+         B     DG07V+4                                                  00598000
+DG07V    OI    VMPSW+4,X'30'  CONDITION-CODE 3 TO VM PSW                00599000
+         BAL   R5,DGTRANS0    FIND USER'S PAGE 0,                       00600000
+         TM    IOBSTAT,IOBCC1 WAS IT CONDITION-CODE 1 ?                 00601000
+         BZ    DG08           NOPE - I/O COMPLETE WITH ERRORS, THEN.    00602000
+         SLR   R14,R14        IF CC 1, RETURN CSW+4/CSW+5 ONLY          00603000
+         SLR   R15,R15        ...                                       00604000
+         ICM   R15,12,IOBCSW+4     ...                                  00605000
+         B     DG09           AND STORE SAME IN USER'S PAGE 0.          00606000
+         SPACE                                                          00607000
+* FOR A COPIED IOBLOK, FRET THE IOERBLOK (IF ANY) & IOBLOK,             00608000
+* AND WAIT FOR THE FINAL INTERRUPT TO COME IN:                          00609000
+DG07WAIT BAL   R5,FRETIOB     "FRET" THE BLOCK(S)              @VA01004 00610000
+         GOTO  DMKDSPCH       AND GO WAIT FOR FINAL INTERRUPT. @VA01004 00611000
+DG08     LM    R14,R15,IOBCSW  REAL CSW INTO R14-R15                    00612000
+         L     R1,IOBCAW      ACCESS REAL CAW                  @VA03750 00613000
+         LA    R1,0(,R1)      CLEAR KEY..ETC                   @VA03750 00614000
+         SLR   R14,R1         MAKE ADDRESS RELATIVE            @VA03750 00615000
+         AL    R14,JRCWVCAW    NOW MAKE IT A VIRTUAL ADDRESS            00616000
+         USING PSA,R2                                                   00617000
+DG09     STM   R14,R15,CSW         AND STORE IN USER'S CSW              00618000
+         DROP  R2                                                       00619000
+         L     R1,IOBIOER     DO WE HAVE ANY SENSE BYTE INFORMATION ?   00620000
+         LTR   R1,R1          ...                                       00621000
+         BZ    ERROR13        IF NOT, NOTHING TO DO HERE.               00622000
+         ST    R1,VDEVIOER    STORE A(IOERBLOK) IN VDEVBLOK             00623000
+         OI    VDEVFLAG,VDEVUC     SIGNAL: SENSE BYTES AVAILABLE        00624000
+         SR    R1,R1          AND CLEAR IOBIOER                         00625000
+         ST    R1,IOBIOER     (SINCE WE'VE HUNG IT ON ANOTHER HOOK)     00626000
+         DROP  R8                                                       00627000
+ERROR13  LA    R15,13         SIGNAL:  ERROR 13 TO USER                 00628000
+*                                                                       00629000
+DG10     ST    R15,VMGPRS+R15*4    STORE RETURN CODE IN USER'S R15,     00630000
+         LH    R4,JRCWRCNT    R4 = COUNT OF CCWS                        00631000
+DG11     TM    VMRSTAT,VMLOGOFF USER LOGGING OFF?              @VA01684 00632000
+         BO    DG12           SKIP UNLOCKING                   @VA01684 00633000
+         LA    R5,DGUNLOCK    R5 = ADDRESS OF UNLOCKING LOOP   @VA01684 00634000
+         L     R6,IOBCAW      R6 = START OF CCWS TO BE EXAMINED         00635000
+         LA    R6,0(,R6)      CLEAR KEY..ETC..                 @VA03750 00636000
+         USING RCWCCW,R6                                                00637000
+* LOOP TO PAGE-UNLOCK DATA AFTER I/O IS COMPLETE:                       00638000
+DGUNLOCK TM    RCWCTL,RCWIO+RCWSHR ANY LOCKED OR SHARED PAGES? @V304735 00639000
+         BNZ   DGUNLOK1       YES - GO HANDLE THEM             @V304735 00640000
+         AL    R6,F8          IF NOT - BUMP R6                 @V304735 00641000
+         BCTR  R4,R5               AND ITERATE "DGUNLOCK" LOOP.         00642000
+         B     DG12                GO FRET RCWTASK WHEN THRU.           00643000
+*                                                                       00644000
+* UNLOCK USER PAGE ON READ-WRITE (WATCH FOR IDAL STUFF):                00645000
+DGUNLOK1 L     R3,RCWADDR     ADDRESS INTO R3  (NOTE - CC STILL SET)    00646000
+         LA    R2,0(,R3)      INTO R2 PLEASE, WITH NO HIGH-ORDER BYTE   00647000
+         TM    RCWCTL,RCWSHR  ANY PAGES FLAGGED AS SHARED      @V304735 00648000
+*                             PAGES ?                                   00649000
+         BZ    NONESHR        NO - JUST UNLOCK THEM            @V304735 00650000
+         TM    RCWFLAG,IDA    IS REAL IDA FLAG ON ?            @V304735 00651000
+         BZ    DGFRET2        NO - JUST RETURN THE PRIMARY PAGE@V304735 00652000
+         L     R7,0(,R3)      GET ADDR. OF 1'ST IDAW IN        @V304735 00653000
+*                             2-WORD IDAL                               00654000
+         N     R7,XPAGNUM     DROP OFF THE DISPLACEMENT        @V304735 00655000
+         SRL   R7,8           LEAVE INDEX INTO CORTABLE        @V304735 00656000
+         AL    R7,ACORETBL    GET THE PROPER TABLE ENTRY       @V304735 00657000
+         XC    CORPGPNT-CORTABLE(4,R7),CORPGPNT-CORTABLE(R7)   @V304735 00658000
+         CALL  DMKPTRFT       PUT THIS PAGE ON THE FREE-LIST   @V304735 00659000
+         L     R2,4(,R3)      GET ADDR. OF 2'ND IDAW           @V304735 00660000
+DGFRET2  LR    R7,R2          TRANSFER ADDRESS OF REAL PAGE    @V304735 00661000
+         N     R7,XPAGNUM     DROP OFF THE DISPLACEMENT        @V304735 00662000
+         SRL   R7,8           LEAVE INDEX INTO CORTABLE        @V304735 00663000
+         AL    R7,ACORETBL    GET THE PROPER TABLE ENTRY       @V304735 00664000
+         XC    CORPGPNT-CORTABLE(4,R7),CORPGPNT-CORTABLE(R7)   @V304735 00665000
+         CALL  DMKPTRFT       PUT THIS PAGE ON THE FREE-LIST   @V304735 00666000
+         AL    R6,F8          BUMP R6 FOR NEXT CCW             @V304735 00667000
+         BCTR  R4,R5          PROCESS ALL CCW'S                @V304735 00668000
+         B     DG12           NOW RELEASE THE RCWTASK          @V304735 00669000
+NONESHR  TM    RCWFLAG,IDA    IS THE REAL IDA FLAG ON ?        @V304735 00670000
+         BZ    DGUNLOK2       NO - JUST UNLOCK PRIMARY ADDRESS          00671000
+         L     R2,0(,R3)      GET ADDRESS OF FIRST IDAW IN 2-WORD IDAL, 00672000
+         CALL  DMKPTRUL       UNLOCK THAT;                              00673000
+         L     R2,4(,R3)      NOW ADDRESS OF 2ND IDAW, AND              00674000
+DGUNLOK2 CALL  DMKPTRUL       UNLOCK 2ND IDAW, OR USER PAGE DIRECTLY    00675000
+         AL    R6,F8          BUMP R6 FOR NEXT TIME, AND       @V304735 00676000
+         BCTR  R4,R5          ITERATE "DGUNLOCK" LOOP.                  00677000
+*                                                                       00678000
+DG12     LR    R1,R9          NOW 'FRET' THE RCWTASK                    00679000
+         LH    R0,JRCWCCNT    GET TOTAL NO. DBL WORDS IN RCWTASK        00680000
+         CALL  DMKFRET        ...                                       00681000
+         BAL   R5,FRETIOB     FRET THE IOBLOK THEN COME BACK   @VA01004 00682000
+DGEXIT   NI    VMRSTAT,255-(VMIOWAIT+VMEXWAIT) CLEAR VMRSTAT   @VA01004 00683000
+*                             BITS                                      00684000
+         GOTO  DMKDSPCH       AND EXIT TO USER VIA 'DISPATCH'  @VA01004 00685000
+         SPACE                                                          00686000
+FRETIOB  L     R1,IOBIOER     IS THERE AN IO ERROR BLOCK THERE @VA01004 00687000
+         LTR   R1,R1          ...                                       00688000
+         BZ    DG12A          NOPE - PROCEED TO FRET THE IOBLOK.        00689000
+         LA    R0,IOERSIZE    SIZE OF IOERBLOK                          00690000
+         USING IOERBLOK,R1                                              00691000
+         AH    R0,IOEREXT     ADD EXTRA SIZE (IF ANY) OF IOERBLOK       00692000
+         DROP  R1                                                       00693000
+         CALL  DMKFRET        GIVE IT BACK (BEFORE IT'S TOO LATE)       00694000
+DG12A    LA    R0,IOBSIZE     NOW FRET THE IOBLOK                       00695000
+         LR    R1,R10         ...                                       00696000
+         CALL  DMKFRET        ...                                       00697000
+         BR    R5             AND RETURN TO MAIN DMKDGD CODE   @VA01004 00698000
+         EJECT                                                          00699000
+* ERROR-RETURNS  (SEE ALSO PROLOG ABOVE):                               00700000
+*                                                                       00701000
+ERROR1   LA    R15,1   ERROR FROM DMKSCNVU - MUST BE ILLEGAL DEVICE     00702000
+         B     SETCC1         THAT = ERROR 1.                           00703000
+*                                                                       00704000
+ERROR2   LA    R15,2          INVALID DEVICE TYPE              @V2A2029 00705000
+         B     SETCC1         THAT = ERROR 2.                           00706000
+*                                                                       00707000
+ERROR3   LA    R15,3   ATTEMPT TO WRITE ON A READ-ONLY DISK             00708000
+         B     SETCC1         THAT = ERROR 3.                           00709000
+*                                                                       00710000
+ERROR4   LA    R15,4   CYLINDER NUMBER NOT WITHIN RANGE OF USER'S DISK  00711000
+*                             THAT = ERROR 4.                           00712000
+         B     SETCC1         GO SET CONDITION CODE            @VA01365 00713000
+ERROR51  LA    R15,5          DEVICE PATH NOT FREE, INT.       @VA01365 00714000
+*                             PENDING                                   00715000
+SETCC1   DS    0H             SET CONDITION-CODE = 1 FOR ERRORS 1-4:    00716000
+         TM    VMESTAT,VMEXTCM     IN EXTENDED CONTROL MODE NOW ?       00717000
+         BZ    SETCC1V             NO.                                  00718000
+         OI    VMPSW+2,X'10'       YES - SET CONDITION-CODE 1           00719000
+         B     DG14                                                     00720000
+SETCC1V  OI    VMPSW+4,X'10'  CONDITION-CODE 1 TO VM PSW                00721000
+         B     DG14           AND GO STORE R15 ERROR CODE.              00722000
+*                                                                       00723000
+ERROR5   LA    R15,5   CALLER'S CAW NOT DOUBLE-WORD ALIGNED             00724000
+         B     SETCC2         THAT = ERROR 5.                           00725000
+*                                                                       00726000
+ERROR6   LA    R15,6  CCW OR SEEK/SEARCH ARGUMENTS NOT WITHIN USER CORE 00727000
+         B     SETCC2         THAT = ERROR 6.                           00728000
+*                                                                       00729000
+ERROR7   LA    R15,7   USER CCW IS INVALID                              00730000
+         B     SETCC2         THAT = ERROR 7.                           00731000
+*                                                                       00732000
+ERROR8   LA    R15,8   READ/WRITE BYTE-COUNT = 0                        00733000
+         B     SETCC2         THAT = ERROR 8.                           00734000
+*                                                                       00735000
+ERROR9   LA    R15,9   READ/WRITE BYTE-COUNT GREATER THAN 2048          00736000
+         B     SETCC2         THAT = ERROR 9.                           00737000
+*                                                                       00738000
+ERROR10P AL    R6,F8          BUMP FOR LAST CCW                @V304735 00739000
+ERROR10  LA    R15,10  READ/WRITE BUFFER NOT WITHIN USER MACHINE        00740000
+         B     SETCC2         THAT = ERROR 10.                          00741000
+*                                                                       00742000
+ERROR11D SL    R6,F8          DECREMENT IF WE RUN OUT OF ROOM  @V304735 00743000
+*                                                                       00744000
+ERROR11  LA    R15,11      USER'S R15 AT ENTRY TOO SMALL FOR CCW-STRING 00745000
+         B     SETCC2         THESE = ERROR 11.                         00746000
+*                                                                       00747000
+ERROR12  LA    R15,12    CYL. NO. ON SEEK HEAD NOT = CYL NO. FROM SEEK  00748000
+*                             THAT = ERROR 12                           00749000
+SETCC2   DS    0H             SET CONDITION-CODE = 2 FOR ERRORS 5-12:   00750000
+         TM    VMESTAT,VMEXTCM     IN EXTENDED CONTROL MODE NOW ?       00751000
+         BZ    SETCC2V             NO.                                  00752000
+         OI    VMPSW+2,X'20'       YES - SET CONDITION-CODE 2           00753000
+         B     DG14                                                     00754000
+SETCC2V  OI    VMPSW+4,X'20'  CONDITION-CODE 2 TO VM PSW                00755000
+*                                                                       00756000
+DG14     ST    R15,VMGPRS+R15*4   RETURN R15 ERROR-CODE TO THE USER,    00757000
+         LTR   R1,R10         ANY FREE STORAGE IN USE YET ?             00758000
+         BZ    DGEXIT         IF NOT, PREPARE TO EXIT FORTHWITH.        00759000
+         LR    R4,R6          POINTER TO CURRENT CCW INTO R4,           00760000
+         L     R1,IOBCAW      ACCESS REAL CAW                  @VA03750 00761000
+         LA    R1,0(,R1)      CLEAR KEY..ETC..                 @VA03750 00762000
+         SLR   R4,R1          SUBTRACT STARTING POINT          @VA03750 00763000
+         SRA   R4,3           BYTES TO DOUBLE WORDS (AND SET CC)        00764000
+         BP    DG11           IF R4 > 0, GO UNLOCK HALF-FINISHED STUFF. 00765000
+         B     DG12           IF NOT, GO RETURN THE FREE STORAGE USED.  00766000
+         EJECT                                                          00766020
+CHKMOUNT EQU   *                                               @V60B6B8 00766040
+*                                                                       00766060
+*        IF THE VIRTUAL ADDRESS WAS NOT FOUND BY DMKSCNVU,              00766080
+*               IT MAY BE BECAUSE THE MSS IS IN THE PROCESS             00766100
+*               OF MOUNTING A REQUIRED SYSTEM VOLUME.                   00766120
+*                                                                       00766140
+*        TEST THE QUEUE OF TASKS WAITING FOR MSS MOUNTS TO              00766160
+*               SEE IF THAT IS THE CASE HERE. IF IT IS, SET             00766180
+*               UP A CPEXBLOK WHICH WILL BE DISPATCHED BY               00766200
+*               LOGON, LINK, OR ATTACH WHEN THE MSS VOLUME              00766220
+*               MOUNT IS COMPLETE.                                      00766240
+*                                                                       00766260
+         TM    PSAMSS,MSSPRES DOES THE SYSTEM HAVE MSS SUPPORT @V60B6B8 00766280
+         BZ    ERROR1         NO, CAN'T BE MSS MOUNT           @V60B6B8 00766300
+         L     R3,=V(DMKSSSMQ) Q OF MSS VOLUME MOUNTS          @V60B6B8 00766320
+TESTCOM  EQU   *              IS THERE A Q                     @V60B6B8 00766340
+         LTR   R3,R3          0 PTR = Q END                    @V60B6B8 00766360
+         BZ    ERROR1         NOT WAITING FOR THIS VIRT ADDR   @V60B6B8 00766380
+         USING OSVSCOM,R3     ASSEMBLER ADDRESSABILITY         @V60B6B8 00766400
+         CLC   VMUSER(8),MSSUSER IS Q ENTRY FOR THIS USER      @V60B6B8 00766420
+         BNE   NXTCOM         NO, GET NEXT ENTRY               @V60B6B8 00766440
+         L     R2,MSSTASK1    CPEXBLOK FOR MOUNT REQUESTOR     @V60B6B8 00766460
+         CH    R5,CPEXMISC-CPEXBLOK(R2) THIS VADDR WAITING?    @V60B6B8 00766480
+         BNE   NXTCOM         NO, SEE IF WAITING FOR MORE      @V60B6B8 00766500
+         LA    R0,CPEXSIZE    NO OF D-WORDS IN A CPEXBLOK      @V60B6B8 00766520
+         CALL  DMKFREE        GET A CPEXBLOK                   @V60B6B8 00766540
+         USING CPEXBLOK,R1    ASSEMBLER ADDRESSABILITY         @V60B6B8 00766560
+         ST    R1,MSSTASK2    PTR IN THE MASTER CONTROL BLOCK  @V60B6B8 00766580
+         STM   R0,R15,CPEXREGS SAVE CURRENT REGS               @V60B6B8 00766600
+         LA    R0,DGDRST2     RESTART ADDR                     @V60B6B8 00766620
+         ST    R0,CPEXADD     ADDR TO BE DISPATCHED            @V60B6B8 00766640
+         ST    R5,CPEXMISC    SAVE VIRT DEV ADDR               @V60B6B8 00766660
+         OI    VMRSTAT,VMCFWAIT PLACE VIRT MACH IN WAIT        @V60B6B8 00766680
+         GOTO  DMKDSPCH       EXIT FOR NOW - WILL BE DISPATCHED@V60B6B8 00766700
+*                                 AT DGDRST2 WHEN MOUNT COMPLETE        00766720
+         DROP  R1                                              @V60B6B8 00766740
+NXTCOM   EQU   *              GET NEXT MSSCOM BLOCK            @V60B6B8 00766760
+         L     R3,MSSNEXT     CHAIN PTR                        @V60B6B8 00766780
+         B     TESTCOM        GO TEST IT                       @V60B6B8 00766800
+         DROP  R3                                              @V60B6B8 00766820
+         EJECT                                                          00767000
+*        CONSTANTS:                                                     00768000
+*                                                                       00769000
+FNUMCC   DC    A(JNUMCC)      NO. OF BYTES RESERVED FOR CONTROL WORDS   00770000
+F2048    DC    F'2048'        ALSO = X'00000800'                        00771000
+*                                                                       00771060
+*        PREFIX CCWS TO BE PLACED IN THE REAL CHANNEL PROGRAM           00771120
+*             IF THE REAL DEVICE IS A 3330V                             00771180
+*                                                                       00771240
+         DS    0D                                              @V60B6B8 00771300
+MSSPRE   EQU   *                                               @V60B6B8 00771360
+         DC    X'07',XL3'0',AL1(CC),AL3(6) SEEK CCW            @V60B6B8 00771420
+         DC    X'08',XL3'0',AL1(CC),AL3(1) TIC CCW             @V60B6B8 00771480
+         DC    X'03',XL3'0',AL1(0),AL3(1) NOP CCW              @V60B6B8 00771540
+PREL     EQU   *-MSSPRE       PREFIX LENGTH                    @V60B6B8 00771600
+N3       EQU   3                                               @V60B6B8 00771660
+TICOFF   EQU   9                                               @V60B6B8 00771720
+FULL     EQU   X'FF'          CONSTANT FOR FLAG BYTE CLEARING  @V60B6B8 00771780
+ZERO     EQU   X'00'                                           @V60B6B8 00771840
+*                                                                       00772000
+         LTORG                                                          00773000
+         EJECT                                                          00774000
+OSVSCOM  MSSCOM                                                @V60B6B8 00774500
+         COPY  IOBLOKS        NOTE:  SEE OUR DSECT FOLLOWING THIS ...   00775000
+         EJECT                                                          00776000
+IOBLOK   DSECT               OUR "IOTASK" AND FILLED-IN CCW-CHAIN (R10) 00777000
+*                                                                       00778000
+         ORG   IOBLOK         START AT THE BEGINNING                    00779000
+*                                                                       00780000
+JRCWTASK DSECT              RCWTASK INCLUDING HEADER AND CCW-CHAIN (R9) 00781000
+*                                                                       00782000
+***      RCWTASK - TRANSLATED VIRTUAL IO CCW PACKAGE                    00783000
+*                                                                       00784000
+JRCWPNT  DS    1F             = RCWPNT                                  00785000
+JRCWVCAW DS    1F             = RCWVCAW                                 00786000
+JRCWVCNT DS    1H             = RCWVCNT                                 00787000
+JRCWRCNT DS    1H             = RCWRCNT                                 00788000
+JRCWHEAD DS    1H             = RCWHEAD                                 00789000
+JRCWCCNT DS    1H             NOTE:  USED FOR TOTAL NO. DBL-WORDS USED. 00790000
+*                                                                       00791000
+* NOTE:  RCW HEADER = 2 DBL WORDS = 16 BYTES                            00792000
+*                                                                       00793000
+         DS    0D             RCWCCW FOLLOWS:                           00794000
+JCCW1ST  CCW   X'07',JSEEKA,CC,6   SEEK (07) OR SEEK HEAD (1B)          00795000
+         CCW   X'23',JSCTNO,CC,1 SET SECTOR                    @V2A2029 00796000
+         CCW   X'31',JSEARCH,CC,5  SEARCH                               00797000
+         CCW   X'08',*-8,0,0       TIC BACK TO SEARCH                   00798000
+         CCW   X'00',*-*,SILI,*-*  READ (06) OR WRITE (05)              00799000
+*                                                                       00800000
+JSEEKA   DC    XL6'00'        6-BYTE SEEK ARGUMENT                      00801000
+JSEARCH  DC    XL5'00'        5-BYTE SEARCH ARGUMENT                    00802000
+JSCTNO   DC    X'00'          1-BYTE SECTOR NUMBER             @V2A2029 00803000
+*                                                                       00804000
+JIDAL1   DC    F'0'           IDAW WORDS (IF NEEDED)                    00805000
+JIDAL2   DC    F'0'           ...                                       00806000
+*                                                                       00807000
+JNUMCC   EQU   *-JSEEKA       NUMBER OF BYTES FOR CONTROL WORDS         00808000
+*                                                                       00809000
+JNUM3330 EQU   (*-JCCW1ST)/4  NO. OF FULL WORDS PER READ/WRITE @V2A2029 00810000
+JNUMOTH  EQU   JNUM3330-2     DITTO FOR 2311/2319 (NO SET-SECTOR USED)  00811000
+         EJECT                                                          00812000
+         COPY  IOER                                                     00813000
+         COPY  VMBLOK                                                   00814000
+         COPY  EQU                                                      00815000
+         COPY  SAVE                                            @V304735 00816000
+         COPY  CORE                                            @V304735 00817000
+         COPY  VBLOKS                                                   00818000
+         COPY  RBLOKS                                          @V60B6B8 00818500
+         COPY  DEVTYPES                                                 00819000
+         PSA                                                            00820000
+         END                                                            00821000

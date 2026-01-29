@@ -1,0 +1,1593 @@
+FOR      TITLE 'DMSFOR     (CMS)       VM/370 - RELEASE 6'              00001000
+         SPACE 2                                                        00003000
+*.                                                                      00004000
+*                                                                       00005000
+*                                                                       00006000
+*                                                                       00007000
+*                                                                       00008000
+* MODULE NAME:                                                          00009000
+*                                                                       00010000
+*      DMSFOR  (FORMAT)                                                 00011000
+*                                                                       00012000
+* FUNCTION:                                                             00013000
+*                                                                       00014000
+*        TO PHYSICALLY  INITIALIZE A  DISK SPACE  FOR THE  CMS          00015000
+*        DATA MANAGEMENT  ROUTINES.  FOR AN EXISTING  DISK, IT          00016000
+*        MAY IN EFFECT BE CLEARED; A LABEL MODIFIED; RECOMPUTE          00017000
+*        THE NUMBER OF CYLINDERS THAT ARE ALLOWED TO BE USED.           00018000
+*                                                                       00019000
+* ATTRIBUTES:                                                           00020000
+*                                                                       00021000
+*      DISK RESIDENT;  SERIALLY REUSABLE.                               00022000
+*                                                                       00023000
+* ENTRY POINTS:                                                         00024000
+*                                                                       00025000
+*      DMSFOR-(FORMAT)                                                  00026000
+*                                                                       00027000
+* ENTRY CONDITIONS:                                                     00028000
+*                                                                       00029000
+*        R1 MUST POINT TO FORMAT PARAMETER LIST:                        00030000
+*        DS   0F                                                        00031000
+* PLIST  DC   CL8'FORMAT'                                               00032000
+*        DC   CL8'CCU'                                                  00033000
+*        DC   CL8'MODE'                                                 00034000
+*       <DC   CL8'NN'>                                                  00035000
+*       <DC   CL8'(RECOMP)'>                                            00036000
+*       <DC   CL8'(LABEL)'>                                             00037000
+*        DC   CL8'FENCE'                                                00038000
+*                                                                       00039000
+* EXIT CONDITIONS:                                                      00040000
+*                                                                       00041000
+*      NORMAL RETURN                                                    00042000
+*         R15=0                                                         00043000
+*      ERROR RETURNS                                                    00044000
+*         R15 NONZERO (SEE "ERROR RETURNS")                             00045000
+*                                                                       00046000
+* CALLS TO OTHER ROUTINES:                                              00047000
+*                                                                       00048000
+*       DMSLAD,  DMSFRE,  DMSFRET,  DMSDIOR,  DMSALU,  DMSSTD,          00049000
+*        DMSAUD, DMSDIOW, DMSCRD, DMSCRW, DMSERR                        00050000
+*                                                                       00051000
+*        CALLED BY:                                                     00052000
+*                                                                       00053000
+*           DMSINT, OR USER FROM TERMINAL                               00054000
+*                                                                       00055000
+*        EXTERNAL REFERENCES:                                           00056000
+*                                                                       00057000
+*             ADTSECT, FVSECT                                           00058000
+*                                                                       00059000
+* EXIT CONDITIONS:                                                      00060000
+*                                                                       00061000
+*        NORMAL: GPR15 = 0                                              00062000
+*                                                                       00063000
+*        ERROR: GPR15 HAS ERROR CODE AS FOLLOWS                         00064000
+*                                                                       00065000
+*              8 RECOMPUTE WOULD CAUSE DATA-LOSS                        00066000
+*             24 PARAMETER LIST ERROR                                   00067000
+*             36 DISK IS READ-ONLY                                      00068000
+*             88 UNSUPPORTED DEVICE TYPE                                00069000
+*            100 DEVICE NOT ATTACHED                                    00070000
+*                 OR                                                    00071000
+*                I/O ERROR DURING FORMAT                                00072000
+*                                                                       00073000
+*                                                                       00074000
+* REGISTER USAGE                                                        00075000
+*                                                                       00076000
+*      R12   BASE                                                       00077000
+*      R13   FVSECT                                                     00078000
+*      REST  WORK                                                       00079000
+*                                                                       00080000
+* OPERATION:                                                            00081000
+*                                                                       00082000
+*        INITIALIZATION PHASE                                           00083000
+*                                                                       00084000
+*        DMSFOR VALIDATES THE PARAMETER LIST.  A CHECK IS               00085000
+*      MADE TO VERIFY THAT THE SPECIFIED CCU IS VALID (NONZERO)         00086000
+*        AND NOT GREATER THAN X'FFF'.  FURTHER, THE MODE                00087000
+*        IS CHECKED FOR VALIDITY AND A SPECIFICATION OF 'S'             00088000
+*        FOR THE SYSTEM DISK WILL, OF COURSE, NOT BE                    00089000
+*        ALLOWED.  THE SPECIFIED DEVICE IS THEN VERIFIED TO             00090000
+*        BE A READ/WRITE DASD DEVICE. A CP DIAGNOSE IS                  00091000
+*        THEN ISSUED TO DETERMINE IF THE DEVICE IS                      00092000
+*        ATTACHED AND READY AND TO DETERMINE THE ACTUAL                 00093000
+*        DEVICE TYPE.  IF ANY CONDITION IS NOT MET OR THE               00094000
+*        DEVICE TYPE IS NOT RECOGNIZABLE AN ERROR CODE AND              00095000
+*        SUITABLE MESSAGE IS PRODUCED.                                  00096000
+*                                                                       00097000
+*        DMSFOR CONTINUES AS DESCRIBED IN THE FOLLOWING                 00098000
+*        SECTIONS.                                                      00099000
+*                                                                       00100000
+*        REAL FORMAT (FORMAT CCU MODE <NN>)                             00101000
+*                                                                       00102000
+*        IF THE  DISK IS REALLY TO  BE FORMATTED (NONE  OF THE          00103000
+*        SPECIAL OPTIONS R, OR L WAS SPECIFIED), THE PROCEDURE          00104000
+*        USED IS AS FOLLOWS.  THE  GENERAL DESCRIPTION WILL BE          00105000
+*        THAT  OF  THE  PROCEDURE  FOLLOWED  FOR  THE  A-DISK;          00106000
+*        FORMATTING  OF  THE  OTHER   DISKS  IS  IDENTICAL  IN          00107000
+*        OPERATION.   WHERE   THERE  ARE  DIFFERENCES   FOR  A          00108000
+*        DYNAMICALY  CREATED DISK  SPACE, THEY  ARE NOTED  AND          00109000
+*        ALSO  SUMMARIZED IN  A LATER  SECTION. A  DYNAMICALLY          00110000
+*        CREATED  DISK  SPACE  IS  CARVED OUT  OF  A  POOL  OF          00111000
+*        AVAILABLE CYLINDERS  BY CP.  THE  USER HAS  A VIRTUAL          00112000
+*        MACHINE DIRECTORY  ENTRY WHICH SPECIFIES A  TEMP DISK          00113000
+*        AT ADDRESS 192 IS TO BE NN CYLINDERS.  AT LOGON TIME,          00114000
+*        CP  PRESENTS  TO  CMS  A DISK  SPACE  AT  192  OF  NN          00115000
+*        CYLINDERS  WITH  RELATIVE  TRACK 00  00  ZEROED  OUT.          00116000
+*        THEREFORE,  AFTER USING  A  DYNAMICALLY CREATED  DISK          00117000
+*        SPACE (HEREAFTER TO BE REFERRED TO AS THE DY- DISK) AND        00118000
+*        LOGOUT FROM  CP, THE INFORMATION  THAT WAS  PLACED ON          00119000
+*        THAT  DISK  IS  LOST.  ALTHOUGH,  DURING  A  TERMINAL          00120000
+*        SESSION, THE  DISK AND INFORMATION THEREUPON  IS KEPT          00121000
+*        ALIVE ACROSS THE RE-IPLING OF THE CMS NUCLEUS.                 00122000
+*                                                                       00123000
+*        1. TO GUARD  AGAINST ACCIDENTAL OR INCORRECT  CALL OF          00124000
+*             DMSFOR, WHICH CAN CAUSE THE ERADICATION OF                00125000
+*             ALL FILES ON A DISK, A MESSAGE IS TYPED ON THE            00126000
+*             USER'S TERMINAL BEFORE ANY TABLES ARE CLEARED OR          00127000
+*             ANYTHING  IS WRITTEN  ON TO  DISK. THIS  MESSAGE          00128000
+*             (WITH DISK-MODE AND DEVICE-ADDRESS  FILLED IN TO          00129000
+*             THEIR CORRECT VALUES) REQUIRES A REPLY OF 'YES'           00130000
+*             OR 'NO' BEFORE THE PROGRAM WILL RESUME.                   00131000
+*                                                                       00132000
+*             THE USER MUST  TYPE IN YES FOR  FORMATTING TO BE          00133000
+*             UNDERTAKEN.  ANY OTHER  INPUT  AT  ALL FROM  THE          00134000
+*             TERMINAL WILL  RESULT IN AN ERROR-CODE  11 BEING          00135000
+*             RETURNED, NOTHING AT ALL IN  THE NUCON OR ACTIVE          00136000
+*             DISK  TABLE BEING  AFFECTED,  AND A MESSAGE               00137000
+*             INDICATING THAT FORMAT WILL NOT BE EXECUTED               00138000
+*             IS TYPED AT THE VIRTUAL CONSOLE.                          00139000
+*                                                                       00140000
+*             FOR THE DY-DISK, DURING CMS INITIALIZATION                00141000
+*             THIS  ENTIRE STEP IS  OMITTED; FORMATTING                 00142000
+*             PROCEEDS  WITH NO  MESSAGE  TO  THE TERMINAL  OR          00143000
+*             FURTHER INPUT FROM THE USER.                              00144000
+*                                                                       00145000
+*        2.   DMSCRD IS THEN CALLED TO  OBTAIN THE LABEL TYPED          00146000
+*             BY THE USER IN RESPONCE TO THE LABEL REQUEST              00147000
+*             MESSAGE THAT IS PART OF THE FORMAT PROCEDURE.             00148000
+*                                                                       00149000
+*             THE TYPED-IN  LABEL (BLANK-FILLED  IF LESS  THAN          00150000
+*             SIX BYTES, TRUNCATED IF MORE)  IS WRITTEN ON THE          00151000
+*             FIRST TEN BYTES OF RECORD  3 WHEN THE FORMATTING          00152000
+*             IS DONE.                                                  00153000
+*             (FOR EXAMPLE, IF  THE USER TYPED IN  MYDISK, THE          00154000
+*             LABEL WOULD BE: VOL1MYDISK). FOR THE DY-DISK, NO          00155000
+*             MESSAGE IS GIVEN, NO USER  REPLY, AND A LABEL OF          00156000
+*             VOL1DYDISK IS ALWAYS USED.                                00157000
+*                                                                       00158000
+*        3. AT THIS  POINT, DMSALU  IS CALLED  TO RELEASE  AND          00159000
+*             CLEAR ALL APPROPRIATE                                     00160000
+*             RESIDENT TABLES FOR  THIS DISK, AND THE  R/O AND          00161000
+*             R/W FLAG-BITS  IN THE  ADTFLG1 FLAG-BYTE  IN THE          00162000
+*             ACTIVE DISK TABLE ARE CLEARED.                            00163000
+*                                                                       00164000
+*        4. JUST BEFORE FORMATTING STARTS, A MESSAGE IS TYPED,          00165000
+*             OF THE FOLLOWING FORM:                                    00166000
+*                                                                       00167000
+*                FORMATTING CCU DISK'MODE'  (2314|3330).                00168000
+*                                                                       00169000
+*             THIS  MESSAGE  CONFIRMS  TO THE  USER  THAT  THE          00170000
+*             FORMAT PROGRAM  IS FORMATTING THE  DESIRED DISK,          00171000
+*             AND INDICATES  THE DISK  TYPE.                            00172000
+*                                                                       00173000
+*             FORMATTING OF  THE DISK THEN COMMENCES.   A 3330          00174000
+*             IS FORMATTED BY WRITING 14 800-BYTE RECORDS PER           00175000
+*             HEAD, 19 HEADS PER CYLINDER. A 3340 IS FORMATTED          00176000
+*             BY WRITING 8 800-BYTE RECORDS PER HEAD, 12 HEADS          00177000
+*             PER CYLINDER. A 3350 IS FORMATED BY WRITING 19            00178000
+*             800-BYTE RECORDS PER HEAD, 30 HEADS PER CYLINDER.         00179000
+*             A 2314 OR 2319 IS FORMATTED WITH                          00180000
+*             15 800-BYTE RECORDS PER TWO HEADS, FOR TEN PAIRS          00181000
+*             OF HEADS PER CYLINDER.  THE DATA WRITTEN (EXCEPT          00182000
+*             FOR  THE LABEL)  CONSISTS OF  BINARY ZEROES.   A          00183000
+*             READ-AFTER-WRITE CHECK  IS INCLUDED  IN THE  CCW          00184000
+*             CHAIN FOR  THE DISK, WHERE  THE DATA  WRITTEN ON          00185000
+*             THE DISK  IS IMMEDIATELY  READ (IN  NON-TRANSMIT          00186000
+*             MODE)   TO  CHECK   THAT   THE  FORMATTING   WAS          00187000
+*             SUCCESSFUL.    FOR   PURPOSE   OF   SPEED,   THE          00188000
+*             READ-AFTER-WRITE CHECK  IS NOT PERFORMED  ON THE          00189000
+*             DY-DISK, AS  THE DY-DISK  MAY BE  FORMATTED ONCE          00190000
+*             FOR EACH TERMINAL SESSION, WHILE THE OTHER DISKS          00191000
+*             ARE  USUALLY  FORMATTED  ONLY ONCE  IN  A  GREAT          00192000
+*             WHILE.                                                    00193000
+*                                                                       00194000
+*             IF ERRORS DO OCCUR,  REPEATED EFFORTS TO RECOVER          00195000
+*             ARE MADE BY CP AND IF AN ERROR RETURN FROM THE            00196000
+*             CP DIAGNOSE IS RECEIVED, THE ERROR IS CONSIDERED          00197000
+*             TO BE PERMANENT.  A MESSAGE INDICTING THE POINT           00198000
+*             AT WHICH FORMATTING WAS TRUNCATED AND AN                  00199000
+*             ANNOUNCEMENT OF THE ERROR CONDITION IS MADE TO            00200000
+*             USER THAT HE MIGHT TAKE THE APPROPRIATE ACTION.           00201000
+*                                                                       00202000
+*        5. FORMATTING OF THE  DISK CONCLUDES WHEN THE  END OF          00203000
+*             DISK  IS  REACH  (DETERMINED  BY  A  UNIT  CHECK          00204000
+*             COUPLED WITH  A SENSE  BYTE OF  X'81'), OR  IF A          00205000
+*             SPECIFIED  LIMIT BY  THE  USER  IS REACHED  (FOR          00206000
+*             EXAMPLE, 50 CYLINDERS FOR FORMAT  A 50), OR IF A          00207000
+*             PERMANENT ERROR OCCURS, WHICHEVER HAPPENS FIRST.          00208000
+*                                                                       00209000
+*             IF THE  NUMBER OF  CYLINDERS FORMATTED  IS ZERO,          00210000
+*             THEN DMSFOR EXITS WITH AN ERROR                           00211000
+*             MESSAGE, AND NO FURTHER ACTION IS TAKEN.                  00212000
+*                                                                       00213000
+*        6. IF  AT   LEAST  ONE   CYLINDER  WAS   SUCCESSFULLY          00214000
+*             FORMATTED, THEN DMSFOR CONCLUDES AS                       00215000
+*             FOLLOWS:                                                  00216000
+*                                                                       00217000
+*           A.   STORES THE NUMBER OF  CYLINDERS ADTCYL IN THE          00218000
+*                  ACTIVE DISK TABLE.                                   00219000
+*                                                                       00220000
+*           B.   TYPES A MESSAGE INDICATING HOW MANY CYLINDERS          00221000
+*             WERE FORMATTED.                                           00222000
+*                                                                       00223000
+*           C.  STORES THE DEVICE DEPENDANT UNIT-TYPE-BYTE              00224000
+*                  IN THE APPROPRIATE SLOT IN THE NUCON TABLE.          00225000
+*                                                                       00226000
+*           D.   OBTAINS A  816-BYTE BLOCK FROM  FREE STORAGE,          00227000
+*                  IF NECESSARY, FOR THE FIRST FST HYPERBLOCK,          00228000
+*                  CLEARS IT,  AND PLACES  ITS ADDRESS  IN THE          00229000
+*                  ACTIVE DISK TABLE.                                   00230000
+*                                                                       00231000
+*           E.   OBTAINS A  200-BYTE BLOCK FROM  FREE STORAGE,          00232000
+*                  IF NECESSARY,  FOR THE QQMSK  TABLE, CLEARS          00233000
+*                  IT,  AND  PLACES  ITS ADDRESS  IN  THE  ADT          00234000
+*                  TABLE.                                               00235000
+*                                                                       00236000
+*           F.   OBTAINS FREE  STORAGE FOR  THE QMSK  BIT-MASK          00237000
+*                  TABLE, THE SIZE DEPENDING  ON THE NUMBER OF          00238000
+*                  CYLINDERS,  SETS  THE  FIRST  WORD  TO  ITS          00239000
+*                  DEFAULT VALUE  OF X'F00000000',  CLEARS THE          00240000
+*                  REMAINDER  OF  THE TABLE,  AND  PLACES  ITS          00241000
+*                  ADDRESS IN THE ADT TABLE.                            00242000
+*                                                                       00243000
+*           G.   INITIALIZES ALL OTHER COUNTS IN THE ADT TABLE          00244000
+*                  AS  NEEDED (ADTNUM,  ETC.),  AND FLAGS  THE          00245000
+*                  DISK AS LOGGED IN AND READ-WRITE.                    00246000
+*                                                                       00247000
+*           H.   CALLS  DMSAUD  TO  WRITE  THE  FINISHED  FILE          00248000
+*                  DIRECTORY ON DISK.                                   00249000
+*                                                                       00250000
+*        7. FINALLY,  DMSFOR RETURNS  TO THE  CALLER WITH  THE          00251000
+*             APPROPRIATE ERROR-CODE IN R15.                            00252000
+*             WAS SUCCESSFUL) IN R15.                                   00253000
+*                                                                       00254000
+*             CORRECT VALUE OF ADTNUM.  THE ACTUAL BITS IN THE          00255000
+*             QMSK BIT-MASK ARE THEN COUNTED                            00256000
+*                                                                       00257000
+*        RECOMPUTING FORMAT (FORMAT CUU MODE <NN> (R))                  00258000
+*                                                                       00259000
+*        RECOMPUTING FORMAT      (WITH   NO  CYLINDER   AMOUNT          00260000
+*        SPECIFIED),  IS  USED  TO  ASCERTAIN  THE  NUMBER  OF          00261000
+*        CYLINDERS AND RECOMPUTE THE DISK COUNTS, BUT ALSO HAS          00262000
+*        THE CAPABILITY OF  REVISING THE DISK COUNT  UPWARD IF          00263000
+*        ADTNUM IS GREATER THAN IT WAS PREVIOUSLY.                      00264000
+*                                                                       00265000
+*        FORMAT MODE RECOMP  NN (WHERE NN IS  A DECIMAL NUMBER          00266000
+*        OF  CYLINDERS  DESIRED)  WORKS LIKE  RECOMP  WITH  NO          00267000
+*        OPTIONS,  EXCEPT  THAT  THE NUMBER  OF  CYLINDERS  IS          00268000
+*        LIMITED TO THE 'NN' GIVEN BY THE USER.                         00269000
+*                                                                       00270000
+*        THE ACTION TAKEN  FOR FORMAT RECOMP (WITH  OR WITHOUT          00271000
+*        OPTIONS) IS AS FOLLOWS:                                        00272000
+*                                                                       00273000
+*        1. DMSLAD IS CALLED AND THE DISK CHECKED TO MAKE SURE          00274000
+*             IT IS ACCESSED IN READ/WRITE MODE.                        00275000
+*             IN AND IN READ-WRITE FORM.                                00276000
+*                                                                       00277000
+*        2. SUCCESSIVE  SEEKS TO  THE  DISK  ARE PERFORMED  TO          00278000
+*             DETERMINE THE ACTUAL NUMBER  OF CYLINDERS ON THE          00279000
+*             DISK.                                                     00280000
+*                                                                       00281000
+*        3. THE NUMBER OF  RECORDS ON DISK ADTNUM  IS COMPUTED          00282000
+*             FROM  THE  ACTUAL  NUMBER OF  CYLINDERS,  IF  NO          00283000
+*             OPTIONS WERE GIVEN.  IF  "NN" WAS SPECIFIED, THE          00284000
+*             "NN" COUNT OR THE ACTUAL  NUMBER OF CYLINDERS IS          00285000
+*             USED, WHICHEVER IS LESS. THE REVISED DISK COUNTS          00286000
+*             ARE THEN COMPUTED.  THE ACTUAL BITS IN  THE QMSK          00287000
+*             BIT-MASK ARE THEN COUNTED TO COMPUTE THE VALUE            00288000
+*             OF ADTUSED  (NUMBER OF RECORDS IN  USE), ADTLEFT          00289000
+*             (NUMBER LEFT), AND ADTLAST. ADTLAST  IS CLEARED,          00290000
+*             AND THE  NUMBER OF  CYLINDERS ADTCYL  IS STORED.          00291000
+*             "ADTLAST" (PLUS  A SAFETY  FACTOR IN  THE ADTRES          00292000
+*             RESERVE COUNT) IS  LESS THAN THE OLD  ADTLAST, A          00293000
+*             LOSS  OF DATA  WOULD  RESULT;  IN THIS  CASE,  A          00294000
+*             WARNING MESSAGE  IS GIVEN TO  THE USER,  THE OLD          00295000
+*             DISK COUNTS  ARE LEFT  INTACT, AND  ERROR 13  IS          00296000
+*             RETURNED TO  THE CALLER.  IF  THE NEW  ADTNUM IS          00297000
+*             THE SAME AS THE OLD, FORMATTING TERMINATES                00298000
+*             AFTER A CALL TO DMSAUD AND DMSQRY.                        00299000
+*                                                                       00300000
+*             DMSAUD  IS  THEN  CALLED   TO  ENSURE  THAT  THE          00301000
+*             RECOMPUTED COUNTS ARE STORED ON DISK.                     00302000
+*             FINALLY, DMSQRY IS CALLED TO DISPLAY THE DISK             00303000
+*             COUNTS TO  THE USER.                                      00304000
+*        4. IF THE TOTAL NUMBER OF RECORDS INDICATED IN ADTNUM          00305000
+*             FOR THE DISK TO BE RECOMPUTED IS NOT THE SAME AS          00306000
+*             PREVIOUSLY (AND NO DATA-LOSS WILL OCCUR), RECOMP          00307000
+*             OBTAINS A  NEW QMSK BIK-MASK CORRESPONDS  TO THE          00308000
+*             NEW  DISK COUNTS,  MOVES THE  OLD QMSK  BIT-MASK          00309000
+*             THERETO,   TRUNCATING   OR   ZERO   FILLING   AS          00310000
+*             APPROPRIATE, AND GIVES BACK  THE OLD BIT-MASK TO          00311000
+*             FREE STORAGE.  THEN ALL NEW COUNTS ARE STORED IN          00312000
+*             THE ACTIVE DISK TABLE                                     00313000
+*             (INCLUDING THE  REVISED ADTCYL  CYLINDER COUNT),          00314000
+*             DMSAUD IS CALLED, AND FINALLY DMSQRY.                     00315000
+*                                                                       00316000
+*        RECOMP  MAKES IT  POSSIBLE TO  REVISE DISKS  WHENEVER          00317000
+*        FEASIBLE,  TO LARGER  OR SMALLER  SIZES, WITHOUT  THE          00318000
+*        NECESSITY OF  DUMPING FILES  OUT ON  TAPE, FORMATTING          00319000
+*        THE DISK, AND  LOADING THEM BACK IN  AGAIN.  THE ONLY          00320000
+*        REQUIREMENT,  OTHER THAN  THOSE  DISCUSSED ABOVE,  IS          00321000
+*        THAT  WHEN  A DISK  IS  ENLARGED  VIA RECOMP  IT  WAS          00322000
+*        PREVIOUSLY FORMATTED AT SOME TIME TO ITS FULL SIZE.            00323000
+*                                                                       00324000
+*        CMS DISK-LABEL                                                 00325000
+*                                                                       00326000
+*        RECORD 3 (CYLINDER 0, HEAD 0, RECORD 3) OF A CMS DISK          00327000
+*        INCLUDES  A   TEN-BYTE  LABEL,   CONSISTING  OF   THE          00328000
+*        FOLLOWING:                                                     00329000
+*                                                                       00330000
+*        1. FOUR CHARACTERS:  VOLI                                      00331000
+*                                                                       00332000
+*        2. SIX CHARACTERS:   DESIRED LABEL                             00333000
+*                        (BLANK-FILLED IF LESS THAN 6;                  00334000
+*                        TRUNCATED IF MORE THAN 6 CHARACTERS)           00335000
+*                                                                       00336000
+*        3. REMAINING 790 BYTES OF RECORD=00 (BINARY ZEROES)            00337000
+*                                                                       00338000
+*        OPTION TO WRITE A LABEL ON DISK                                00339000
+*                                                                       00340000
+*        AS MENTIONED EARLIER,  THE OPTION TO FORMAT   A                00341000
+*        CMS DISK CAUSES THE DISK  TO BE FORMATTED INCLUDING A          00342000
+*        LABEL ON RECORD 3.                                             00343000
+*                                                                       00344000
+*        A LABEL CAN  ALSO BE ENTERED ON A DISK  THAT HAS BEEN          00345000
+*        FORMATTED  PREVIOUSLY  TO CHANGE  AN  EXISTING  LABEL          00346000
+*        WITHOUT AFFECTING ANY OTHER INFORMATION ON DISK.               00347000
+*                                                                       00348000
+*        LABEL FORMAT (FORMAT CCU MODE (LABEL))                         00349000
+*                                                                       00350000
+*        THE LOGIC PERFORMED FOR A LABEL-ONLY FORMAT IS AS              00351000
+*        FOLLOWS:                                                       00352000
+*                                                                       00353000
+*        1. DMSLAD IS  CALLED TO MAKE  SURE A DISK  EXISTS FOR          00354000
+*             THE PLIST SPECIFICATION.  (OTHER VERIFICATION IS          00355000
+*             ACCOMPLISHED AS PART OF THE GENERAL INITIALIZING          00356000
+*             PROCESS.)   THE   DISK  MUST,   OF  COURSE,   BE          00357000
+*             ATTACHED, READY,  AND BE A READ-WRITE  DISK, FOR          00358000
+*             THE COMMAND TO SUCCEED.                                   00359000
+*                                                                       00360000
+*        2. DMSDIOR IS CALLED TO READ  THE OLD LABEL FROM DISK          00361000
+*             INTO AN 800-BYTE I/O  BUFFER. (IF DMSDIOR SHOULD          00362000
+*             FAIL, A DESCRIPTIVE ERROR  MESSAGE IS GIVEN.)             00363000
+*                                                                       00364000
+*        3. A MESSAGE IS TYPED ON THE USER TERMINAL ASKING FOR          00365000
+*             A 6-BYTE LABEL TO BE ENTERED.                             00366000
+*                                                                       00367000
+*        4. DMSCRD IS CALLED  TO OBTAIN THE LABEL  TYPED IN BY          00368000
+*             THE USER.                                                 00369000
+*                                                                       00370000
+*        5. VOLI (FOUR BYTES)  AND THE FIRST SIX  BYTES OF THE          00371000
+*             ENTERED LABEL                                             00372000
+*             (BLANK-FILLED, IF LESS THAN 6 WERE INPUTTED) ARE          00373000
+*             MOVED TO THE FIRST TEN BYTES OF THE 800-BYTE I/O          00374000
+*             BUFFER.                                                   00375000
+*                                                                       00376000
+*        6. DMSDIOW IS THEN CALLED TO WRITE THE NEW LABEL BACK          00377000
+*             ON  THE  DISK.   (IF   DMSDIOW  SHOULD  FAIL,  A          00378000
+*             DESCRIPTIVE  ERROR  MESSAGE IS  GIVEN,  AND  THE          00379000
+*             ERROR-CODE  FROM  DMSDIOW  IS  RETURNED  TO  THE          00380000
+*             CALLER.                                                   00381000
+*                                                                       00382000
+*        SUMMARY OF DIFFERENCES IN FORMATTING A DYNAMIC-DISK            00383000
+*                                                                       00384000
+*        AS MENTIONED ABOVE, THERE  ARE SEVERAL DIFFERENCES IN          00385000
+*        THE WAY  A DY-DISK  IS FORMATTED  FROM THE  PROCEDURE          00386000
+*        USED FOR OTHER READ-WRITE DISK.  THESE ARE SUMMARIZED          00387000
+*        AS FOLLOWS:                                                    00388000
+*                                                                       00389000
+*        1. A LABEL OF VOL1DYDISK IS AUTOMATICALLY WRITTEN ON           00390000
+*             RECORD 3. (SEE NOTE BELOW)                                00391000
+*                                                                       00392000
+*        2. THE  READ-AFTER-WRITE CHECK  IN THE  CCW CHAIN  TO          00393000
+*             FORMAT THE DISK IS OMITTED,  IN THE INTERESTS OF          00394000
+*             MAKING  THE FORMATTING  OF A  TEMPORARY DISK  AS          00395000
+*             FAST AS POSSIBLE.                                         00396000
+*                                                                       00397000
+*        3. THE REQUIREMENT FOR THE USER TO TYPE IN YES BEFORE          00398000
+*             FORMATTING  BEGINS  IS WAIVED.                            00399000
+*                                                                       00400000
+*        4. NO INFORMATION MESSAGES ARE TYPED DURING                    00401000
+*             CMS INITIALIZATION.                                       00402000
+*             APPROPRIATE) IS  OMITTED (AS WELL AS  THE NORMAL          00403000
+*             FORMATTING MESSAGES)  IF THE  (NOTYPE) PARAMETER          00404000
+*             WAS GIVEN.                                                00405000
+*                                                                       00406000
+*        NOTE:  IF  DESIRED TO CHANGE  THE LABEL ON  A DY-DISK          00407000
+*        AFTER IT HAS BEEN FORMATTED, THE COMMAND                       00408000
+*                                                                       00409000
+*                 FORMAT 192 D (LABEL)                                  00410000
+*                                                                       00411000
+*        CAN BE ISSUED, AND THE REPLACEMENT LABEL WRITTEN.              00412000
+*                                                                       00413000
+*.                                                                      00414000
+         EJECT                                                          00415000
+DMSFOR   START X'20000'       (DISK-RESIDENT)                           00416000
+         SPACE                                                          00417000
+         USING NUCON,R0                                                 00418000
+         USING ADTSECT,R13                                              00419000
+         EXTRN RELUFD                                                   00420000
+         SPACE                                                          00421000
+         BALR  R11,0          ESTABLISH ADDRESSABILITY                  00422000
+         USING *,R11                                                    00423000
+         LA    R12,4094(,R11) SET UP ANOTHER BASE REGISTER              00424000
+         BCTR  R11,0          DECREMENT IT FOR BETTER                   00425000
+         BCTR  R11,0          ... READABILITY                           00426000
+         USING DMSFOR,R11                                               00427000
+         USING DMSFOR+4096,R12                                          00428000
+         LR    R6,R1          PRESERVE POINTER TO P-LIST       @VA03452 00429000
+         SR    R15,R15        CLEAR R15 ,                      @VA03452 00430000
+         STM   R14,R15,SAVE14 SAVE RETURN-REG & ERRCODE = 0    @VA03452 00431000
+         ST    R15,LIMCYL     CLEAR LIMCYL (UNTIL FILLED IN)   @VA03452 00432000
+         ST    R15,FLAG       CLEAR VARIOUS FLAGS              @VA03452 00433000
+*                                                                       00434000
+* SET CCWS WHICH CAN BE MODIFIED TO THEIR INITIAL (DEFAULT) VALUES:     00435000
+         MVC   TIC3330(8),JTIC3330                             @VA03452 00436000
+         MVC   NOSPEC(8),JNOSPEC                               @VA03452 00437000
+         MVC   TICR8(8),JTICR8                                 @VA03452 00438000
+         MVC   TIC30(8),JTIC30                                 @VA03452 00439000
+         MVC   CHECKIT(8),JCHECKIT                             @VA03452 00440000
+         MVI   SSECT,X'23'    SET-SECTOR OP-CODE IS ENOUGH     @VA03452 00441000
+         MVC   OTHERS(8),JOTHERS                               @VA03452 00442000
+         MVC   END3330(8),JEND3330                             @VA03452 00443000
+         MVC   CCWWR16(8),JCCWWR16 ...                         @V304498 00444000
+         MVC   CCWRD16(8),JCCWRD16 ...                         @V304498 00445000
+*                                                                       00446000
+         SSM   OK81           ALLOW ONLY CHANNEL 0 & EXT INTS  @VA03452 00447000
+         DMSKEY NUCLEUS       BUT WE NEED SYSTEM PRIVILEGES.   @VA03452 00448000
+         LM    R7,R10,ADDRS   PICK UP INITIAL VECTORS                   00449000
+         CLI   8(R1),X'FE'    SPECIAL INITIALIZATION ENTRY?             00450000
+         BNE   SCANNER        NO                                        00451000
+         LA    R1,LETTERD-24  POINT TO MODE LETTER                      00452000
+         L     R15,VCADTLKP   GET THE ADDRESS OF ADTLKP        @VM03093 00453000
+         BALR  R14,R15        GO THERE                                  00454000
+         LR    R13,R1         PUT A(ADT) INTO PROPER REGISTER           00455000
+         ST    R1,ADTADDR     GET DEVICE TABLE ADDRESS                  00456000
+         L     R1,ADTDTA      GET THE DEVICE TABLE ADDRESS              00457000
+         LH    R1,DTAD(,R1)   GET THE DEVICE ADDRESS                    00458000
+         STH   R1,DEVADDR     SALT IT AWAY FOR LATER                    00459000
+         MVC   INBUF(6),DUMTDISK   MOVE IN THE DEFAULT LABEL            00460000
+         OI    FLAG,TDK+LAB   SIGNAL THAT WE CAME THIS WAY              00461000
+         B     START          GET COMMON                                00462000
+SCANNER  LA    R1,8(,R1)      POINT TO NEXT ARGUMENT IN PLIST           00463000
+         CLI   0(R1),X'FF'    IS IT A FENCE?                            00464000
+         BCR   8,R7           IF NOT, KEEP ON.                          00465000
+         CLI   0(R1),C'('     IS IT THE START OF THE OPTIONS?           00466000
+         BCR   8,R8           IF SO, GO PROCESS.                        00467000
+         BR    R9             GO SOMEWHERE.                             00468000
+         SPACE                                                          00469000
+SCANUNIT LA    R9,SCANMODE    SET NEXT SCAN ADDRESS                     00470000
+         LA    R7,ERR3        PICK A CONVENIENT ERROR MESSAGE           00471000
+         LR    R3,R1          SAVE THE PLIST POINTER                    00472000
+         CLI   3(R3),C' '     MORE THAN 3 DIGITS SPECIFIED?             00473000
+         BNE   ERR2           ERROR IF SO.                              00474000
+         SR    R4,R4          EMPTY A WORK REGISTER.                    00475000
+         SR    R5,R5          AND ANOTHER.                              00476000
+         B     CKBYTE         NOW CONVERT ADDRESS TO BINARY             00477000
+TESTIT   CLI   0(R3),C'A'     COMPARE WITH 'A'                          00478000
+         BL    ERR2           ERROR IF LESS                             00479000
+         CLI   0(R3),C'F'     COMPARE WITH 'F'                          00480000
+         BH    ERR2           HIGHER IS ERROR                           00481000
+         IC    R5,0(,R3)      SAVE IT                                   00482000
+         SH    R5,=XL2'00B7'  REDUCE IT                                 00483000
+R5OK     SLL   R4,4           MOVE OVER ANY PREVIOUS DIGITS             00484000
+         OR    R4,R5          APPEND THE NEW                            00485000
+         LA    R3,1(,R3)      POINT TO THE NEXT CHARACTER               00486000
+CKBYTE   CLI   0(R3),C'0'     IS IT NUMERIC                             00487000
+         BL    TESTA          NO. CHECK ALPHABETIC                      00488000
+         IC    R5,0(,R3)      PUT IT INTO A REGISTER                    00489000
+         SH    R5,=XL2'00F0'  TURN OFF THE FIRST 4 BITS                 00490000
+         CLI   0(R3),C'9'     HIGHER THAN 9?                            00491000
+         BNH   R5OK           NO. CONTINUE                              00492000
+         B     ERR2           ERROR IF IT IS                            00493000
+TESTA    CLI   0(R3),C' '     IS IT A BLANK?                            00494000
+         BNE   TESTIT         IF SO, WE'RE DONE                         00495000
+         C     R4,MAXPOSS     > X'FFF'?                        @VA04296 00496000
+         BH    ERR2           ERROR IF SO                               00497000
+         LTR   R4,R4               =X'000'?                    @VA01991 00498000
+         BZ    ERR2                ERROR IF SO                 @VA01991 00499000
+         STH   R4,DEVADDR     SAVE CONSTRUCTED DEVADDR                  00500000
+         BR    R10            CONTINUE                                  00501000
+         SPACE                                                          00502000
+SCANMODE LA    R9,SCANCYL     POINT TO NEXT SCAN ROUTINE                00503000
+         CLI   1(R1),C' '     MORE THAN 1 CHARACTER?                    00504000
+         BCR   7,R7           ERROR                                     00505000
+         CLI   0(R1),C'A'     < C'A'?                                   00506000
+         BCR   4,R7           ERROR                                     00507000
+         CLI   0(R1),C'S'     C'S' ?                                    00508000
+         BCR   8,R7           ERROR                                     00509000
+         CLI   0(R1),C'Z'     > C'Z' ?                                  00510000
+         BCR   2,R7           ERROR                                     00511000
+         LR    R3,R1          SAVE PLIST POINTER                        00512000
+         SH    R1,=H'24'      SET UP ADTLKP PLIST                       00513000
+         L     R15,VCADTLKP   GET ADDRESS OF ADTLKP            @VM03093 00514000
+         BALR  R14,R15        GO THERE                                  00515000
+         LR    R13,R1         SAVE A(ADT)                               00516000
+         LR    R1,R3          RESTORE CMNDLINE POINTER                  00517000
+         BCR   7,R7           ERROR IF NOT FOUND                        00518000
+         ST    R1,ADTADDR     SAVE ADT ADDRESS                          00519000
+         LA    R7,START       INDICATE ALTERNATE PROCESS PATH           00520000
+         BR    R10            CONTINUE                                  00521000
+         SPACE                                                          00522000
+SCANCYL  LA    R9,ERR4        LOAD ERROR VECTOR                         00523000
+         CLI   0(R1),C'0'     < 0?                                      00524000
+         BCR   4,R9           ERROR                                     00525000
+         CLI   0(R1),C'9'     > 9?                                      00526000
+         BCR   2,R9           ERROR                                     00527000
+         SR    R2,R2          EMPTY A REGISTER                          00528000
+         SR    R3,R3          AND ANOTHER                               00529000
+         LR    R4,R1          SAVE PLIST POINTER                        00530000
+         LA    R15,8          SET MAXIMUM ARGUMENT LENGTH               00531000
+NUMLOOP  CLI   0(R4),C' '     CHECK FOR BLANK                           00532000
+         BE    NUMDONE        DONE IF THIS IS ONE                       00533000
+         IC    R3,0(,R4)      PICK UP CHARACTER                         00534000
+         SH    R3,=XL2'00F0'  MAKE IT BINARY                            00535000
+         BCR   4,R9           ERROR IF NOT NUMERIC                      00536000
+         MH    R2,TEN         ADJUST                                    00537000
+         AR    R2,R3          SAVE IT AWAY                              00538000
+         LA    R4,1(,R4)      POINT TO THE NEXT POSITION                00539000
+         BCT   R15,NUMLOOP    DECREMENT THE ARGUMENT LENGTH             00540000
+NUMDONE  LTR   R2,R2          CHECK THE SAVED PORTION                   00541000
+         BCR   13,R9          POSITIVE REQUIREMENT                      00542000
+         ST    R2,LIMCYL      SAVE THIS FINAL RESULT                    00543000
+         BR    R10            CONTINUE                                  00544000
+         SPACE                                                          00545000
+SCANOPT  LR    R5,R6          GET ORIGINAL PLIST POINTER                00546000
+         LA    R5,8(,R5)      UP IT BY ONE PARAMETER POSITION           00547000
+         CR    R1,R5          SHOULD BE FURTHER THAN THIS               00548000
+         BE    ERR1           ERROR IF WE'RE NOT                        00549000
+         LA    R5,8(,R5)      UP IT BY ANOTHER PARAMETER POSITION       00550000
+         CR    R1,R5          SHOULD ALSO BE FURTHER THAN THIS          00551000
+         BE    ERR3           ERROR IF WE'RE NOT YET                    00552000
+         CLI   8(R1),X'FF'    WAS THIS A NAKED PARENTHESIS              00553000
+         BE    ERR4           ALSO AN ERROR                             00554000
+         LA    R6,7           LOAD COUNT                                00555000
+         LA    R1,8(,R1)      POINT TO THE NEXT ARGUMENT                00556000
+         LA    R4,OPTIONS-8   POINT TO START OF OPTION TABLE            00557000
+         LA    R5,NUMOPTS     GET THE TOTAL OF ACCEPTABLE OPTIONS       00558000
+         LR    R2,R1          PROPAGATE ARGUMENT POINTER                00559000
+CKBLANK  LA    R2,1(,R2)      POINT TO THE NEXT POSITION                00560000
+         CLI   0(R2),C' '     CHECK FOR BLANK                           00561000
+         BE    GOTLN          NOW WE HAVE THE LENGTH                    00562000
+         BCT   R6,CKBLANK     DECREMENT MAXIMUM COUNT                   00563000
+GOTLN    SR    R2,R1          START-CURRENT=LENGTH                      00564000
+         BCTR  R2,0           LESS 1 FOR EXECUTE                        00565000
+CKNXT    LA    R4,8(,R4)      POINT TO OPTION LIST                      00566000
+         EX    R2,CKMATCH     COMPARE                                   00567000
+         BE    OPTFND         PROCESS IF EQUAL                          00568000
+         BCT   R5,CKNXT       ELSE CONTINUE                             00569000
+         B     ERR5           UNLESS WE RUN OUT OF OPTIONS              00570000
+         SPACE                                                          00571000
+CKMATCH  CLC   0(*-*,R4),0(R1)                                          00572000
+         SPACE                                                          00573000
+OPTFND   MVC   OPTFLAG(1),0(R1)    MOVE IN THE OPTION INDICATOR         00574000
+         LA    R1,8(,R1)      POINT TO THE NEXT ARGUMENT                00575000
+         CLI   0(R1),X'FF'    IS THIS THE END                           00576000
+         BCR   8,R7           DONE IF SO                                00577000
+         CLI   0(R1),C')'     OR ARE THE PARENTHESES BALANCED           00578000
+         BNE   ERR5           BAD IF ANYTHING ELSE                      00579000
+         LA    R1,8(,R1)      POINT BEYOND THE RIGHT PARENTHESIS        00580000
+         CLI   0(R1),X'FF'    IS THIS FINALLY THE END                   00581000
+         BNE   ERR4           HAS TO BE, OTHERWISE ERROR                00582000
+         BR    R7             CONTINUE                                  00583000
+         SPACE                                                          00584000
+START    LH    R2,DEVADDR     GET THE CONSTRUCTED DEVICE ADDRESS        00585000
+         DC    X'83230024'    ASK CP ABOUT IT                           00586000
+         BC    1,ERR6         ERROR IF NOT ATTACHED                     00587000
+         CLM   R3,B'1000',MDASD    IS IT AT LEAST DASD                  00588000
+         BNE   ERR7           MUST BE                                   00589000
+         CLM   R3,B'0001',MWR IS IT R/W?                          V0149 00590000
+         BNL   ERR12          ERROR IF NOT                        V0149 00591000
+         LA    R4,MASKS       POINT TO DASD MASKS FOR CP INFO           00592000
+         LA    R5,NUMDEVS     PICK UP COUNT OF SUPPORTED DASD           00593000
+CKDEV    CLM   R3,B'0100',0(R4)    CHECK WHAT WE GOT BACK               00594000
+         BE    DEVFND         CONTINUE IF MATCH                         00595000
+         LA    R4,1(,R4)      POINT TO THE NEXT MASK                    00596000
+         BCT   R5,CKDEV       TRY AGAIN                                 00597000
+         B     ERR7           UNLESS WE RUN OUT                         00598000
+DEVFND   LH    DISK,DEVADDR   GET THE DEVIC ADDRESS                     00599000
+         IC    R4,NUMDEVS(,R4)     PICK UP THE DEVICE TYPE BYTE         00600000
+         STC   R4,DEVADDR+3   PUT IT INTO THE DEVICE TABLE              00601000
+         SR    R15,R15        WAS THERE A CYLINDER SPEC. ?     @VA03452 00602000
+         C     R15,LIMCYL     ???                              @VA03452 00603000
+         BNE   CKFLAG         YES - BE CAREFUL.                @VA03452 00604000
+         CLI   DEVADDR+3,T3350 3350 ?                          @V304498 00605000
+         BNE   NOT3350        NO..BR                           @V304498 00606000
+         MVC   LIMCYL+2(2),MAX3350 MAX 115 FOR 3350            @V304498 00607000
+         B     CKFLAG         CONTINUE                         @V304498 00608000
+NOT3350  EQU   *                                               @V304498 00609000
+         CLI   DEVADDR+3,X'09'     ELSE, WAS THIS A 3330                00610000
+         BNE   NOT3330        IF NOT TAKE THE STANDARD CYL COUNT        00611000
+         MVI   LIMCYL+3,X'F6' MOVE IN THE LARGER COUNT                  00612000
+         B     CKFLAG         CONTINUE                                  00613000
+NOT3330  CLI   DEVADDR+3,T3340 3340 ?                          @V2A2014 00614000
+         BNE   SETMIN         NO..BR                           @V2A2014 00615000
+         MVC   LIMCYL+2(2),MAX3340 MAX 682 FOR 3340            @V2A2014 00616000
+         B     CKFLAG         CONTINUE                         @V2A2014 00617000
+SETMIN   MVI   LIMCYL+3,203   SET MINIMUM FOR 2314             @VA03452 00618000
+CKFLAG   TM    FLAG,TDK       WAS THIS A SPECIAL D-DISK ENTRY           00619000
+         BO    NORELUFD       IF SO SKIP NEXT                           00620000
+         CLI   OPTFLAG,C'R'   WAS RECOMPUTE SPECIFIED                   00621000
+         BE    DONTASK        NO QUESTIONS IF IT WAS                    00622000
+         CLI   OPTFLAG,C'L'   WAS IT STRICTLY A LABELLING REQUEST       00623000
+         BE    GETLAB         IF SO SKIP ONE QUESTION                   00624000
+         BAL   R7,ASK         CHANGE OF HEART ?                         00625000
+         LA    R1,WAITRD      POINT TO WAITRD LIST                      00626000
+         SVC   X'CA'          DO IT                                     00627000
+         CLC   =C'YES',INBUF  STILL WANT TO ?                           00628000
+         BNE   ERR8           NO..                                      00629000
+         OI    FLAG,LAB       SIGNAL LABEL REQUIRED                     00630000
+         L     R1,ADEVTAB     IF THIS DISK LOGGED IN           @VA01151 00631000
+         LA    R15,10         WE MUST RELEASE BY NUMBER        @VA01151 00632000
+         LH    R7,DEVADDR     BEFORE ANY FANCY STUFF           @VA01151 00633000
+CKDISK   LA    R1,DTENTLEN(R1) BUMP TO NEXT ENTRY OR 1ST DISK  @VA01151 00634000
+         CH    R7,0(R1)       MATCH TO-BE-FORMATTED ADDR       @VA01151 00635000
+         BE    RELDSK         AGAINST THOSE LOGGED IN          @VA01151 00636000
+         BCT   R15,CKDISK     AND RELEASE IF FOUND             @VA01151 00637000
+         B     GETLAB         NO MATCH, SKIP RELEASE           @VA01151 00638000
+RELDSK   MVC   RELNO,8(R6)    PUT EBCDIC ADDR IN PLIST         @VA01151 00639000
+         LA    R1,RELIST      PLIST FOR RELEASE                @VA01151 00640000
+         SVC   202                                             @VA01151 00641000
+         DC    AL4(*+4)                                        @VA01151 00642000
+GETLAB   BAL   R7,ASKAGAIN    NEXT QUESTION                             00643000
+         LA    R1,WAITRD      POINT TO WAITRD PLIST                     00644000
+         SVC   X'CA'          DO IT                                     00645000
+         LH    R15,INPCNT+2   GET REPLY LENGTH                          00646000
+         LTR   R15,R15        SHOULD BE POSITIVE                        00647000
+         BNP   ERR8           ERROR IF NOT                              00648000
+         LA    R1,=CL8'CONWAIT' WAIT FOR CONSOLE MESSAGES      @VA03452 00649000
+         SVC   202            GIVEN UP TO THIS POINT TO FINISH @VA03452 00650000
+         CLI   OPTFLAG,C'L'   ONLY LABELLING?                           00651000
+         BE    LABONLY        YES. GET ON WITH IT                       00652000
+         BAL   R7,HANDHOLD    SEND REASSURANCE MESSAGE                  00653000
+DONTASK  TM    ADTFLG2,ADTFROS+ADTFDOS PREV OS DISK LOGGED IN? @VA04337 00654000
+         BNZ   RELDOD                                          @VA04337 00654500
+         TM    ADTFLG1,ADTFRO+ADTFRW DISK LOGGED IN AT ALL?    @VA04337 00655000
+         BZ    NORELUFD       NO, SKIP RELEASE UFD             @VA04337 00655500
+RELDOD   CLI   OPTFLAG,C'R'   RECOMPUTE?                       @VA04337 00656000
+         BE    NORELUFD       SKIP RELUFD                               00657000
+* CLOSE ANY CMS FILES ON THIS DISK WHICH MIGHT BE OPEN:                 00658000
+         IC    R1,ADTM        PICK UP MODE LETTER,             @VA04015 00659000
+         STC   R1,THISDISK    STORE IN 'FINISALL' P-LIST       @VA04015 00660000
+         LA    R1,FINISALL    POINT TO 'FINIS * * X'  PLIST    @VA04015 00661000
+         L     R15,AFINIS     CLOSE ALL/ANY OPEN CMS FILES     @VA04015 00662000
+         BALR  R14,R15        ...                              @VA04015 00663000
+         LR    R0,R13         GET A(ADT)                       @VA04015 00664000
+         L     R15,=A(RELUFD) GET A(DMSALU)                             00665000
+         BALR  R14,R15        GO THERE                                  00666000
+NORELUFD CLI   DEVADDR+3,X'09'     WAS THIS A 3330                      00667000
+         BE    HNDL3330       YES                                       00668000
+         CLI   DEVADDR+3,T3340 3340 ?                          @V2A2014 00669000
+         BE    HNDL3340       YES..BR                          @V2A2014 00670000
+         CLI   DEVADDR+3,T3350 3350 ?                          @V304498 00671000
+         BE    HNDL3350       YES..BR                          @V304498 00672000
+         CLI   DEVADDR+3,X'08'     IS IT A 2314?                        00673000
+         BE    HNDL2314       YES                                       00674000
+         B     ERR7           ERROR IF UNSUPPORTED DASD DEVICE @VA03452 00675000
+         SPACE                                                          00676000
+         DS    0F                                              @VA04015 00677000
+FINISALL DC    CL8'FINIS'     CLOSE ALL...                     @VA04015 00678000
+         DC    CL8'*'         FILENAMES,                       @VA04015 00679000
+         DC    CL8'*'         FILETYPES,                       @VA04015 00680000
+THISDISK DC    CL2'X '        ON "THIS" DISK.                  @VA04015 00681000
+*                                                                       00682000
+********************                                                    00683000
+LETTERD  DC    C'D'                                               P0586 00684000
+ADDRS    DC    A(ERR1)                                            P0586 00685000
+         DC    A(SCANOPT)                                               00686000
+         DC    A(SCANUNIT)                                              00687000
+         DC    A(SCANNER)                                               00688000
+DEVADDR  DC    F'0'                                                     00689000
+ADTADDR  DC    F'0'                                                     00690000
+MAXPOSS  DC    XL4'FFF'       MAXIMUM VIRTUAL DEVICE ADDRESS   @VA04296 00691000
+OPTIONS  EQU   *                                                        00692000
+         DC    CL8'RECOMP'                                              00693000
+         DC    CL8'LABEL'                                               00694000
+NUMOPTS  EQU   (*-OPTIONS)/8                                            00695000
+MDASD    DC    X'04'                                                    00696000
+MASKS    DC    X'1040800108'  08 FOR 3350                      @V304498 00697000
+NUMDEVS  EQU   *-MASKS                                                  00698000
+TYPBYTES DC    X'090801070B'  0B FOR 3350                      @V304498 00699000
+MWR      DC    X'80'          READ-ONLY FLAG IN VDEVBLOK          V0149 00700000
+DATAL    EQU   800                                                      00701000
+********************                                                    00702000
+         SPACE                                                          00703000
+         DS    0F                                                       00704000
+WAITRD   DC    CL8'WAITRD'                                              00705000
+         DC    AL1(1),AL3(INBUF)                                        00706000
+INPCNT   DC    C'U',AL3(*-*)                                            00707000
+         SPACE 1                                                        00708000
+RELIST   DS    0F                                              @VA01151 00709000
+         DC    CL8'RELEASE'                                    @VA01151 00710000
+RELNO    DC    CL8' '                                          @VA01151 00711000
+         DC    8X'FF'                                          @VA01151 00712000
+DTENTLEN EQU   16             LENGTH OF A DEVICE TABLE ENTRY   @VA01151 00713000
+         EJECT                                                          00714000
+HNDL3330 CLI   OPTFLAG,C'R'   IS IT FORMAT "R" ?                        00715000
+         BE    CHEK3330       YES.                                      00716000
+HNDL3340 CLI   OPTFLAG,C'R'   IS IT FORMAT 'R' ?               @V2A2014 00717000
+         BE    CHEK3340       YES..BR                          @V2A2014 00718000
+HNDL3350 CLI   OPTFLAG,C'R'   IS IT FORMAT 'R' ?               @V304498 00719000
+         BE    CHEK3350       YES..BR                          @V304498 00720000
+ST3330   EQU   *              NOW FORMAT A 3330                         00721000
+         MVC   TIC3330(8),DUM3330  DON'T WRITE RECORD 0 OR HOME ADDRESS 00722000
+         MVC   R8ASTUFX(4),ADJUST8 SET PROPER DATA LENGTH.              00723000
+         CLI   DEVADDR+3,T3350 3350 ?                          @V304498 00724000
+         BE    CONT3330       YES...BR                         @V304498 00725000
+         MVC   TIC30(8),DUM2311 NO RECORD 15 IS NEEDED EITHER. @V304498 00726000
+         MVC   END3330(8),CCWNOOP  MARK THE END OF THE CCW'S            00727000
+CONT3330 EQU   *                                               @V304498 00728000
+         MVC   NOSPEC(8),NOSEEK    SKIP THE OVERFLOW CCW'S              00729000
+         CLI   DEVADDR+3,T3340 3340 ?                          @V2A2014 00730000
+         BNE   ST2314         NO...BR                          @V2A2014 00731000
+         MVC   TICR8(8),DUM2311 TIC TO READ CHECK              @V2A2014 00732000
+         MVC   OTHERS(8),CCWNOOP END OF STRING                 @V2A2014 00733000
+         B     ST2314         JOIN COMMON CODE.                         00734000
+HNDL2314 CLI   OPTFLAG,C'R'   FORMAT  R ?                               00735000
+         BE    CHEK2314       BZ IF YES, GO CHECK CYL., ETC.            00736000
+         MVC   OTHERS(8),NXTSEEK   SET UP TO READ RECORDS 9-15          00737000
+         MVC   CCWWR16(8),DUM2311 SET TIC TO READ CHECK        @V304498 00738000
+         MVC   CCWRD16(8),CCWNOOP SET END OF CHANNEL PROGRAM   @V304498 00739000
+         MVI   SSECT,03       AND NO-OP THE SET-SECTOR.        @V304498 00740000
+ST2314   EQU   *              COMMON CODE FOR 2314 & OTHERS:   @V304498 00741000
+         TM    FLAG,TDK       IS IT A "TEMPORARY" DISK ?       @V304498 00742000
+         BZ    FRSTCYL         BZ IF NOT.                               00743000
+         MVC   CHECKIT(8),CCWNOOP  BYPASS READ-AFTER-WRITE CHECK IF YES 00744000
+FRSTCYL  SR    R7,R7          IMPLY THAT FIRST CYLINDER ADDRESS IS ZERO 00745000
+HNXTCYL  BAL   R15,STRCYL     STORE CYLINDER NUMBER WHERE NEEDED        00746000
+         SSM   OK81           PERMIT INTERRUPTS BRIEFLY;       @VA03452 00747000
+*                             (TO ALLOW MESSAGES TO FINISH ETC)         00748000
+         SSM   NOINTS         AND THEN INHIBIT AGAIN           @VA03452 00749000
+         SR    R2,R2          CLEAR HEAD NUMBER,                        00750000
+         LA    R3,10          SET FOR 10                                00751000
+         CLI   DEVADDR+3,X'09'     IS IT A 3330?                        00752000
+         BE    CYL3330        YES..SET HEAD COUNT              @V2A2014 00753000
+         CLI   DEVADDR+3,T3350 3350 ?                          @V304498 00754000
+         BE    CYL3350        YES..BR                          @V304498 00755000
+         CLI   DEVADDR+3,T3340 3340 ?                          @V2A2014 00756000
+         BE    CYL3340        YES..BR                          @V2A2014 00757000
+         B     HNXTHED        CONTINUE                         @V2A2014 00758000
+CYL3340  LA    R3,12          SET NO. OF HEADS FOR 3340        @V2A2014 00759000
+         B     HNXTHED        CONTINUE                         @V2A2014 00760000
+CYL3350  LA    R3,30          SET NO. OF HEADS FOR 3350        @V304498 00761000
+         B     HNXTHED        CONTINUE                         @V304498 00762000
+CYL3330  LA    R3,19          SET NO. OF HEADS FOR 3330        @V2A2014 00763000
+HNXTHED  LA    R14,FMT        SET UP CCW-STRING IN R14,                 00764000
+         BAL   R15,STRHEAD    STORE HEAD NUMBERS WHERE NEEDED           00765000
+LAR410   L     R4,ERRLIM      ALLOW FOR 10 POSSIBLE ERRORS              00766000
+*                             R5 HOLDS DEVICE ADDRESS;                  00767000
+*                             R14 POINTS TO CCW-STRING;                 00768000
+         DC    X'835E0020'    LET 'CP' DO ALL THE HARD WORK.   @VA03452 00769000
+         BNZ   IOERROR                                                  00770000
+         LA    R2,1(,R2)      INCREMENT FOR NEXT (FULL) TRACK...        00771000
+         CLI   DEVADDR+3,X'08'     IS IT A 2314?                        00772000
+         BNE   HNDLNXT        NOPE.                                     00773000
+         LA    R2,1(,R2)      INDEX BY HEAD-PAIRS.                      00774000
+HNDLNXT  BCT   R3,HNXTHED     GO HANDLE NEXT HEAD                       00775000
+         LA    R7,1(,R7)      INCREMENT NUMBER OF CYLINDERS             00776000
+         C     R7,LIMCYL      HAVE WE REACHED MAXIMUM ?                 00777000
+         BL    HNXTCYL        IF NOT, GO HANDLE NEXT CYLINDER.          00778000
+         B     YESEND         WE'RE DONE IF MAXIMUM IS REACHED.         00779000
+         SPACE                                                          00780000
+IOERROR  ST    R14,SCRATCH                                              00781000
+         CLI   SENSE,X'81'                                              00782000
+         BE    YESEND                                                   00783000
+         CLI   SENSE,X'80'    SEEK CHECK 3330 OR 3340 ?        @V2A2014 00784000
+         BNE   ERR10X         NO..ERROR                        @V2A2014 00785000
+         CLI   DEVADDR+3,T2314 IS THISA 2314 ?                 @V2A2014 00786000
+         BNE   YESEND         NO..OK, MUST BE 3330 OR 3340     @V2A2014 00787000
+ERR10X   BAL   R3,ERR10                                                 00788000
+         B     YESEND                                                   00789000
+         SPACE                                                          00790000
+SCRATCH  DC    F'0'                                                     00791000
+SENSE    EQU   SCRATCH+2                                                00792000
+         EJECT                                                          00793000
+*   CCW STRING FOR FORMATTING DISK                                      00794000
+*        NOTE:  PLEASE KEEP CODE SERIALLY RE-USABLE.                    00795000
+*                                                                       00796000
+FMT      CCW   07,SEEKA,CC,6            SEEK                            00797000
+         CCW   31,FILEMSK,CC+SILI,1     SET FILE MASK                   00798000
+TIC3330  DS    0D                                                       00799000
+         CCW   25,SEEKA+1,CC+SILI,5     WRITE HOME ADDRESS              00800000
+         CCW   21,SEEKA2,CC+SILI,16     WRITE "RECORD R0"               00801000
+         CCW   08,CONT14,0,1                                            00802000
+SCHA     CCW   35,INDXPT,CC+SILI,1 SET SECTOR FOR INDEX POINT  @VA03452 00803000
+         CCW   49,SEEKA2,CC+SILI,5                             @VA03452 00804000
+         CCW   08,*-8,0,0                                               00805000
+CONT14   CCW   29,R1STUF,CC+SILI,8  WRITE COUNT, KEY, & DATA, RECORD 1  00806000
+         CCW   29,R2STUF,CC+SILI,8  WRITE COUNT, KEY, & DATA, RECORD 2  00807000
+         CCW   29,R3STUF,CC+SILI,8  WRITE COUNT, KEY, & DATA, RECORD 3  00808000
+         CCW   29,R4STUF,CC+SILI,8  WRITE COUNT, KEY, & DATA, RECORD 4  00809000
+         CCW   29,R5STUF,CC+SILI,8  WRITE COUNT, KEY, & DATA, RECORD 5  00810000
+         CCW   29,R6STUF,CC+SILI,8  WRITE COUNT, KEY, & DATA, RECORD 6  00811000
+         CCW   29,R7STUF,CC+SILI,8  WRITE COUNT, KEY, & DATA, RECORD 7  00812000
+NOSPEC   DS    0D                                                       00813000
+         CCW   01,R8STUF,CC+SILI,8  SPECIAL WRITE CNT KEY & DATA REC 8  00814000
+         CCW   07,SEEKB,CC+SILI,6   NEW SEEK,                           00815000
+         CCW   25,SEEKB+1,CC+SILI,5 WRITE NEW HOME ADDRESS,             00816000
+         CCW   21,SEEKB2,CC+SILI,16 WRITE NEW "RECORD R0"               00817000
+CONT30   CCW   29,R8ASTUF,CC+SILI,8 WRITE COUNT, KEY, & DATA, RECORD 8  00818000
+TICR8    CCW   29,R9STUF,CC+SILI,8 WRITE CKD RECORD 9          @V2A2014 00819000
+         CCW   29,R10STUF,CC+SILI,8 WRITE COUNT, KEY, & DATA, RECORD 10 00820000
+         CCW   29,R11STUF,CC+SILI,8 WRITE COUNT, KEY, & DATA, RECORD 11 00821000
+         CCW   29,R12STUF,CC+SILI,8 WRITE COUNT, KEY, & DATA, RECORD 12 00822000
+         CCW   29,R13STUF,CC+SILI,8 WRITE COUNT, KEY, & DATA, RECORD 13 00823000
+         CCW   29,R14STUF,CC+SILI,8 WRITE COUNT, KEY, & DATA, RECORD 14 00824000
+TIC30    DS    0D                                                       00825000
+         CCW   29,R15STUF,CC+SILI,8 WRITE COUNT, KEY, & DATA, RECORD 15 00826000
+CCWWR16  CCW   29,R16STUF,CC+SILI,8 WRITE CKD RECORD 16        @V304498 00827000
+         CCW   29,R17STUF,CC+SILI,8 WRITE CKD RECORD 17        @V304498 00828000
+         CCW   29,R18STUF,CC+SILI,8 WRITE CKD RECORD 18        @V304498 00829000
+         CCW   29,R19STUF,CC+SILI,8 WRITE CKD RECORD 19        @V304498 00830000
+CHECKIT  CCW   07,SEEKA,CC,6        SEEK CYLINDER & HEAD 0, 2, ETC.     00831000
+SSECT    CCW   35,INDXPT,CC+SILI,1 SET SECTOR FOR INDEX POINT  @VA03452 00832000
+         CCW   49,SEEKA2,CC,5       SEARCH FOR RECORD 0                 00833000
+         CCW   08,*-8,0,1           ...                                 00834000
+         CCW   30,0,CC+SILI+NO,1    READ COUNT, KEY & DATA RECORD 1     00835000
+         CCW   30,0,CC+SILI+NO,1    READ COUNT, KEY & DATA RECORD 2     00836000
+         CCW   30,0,CC+SILI+NO,1    READ COUNT, KEY & DATA RECORD 3     00837000
+         CCW   30,0,CC+SILI+NO,1    READ COUNT, KEY & DATA RECORD 4     00838000
+         CCW   30,0,CC+SILI+NO,1    READ COUNT, KEY & DATA RECORD 5     00839000
+         CCW   30,0,CC+SILI+NO,1    READ COUNT, KEY & DATA RECORD 6     00840000
+         CCW   30,0,CC+SILI+NO,1    READ COUNT, KEY & DATA RECORD 7     00841000
+         CCW   30,0,CC+SILI+NO,1    READ COUNT, KEY & DATA RECORD 8     00842000
+OTHERS   CCW   08,*+8,0,1                                               00843000
+NXTRK    CCW   30,0,CC+SILI+NO,1    READ COUNT, KEY & DATA RECORD 9     00844000
+         CCW   30,0,CC+SILI+NO,1    READ COUNT, KEY & DATA RECORD 10    00845000
+         CCW   30,0,CC+SILI+NO,1    READ COUNT, KEY & DATA RECORD 11    00846000
+         CCW   30,0,CC+SILI+NO,1    READ COUNT, KEY & DATA RECORD 12    00847000
+         CCW   30,0,CC+SILI+NO,1    READ COUNT, KEY & DATA RECORD 13    00848000
+         CCW   30,0,CC+SILI+NO,1    READ COUNT, KEY & DATA RECORD 14    00849000
+END3330  CCW   30,0,CC+SILI+NO,1    READ COUNT, KEY & DATA RECORD 15    00850000
+CCWRD16  CCW   30,0,CC+SILI+NO,1    READ CKD RECORD 16         @V304498 00851000
+         CCW   30,0,CC+SILI+NO,1    READ CKD RECORD 17         @V304498 00852000
+         CCW   30,0,CC+SILI+NO,1    READ CKD RECORD 18         @V304498 00853000
+         CCW   30,0,CC+SILI+NO,1    READ CKD RECORD 19         @V304498 00854000
+CCWNOOP  CCW   03,0,SILI,1          NO-OP = END OF CCW STRING.          00855000
+*                                                                       00856000
+BSEEK    CCW   07,SEEKB,CC,6        SEEK NEXT HEAD                      00857000
+         CCW   49,SEEKB2,CC,5       SEARCH RECORD 0                     00858000
+         CCW   08,NXTRK,0,1                                             00859000
+*                                                                       00860000
+NXTSEEK  CCW   08,BSEEK,0,1                                             00861000
+DUM2311  CCW   08,CHECKIT,0,1 "TIC CHECKIT" (WHERE NEEDED)     @VA03452 00862000
+DUM3330  CCW   08,SCHA,0,1                                              00863000
+NOSEEK   CCW   08,CONT30,0,1                                            00864000
+*                                                                       00865000
+* INITIAL (DEFAULT) VALUES FOR CCWS IN ABOVE STRING WHICH ARE MODIFIED: 00866000
+JTIC3330 CCW   25,SEEKA+1,CC+SILI,5                            @VA03452 00867000
+JNOSPEC  CCW   01,R8STUF,CC+SILI,8                             @VA03452 00868000
+JTICR8   CCW   29,R9STUF,CC+SILI,8                             @VA03452 00869000
+JTIC30   CCW   29,R15STUF,CC+SILI,8                            @VA03452 00870000
+JCHECKIT CCW   07,SEEKA,CC,6                                   @VA03452 00871000
+JOTHERS  CCW   08,OTHERS+8,0,1                                 @VA03452 00872000
+JEND3330 CCW   30,0,CC+SILI+NO,1                               @VA03452 00873000
+JCCWWR16 CCW   29,R16STUF,CC+SILI,8                            @V304498 00874000
+JCCWRD16 CCW   30,0,CC+SILI+NO,1                               @V304498 00875000
+         EJECT                                                          00876000
+         CNOP  2,4                                                      00877000
+SEEKA    DC    H'0'           ("BIN" - ALWAYS 0)                        00878000
+SEEKA2   DC    AL2(*-*)       CYLINDER NO. FOR SEEK, HOME-ADDRESS, & R0 00879000
+SEEKA4   DC    AL2(*-*)       START WITH HEAD (TRACK) 0                 00880000
+         DC    X'00000008',8X'00'  LAST 12 BYTES OF "RECORD R0"         00881000
+SEEKB    DC    H'0'           ("BIN" - ALWAYS 0)                        00882000
+SEEKB2   DC    AL2(*-*)       CYLINDER NO. FOR SEEK, HOME-ADDRESS, & R0 00883000
+SEEKB4   DC    AL2(*-*)       START WITH HEAD (TRACK) 1                 00884000
+         DC    X'00000008',8X'00'  LAST 12 BYTES OF "RECORD R0"         00885000
+         DS    0D             FIRST 8 BYTES FOR EACH RECORD (1-15) ...  00886000
+R1STUF   DC    AL2(*-*)       CYLINDER                                  00887000
+         DC    AL2(*-*)       HEAD (0,2,4, ..., 18)                     00888000
+         DC    AL1(01),AL3(DATAL)  RECORD NO. 01                        00889000
+*                                                                       00890000
+R2STUF   DC    AL2(*-*)       CYLINDER                                  00891000
+         DC    AL2(*-*)       HEAD (0,2,4, ..., 18)                     00892000
+         DC    AL1(02),AL3(DATAL)  RECORD NO. 02                        00893000
+*                                                                       00894000
+R3STUF   DC    AL2(*-*)       CYLINDER                                  00895000
+         DC    AL2(*-*)       HEAD (0,2,4, ..., 18)                     00896000
+         DC    AL1(03),AL3(DATAL)  RECORD NO. 03                        00897000
+*                                                                       00898000
+R4STUF   DC    AL2(*-*)       CYLINDER                                  00899000
+         DC    AL2(*-*)       HEAD (0,2,4, ..., 18)                     00900000
+         DC    AL1(04),AL3(DATAL)  RECORD NO. 04                        00901000
+*                                                                       00902000
+R5STUF   DC    AL2(*-*)       CYLINDER                                  00903000
+         DC    AL2(*-*)       HEAD (0,2,4, ..., 18)                     00904000
+         DC    AL1(05),AL3(DATAL)  RECORD NO. 05                        00905000
+*                                                                       00906000
+R6STUF   DC    AL2(*-*)       CYLINDER                                  00907000
+         DC    AL2(*-*)       HEAD (0,2,4, ..., 18)                     00908000
+         DC    AL1(06),AL3(DATAL)  RECORD NO. 06                        00909000
+*                                                                       00910000
+R7STUF   DC    AL2(*-*)       CYLINDER                                  00911000
+         DC    AL2(*-*)       HEAD (0,2,4, ..., 18)                     00912000
+         DC    AL1(07),AL3(DATAL)  RECORD NO. 07                        00913000
+*                                                                       00914000
+R8STUF   DC    AL2(*-*)       CYLINDER                                  00915000
+         DC    AL2(*-*)       HEAD (0,2,4, ..., 18)                     00916000
+         DC    AL1(08),AL3(DATAL-400)  RECORD NO. 08 (FIRST HALF)       00917000
+*                                                                       00918000
+R8ASTUF  DC    AL2(*-*)       CYLINDER                                  00919000
+         DC    AL2(*-*)       HEAD (1,3,5, ..., 19)                     00920000
+R8ASTUFX DC    AL1(08),AL3(400)        RECORD NO. 08 (SECOND HALF)      00921000
+*                                                                       00922000
+R9STUF   DC    AL2(*-*)       CYLINDER                                  00923000
+         DC    AL2(*-*)       HEAD (1,3,5, ..., 19)                     00924000
+         DC    AL1(09),AL3(DATAL)  RECORD NO. 09                        00925000
+*                                                                       00926000
+R10STUF  DC    AL2(*-*)       CYLINDER                                  00927000
+         DC    AL2(*-*)       HEAD (1,3,5, ..., 19)                     00928000
+         DC    AL1(10),AL3(DATAL)  RECORD NO. 10                        00929000
+*                                                                       00930000
+R11STUF  DC    AL2(*-*)       CYLINDER                                  00931000
+         DC    AL2(*-*)       HEAD (1,3,5, ..., 19)                     00932000
+         DC    AL1(11),AL3(DATAL)  RECORD NO. 11                        00933000
+*                                                                       00934000
+R12STUF  DC    AL2(*-*)       CYLINDER                                  00935000
+         DC    AL2(*-*)       HEAD (1,3,5, ..., 19)                     00936000
+         DC    AL1(12),AL3(DATAL)  RECORD NO. 12                        00937000
+*                                                                       00938000
+R13STUF  DC    AL2(*-*)       CYLINDER                                  00939000
+         DC    AL2(*-*)       HEAD (1,3,5, ..., 19)                     00940000
+         DC    AL1(13),AL3(DATAL)  RECORD NO. 13                        00941000
+*                                                                       00942000
+R14STUF  DC    AL2(*-*)       CYLINDER                                  00943000
+         DC    AL2(*-*)       HEAD (1,3,5, ..., 19)                     00944000
+         DC    AL1(14),AL3(DATAL)  RECORD NO. 14                        00945000
+*                                                                       00946000
+R15STUF  DC    AL2(*-*)       CYLINDER                                  00947000
+         DC    AL2(*-*)       HEAD (1,3,5, ..., 19)                     00948000
+         DC    AL1(15),AL3(DATAL)  RECORD NO. 15                        00949000
+*                                                                       00950000
+R16STUF  DC    AL2(*-*)       CYLINDER                         @V304498 00951000
+         DC    AL2(*-*)       HEAD (1,3,5, ..., 19)            @V304498 00952000
+         DC    AL1(16),AL3(DATAL)   RECORD NO. 16              @V304498 00953000
+*                                                                       00954000
+R17STUF  DC    AL2(*-*)       CYLINDER                         @V304498 00955000
+         DC    AL2(*-*)       HEAD (1,3,5, ..., 19)            @V304498 00956000
+         DC    AL1(17),AL3(DATAL)   RECORD NO. 17              @V304498 00957000
+*                                                                       00958000
+R18STUF  DC    AL2(*-*)       CYLINDER                         @V304498 00959000
+         DC    AL2(*-*)       HEAD (1,3,5, ..., 19)            @V304498 00960000
+         DC    AL1(18),AL3(DATAL)   RECORD NO. 18              @V304498 00961000
+*                                                                       00962000
+R19STUF  DC    AL2(*-*)       CYLINDER                         @V304498 00963000
+         DC    AL2(*-*)       HEAD (1,3,5, ..., 19)            @V304498 00964000
+         DC    AL1(19),AL3(DATAL)   RECORD NO. 19              @V304498 00965000
+*                                                                       00966000
+NOINTS   DC    X'00'                                                    00967000
+OK81     DC    X'81'                                                    00968000
+ADJUST8  DC    AL1(08),AL3(DATAL)                                       00969000
+FILEMSK  DC    X'C0'          PERMIT WRITES                             00970000
+         EJECT                                                          00971000
+*        SUBROUTINE TO STORE CYLINDER NUMBER (IN R7) WHEREVER NEEDED    00972000
+STRCYL   STH   R7,SEEKA2      SET UP THE CYLINDER NUMBER.               00973000
+         STH   R7,SEEKB2      ...                                       00974000
+         STM   R3,R5,SAVE36   SAVE REGISTERS TO MAKE SOME AVAILABLE     00975000
+         LM    R3,R5,BXLEAD1  SET UP REGS FOR BXLE,                     00976000
+STRCYLP  STH   R7,0(,R3)      STORE CYLINDER NUMBER WHERE NEEDED        00977000
+         BXLE  R3,R4,STRCYLP  ITERATE FOR MANY PLACES                   00978000
+         LM    R3,R5,SAVE36   RESTORE NECESSARY REGISTERS               00979000
+         BR    R15            RETURN TO CALLER.                         00980000
+*        SUBROUTINE TO STORE HEAD NUMBER WHEREVER NEEDED                00981000
+STRHEAD  STM   R3,R6,SAVE36   SAVE REGISTERS TO MAKE SOME AVAILABLE     00982000
+         CLI   DEVADDR+3,X'09'     IS IT A 3330?                        00983000
+         BE    STRHEDX        YES. GET INTO THE PROPER LOOP.            00984000
+         CLI   DEVADDR+3,T3350 3350 ?                          @V304498 00985000
+         BE    STRHEDZ        GET IN 3350 LOOP                 @V304498 00986000
+         CLI   DEVADDR+3,T3340 3340 ?                          @V2A2014 00987000
+         BE    STRHEDY        GET IN 3340 LOOP                 @V2A2014 00988000
+         LM    R3,R5,BXLEAD2  SET UP REGS FOR 1ST 8 HEADS TO SET UP,    00989000
+         STH   R2,SEEKA4      STORE FOR SEEK, ETC.                      00990000
+STRHED1  STH   R2,2(,R3)      STORE HEAD NUMBER (0, 2, 4, ETC.)         00991000
+         BXLE  R3,R4,STRHED1  ITERATE FOR THE FIRST EIGHT.              00992000
+         LM    R3,R5,BXLEAD3  NOW SET UP FOR THE LAST EIGHT,            00993000
+         LA    R6,1(,R2)      HEAD NUMBER PLUS 1 INTO R6,               00994000
+         STH   R6,SEEKB4      STORE FOR SEEK, ETC.                      00995000
+STRHED2  STH   R6,2(,R3)      STORE NEAD NUMBER (1, 3, 5, ETC.)         00996000
+         BXLE  R3,R4,STRHED2  ITERATE FOR THE LAST 8 PLACES WE NEED IT  00997000
+         LM    R3,R6,SAVE36   RESTORE NECESSARY REGISTERS               00998000
+         BR    R15            THEN RETURN TO CALLER.                    00999000
+STRHEDX  LM    R3,R5,BXLEAD4  GET RANGE/INDEX VALUES.                   01000000
+         STH   R2,SEEKA4      STORE FOR SEEK ETC.                       01001000
+STRHEDX1 STH   R2,2(,R3)      STORE HEAD NUMBER.                        01002000
+         BXLE  R3,R4,STRHEDX1 ITERATE FOR A FULL TRACK.                 01003000
+         LM    R3,R6,SAVE36   THEN, RETURN TO THE CALLER.               01004000
+         BR    R15                                                      01005000
+STRHEDY  LM    R3,R5,BXLEAD1  GET RANGE/INDEX VALUES           @V2A2014 01006000
+         STH   R2,SEEKA4      STORE FOR SEEK ETC.              @V2A2014 01007000
+STRHEDY1 STH   R2,2(,R3)      STORE HEAD NUMBER                @V2A2014 01008000
+         BXLE  R3,R4,STRHEDY1 ITEERATE FOR FULL 3340 TRACK     @V2A2014 01009000
+         LM    R3,R6,SAVE36   THEN RETURN                      @V2A2014 01010000
+         BR    R15            TO CALLER                        @V2A2014 01011000
+*                                                                       01012000
+STRHEDZ  LM    R3,R5,BXLEAD5  GET RANGE/INDEX VALUES           @V304498 01013000
+         STH   R2,SEEKA4      STORE FOR SEEK ETC.              @V304498 01014000
+STRHEDZ1 STH   R2,2(,R3)      STORE HEAD NUMBER                @V304498 01015000
+         BXLE  R3,R4,STRHEDZ1 ITEERATE FOR FULL 3350 TRACK     @V304498 01016000
+         LM    R3,R6,SAVE36   THEN RETURN                      @V304498 01017000
+         BR    R15            TO CALLER                        @V304498 01018000
+*                                                                       01019000
+SAVE36   DS    4F             R3 THRU R6 SAVED HERE                     01020000
+BXLEAD1  DC    A(R1STUF),F'8',A(R19STUF) FOR STORING CYL NO'S  @V304498 01021000
+BXLEAD2  DC    A(R1STUF),F'8',A(R8STUF) FOR STORING HEAD NUMBERS 0, 2,  01022000
+BXLEAD3  DC    A(R8ASTUF),F'8',A(R15STUF) FOR STORING HEAD NUMBERS 1, 3 01023000
+BXLEAD4  DC    A(R1STUF),F'8',A(R14STUF)                                01024000
+BXLEAD5  DC    A(R1STUF),F'8',A(R19STUF)                       @V304498 01025000
+         EJECT                                                          01026000
+*                                                                       01027000
+CMSEQ    DC    C'CMS='        MUST PRECEDE 'INBUF' ...                  01028000
+INBUF    DC    CL6'SCRTCH'    LABEL TYPED IN HERE (SCRTCH VALUE SHOWN)  01029000
+DISKBUF  DC    800X'00'       REMAINDER OF 130-BYTE BUFFER FOR WAITRD.  01030000
+*                                                                       01031000
+DUMTDISK DC    CL6'SCRTCH'    SCRTCH LABEL.                             01032000
+SAVE14   DC    2F'0'          R14 SAVED HERE FOR EXITING WHEN THRU.     01033000
+ERRKODE  EQU   *-1            RETURN- (ERROR-) CODE BYTE                01034000
+*                                                                       01035000
+LIMCYL   DC    F'203'  LIMIT FOR NUMBER OF CYLINDERS (CAN BE FILLED IN) 01036000
+*                                                                       01037000
+ERRLIM   DC    F'10'          ...                                       01038000
+TEN      EQU   *-2                                                      01039000
+*                                                                       01040000
+FLAG     DC    F'0'               SWITCHES                              01041000
+TDK      EQU   X'40'                                                    01042000
+LAB      EQU   X'02'          LABEL IS WANTED                           01043000
+STAT     EQU   X'01'          CALL TO 'STAT' WANTED BEFORE EXITING.     01044000
+*                                                                       01045000
+OPTFLAG  EQU   FLAG+1                                                   01046000
+*                                                                       01047000
+INDXPT   DC    X'00'          SECTOR NO. OF 00 FOR INDEX POINT @VA03452 01048000
+         LTORG                                                          01049000
+         EJECT                                                          01050000
+*        COMES HERE WHEN END-OF-DISK REACHED ...                        01051000
+*                                                                       01052000
+YESEND   LTR   R7,R7          IF ZERO CYLINDERS FORMATTED..    @VA01447 01053000
+         BZ    ERR10          ..MUST BE A DISK ERROR           @VA01447 01054000
+YESEND1  ST    R7,ADTCYL      STORE CYLINDER COUNT IN ADT      @VA01447 01055000
+         BAL   R3,TYPECYL                                               01056000
+         LTR   R7,R7          BUT 1ST CHECK NO. CYLINDERS FORMATTED     01057000
+         BZ    LM1415         BZ IF 0, OMIT STORING UNIT-TYPE-BYTE.     01058000
+         MVC   ADTID(6),INBUF STORE DISK-LABEL IN ACTIVE DISK TABLE     01059000
+         L     R6,ADTDTA      R6 AGAIN POINTS TO NUCON DEVICE-TABLE,    01060000
+         L     R15,DEVADDR    GET THE DEVICE INFO WE CONSTRUCTED.       01061000
+         ST    R15,DTAD(,R6)  AND PUT IT INTO THE DEVICE TABLE.         01062000
+*                                                                       01063000
+         L     R3,ADTFDA      R3 = A(PSTAT)                             01064000
+         LTR   R3,R3          (IF ANY)                                  01065000
+         BP    CHEKQQ         BP IF WE'VE ALREADY GOT ONE.              01066000
+*                             (NOTE - ALREADY CLEARED BY 'RELUFD')      01067000
+* ALLOCATE 102 DOUBLE-WORDS FOR PSTAT                                   01068000
+         DMSFREE DWORDS=(102),TYPE=NUCLEUS,TYPCALL=BALR        @VM03083 01069000
+         ST    R1,ADTFDA      STORE ADDRESS IN ACTIVE DISK TABLE.       01070000
+         OI    ADTFLG1,ADTFFSTF  FLAG 'PSTAT' IN FREE STORAGE           01071000
+         LR    R3,R1          PLACE IN R3 AS ABOVE                      01072000
+         LA    R0,40          40 BYTES AND                              01073000
+         LA    R1,800         800 BYTES                                 01074000
+         STM   R0,R1,0(R3)    INTO FIRST 8 BYTES OF NEW 'PSTAT'.        01075000
+         LA    R3,8(,R3)      SPACE OVER PRELIMINARY COUNTERS,          01076000
+         XC    0(208,R3),0(R3)     CLEAR 1ST 208 BYTES OF 'PSTAT',      01077000
+         MVC   208(200,R3),0(R3)   NEXT 200 BYTES,                      01078000
+         MVC   408(200,R3),0(R3)   NEXT 200 BYTES,                      01079000
+         MVC   608(200,R3),0(R3)  AND LAST 200 BYTES INCLUDING POINTERS 01080000
+CHEKQQ   CLI   DEVADDR+3,T2314 2314 ?                          @V2A2014 01081000
+         BNE   FINCOMP        NO..BR                           @V2A2014 01082000
+         L     R4,ADTQQM      R4 = A(PQQMSK)                            01083000
+         LTR   R4,R4          DO WE HAVE A PQQMSK ?                     01084000
+         BP    FINCOMP        BP IF YES (NOTE - ALREADY CLEAR)          01085000
+* ALLOCATE 25 DOUBLE-WORDS FOR PQMASK                                   01086000
+         DMSFREE DWORDS=25,TYPE=NUCLEUS,TYPCALL=BALR           @VM03083 01087000
+         LR    R4,R1          PLACE IN R4 AS ABOVE                      01088000
+         ST    R4,ADTQQM      STORE WHERE NEEDED,                       01089000
+         OI    ADTFLG1,ADTFQQF  FLAG 'PQQMSK' IN FREE STORAGE           01090000
+         XC    0(200,R4),0(R4)     CLEAR 200-BYTE 'PQQMSK'              01091000
+*              'PSTAT' AND 'PQQMSK' BOTH INITIALIZED AND CLEAR,         01092000
+*        NOW CONTINUE TO 'FINCOMP' ...                                  01093000
+FINCOMP  EQU   *              COMPUTE CURRENT NO. TRACKS, ETC...        01094000
+*        NOTE -- R7 STILL CONTAINS 'NUMCYLP' OR 'NUMCYLT'               01095000
+         LTR   R7,R7          CHECK NO. CYL. FORMATTED,                 01096000
+         BNP   LM1415         EXIT FORTHWITH IF NO SUCCESS AT ALL.      01097000
+         LA    R4,TAB3330     POINT TO TABLE OF 3330 STATS.             01098000
+         CLI   DEVADDR+3,X'09'     IS IT A 3330?                        01099000
+         BE    JCON2          YUP. GO DO.                               01100000
+         LA    R4,TAB3340     GET 3340 STATS TABLE             @V2A2014 01101000
+         CLI   DEVADDR+3,T3340 3340 ?                          @V2A2014 01102000
+         BE    JCON2          YES..BR                          @V2A2014 01103000
+         LA    R4,TAB3350     GET 3350 STATS TABLE             @V304498 01104000
+         CLI   DEVADDR+3,T3350 3350 ?                          @V304498 01105000
+         BE    JCON2          YES..BR                          @V304498 01106000
+         LA    R4,TAB2314     POINT TO TABLE OF 2314 VALS.              01107000
+         CLI   DEVADDR+3,X'08'     IS IT A 2314?                        01108000
+         BE    JCON2          BO IF YES.                                01109000
+         B     ERR7           ERROR IF UNSUPPORTED DASD DEVICE @VA03452 01110000
+         USING JTABLE,R4      (FROM NOW ON)                             01111000
+JCON2    L     R5,ADTMSK      R5 = ADDRESS OLD 'PQMSK'                  01112000
+         LM    R14,R15,PQMSKDUM    INITIAL VALUES AND COUNT FOR P-DISK, 01113000
+         MH    R7,RECCYL+2    OBTAIN TOTAL NO. OF RECORDS               01114000
+         CL    R7,LIMFILST    EXCEED CMS FILE SYSTEM LIMIT ?   @VA03452 01115000
+         BNH   *+8            NOPE - OK.                       @VA03452 01116000
+         L     R7,LIMFILST    YES - LIMIT TO WHAT IT CAN DO.   @VA03452 01117000
+         SPACE                                                          01118000
+*        NOTE: LEAVE TOTAL NUMBER OF RECORDS (BITS IN BIT-MAP) "AS IS"  01119000
+*              (NOT NECESSARY TO TRUNCATE TO AN EVEN NUMBER OF BYTES).  01120000
+         SPACE                                                          01121000
+         CLI   OPTFLAG,C'R'   WAS IT FORMAT R?                          01122000
+         BNE   REALFMT        FLAG SAYS REAL FORMAT.                    01123000
+*        FOR FORMAT WITH "RECOMP" OPTION, RECOMPUTE DISK-STATISTICS:    01124000
+         LR    R3,R7             REMEMBER SIZE OF NEW BIT-MASK,         01125000
+         MVC   ZADTPQM3,ADTPQM3    SAVE 'OLD' ADTPQM3 (R0NUM),          01126000
+         MVC   ZADTMSK,ADTMSK      SAVE ADDRESS OF 'OLD' PQMSK,         01127000
+         C     R7,ADTNUM      COMPARE NEW BIT-MASK WITH OLD ONE,        01128000
+         BNH   R7OK           NO PROBLEM IF = OLD ONE (OR LESS)         01129000
+         L     R7,ADTNUM     SUBSTITUTE 'OLD' NUMTRKS IF IT WAS LESS.   01130000
+R7OK     ST    R7,ADTNUM     STORE 'NEW' NUMTRKS (OR NOTRKST)           01131000
+         LR    R14,R5         SAVE STARTING ADDRESS FOR LATER USE,      01132000
+         LR    R10,R5         NEED IN R10 FOR INITIAL VALUE OF LASTRK.  01133000
+         LA    R6,1           INCREMENTER (ONE BYTE)                    01134000
+         LR    R9,R7          SAVE TOTAL NUMTRKS FOR LATER IN R9,       01135000
+         LA    R7,7(,R7)      ROUND BEFORE CONVERTING TO BYTES @VA03452 01136000
+         SRA   R7,3           OBTAIN NO. IN BYTES,                      01137000
+         AR    R7,R5          PLUS STARTING-ADDRESS,                    01138000
+         SR    R7,R6          LESS 1 FOR BXLE LOOP.                     01139000
+*        NOTE -- THIS COMPUTATION PERFORMED VERY SELDOM, SO DON'T CARE  01140000
+*        ABOUT THE SPEED OR ELEGANCE OF THE CODE, AS LONG AS IT WORKS.  01141000
+         SR    R8,R8          LET R8 = QTUSEDP                          01142000
+*        NOTE -- R9 WILL BE 'QTLEFTP' LATER                             01143000
+JSLOOP   TM    0(R5),X'FF'    CHECK A BYTE OF PQMSK,                    01144000
+         BZ    JBXLE          IF =00, GO TO BXLE                        01145000
+         LR    R10,R5         NEW 'LASTRK' IF BYTE NONZERO              01146000
+         BO    INC8           IF BYTE = ALL ONES, INCREMENT BY 8        01147000
+*        CHECK EACH BIT OF THIS BYTE IF BYTE NOT ALL 0 OR ONES...       01148000
+         TM    0(R5),X'80'    CHECK FIRST BIT,                          01149000
+         BZ    *+6            BZ IF THIS BIT = 0,                       01150000
+         AR    R8,R6          INCREMENT 'QTUSEDP' BY 1 IF NONZERO       01151000
+         TM    0(R5),X'40'    CHECK SECOND BIT,                         01152000
+         BZ    *+6            BZ IF THIS BIT = 0,                       01153000
+         AR    R8,R6          INCREMENT 'QTUSEDP' BY 1 IF NONZERO       01154000
+         TM    0(R5),X'20'    CHECK THIRD BIT                           01155000
+         BZ    *+6            BZ IF THIS BIT = 0,                       01156000
+         AR    R8,R6          INCREMENT 'QTUSEDP' BY 1 IF NONZERO       01157000
+         TM    0(R5),X'10'    CHECK FOURTH BIT,                         01158000
+         BZ    *+6            BZ IF THIS BIT = 0,                       01159000
+         AR    R8,R6          INCREMENT 'QTUSEDP' BY 1 IF NONZERO       01160000
+         TM    0(R5),X'08'    CHECK FIFTH BIT,                          01161000
+         BZ    *+6            BZ IF THIS BIT = 0,                       01162000
+         AR    R8,R6          INCREMENT 'QTUSEDP' BY 1 IF NONZERO       01163000
+         TM    0(R5),X'04'    CHECK SIXTH BIT,                          01164000
+         BZ    *+6            BZ IF THIS BIT = 0,                       01165000
+         AR    R8,R6          INCREMENT 'QTUSEDP' BY 1 IF NONZERO       01166000
+         TM    0(R5),X'02'    CHECK SEVENTH BIT                         01167000
+         BZ    *+6            BZ IF THIS BIT = 0,                       01168000
+         AR    R8,R6          INCREMENT 'QTUSEDP' BY 1 IF NONZERO       01169000
+         TM    0(R5),X'01'    CHECK EIGHTH BIT                          01170000
+         BZ    *+6            BZ IF THIS BIT = 0,                       01171000
+         AR    R8,R6          INCREMENT 'QTUSEDP' BY 1 IF NONZERO       01172000
+         BXLE  R5,R6,JSLOOP   ITERATE SCANNING LOOP.                    01173000
+         B     JTHRU          JOIN BELOW IF/WHEN THRU HERE.             01174000
+*                                                                       01175000
+INC8     LA    R8,8(,R8)      INCREMENT QTUSEDP BY 8 IF THIS BYTE ALL 1 01176000
+JBXLE    BXLE  R5,R6,JSLOOP   ITERATE FOR AS MANY BYTES AS IN PQMSK     01177000
+JTHRU    SR    R9,R8          R9 NOW = NUMBER OF BITS LEFT IN PQMSK     01178000
+         SR    R10,R14        SUBTRACT 'BASE' OF PQMSK OR TQMSK,        01179000
+         STM   R8,R10,ADTUSED STORE THE REMAINING THREE COUNTERS.       01180000
+         XC    ADT1ST(4),ADT1ST    CLEAR 'ADT1ST' TO BE ON SAFE SIDE    01181000
+         L     R8,LIMCYL      DESIRED NO. OF CYLINDERS INTO R8,         01182000
+         C     R8,NUMCYL      LESS THAN NUMBER ACTUALLY THERE ?         01183000
+         BL    JCON6A         BL IF YES, MAKE SPECIAL CHECK.            01184000
+         C     R3,ADTNUM      'NEW' NUMTRKS BIGGER THAN 'OLD' ?         01185000
+         BNH   STNEWCYL       BNH IF NOT, STORE ADTCYL & EXIT.          01186000
+JCON6    LR    R7,R3          NEW 'NUMTRKS' INTO R7,                    01187000
+         L     R9,PQMSKDUM    FIRST WORD FOR BIT-MASK INTO R9 (NEEDED)  01188000
+         LA    R2,JCON7       SET R2 'SWITCH' TO RETURN BELOW,          01189000
+         B     JCON8          AND GO GET 'NEW' PQMSK.                   01190000
+*        UPON RETURN, MOVE OLD PQMSK INTO THE NEW ONE,                  01191000
+*        RE-COMPUTE DISK-COUNTS AS NECESSARY,                           01192000
+*        AND 'FRET' THE OLD PQMSK;  THEN GO UPDATE DIRECTORY.           01193000
+JCON7    L     R0,ZADTPQM3+4  STARTING-ADDRESS OF OLD BIT-MAP  @VA03452 01194000
+         L     R2,ADTMSK      STARTING-ADDRESS OF NEW BIT-MAP  @VA03452 01195000
+*                             (WHICH HAS ALREADY BEEN CLEARED)          01196000
+         LA    R1,1           ONE + NEW "ADTLAST" =            @VA03452 01197000
+         A     R1,ADTLAST     NUMBER OF BYTES TO BE MOVED      @VA03452 01198000
+         LR    R3,R1          IN R1 AND R3                     @VA03452 01199000
+         MVCL  R2,R0          OUR PAL "MVCL" DOES ALL THE WORK @VA03452 01200000
+         L     R1,ADTPQM2     GET NO. OF PQMSK EXTENSION(S),            01201000
+         L     R15,ADTLAST        CHECK OLD 'ADTLAST'                   01202000
+         CH    R15,=H'215'        COMPARE WITH 215                      01203000
+         BNL   JCON9B             IF 215 OR MORE, R1 IS OK              01204000
+         AR    R1,R1              DOUBLE ADTPQM2 FOR WORST CASE LOGIC   01205000
+JCON9B   A     R1,ADTHBCT         ADD HYPERBLOCK COUNT,                 01206000
+         LA    R1,1(,R1)      PLUS 1 = RESERVE-COUNT                    01207000
+         STH   R1,ADTRES      STORE CORRECT RESERVE-COUNT.              01208000
+         LM    R0,R1,ZADTPQM3 SIZE & STARTING-ADDRESS OF OLD PQMSK,     01209000
+* RELEASE STORAGE FROM OLD BIT-MASK                                     01210000
+         DMSFRET DWORDS=(0),LOC=(1),TYPCALL=BALR               @VM03083 01211000
+STNEWCYL OI    FLAG,STAT      SET 'STAT' FLAG,                          01212000
+JCON9A   MVC   ADTCYL(4),NUMCYL    STORE CORRECT NO. OF CYLINDERS,      01213000
+         B     UPDIR          AND GO UPDATE DIRECTORY.                  01214000
+*                                                                       01215000
+JCON6A   MH    R8,RECCYL+2    DESIRED NO. OF CYL. TO 'NUMTRKS' FORM,    01216000
+         CL    R8,LIMFILST    EXCEED CMS FILE SYSTEM LIMIT ?   @VA03452 01217000
+         BNH   *+8            NOPE - OK.                       @VA03452 01218000
+         L     R8,LIMFILST    YES - LIMIT TO WHAT IT CAN DO.   @VA03452 01219000
+         LR    R15,R8         REMEMBER "NEW" ADTNUM IN R15     @VA03452 01220000
+         LA    R8,7(,R8)      ROUND BEFORE CONVERTING TO BYTES @VA03452 01221000
+         SRL   R8,3           CONVERT BIT-COUNT TO BYTE-COUNT  @VA03452 01222000
+         C     R8,ADTLAST     WILL WE LOSE ANY DATA THIS WAY ?          01223000
+         BL    DATALOSS       BL IF YES (WE CAN'T DO IT).               01224000
+         LR    R8,R15         "NEW" ADTNUM IN R8 AND R15       @VA03452 01225000
+         S     R15,ADTUSED    COMPUTE TENTATIVE 'ADTLEFT'               01226000
+         CH    R15,ADTRES     MUST EXCEED (OR EQUAL) 'RESERVE-COUNT'    01227000
+         BL    DATALOSS       DON'T ALLOW IT IF IT DOESN'T.             01228000
+         LR    R15,R8         IF OK, RELOAD R15 AGAIN,                  01229000
+         SR    R14,R14        CLEAR R14, AND                            01230000
+         D     R14,RECCYL     NUMTRKS/40 OR /150 GIVES NEW 'NUMCYL'     01231000
+         LTR   R14,R14        CHECK REMAINDER,                          01232000
+         BZ    NEWCYLOK       BZ IF 0,                                  01233000
+         LA    R15,1(,R15)    ADJUST R15 OTHERWISE                      01234000
+NEWCYLOK ST    R15,NUMCYL     STORE RECOMPUTED NO. OF CYLINDERS.        01235000
+         LR    R3,R8          'NEW' NUMTRKS INTO R3,                    01236000
+         C     R3,ADTNUM      COMPARE WITH 'OLD' VALUE,                 01237000
+         BH    JCON6          WE MUST EXPAND IT IF GREATER.             01238000
+         BE    STNEWCYL       IF = NOTHING TO DO AT ALL.                01239000
+         ST    R3,ADTNUM      STORE NEW VALUE IF LESS,                  01240000
+         S     R3,ADTUSED     COMPUTE NUMBER LEFT,                      01241000
+         ST    R3,ADTLEFT     AND STORE IT.                             01242000
+         B     STNEWCYL       GO EXIT (OTHER COUNTS SHOULD BE OK).      01243000
+*                                                                       01244000
+ZADTPQM3 DC    F'0'           (1) OLD ADTPQM3 (R0NUM) SAVED HERE        01245000
+ZADTMSK  DC    F'0'           (2) OLD ADTMSK = A(PQMSK) SAVED HERE      01246000
+*                                                                       01247000
+NUMCYL   DC    F'0'        NUMBER OF CYLINDERS FOUND BY "FORMAT - C/R"  01248000
+*                             (STORED HERE TEMPORARILY)                 01249000
+         EJECT                                                          01250000
+*        INITIALIZE BIT-MASK ("PQMSK") FOR REAL FORMAT ...              01251000
+*                                                                       01252000
+REALFMT  LR    R9,R14         SAVE 1ST WORD OF PQMSK (WILL STORE LATER) 01253000
+         ST    R15,ADTUSED    STORE NO. OF BYTES IN USE (E.G. 4)        01254000
+         LA    R2,JCON10      SET R2 'SWITCH' TO CONTINUE IN LINE BELOW 01255000
+JCON8    XC    ADTPQM1(8),ADTPQM1  CLEAR PQMSIZ & PQMNUM (TENTATIVELY)  01256000
+         LR    R1,R7               NEW 'NUMTRKS' INTO R1,               01257000
+         LA    R1,7(,R1)      ROUND BEFORE CONVERTING TO BYTES @VA03452 01258000
+         SRA   R1,3                CHANGE FROM BITS TO BYTES,           01259000
+         LR    R15,R1              SAVE IN R1,PUT IN R15 ALSO           01260000
+         SH    R15,=H'215'         SUBTRACT MINIMUM OF 215 BYTES,       01261000
+         BNP   FREPQ               TRANSFER IF 215 OR LESS.             01262000
+         ST    R15,ADTPQM1         STORE SIZE FOR READ OR WRITE,        01263000
+         SR    R14,R14             DIVIDE                               01264000
+         D     R14,=F'800'         BY 800,                              01265000
+         LTR   R14,R14             CHECK FOR ZERO-REMAINDER             01266000
+         BZ    STR15P              (POSSIBLE ALBEIT UNLIKELY)           01267000
+         LA    R15,1(,R15)         ADJUST QUOTIENT (UNLESS REM=0)       01268000
+STR15P   ST    R15,ADTPQM2         STORE NUMBER OF TRACKS NEEDED        01269000
+FREPQ    LA    R0,7(,R1)           NOW GET TOTAL SIZE OF                01270000
+         SRA   R0,3                PQMSK ROUNDED UP TO DBL-WORDS,       01271000
+* OBTAIN FREE STORAGE FOR PQMASK                                        01272000
+         DMSFREE DWORDS=(0),TYPE=NUCLEUS,TYPCALL=BALR          @VM03083 01273000
+         ST    R0,ADTPQM3     SAVE NO. DBL-WORDS OF FREE STORAGE        01274000
+         LR    R5,R1          PLACE IN R5,                              01275000
+         ST    R5,ADTMSK      STORE ADDRESS OF NEW PQMSK (OR TQMSK)     01276000
+         ST    R7,ADTNUM     STORE NEW VALUE OF 'NUMTRKS'               01277000
+         USING PTQSECT,R5     FOR A WHILE ...                           01278000
+         ST    R9,PQMSK       INITIALIZE FIRST FULL-WORD OF PQMSK,      01279000
+         LR    R8,R7          NO OF RECORDS INTO R8 BRIEFLY,            01280000
+         S     R8,ADTUSED     SUBTRACT NO. IN USE (E.G. 4)              01281000
+         BP    STR8           OK IF PLUS.                               01282000
+         SR    R8,R8          DON'T STORE A NEGATIVE NUMBER,            01283000
+STR8     ST    R8,ADTLEFT     STORE THE NUMBER LEFT.                    01284000
+         SR    R9,R9          CLEAR R9,                                 01285000
+         ST    R9,PQMSK+4     CLEAR 2ND FULL WORD OF PQMSK              01286000
+         LR    R7,R0          NUMBER OF DOUBLE WORDS,                   01287000
+         SH    R7,=H'1'       LESS 1 FOR THAT ALREADY DONE,             01288000
+         BNP   BRR2           DON'T CLEAR ANY MORE IF NONE THERE.       01289000
+         SR    R10,R10        CLEAR R10 FOR USE BELOW,                  01290000
+         LA    R15,8          R15 = INCREMENTER FOR NEXT DBL-WORD,      01291000
+         LA    R14,CLRMSK     R14 = A(CLRMSK),                          01292000
+CLRMSK   STM   R9,R10,PQMSK+8 CLEAR ONE DBL-WORD,                       01293000
+         AR    R5,R15         INCREMENT FOR NEXT ONE,                   01294000
+         BCTR  R7,R14         ITERATE FOR NUMBER OF BYTES IN PQMSK.     01295000
+         DROP  R5                                                       01296000
+BRR2     BR    R2             CONTINUE OR BRANCH TO 'JCON7' ...         01297000
+*                                                                       01298000
+JCON10   ST    R9,ADTLAST     CLEAR ADTLAST ('LASTRK')                  01299000
+         ST    R9,ADT1ST      AND 'ADT1ST'.                             01300000
+         L     R15,ADTFDA     GET A(PSTAT)                              01301000
+         LA    R15,8(,R15)    SPACE OVER PRELIMINARY COUNTERS,          01302000
+         ST    R15,ADTLHBA    STORE NEEDED ADCON "ADTLHBA"              01303000
+         LA    R9,1           R9 = 1,                                   01304000
+         ST    R9,ADTHBCT     SET HYPERBLOCK COUNT = 1,                 01305000
+         AR    R9,R9          R9 = 2 NOW,                               01306000
+         A     R9,ADTPQM2     ADD NO. 800-BYTE RECORDS NEEDED FOR PQMSK 01307000
+         A     R9,ADTPQM2     ADD ADTPQM2 AGAIN FOR WORST CASE LOGIC    01308000
+         STH   R9,ADTRES      AND STORE VALUE OF 'RESERVE COUNT'        01309000
+         OI    ADTFLG1,ADTFRW SET READ-WRITE FLAG IN ADTFLG1,           01310000
+         OI    ADTFLG2,ADTFALUF    FLAG 'ALL UFD IN CORE' (THOUGH NULL) 01311000
+*                                                                       01312000
+*        NOTE: ALL OTHER QUANTITIES IN ACTIVE-DISK-TABLE ALREADY        01313000
+*              = 0 (THEIR CORRECT VALUE) FROM EARLIER CALL TO "RELUFD". 01314000
+*                                                                       01315000
+UPDIR    LR    R0,R13         SET UP R0,                                01316000
+         LA    R1,1           R1 = PLUS (ANYTHING),                     01317000
+         SSM   NOINTS         NO INTERRUPTS NOW,                        01318000
+         L     R15,AUPDISK    UPDATE USER-FILE-DIRECTORY                01319000
+         BALR  R14,R15        ...                                       01320000
+*                                                                       01321000
+         TM    FLAG,LAB       ARE WE GOING TO LABEL THIS DISK ?         01322000
+         BO    LABONLY        YES.                                      01323000
+LM1415   TM    FLAG,STAT      IF NOT, IS CALL TO 'STAT' WANTED ?        01324000
+         BZ    FMTEXIT        BZ IF NOT.                                01325000
+         MVC   STATLTR(1),ADTM                                          01326000
+         LA    R1,STATLST     IF YES, CALL 'STAT'                       01327000
+         SVC   X'CA'          (PARAMETER-LIST ALL SET)                  01328000
+         DC    AL4(*+4)       IGNORE POSSIBLE IF UNLIKELY ERROR         01329000
+FMTEXIT  DMSKEY RESET                                                   01330000
+         LM    R14,R15,SAVE14     RESTORE R14, RETURN-CODE INTO R15,    01331000
+         BR    R14                AND RETURN TO CALLER.                 01332000
+         EJECT                                                          01333000
+         DS    0F                                                       01334000
+STATLST  DC    CL8'QUERY'     TO CALL 'STAT' ROUTINE ...                01335000
+         DC    CL8'DISK'                                                01336000
+STATLTR  DC    CL8'Z   '      (FILLED IN)                               01337000
+         DC    X'FFFFFFFF'                                              01338000
+*                                                                       01339000
+         DS    0F                                                       01340000
+PQMSKDUM DC    X'F0000000'    DEFAULT FOR FIRST WORD OF PQMSK           01341000
+         DC    F'4'           (MUST FOLLOW) - NO. OF ONE'S IN ABOVE.    01342000
+         EJECT                                                          01343000
+CHEK3330 LA    R10,TAB3330    USE 3330 SPECS.                           01344000
+         B     CHEKJOIN                                                 01345000
+CHEK3340 LA    R10,TAB3340    USE 3340 SPECS                   @V2A2014 01346000
+         B     CHEKJOIN                                        @V2A2014 01347000
+CHEK3350 LA    R10,TAB3350    USE 3350 SPECS                   @V304498 01348000
+         B     CHEKJOIN                                        @V304498 01349000
+CHEK2314 LA    R10,TAB2314    USE 2314 SPECS.                           01350000
+         B     CHEKJOIN                                                 01351000
+         USING JTABLE,R10          ...                                  01352000
+CHEKJOIN BAL   R15,VERIFY                                               01353000
+         SR    R7,R7                                                    01354000
+* NOTE --R7 = NUMBER OF CYLINDERS FORMATTED SO FAR                      01355000
+JSIO     ST    R7,SEEKC       STORE CYLINDER-NUMBER IN CCW'S            01356000
+         LA    R14,JCCWS      GET ADDRESS OF CCWS                       01357000
+         SSM   NOINTS         NO INTERRUPTS WHILE SIO, PLEASE...        01358000
+         ST    R14,ZCAW       PUT IN CAW                                01359000
+         DC    X'835E0020'                                              01360000
+         BNZ   CKERROR                                                  01361000
+         LA    R7,1(,R7)      INCREMENT NUMBER OF CYLINDERS CHECKED     01362000
+         CH    R7,MAXCYL      HAVE WE REACHED THE MAXIMUM?              01363000
+         BL    JSIO           BL IF NOT, KEEP TRYING.                   01364000
+JYESEND  ST    R7,NUMCYL      STORE NUMBER OF CYLINDERS FORMATTED       01365000
+         B     FINCOMP        GO MAKE FINAL COMPUTATIONS                01366000
+*                                                                       01367000
+JCCWS    CCW   7,SEEKC,CC+SILI,6   SEEK A CYLINDER (FROM 0 UP)          01368000
+         CCW   3,*,SILI,1               NO-OP (CE & DE TOGETHER)        01369000
+SEEKC    DC    F'0',H'0'      CYLINDER-ADDRESS, ETC.                    01370000
+*                                                                       01371000
+CKERROR  ST    R14,SCRATCH                                              01372000
+         CLI   SENSE,X'81'                                              01373000
+         BE    JYESEND                                                  01374000
+         CLI   DEVADDR+3,T2314 IS THIS A 2314 ?                @V2A2014 01375000
+         BNE   CKSNS          NO.. OK, MUST BE 3330 OR 3340    @V2A2014 01376000
+         B     ERR10XX                                         @V2A2014 01377000
+CKSNS    CLI   SENSE,X'80'    VALID SENSE 3330/3340            @V2A2014 01378000
+         BE    JYESEND                                                  01379000
+ERR10XX  BAL   R3,ERR10                                                 01380000
+         B     JYESEND                                                  01381000
+         EJECT                                                          01382000
+LABONLY  CLI   OPTFLAG,C'L'                                             01383000
+         BNE   GOAHEAD                                                  01384000
+         BAL   R15,VERIFY                                               01385000
+GOAHEAD  ST    R13,LABACT     STORE A(ACTIVE-DISK-TABLE) WHERE NEEDED,  01386000
+         L     R15,ARDTK      POINT TO RDTK,                            01387000
+         LA    R1,LABLIST     SET UP R1 TO P-LIST,                      01388000
+         SSM   NOINTS                                                   01389000
+         BALR  R14,R15        READ IN OLD LABEL WITH RDTK               01390000
+         SSM   OK81                                                     01391000
+         LTR   R15,R15        CHECK ERROR-CODE                          01392000
+         LA    R15,=CL4'READ'                                           01393000
+         BNZ   ERR9           BAD SHOW IF ERROR.                        01394000
+         MVC   DISKBUF(10),CMSEQ    "CMS=" TO DISK-BUFFER,              01395000
+         MVC   ADTID(6),INBUF STORE DISK-LABEL IN ACTIVE DISK TABLE     01396000
+         L     R15,AWRTK      POINT TO WRTK,                            01397000
+         LA    R1,LABLIST     SET UP R1 TO P-LIST AGAIN,                01398000
+         SSM   NOINTS                                                   01399000
+         BALR  R14,R15        WRITE BACK ON DISK WITH NEW LABEL,        01400000
+         SSM   OK81                                                     01401000
+         LTR   R15,R15        CHECK ERROR-CODE                          01402000
+         BZ    LM1415         GOOD SHOW IF NO ERRORS, WE'RE DONE.       01403000
+         LA    R15,=CL4'WRIT'                                           01404000
+         B     ERR9                                                     01405000
+         SPACE                                                          01406000
+         DS    0F                                                       01407000
+LABLIST  DC    A(DISKBUF)     CORE-BUFFER FOR READ/WRITE LABEL          01408000
+         DC    F'800'         800 BYTES                                 01409000
+         DC    A(THREE)       CORE-ADDRESS OF DISK-ADDRESS              01410000
+LABACT   DC    A(*-*)         A (ACTIVE-DISK-TABLE) FILLED IN HERE      01411000
+THREE    DC    H'0003'                                                  01412000
+         SPACE                                                          01413000
+VERIFY   TM    ADTFLG1,ADTFRO+ADTFRW                                    01414000
+         L     R6,ADTDTA      GET ADDRESS OF DEVICE TABLE ENTRY.  V0419 01415000
+         CLC   DTAD(2,R6),DEVADDR  COMPARE WITH DEVICE SPECIFIED. V0419 01416000
+         BNE   ERR13          CAN'T ALLOW A FAST ONE.             V0419 01417000
+         TM    ADTFLG1,ADTFRW                                           01418000
+         BNO   ERR12                                                    01419000
+         BR    R15                                                      01420000
+         EJECT                                                          01421000
+ERR1     DMSERR NUM=28,LET=E,TEXT='NO DEVICE SPECIFIED'                 01422000
+         MVI   ERRKODE,24                                               01423000
+         B     LM1415                                                   01424000
+         SPACE                                                          01425000
+ERR2     LR    R3,R1                                                    01426000
+         DMSERR NUM=17,LET=E,SUB=(CHARA,(3)),                          X01427000
+               TEXT='INVALID DEVICE ADDRESS ''........'''               01428000
+         MVI   ERRKODE,24                                               01429000
+         B     LM1415                                                   01430000
+         SPACE                                                          01431000
+ERR3     LR    R3,R1                                                    01432000
+         DMSERR NUM=48,LET=E,SUB=(CHARA,(3)),                          X01433000
+               TEXT='INVALID MODE ''........'''                         01434000
+         MVI   ERRKODE,24                                               01435000
+         B     LM1415                                                   01436000
+         SPACE                                                          01437000
+ERR4     LR    R3,R1                                                    01438000
+         DMSERR NUM=70,LET=E,SUB=(CHARA,(3)),                          X01439000
+               TEXT='INVALID PARAMETER ''........'''                    01440000
+         MVI   ERRKODE,24                                               01441000
+         B     LM1415                                                   01442000
+         SPACE                                                          01443000
+ERR5     LR    R3,R1                                                    01444000
+         DMSERR NUM=3,LET=E,SUB=(CHARA,(3)),                           X01445000
+               TEXT='INVALID OPTION ''........'''                       01446000
+         MVI   ERRKODE,24                                               01447000
+         B     LM1415                                                   01448000
+         SPACE                                                          01449000
+ERR6     DMSERR NUM=113,LET=S,SUB=(HEXA,DEVADDR-2),               P0801X01450000
+               TEXT='DEVICE ''...'' NOT ATTACHED'                 P0801 01451000
+         MVI   ERRKODE,100                                              01452000
+         B     LM1415                                                   01453000
+         SPACE                                                          01454000
+ERR7     DMSERR NUM=114,LET=S,SUB=(HEXA,DEVADDR-2),                    *01455000
+               TEXT='''...'' IS AN UNSUPPORTED DEVICE TYPE'    @VA02853 01456000
+         MVI   ERRKODE,88                                               01457000
+         B     LM1415                                                   01458000
+         SPACE                                                          01459000
+ERR8     DMSERR NUM=705,LET=I,TEXT='DISK REMAINS UNCHANGED'             01460000
+         MVI   ERRKODE,00                                               01461000
+         B     LM1415                                                   01462000
+         SPACE                                                          01463000
+ERR9     DMSERR NUM=126,LET=S,SUB=(CHARA,((15),4),CHARA,(ADTM,1), P0801X01464000
+               HEXA,DEVADDR-2),TEXT='ERROR ....ING LABEL ON DISK ''..(.X01465000
+               ..)''',RENT=NO                                           01466000
+         MVI   ERRKODE,100                                              01467000
+         B     LM1415                                                   01468000
+         SPACE                                                          01469000
+ERR10    DMSERR NUM=125,LET=S,SUB=(CHARA,(ADTM,1),HEXA,DEVADDR-2),TEXT=X01470000
+               'PERMANENT UNIT CHECK ON DISK ''..(...)''',RENT=NO       01471000
+         MVI   ERRKODE,100                                              01472000
+         B     YESEND1                                         @VA01447 01473000
+         SPACE                                                          01474000
+ERR11    DMSERR NUM=69,LET=E,SUB=(CHARA,(ADTM,1)),TEXT='DISK ''..'' NOTX01475000
+                ACCESSED'                                               01476000
+         MVI   ERRKODE,36                                               01477000
+         B     FMTEXIT                                                  01478000
+         SPACE                                                          01479000
+ERR12    DMSERR NUM=37,LET=E,SUB=(HEXA,DEVADDR-2),                     X01480000
+               TEXT='DISK ''...'' IS READ/ONLY'                         01481000
+         MVI   ERRKODE,36                                               01482000
+         B     FMTEXIT                                                  01483000
+         SPACE 1                                                        01484000
+ERR13    DMSERR NUM=69,LET=E,SUB=(CHARA,(ADTM,1),HEXA,DEVADDR-2),      X01485000
+               TEXT='DISK ''..(...)'' NOT ACCESSED',RENT=NO             01486000
+         MVI   ERRKODE,36                                         V0419 01487000
+         B     FMTEXIT                                            V0419 01488000
+         SPACE 1                                                        01489000
+ASK      LA    R2,8(,R6)                                                01490000
+         LA    R3,8(,R2)                                                01491000
+         DMSERR NUM=603,LET=R,DOT=NO,SUB=(CHARA,((3),1),CHARA,((2),3)),X01492000
+               TEXT='FORMAT WILL ERASE ALL FILES ON DISK ''..(...)''.  X01493000
+               DO YOU WISH TO CONTINUE? (YES|NO):',RENT=NO              01494000
+         BR    R7                                                       01495000
+*                                                                       01496000
+ASKAGAIN DMSERR NUM=605,LET=R,DOT=NO,TEXT='ENTER DISK LABEL:'           01497000
+         BR    R7                                                       01498000
+*                                                                       01499000
+DATALOSS DMSERR NUM=214,LET=W,TEXT='CANNOT RECOMPUTE WITHOUT LOSS OF DAX01500000
+               TA.  NO CHANGE'                                          01501000
+         MVI   ERRKODE,8                                       @VA02851 01502000
+         B     UPDIR          LEAVE ADTCYL AS IS & UPDATE DIR. @VA03452 01503000
+TYPECYL  TM    FLAG,TDK                                           P0586 01504000
+         BCR   1,R3                                               P0586 01505000
+         DMSERR NUM=732,LET=I,SUB=(DECA,ADTCYL,CHARA,(ADTM,1),HEXA,    X01506000
+               DEVADDR-2),TEXT='''...'' CYLINDERS FORMATTED ON ''..(...X01507000
+               )''',RENT=NO                                             01508000
+         BR    R3                                                       01509000
+*                                                                       01510000
+HANDHOLD DMSERR NUM=733,LET=I,SUB=(CHARA,(ADTM,1)),TEXT='FORMATTING DISX01511000
+               K ''..'''                                                01512000
+         BR    R7                                                       01513000
+         EJECT                                                          01514000
+         LTORG                                                          01515000
+*                                                                       01516000
+ZCAW     EQU   X'48'                                                    01517000
+ZIONP    EQU   X'78'                                                    01518000
+CC       EQU   X'40'                                                    01519000
+SILI     EQU   X'20'                                                    01520000
+NO       EQU   X'10'                                                    01521000
+CE       EQU   X'08'                                                    01522000
+DE       EQU   X'04'                                                    01523000
+UC       EQU   X'02'          UNIT CHECK BIT OF CSW                     01524000
+*                                                                       01525000
+T3340    EQU   X'07'                                           @V2A2014 01526000
+T2314    EQU   X'08'                                           @V2A2014 01527000
+T3330    EQU   X'09'                                           @V2A2014 01528000
+T3350    EQU   X'0B'          CMS' 3350 DEVICE TYPE            @V304498 01529000
+*                                                                       01530000
+*                                                                       01531000
+TAB2314  DS    0F                                                       01532000
+         DC    F'150'                                                   01533000
+         DC    F'15'                                                    01534000
+         DC    H'2'                                                     01535000
+         DC    H'8'                                                     01536000
+         DC    H'20'                                                    01537000
+         DC    H'203'                                                   01538000
+         DC    F'30450'       MAX. NO. OF RECORDS = 150 X 203  @VA03452 01539000
+*                                                                       01540000
+TAB3350  DS    0F             3350 STATS TABLE                 @V304498 01541000
+         DC    F'570'         NUMBER OF RECORDS PER CYLINDER   @V304498 01542000
+         DC    F'19'          NUMBER OF RECORDS PER ...        @V304498 01543000
+         DC    H'1'           PER ONE HEAD.                    @V304498 01544000
+         DC    H'20'          OVERFLOW-NUMBER NUMBER           @V304498 01545000
+         DC    H'30'          NUMBER OF TRACKS PER CYLINDER    @V304498 01546000
+MAX3350  DC    H'115'         114 CYL + 29 TRACKS ON 115TH CYL @V304498 01547000
+         DC    F'65531'       MAX. NO OF RECORDS FOR 3350 ...  @V304498 01548000
+*                             = 64980 (570 X 114) + 551 (19 X 29)       01549000
+TAB3330  DS    0F                                                       01550000
+         DC    F'266'                                                   01551000
+         DC    F'14'                                                    01552000
+         DC    H'1'                                                     01553000
+         DC    H'15'                                                    01554000
+         DC    H'19'                                                    01555000
+         DC    H'246'                                                   01556000
+         DC    F'65436'       MAX. NO. OF RECORDS = 266 X 246  @VA03452 01557000
+*                                                                       01558000
+TAB3340  DS    0F             3340 STATS TABLE                 @V2A2014 01559000
+         DC    F'96'                                           @V2A2014 01560000
+         DC    F'8'                                            @V2A2014 01561000
+         DC    H'1'                                            @V2A2014 01562000
+         DC    H'9'                                            @V2A2014 01563000
+         DC    H'12'                                           @V2A2014 01564000
+MAX3340  DC    H'682'                                          @V2A2014 01565000
+         DC    F'65472'       MAX. NO. OF RECORDS = 96 X 682   @VA03452 01566000
+*                                                                       01567000
+JTABLE   DSECT                                                          01568000
+*        DEFAULT VALUES FOR 2314 ARE SHOWN ...                          01569000
+RECCYL   DS    F'150'         NUMBER OF RECORDS PER CYLINDER            01570000
+RECHED   DS    F'15'          NUMBER OF RECORDS PER ...                 01571000
+NUMHED   DS    H'2'           PER ONE OR TWO HEADS.                     01572000
+OVEREC   DS    H'8'           OVERFLOW-RECORD NUMBER                    01573000
+HEDCYL   DS    H'20'          NUMBER OF HEADS (TRACKS) PER CYLINDER     01574000
+MAXCYL   DS    H'203'         MAXIMUM NUMBER OF CYLINDERS               01575000
+LIMFILST DS    F'65532'       LIMIT CMS FILE SYSTEM CAN HANDLE @VA03452 01576000
+         EJECT                                                          01577000
+*                                                                       01578000
+         NUCON                                                          01579000
+         FVS                                                            01580000
+         ADT                                                            01581000
+         SPACE 2                                                        01582000
+PTQSECT  DSECT                DSECT FOR "PQMSK" ITSELF                  01583000
+*                                                                       01584000
+PQMSK    DC    X'F0000000'    FIRST 4 BYTES                             01585000
+*                             (REMAINDER IS OF VARIABLE LENGTH)         01586000
+*                                                                       01587000
+         DIOSECT                                                        01588000
+         EJECT                                                          01589000
+         REGEQU                                                         01590000
+DISK     EQU   R5                                                       01591000
+         END                                                            01592000

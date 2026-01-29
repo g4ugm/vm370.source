@@ -1,0 +1,869 @@
+DIO      TITLE 'DMSDIO     (CMS)       VM/370 - RELEASE 6'              00001000
+         SPACE 2                                                        00002000
+*.                                                                      00004000
+*                                                                       00005000
+* MODULE NAME:                                                          00006000
+*                                                                       00007000
+*        DMSDIO   (DISKIO)                                              00008000
+*                                                                       00009000
+* SUBROUTINE NAME:                                                      00010000
+*                                                                       00011000
+*        DMSDIOR (RDTK)                                                 00012000
+*                                                                       00013000
+* FUNCTION:                                                             00014000
+*                                                                       00015000
+*        TO READ  ONE OR MORE  800-BYTE RECORDS  (BLOCKS) FROM          00016000
+*        DISK, OR TO READ ONE 200-BYTE RECORD (SUB-BLOCK) FROM          00017000
+*        DISK.                                                          00018000
+*                                                                       00019000
+* ATTRIBUTES:                                                           00020000
+*                                                                       00021000
+*        NUCLEUS RESIDENT, REENTRANT                                    00022000
+*                                                                       00023000
+* ENTRY POINTS:                                                         00024000
+*                                                                       00025000
+*        DMSDIOR                                                        00026000
+*                                                                       00027000
+* ENTRY CONDITIONS:                                                     00028000
+*                                                                       00029000
+*        L      R15,ARDTK   WHERE ARDTK=V(DMSDIOR)                      00030000
+*        BALR   R14,R15                                                 00031000
+*                                                                       00032000
+*              R1 MUST POINT TO PARAMETER LIST AS FOLLOWS:              00033000
+*                                                                       00034000
+*              DS     OF                                                00035000
+*        PLIST DC     A(BUFF)    ADDRESS OF BUFFER INTO                 00036000
+*                                WHICH DATA IS TO BE READ               00037000
+*              DC     F' '       SIZE OF ABOVE BUFFER (BYTE COUNT)      00038000
+*              DC     A(DISKAD)  ADDRESS OF LIST CONTAINING             00039000
+*                                DISK ADDRESSES OF ALL RECORD(S)        00040000
+*                                TO BE READ                             00041000
+*              DC     A(DSKTBL)  ADDRESS OF (POINTER TO) ACTIVE         00042000
+*                                DISK TABLE BLOCK PERTAINING TO DISK    00043000
+*                                TO BE READ                             00044000
+*                                                                       00045000
+* EXIT CONDITIONS:                                                      00046000
+*                                                                       00047000
+*        NORMAL RETURN                                                  00048000
+*              R15=0  (AND CONDITION-CODE=0)                            00049000
+*                                                                       00050000
+*        ERROR RETURNS                                                  00051000
+*             R15=1:  NO ACTIVE-DISK-TABLE BLOCK FOUND BY ADTLKP        00052000
+*                     WHERE MODE-LETTER WAS SUPPLIED                    00053000
+*             R15=2:  PERMANENT I/O ERROR READING DISK                  00054000
+*             R15=3:  UNSUPPORTED DASD OR NOT ATTACHED                  00055000
+*             R15=5:  DISK-ADDRESS=0 (A PROGRAMMING BUG BY CALLER)      00056000
+*                     OR NOT WITHIN DISK LIMITS                         00057000
+*             R15=7:  ATTEMPT TO READ INTO CMS NUCLEUS BELOW FREAR      00058000
+*             R15=8:  UNDETERMINED ERROR (CP DIAGNOSE CONDITION CODE 2) 00059000
+*             R15=25: INSUFFICIENT FREE STORAGE AVAILABLE               00059500
+*                                                                       00060000
+* CALLS TO OTHER ROUTINES:                                              00061000
+*                                                                       00062000
+*        DMSLAD, DMSFREE, DMSFRET                                       00063000
+*                                                                       00064000
+* EXTERNAL REFERENCES:                                                  00065000
+*                                                                       00066000
+*        DMSNUC, ADTSECT, DIOSECT                                       00067000
+*                                                                       00068000
+* TABLES/WORKAREAS:                                                     00069000
+*                                                                       00070000
+*        800 BYTE BUFFER AREA                                           00071000
+*                                                                       00072000
+* REGISTER USAGE:                                                       00073000
+*                                                                       00074000
+*        R15  DIOSECT                                                   00075000
+*        R2   BASE                                                      00076000
+*        REST WORK                                                      00077000
+*                                                                       00078000
+* NOTES:                                                                00079000
+*                                                                       00080000
+*        (1)     THE FORMAT  OF EACH DISK ADDRESS  SUPPLIED IN          00081000
+*             THE LIST FOR EACH 800-BYTE  RECORD IS A HALFWORD          00082000
+*             BLOCK NUMBER.                                             00083000
+*                                                                       00084000
+*        (2)     IF THE  BUFFER-SIZE (BYTE  COUNT) IS  ZERO, A          00085000
+*             200-BYTE RECORD (SIXTEENTH-TRACK) IS TO BE READ.          00086000
+*                                                                       00087000
+*        (3)     DMSDIOR WILL ACCEPT  A DISK MODE IN  PLACE OF          00088000
+*             THE POINTER TO THE ACTIVE DISK TABLE:  DMSIAD IS          00089000
+*             CALLED IN THIS CASE TO FIND THE EQUIVALENT DISK.          00090000
+*                                                                       00091000
+*        (4)     A SPECIAL  INTERFACE BETWEEN CMS AND  CP WILL          00092000
+*             CAUSE INPUT/OUTPUT OPERATIONS TO  BE EXECUTED BY          00093000
+*             CP.  CONTROL WILL  NOT BE RETURNED TO  CMS UNTIL          00094000
+*             THE OPERATION IS COMPLETE.   ANY NECESSARY ERROR          00095000
+*             RECOVERY WIL BE DONE BY CP.                               00096000
+*                                                                       00097000
+* OPERATION:                                                            00098000
+*                                                                       00099000
+*        DMSDIOR DETERMINES WHETHER OR NOT THE CALLING PROGRAM          00100000
+*        WISHES TO  READ A 800-BYTE  RECORD.  IF IT  DOES NOT,          00101000
+*        DMSDIOR CHECKS TO SEE IF                                       00102000
+*        THE BYTE COUNT EXCEEDS 800  BYTES, IMPLYING MORE THAN          00103000
+*        ONE 800-BYTE RECORD TO BE  READ.  IF SO, FREE STORAGE          00104000
+*        IS OBTAINED,  AND CHAINED CCW'S  ARE USED  INSOFAR AS          00105000
+*        PRACTICAL TO  READ AS MANY  RECORDS AS  POSSIBLE WITH          00106000
+*        ONE IO  TO THE DISK.  IF  NOT MORE THAN 800,  NO FREE          00107000
+*        STORAGE IS  NECESSARY AS A  STANDARD CCW  PACKAGE (IN          00108000
+*        DIOSECT)  IS USED.   IN  ANY  EVENT, WHETHER  OR  NOT          00109000
+*        REPEATED IO'S  ARE NECESSARY, THE  DATA IS  READ INTO          00110000
+*        THE DESIGNATED  BUFFER, FREE  STORAGE IS  RETURNED IF          00111000
+*        NECESSARY, AND RETURN IS MADE  TO THE CALLER.  IF THE          00112000
+*        BYTE COUNT EXCEEDS 800, IT NEED NOT NECESSARILY BE AN          00113000
+*        EXACT MULTIPLE OF 800.                                         00114000
+*                                                                       00115000
+*        IF  THE CALLING  PROGRAM WISHES  TO  READ A  200-BYTE          00116000
+*        RECORD (SUB-BLOCK),                                            00117000
+*        DMSDIOR CALLS THE DMSFREE TO OBTAIN AN 800-BYTE                00118000
+*        BUFFER.  IT THEN READS  THE 800-BYTE BLOCK CONTAINING          00119000
+*        THE DESIRED SUB-BLOCK INTO THE BUFFER.                         00120000
+*        NEXT, DMSDIOR EXTRACTS THE DESIRED SUB-BLOCK FROM THE          00121000
+*        800-BYTE BUFFER  AND MOVES  IT TO THE 200-BYTE BUFFER          00122000
+*        THE 200-BYTE                                                   00123000
+*        BUFFER  SPECIFIED IN  THE  PARAMETER  LIST.  IT  THEN          00124000
+*        CALLS THE DMSFRET TO RELEASE THE 800-BYTE BUFFER, THE          00125000
+*        ENTIRE BLOCK WAS READ INTO AND RETURNS TO THE CALLING          00126000
+*        PROGRAM.   SUB-BLOCKS ARE  RESERVED  FOR FIRST  CHAIN          00127000
+*        LINK AREAS AND SHOULD NOT BE USED FOR OTHER PURPOSES.          00128000
+*                                                                       00129000
+*        NOTE:                                                          00130000
+*                                                                       00131000
+*        IF THE 200-BYTE BLOCK IS THE FIRST 200 BYTES OF AN             00132000
+*        800  BYTE BUFFER,  DMSDIOR READS  200 BYTES  DIRECTLY          00133000
+*        INTO THE DESIGNATED                                            00134000
+*        STORAGE AREA  INSTEAD OF  OBTAINING FREE  STORAGE AND          00135000
+*        MOVING THE 200 BYTES LATER.                                    00136000
+*                                                                       00137000
+* MODULE NAME:                                                          00138000
+*                                                                       00139000
+*        DMSDIO   (DISKIO)                                              00140000
+*                                                                       00141000
+* SUBROUTINE NAME:                                                      00142000
+*                                                                       00143000
+*        DMSDIOW (WRTK)                                                 00144000
+*                                                                       00145000
+* FUNCTION:                                                             00146000
+*                                                                       00147000
+*        TO WRITE  ONE OR  MORE 800-BYTE  RECORDS (BLOCKS)  ON          00148000
+*        DISK, OR TO WRITE ONE  200-BYTE RECORD (SUB-BLOCK) ON          00149000
+*        DISK.                                                          00150000
+*                                                                       00151000
+* ATTRIBUTES:                                                           00152000
+*                                                                       00153000
+*        NUCLEUS RESIDENT, REENTRANT                                    00154000
+*                                                                       00155000
+* ENTRY POINTS:                                                         00156000
+*                                                                       00157000
+*        DMSDIOW                                                        00158000
+*                                                                       00159000
+* ENTRY CONDITIONS:                                                     00160000
+*                                                                       00161000
+*        L    R15,AWTRK  WHERE WRTK=V(WRTK)                             00162000
+*        BALR R14,R15                                                   00163000
+*                                                                       00164000
+*              R1 MUST POINT TO PARAMETER LIST AS FOLLOWS:              00165000
+*              DS   OF                                                  00166000
+*        PLIST DS   A(BUFF)    ADDRESS OF BUFFER FROM WHICH             00167000
+*                              DATA IS TO BE WRITTEN                    00168000
+*              DC   F' '       SIZE OF ABOVE BUFFER (BYTE COUNT)        00169000
+*              DC   A(DISKAD   ADDRESS OF LIST CONTAINING DISK          00170000
+*                              ADDRESSES OF ALL RECORD(S) TO BE WRITTEN 00171000
+*              DC   A(DSKTBL) ADDRESS OF (POINTER TO) ACTIVE DISK       00172000
+*                    TABLE BLOCK PERTAINING TO DISK TO BE WRITTEN.      00173000
+*                                                                       00174000
+* EXIT CONDITIONS:                                                      00175000
+*                                                                       00176000
+*        NORMAL RETURN                                                  00177000
+*        R15=0   (AND CONDITION-CODE=0)                                 00178000
+*                                                                       00179000
+*        ERROR RETURNS                                                  00180000
+*        R15=1:  NO ACTIVE-DISK-TABLE BLOCK FOUND BY ADTLKP             00181000
+*                WHERE MODE-LETTER WAS SUPPLIED                         00182000
+*        R15=2:  PERMANENT I/O ERROR WRITING DISK                       00183000
+*        R15=3:  UNSUPPORTED DASD OR NOT ATTACHED                       00184000
+*        R15=4:  ATTEMPT TO WRITE ON SYSTEM DISK (MODE=S)               00185000
+*        R15=5:  DISK-ADDRESS=0 (A PROGRAMMING BUG BY CALLER)           00186000
+*                OR NOT WITHIN DISK LIMITS                              00187000
+*        R15=6:  ATTEMPT TO WRITE ON READ-ONLY DISK                     00188000
+*        R15=8:  UNDETERMINED ERROR (CP DIAGNOSE CONDITION CODE 2)      00189000
+*        R15=25: INSUFFICIENT FREE STORAGE AVAILABLE                    00189500
+*                                                                       00190000
+* CALLS TO OTHER ROUTINES:                                              00191000
+*                                                                       00192000
+*        DMSLAD, DMSFREE, DMSFRET                                       00193000
+*                                                                       00194000
+* EXTERNAL REFERENCES:                                                  00195000
+*                                                                       00196000
+*        DMSNUC, DIOSECT, ADTSECT                                       00197000
+*                                                                       00198000
+* TABLES/WORKAREAS:                                                     00199000
+*                                                                       00200000
+*        800 BYTE BUFFER AREA OBTAINED FROM FREE STORAGE                00201000
+*                                                                       00202000
+* REGISTER USAGE:                                                       00203000
+*                                                                       00204000
+*        R0, R1, R3-14 = WORK REGISTERS                                 00205000
+*        R15  DIOSECT                                                   00206000
+*        R2   BASE                                                      00207000
+*                                                                       00208000
+* NOTES:                                                                00209000
+*                                                                       00210000
+*        (1)     THE FORMAT  OF EACH DISK ADDRESS  SUPPLIED IN          00211000
+*             THE LIST FOR EACH 800-BYTE  RECORD IS A HALFWORD          00212000
+*             BLOCK NUMBER.                                             00213000
+*                                                                       00214000
+*        (2)     IF THE  BUFFER SIZE (BYTE  COUNT) IS  ZERO, A          00215000
+*             200-BYTE RECORD IS TO BE WRITTEN.                         00216000
+*                                                                       00217000
+*        (3)     WRTK WILL ACCEPT A DISK  MODE IN PLACE OF THE          00218000
+*             POINTER TO THE ACTIVE DISK TABLE.                         00219000
+*                                                                       00220000
+* OPERATION:                                                            00221000
+*                                                                       00222000
+*        DMSDIOW DETERMINES WHETHER OR NOT THE CALLING PROGRAM          00223000
+*        WISHES TO WRITE A SUB-BLOCK.  IF IT DOES NOT, DMSDIOW          00224000
+*        CHECKS                                                         00225000
+*        TO SEE IF THE BYTE  COUNT EXCEEDS 800 BYTES, IMPLYING          00226000
+*        MORE THAN ONE 800-BYTE RECORD  TO BE WRITTEN.  IF SO,          00227000
+*        FREE STORAGE IS OBTAINED, AND  CHAINED CCW'S ARE USED          00228000
+*        INSOFAR  AS PRACTICAL  TO WRITE  AS  MANY RECORDS  AS          00229000
+*        POSSIBLE WITH  ONE IO  OPERATION.  IF  NOT MORE  THAN          00230000
+*        800, NO FREE STORAGE IS  NECESSARY, AS A STANDARD CCW          00231000
+*        PACKAGE (IN DIOSECT) IS USED.   IN ANY EVENT, WHETHER          00232000
+*        OR  NOT REPEATED  IO'S  ARE  NECESSARY, THE  DATA  IS          00233000
+*        WRITTEN FROM  THE DESIGNATED BUFFER, FREE  STORAGE IS          00234000
+*        RETURNED  IF NECESSARY,  AND RETURN  IS  MADE TO  THE          00235000
+*        CALLER.  IF THE  BYTE COUNT EXCEEDS 800,  IT NEED NOT          00236000
+*        NECESSARILY BE AN EXACT MULTIPLE OF 800.                       00237000
+*                                                                       00238000
+*        IF THE CALLING PROGRAM WISHES TO WRITE A SUB-BLOCK,            00239000
+*        DMSDIOW OBTAINS 800 BYTES OF  BUFFER SPACE INTO WHICH          00240000
+*        TO READ                                                        00241000
+*        THE BLOCK  (IN WHICH THE 200  BYTES OF DATA IS  TO BE          00242000
+*        PLACED).  IT THEN  READS THAT BLOCK INTO  THE BUFFER.          00243000
+*        NEXT,                                                          00244000
+*        DMSDIOW  MOVES 200  BYTES  OF  DATA FROM  THE  BUFFER          00245000
+*        POINTED TO BY THE PARAMETER                                    00246000
+*        LIST INTO  THE APPROPRIATE SUB-BLOCK LOCATION  IN THE          00247000
+*        BUFFER CONTAINING                                              00248000
+*        THE 800-BYTE BLOCK.  DMSDIOW  THEN WRITES THE UPDATED          00249000
+*        BLOCK BACK ONTO                                                00250000
+*        THE DISK AT  ITS ORIGINAL LOCATION, RELEASES  THE 800          00251000
+*        BYTES IT USED AS A BUFFER, AND RETURNS TO THE CALLING          00252000
+*        PROGRAM.                                                       00253000
+*                                                                       00254000
+*        NOTE:                                                          00255000
+*                                                                       00256000
+*        IF THE 200-BYTE  SUB-BLOCK IS THE FIRST  200 BYTES OF          00257000
+*        AN 800-BYTE  BUFFER AND THE  REMAINING 600  BYTES ARE          00258000
+*        NOT USED                                                       00259000
+*        DMSDIOW WRITES 200 BYTES DIRECTLY FROM THE DESIGNATED          00260000
+*        STORAGE AREA                                                   00261000
+*        INSTEAD  OF  THE  READ,  MOVE,  AND  WRITE  PROCEDURE          00262000
+*        DESCRIBED ABOVE.                                               00263000
+*                                                                       00264000
+*        DIRECT I/O                                                     00265000
+*                                                                       00266000
+*        INPUT/OUTPUT ACTIVITY TO DISK WILL  BE INITIATED BY A          00267000
+*        SPECIALLY CODED DIAGNOSE INSTRUCTION.                          00268000
+*                                                                       00269000
+*        A DIAGNOSE INSTRUCTION WITH A CODE X'18' IS ISSUED TO          00270000
+*        SIGNAL CP  TO PERFORM  THE DESIGNATED  I/O OPERATION.          00271000
+*        R4 CONTAINS THE DEVICE-ADDRESS, AND  R8 POINTS TO THE          00272000
+*        STANDARD CCW CHAIN:                                            00273000
+*                                                                       00274000
+*              FOR 2314 OR 2319                                         00275000
+*                                                                       00276000
+*              SEEK CCHH                                                00277000
+*              SEARCH CCHHR                                             00278000
+*              TIC   *-8                                                00279000
+*              READ/WRITE                                               00280000
+*        CCHHR DC X'CCHHR'                                              00281000
+*                                                                       00282000
+*              FOR 3330, 3340, OR 3350                                  00283000
+*                                                                       00284000
+*              SEEK CCHH                                                00285000
+*              SET SECTOR                                               00286000
+*              SEARCH CCHHR                                             00287000
+*              TIC  *-8                                                 00288000
+*              READ/WRITE                                               00289000
+*        CCHHR DC X'CCHHR'                                              00290000
+*                                                                       00291000
+* IF THE  OPERATION IS  SUCCESSFUL, CP RETURNS  TO CMS  WITH A          00292000
+* CONDITION-CODE  0; THIS  INDICATES  THAT  THE OPERATION  WAS          00293000
+* SUCCESSFULLY STARTED AND COMPLETED.                                   00294000
+*                                                                       00295000
+* UPON RETURN TO CMS, THE  FOLLOWING CONDITION CODES AND ERROR          00296000
+* CODES ARE RETURNED:                                                   00297000
+*                                                                       00298000
+* CONDITION-CODE (CC) = 0:  I/O COMPLETE WITH NO ERRORS.                00299000
+*                                                                       00300000
+* CC = 1:  ERROR CONDITION, AS PER R15 RETURNS 1-4                      00301000
+*                                                                       00302000
+* CC = 2:  ERROR CONDITION, AS PER R15 RETURNS 5-12                     00303000
+*                                                                       00304000
+* CC = 3:  UNCORRECTABLE I/O ERROR, AS PER R15 RETURN 13                00305000
+*          OR INVALID DIAGNOSE CALL                                     00306000
+*                                                                       00307000
+*          ERROR-CODE RETURNED IN R15, AS FOLLOWS:                      00308000
+*                                                                       00309000
+*          1 = DEVICE NOT ATTACHED                                      00310000
+*          2 = DEVICE IS IS AN UNSUPPORTED DASD DEVICE                  00311000
+*          3 = ATTEMPT TO WRITE ON A READ-ONLY DISK-WORD ALIGNED        00312000
+*          4 = CYLINDER NUMBER NOT WITHIN RANGE OF USER'S DISK          00313000
+*          5 = POINTER TO USER'S CCW STRING NOT DBL-WORD ALIGNED        00314000
+*          6 = CCW OR SEEK/SEARCH ARGUMENTS NOT WITHIN USER CORE        00315000
+*          7 = USER CCW IS INVALID                                      00316000
+*          8 = READ/WRITE BYTE-COUNT = 0                                00317000
+*          9 = READ/WRITE BYTE-COUNT GREATER THAN 2048                  00318000
+*         10 = USER'S R15 AT ENTRY NOT POSITIVE NUMBER                  00319000
+*              OR IS NOT LARGE ENOUGH FOR GIVEN CCW STRING              00320000
+*         12 = CYLINDER NUMBER ON SEEK-HEAD DOES NOT MATCH              00321000
+*              THE CYLINDER NUMBER ON THE FIRST SEEK                    00322000
+*         13 = UNCORRECTABLE I/O ERROR (CSW RETURNED                    00323000
+*              TO THE USER; SENSE BYTES AVAILABLE IF USER               00324000
+*              DOES A SENSE.)                                           00325000
+*                                                                       00326000
+* UNSUCCESSFUL  DISK I/O:   BECAUSE  OF  USE OF  THE  DIAGNOSE          00327000
+* SIGNAL, CP IS IN A POSITION OF KNOWING WHAT I/O ACTIVITY THE          00328000
+* VIRTUAL MACHINE  DESIRES.  CP WILL PERFORM  ERROR RECORDING,          00329000
+* RETRY,  RECOVERY OR  ABORT PROCEDURES  FOR  THE CMS  VIRTUAL          00330000
+* MACHINE.                                                              00331000
+*                                                                       00332000
+*.                                                                      00333000
+         EJECT                                                          00334000
+**********************************************************************  00335000
+*                                                                       00336000
+*                             INITIALIZATION                            00337000
+*                                                                       00338000
+**********************************************************************  00339000
+DMSDIO   START 0                                               @VA01921 00340300
+RDTK     EQU   DMSDIO                                          @VA01921 00340600
+         ENTRY RDTK                                            @VA01921 00340900
+         ENTRY WRTK                                                     00341000
+         ENTRY DMSDIOR                                                  00342000
+         ENTRY DMSDIOW                                                  00343000
+         USING NUCON,R0                                                 00344000
+         SPACE                                                          00345000
+         USING RDTK,R15                                                 00346000
+DMSDIOR  EQU   *                                                        00347000
+         L     R15,ADIOSECT        SET UP R15 BRIEFLY FOR               00348000
+         USING DIOSECT,R15    EXTERNAL DIO-SECT                         00349000
+         STM   R0,R14,XRSAVE       SAVE THE REGISTERS (NOT 15)          00350000
+         LR    R12,R15        SWITCH DSECT-ADDRESSABILITY               00351000
+         DROP  R15            TO R12 INSTEAD OF R15                     00352000
+         USING DIOSECT,R12    ...                                       00353000
+         BALR  BASE,0         NOW ESTABLISH                             00354000
+         USING *,BASE         OUR OWN                                   00355000
+         LA    BASE,COMAD     COMMON ADDRESSABILITY                     00356000
+         USING COMAD,BASE     ...                                       00357000
+         MVI   IOCOMM,READ    SET IO COMMAND TO READ                    00358000
+         CLC   0(4,R1),ANUCEND         IS CORE-ADDRESS WITHIN CMS NUC?  00359000
+         BNL   COMMON                  TRF IF NOT (OK) - JOIN COMMON    00360000
+*                                                                       00361000
+         MVI   ERRCODE,07              ATTEMPT TO RDTK INTO NUCLEUS IS  00362000
+         B     RETURN2                 NOW 'ERROR 7'.  (24 NOV 70)      00363000
+         DROP  BASE                                                     00364000
+         SPACE 3                                                        00365000
+         USING WRTK,15                                                  00366000
+DMSDIOW  EQU   *                                                        00367000
+WRTK     L     R15,ADIOSECT        SET UP R15 BRIEFLY FOR               00368000
+         USING DIOSECT,R15    EXTERNAL DIO-SECT                         00369000
+         STM   R0,R14,XRSAVE       SAVE THE REGISTERS (NOT 15)          00370000
+         LR    R12,R15        SWITCH DSECT-ADDRESSABILITY               00371000
+         DROP  R15            TO R12 INSTEAD OF R15                     00372000
+         USING DIOSECT,R12                                              00373000
+         BALR  BASE,0         NOW ESTABLISH                             00374000
+         USING COMAD,BASE     OUR OWN                                   00375000
+COMAD    EQU   *              COMMON ADDRESSABILITY.                    00376000
+         MVI   IOCOMM,WRITE   SET IO COMMAND TO WRITE                   00377000
+         USING XPLIST,R1      (BRIEFLY)                                 00378000
+         CLI   XMODE,C'S'      TEST FOR ATTEMPT TO WRITE ON SYSTEM DISK 00379000
+         BNE   COMMON         OK, CONTINUE                              00380000
+         MVI   ERRCODE,04     NO, SET ERROR CODE = 4                    00381000
+         B     RETURN2         ERROR RETURN                             00382000
+         DROP  R1                                                       00383000
+         EJECT                                                          00384000
+**********************************************************************  00385000
+*                                                                       00386000
+*                             COMMON RDTK/WRTK CODING                   00387000
+*                                                                       00388000
+**********************************************************************  00389000
+COMMON   LR    PLIST,1        SAVE PARAMETER LIST                       00390000
+         USING XPLIST,PLIST   ...                                       00391000
+         MVI   DIOFLAG,X'00'  CLEAR ALL FLAG-BITS                       00392000
+         CLI   XMODE,00       CHECK MODE, HOPEFULLY = 00                00393000
+         BE    GETDEVT        OK, GET DEVICE-TABLE DIRECTLY             00394000
+         S     R1,=F'12'      BACK OFF 12 BYTES TO MAKE MODE 24(R1)     00395000
+         L     R15,VCADTLKP   CALL ADTLKP                      @VM03093 00396100
+         BALR  R14,R15        ...                                       00397000
+         BZ    R1OK           GOOD SHOW.                                00398000
+         MVI   ERRCODE,01     ERROR 1 IF ERROR FROM ADTLKP (SICK MODE)  00399000
+         B     RETURN2        GO EXIT.                                  00400000
+*                                                                       00401000
+GETDEVT  L     R1,XMODE       GET DEVICE-TABLE-ADDRESS FROM P-LIST      00402000
+*                                                                       00403000
+         USING ADTSECT,R1     (BRIEFLY)                                 00404000
+R1OK     ST    R1,SAVEADT     KEEP THIS SAFE IN CASE WE NEED IT.        00405000
+         L     XR1,ADTDTA     ACCESS DEVICE TABLE IN NUCON              00406000
+         DROP  R1                                                       00407000
+*                                                                       00408000
+         L     R14,AFVS       REFERENCE FVS INFO                        00409000
+         USING FVSECT,R14     ...                                       00410000
+         OI    UFDBUSY,DIOBIT SET OUR BIT IN 'UFDBUSY' FLAG             00411000
+         ST    R1,ADTADD      SAVE ADT ADDRESS                 @VA05652 00411500
+         DROP  R14                                                      00412000
+*                                                                       00413000
+         LH    DISKIO,DTAD(,XR1)   GET ACTUAL DISK ADDRESS              00414000
+         IC    R15,DTADT(,XR1) GET THE DEVICE-TYPE,            @VA01695 00415100
+         STC   R15,DEVTYP      AND SAVE FOR GENERAL USE        @VA01695 00415200
+         L     BUFFAD,XBUFFAD GET ADDRESS OF BUFFER                     00416000
+         L     BUFFSZ,XBUFFSZ GET BUFFER SIZE                           00417000
+         L     DISKAD,XDISKAD GET ADDRESS OF DISK ADDRESS               00418000
+         SR    R11,R11        CLEAR ERROR-COUNT FOR LATER USE,          00419000
+         ST    R11,DIOFREE    AND CLEAR FREE-STORAGE-ADDRESS            00420000
+         LTR   BUFFSZ,BUFFSZ  CHECK BYTE-COUNT,                         00421000
+         BZ    HANDLQQ        BZ IF = 0, HANDLE DIFFERENTLY.            00422000
+         C     BUFFSZ,RECSZ   IF NOT, IS BYTE-COUNT > 800 ?             00423000
+         BNH   READY          BNH IF NOT, HANDLE REGULARLY.             00424000
+         OI    DIOFLAG,TOOBIG SIGNAL TOO BIG TO TRY DIAGNOSE            00425000
+         LA    R0,JSNEED      IF > 800, GET                             00426000
+* GET SOME FREE STORAGE FOR A CCW-CHAIN AND DISK ADDRESS                00427000
+         DMSFREE DWORDS=(0),TYPCALL=BALR,TYPE=NUCLEUS                   00428000
+         LTR   R15,R15           FAIL IF STORAGE NOT           @VA02374 00428300
+         BNZ   ERROR25           ACQUIRED                      @VA02374 00428600
+         STM   R0,R1,FREER0   SAVE NO. WORDS & ADDRESS FOR LATER        00429000
+         LR    R8,R1          SET IT IN R8 WHERE NEEDED,                00430000
+         MVI   LASTCYL+3,X'FF'     SET CYLINDER NO. TO 255 TO FORCE     00431000
+*                             A NEW CYLINDER-SEEK, AND CONTINUE...      00432000
+*        MAIN LOOP FOR READING SEVERAL 800 -BYTE RECORDS ...            00433000
+LOOP     LR    R9,R8          SET R9 TO BEGINNING OF CCW-CHAIN,         00434000
+         LA    R10,DSEEKA(,R8) SET R10 FOR SEEK-ADDRESSES,              00436000
+         MVI   LASTREC,X'FF'       FORCE SETSECT FOR 1ST IN CHN@VA02324 00436500
+         MVI   LASTHED+3,X'FF'     SET HEAD NUMBER PURPOSELY TO 255,    00437000
+         LA    R0,PRACLIM     PRACTICAL LIMIT INTO R0 FOR BCT-LOOP,     00438000
+         B     LOOP2          AND CONTINUE SHORTLY BELOW ...            00439000
+*        LOOP FOR CHAINING ANOTHER CCW ...                              00440000
+LOOP1    MVI   20(R9),X'60'   TURN ON COMMAND CHAINING                  00441000
+         LA    R9,24(,R9)     REESTABLISH CCW-POINTER                   00442000
+         AL    BUFFAD,RECSZ   INC. CORE-ADDRESS FOR NEXT REC.  @VA01695 00443100
+         LA    DISKAD,2(,DISKAD)   INC. FOR NEXT DISK-ADDRESS,          00444000
+*        MAIN LOOP FOR SETTING UP ONE CCW-PACKAGE ...                   00445000
+LOOP2    BAL   R13,JFILL2     FILL IN SEEK-ADDRESSES AND RWCCW,         00446000
+         C     R14,LASTCYL    IS IT THE SAME CYLINDER AS LAST TIME?     00447000
+         BE    JAS1           BE IF YES.                                00448000
+         ST    R14,LASTCYL    IF NOT, STORE NEW CYLINDER NUMBER         00449000
+         MVI   LASTREC,X'FF'  SET REC. NO. FOR SET-SECTOR TEST @VA01695 00449100
+         CR    R9,R8          ARE WE AT THE BEGINNING OF CCW'S ?        00450000
+         BE    JAS2A          YES - START THE NEW CCW CHAIN.   @VA01695 00451100
+         BCTR  DISKAD,0       IF NOT DECREMENT 'DISKAD' BY 2 TO         00452000
+         BCTR  DISKAD,0       COMPENSATE FOR BEING INCREMENTED LATER    00453000
+         SL    BUFFAD,RECSZ   AND DECR BUFFAD FOR SAME REASON, @VA01695 00454100
+         SH    R9,=H'8'       BACK UP TO THE LAST CCW             P3094 00455000
+         MVI   4(R9),X'20'    TURN OFF COMMAND CHAINING           P3094 00456000
+         B     JAS3A              GO INCREMENT BUFFSZ & ADD NO-OP.      00457000
+*        IF CYLINDER NO. SAME AS LAST TIME, CHECK HEAD NUMBER ...       00458000
+JAS1     C     R15,LASTHED    IF HEAD NUMBER SAME AS LAST TIME ?        00459000
+         BE    JAS3           BE IF YES, OMIT UNNECESSARY SEEK.         00460000
+         CR    R9,R8          AT THE BEGINNING OF CCW CHAIN ?  @VA01695 00460100
+         BE    JAS2A          YES - LEAVE "LASTREC" = X'FF'.   @VA01695 00460200
+*                             (TO ENSURE A SET-SECTOR IS INCLUDED)      00460300
+*        STORE NEW HEAD NUMBER, AND INCLUDE 'SEEK' IN CCW-CHAIN ...     00461000
+JAS2     MVI   LASTREC,00     CLEAR REC NO FOR SET-SECTOR TEST @VA01695 00462100
+JAS2A    ST    R15,LASTHED    STORE NEW HEAD NUMBER,           @VA01695 00462200
+         ST    R10,0(,R9)     STORE SEEKAD IN CCW,                      00463000
+         MVI   0(R9),X'1B'    WITH SEEK COMMAND-CODE,                   00464000
+         MVC   4(4,R9),CCW1+4 MOVE IN THE RIGHT HALF,                   00465000
+         LA    R9,8(,R9)      ADJUST CCW-POINTER,                       00466000
+*        NOW SET UP SEARCH, TIC, AND READ/WRITE CCW'S ...               00467000
+JAS3     TM    DEVTYP,RPSTYP  RPS TYPE DEVICE ?                @V2A2014 00468100
+         BNO   JAS3M          NO...BR                          @V2A2014 00468200
+         MVC   4(4,R9),CCWX+4 MOVE IN THE SET SECTOR CCW.               00470000
+         SR    R13,R13        CLEAR A WORK REGISTER                     00471000
+         IC    R13,6(,R10)    ...AND GET THE DISPLACEMENT.              00472000
+         IC    R15,SECTNUMS(R13) GET THE NEEDED SECTOR NO      @VA01695 00473500
+         CLI   DEVTYP,TYP3330 3330?                            @V2A2014 00473600
+         BE    SECTSET        YES..USE 3330 SECTORS            @V2A2014 00473700
+         IC    R15,SECT3350(R13) NO..USE 3350 SECTORS          @V304498 00473740
+         CLI   DEVTYP,TYP3350 3350?                            @V304498 00473750
+         BE    SECTSET        YES..USE 3350 SECTORS            @V304498 00473760
+         IC    R15,SECT3340(R13) NO..USE 3340 SECTORS          @V2A2014 00473800
+SECTSET  EQU   *                                               @V2A2014 00473900
+         STC   R15,7(,R10)    SAVE IT AFTER THE SEEK ARGUMENTS @VA01695 00474500
+         LA    R15,7(,R10)    POINT TO WHERE WE PUT IT,        @VA01695 00475500
+         ST    R15,0(,R9)     STORE ADDRESS IN CCW,            @VA01695 00476500
+         MVI   0(R9),X'23'    AND MOVE IN THE OP-CODE.                  00478000
+         SLR   R15,R15        GET THE...                       @VA01695 00478100
+         IC    R15,LASTREC    LAST RECORD WE HANDLED           @VA01695 00478200
+         LA    R15,1(,R15)    PLUS ONE;                        @VA01695 00478300
+         CR    R13,R15        THIS ONE SAME AS LAST+1 ?        @VA01695 00478400
+         STC   R13,LASTREC    SAVE "THIS ONE" (C.C. INTACT)    @VA01695 00478500
+         BE    JAS3M          SAME AS LAST+1, OMIT SET-SECTOR. @VA01695 00478600
+         LA    R9,8(,R9)      ADJUST THE CCW-POINTER.                   00479000
+JAS3M    LA    R15,2(,R10)    STORE SEEKAD+2                            00480000
+         ST    R15,0(,R9)     IN CCW,                                   00481000
+         MVI   0(R9),X'31'    AND FILL IN SEARCH COMMAND CODE,          00482000
+         MVC   4(20,R9),CCW2+4     MOVE IN THE REST OF MAIN CCW'S,      00483000
+         ST    R9,8(,R9)      FILL IN ADDRESS OF '*-8'                  00485000
+         MVI   8(R9),X'08'    AND THE 'TIC' COMMAND-CODE.               00486000
+         LA    R10,8(,R10)    AND SEEKAD POINTER FOR NEXT ONE.          00487000
+         S     BUFFSZ,RECSZ   DECREMENT BYTE COUNT                      00488000
+         BNP   JAS4           BNP IF 0 (OR MINUS), ALL DONE.            00489000
+         BCT   R0,LOOP1       IF STILL PLUS, ITERATE UP TO LIMIT.       00490000
+         LA    R0,1           SET R0=1 IF DROPPED THRU BCT;    @VA01695 00490100
+JAS3A    A     BUFFSZ,RECSZ   IF LIMIT EXCEEDED, RESTORE 'BUFFSZ'       00491000
+JAS4     LA    R15,PRACLIM+1  COMPUTE NO. OF CCW "PACKAGES"    @VA01695 00492100
+         SR    R15,R0         ... (AND LEAVE IN R15);          @VA01695 00492200
+         MVI   0(R8),X'07'    INSTALL SEEK OP-CODE                      00493000
+         B     READY1         AND GO PREPARE TO START SIO SEQUENCE.     00494000
+*                                                                       00495000
+READY    BAL   R13,JFILL1     FILL IN SEEKAD'S AND CCW'S                00496000
+*                                                                       00497000
+         LA    R15,1          ONLY 1 READ OR WRITE FOR ST'D DIAG.       00498000
+READY1   XC    CSW(8),CSW     ZERO OUT THE CSW                          00499000
+         ST    R8,CAW         AND POINT TO THE CCWS                     00500000
+         DC    X'83',X'48',AL2(DIAGNUM)                                 00501000
+         BNZ   DIAGBAD        APPARENTLY DIDN'T DO TOO WELL!            00502000
+         TM    DIOFLAG,TOOBIG WAS THIS A ST'D DIAGNOSE CALL?            00503000
+         BNO   JAS9           YES. THEN THERE'S ONLY ONE ITERATION      00504000
+         LA    DISKAD,2(,DISKAD) INCREMENT DISK-ADDRESS FOR NEXT TIME   00505000
+         AL    BUFFAD,RECSZ   ADVANCE CORE-ADDRESS             @VA01695 00506100
+         S     BUFFSZ,RECSZ   AND DECREMENT BYTE-COUNT                  00507000
+         BP    LOOP           BP IF STILL SOME MORE LEFT TO DO.         00508000
+JAS9     TM    DIOFLAG,WRTKF  TEST IF WRTK CALLED RDTK                  00509000
+         BO    RECUR          YES, HANDLE RECURSIVENESS                 00510000
+         TM    DIOFLAG,QQTRK  TEST IF ONLY 1/4 OF 1/4 DESIRED           00511000
+         BZ    CLEAR15        BZ IF NOT - WE'RE DONE.                   00512000
+*                                                                       00513000
+         BAL   RETREG,QQCALC  IF WE READ 16TH TRACK, SET UP REGISTERS   00514000
+         MVC   0(200,BUFFAD),0(TEMP)  AND MOVE DATA TO USER'S BUFFER.   00515000
+*                                                                       00516000
+CLEAR15  MVI   ERRCODE,00     CLEAR ERROR CODE IN R15                   00517000
+*                                                                       00518000
+RETURN   LM    R0,R1,FREER0   RESTORE R0 & R1 FOR FRET-CALL,            00519000
+         LTR   R1,R1          IS THERE ANYTHING TO RETURN ?             00520000
+         BZ    RETURN1        EXIT IF 0 (NO NEED FOR FRET CALL)         00521000
+* CALL FRET TO RETURN THE SPACE USED FOR CCW'S                          00522000
+         DMSFRET DWORDS=(0),LOC=(1),TYPCALL=BALR                        00523000
+RETURN1  L     R14,AFVS       REFERENCE FVS INFO                        00524000
+         USING FVSECT,R14     ...                                       00525000
+         KXCHK DIOBIT         CHECK FOR 'KX' WANTED...                  00526000
+         DROP  R14                                                      00527000
+RETURN2  LM    R0,R15,XRSAVE  RESTORE REGISTERS 0-14, ERROR-CODE TO R15 00528000
+         LTR   R15,R15     SET CONDITION-CODE FOR CONVENIENCE OF CALLER 00529000
+         BR    R14            AND RETURN TO CALLER.                     00530000
+         EJECT                                                          00531000
+**********************************************************************  00532000
+*                                                                       00533000
+*                             SPECIAL ROUTINES TO HANDLE 1/4 OF 1/4 TRK 00534000
+*                                                                       00535000
+**********************************************************************  00536000
+*                                                                       00537000
+*              DETERMINE WHETHER RDTK OR WRTK AND GET BUFFER SPACE      00538000
+*                                                                       00539000
+*        CHECK FOR VARIOUS SPECIAL CASES FOR READ OR WRITE 200 BYTES... 00540000
+*                                                                       00541000
+HANDLQQ  LA    R13,READY      R13 = A(READY) FOR MANY XFER'S BELOW,     00542000
+         MVC   QQDSK2(2),0(DISKAD) MOVE DISK-ADDRESS TO DIOSECT         00543000
+         LA    DISKAD,QQDSK2  AND REFER TO IT FROM THERE.               00544000
+H200     LA    BUFFSZ,200     SET FOR READ OR WRITE OF 200 BYTES,       00545000
+         CLI   DEVTYP,TYP2314 IS THIS A 2314 ?                 @V2A2014 00546100
+         BCR   7,R13          NO..NO ADJUST NECESSARY          @V2A2014 00546200
+         TM    QQDSK2,X'20'   CHECK 3RD BIT OF DISK-ADDRESS,            00548000
+         BZ    CHKNEW         IF = 0 (BLOCK NO. < 8192), CHECK FURTHER  00549000
+         TM    QQDSK2,X'80'   IF = 1, IS LEFTMOST BIT ALSO = 1 ?        00550000
+         BCR   8,R13          'BZ READY' IF NOT (NO SPECIAL PROBLEM)    00551000
+         L     TEMP,QQDSK1    GET DISK-ADDRESS (IN RIGHT END OF REG.)   00552000
+         SH    TEMP,X6000     SUBTRACT NECESSARY ADJUSTER FOR SPECIAL   00553000
+         STH   TEMP,QQDSK2    CASE, AND STORE ADJUSTED DISK-ADDRESS     00554000
+         BR    R13            'B READY'  (CAN READ OR WRITE 200 BYTES)  00555000
+X6000    DC    AL2(X'6000')   ADJUSTER FOR SPECIAL RANGE OF BLOCK NUMBR 00556000
+*                                                                       00557000
+CHKNEW   CLI   IOCOMM,WRITE   IF BLOCK-NUMBER < 8192, = WRITE ?         00558000
+         BE    CLRLEFT        BE IF YES, MUST CLEAR 16TH-TRACK BITS.    00559000
+         TM    QQDSK2,X'C0'   IF A READ, MAYBE = 1ST 16TH TRACK ?       00560000
+         BCR   8,R13          'BZ READY' IF YES, READ 1ST 200 BYTES.    00561000
+*                                                                       00562000
+CLRLEFT  NI    QQDSK2,X'3F'   CLEAR LEFTMOST 2 BITS & USE OLD METHOD.   00563000
+* GET 800 BYTES FROM FREE                                               00564000
+         DMSFREE DWORDS=100,TYPE=NUCLEUS,TYPCALL=BALR                   00565000
+         LTR   R15,R15           FAIL IF STORAGE NOT           @VA02374 00565300
+         BNZ   ERROR25           ACQUIRED                      @VA02374 00565600
+         STM   R0,R1,FREER0   SAVE NO. WORDS & ADDRESS FOR LATER        00566000
+         LR    BUFFAD,R1      AND LOAD WHERE NEEDED.                    00567000
+         OI    DIOFLAG,QQTRK  SET 1/4 OF 1/4 MODE BIT                   00568000
+         L     BUFFSZ,RECSZ   SET ADJUSTED BUFFER SIZE                  00569000
+         CLI   IOCOMM,WRITE   CALLED FOR WRTK                           00570000
+         BCR   7,R13          NO, WE'RE ALL SET  (GO TO 'READY')        00571000
+         OI    DIOFLAG,WRTKF  IF YES,SET FLAG-BIT TO READ FIRST         00572000
+         MVI   IOCOMM,READ    SET TO READ FIRST                         00573000
+         BR    R13            'B READY'                                 00574000
+*                                                                       00575000
+*              PROCESS WRTK CALLS RDTK CASE, AFTER READ COMPLETED       00576000
+*                                                                       00577000
+RECUR    BAL   RETREG,QQCALC  CALCULATE APPROPRIATE 1/4 WITHIN BLOCK    00578000
+         MVC   0(200,TEMP),0(BUFFAD)    MOVE INTO TEMPORARY 800 BYTE BU 00579000
+         MVI   IOCOMM,WRITE   RESET TO WRITE                            00580000
+         L     BUFFAD,DIOFREE SET NEW BUFFER ADDRESS                    00581000
+         L     BUFFSZ,RECSZ   AND SIZE OF RECORD                        00582000
+         NI    DIOFLAG,255-WRTKF-QQTRK  CLEAR FLAG-BITS (ALMOST DONE)   00583000
+         LA    R13,READY1     SET R13 TO RETURN TO 'READY',             00584000
+         LA    R15,1          SIGNAL THIS IS A SINGLE 'I/O'             00585000
+         B     JFILL3         FILL IN CCW'S AND THEN WRITE THE BLOCK.   00586000
+         EJECT                                                          00587000
+**********************************************************************  00588000
+*                                                                       00589000
+*                             I/O ERROR PROCESSOR                       00590000
+*                                                                       00591000
+**********************************************************************  00592000
+         SPACE                                                          00593000
+DIAGBAD  STC   R15,DIAGRET    SAVE CP'S RETURN CODE.                    00594000
+         MVC   IOOLD(16),IOOPSW         AND PERTINENT INFO              00595000
+         BC    4,RET1         HANDLE CONDITION CODE 1.                  00596000
+         BC    2,RET2         HANDLE CONDITION CODE 2                   00597000
+         MVI   ERRCODE,02     MIGHT AS WELL NAME THIS ERROR NOW.        00598000
+GETOUT   LA    TEMP,SENCCW    POINT TO THE SENSE-CCW                    00599000
+         ST    TEMP,CAW       REALLY POINT TO IT.                       00600000
+         SIO   0(DISKIO)      NOW CRANK IT UP.                          00601000
+         TIO   0(DISKIO)      AND WAIT.                                 00602000
+         BC    2,*-4          ...SOME MORE...                           00603000
+         CLI   DEVTYP,TYP2314 IS DISK A 2314?                  @VA04120 00603100
+         BE    RETURN         YES; THEN DON'T ISSUE MSG BELOW  @VA04120 00603200
+         TM    SENSB+1,WRTINHIB    'WRITE-INHIBIT' IS NOT THE  @VA01921 00603300
+         BO    WRTONLY              USERS FAULT - GIVE A CLUE. @VA01921 00603600
+         B     RETURN         GET OUT NOW SINCE INFO IS AVAILABLE.      00604000
+*                                                                       00605000
+RET1     CLI   DIAGRET,X'04'  DID CP CATCH SOMEONE GOING OFF THE END?   00606000
+         BE    ERROR5         YES. GO TELL HIM.                         00607000
+         CLI   DIAGRET,X'03'  OR WAS THE DISK READ-ONLY?                00608000
+         BE    ERROR6         YES. GO HANDLE.                           00609000
+         MVI   ERRCODE,X'03'  LABLE IT AS A WEIRD USER-ERROR.           00610000
+         B     RETURN         RETURN TO CALLER                          00611000
+*                                                                       00612000
+RET2     MVI   ERRCODE,X'08'  LABEL AS UNDETERMINED               V0158 00613100
+         B     RETURN         RETURN TO THE CALLER.                     00621000
+*                                                                       00622000
+ERROR5   MVI   ERRCODE,X'05'  TELL HIM HIS EXTENT IS WRONG              00623000
+         B     RETURN         RETURN TO THE CALLER                      00624000
+*                                                                       00625000
+WRTONLY  DMSERR NUM=905,LET=S,TEXT='WRITE-INHIBIT SWITCH SET ON DRIVE..X00625300
+               .NOTIFY OPERATOR'                               @VA01921 00625600
+ERROR6   L     R15,SAVEADT    GET THAT ADDRESS WE SAVED SO NEATLY.      00626000
+         USING ADTSECT,R15                                              00627000
+         NI    ADTFLG1,255-ADTFRW  TURN OF THE R/W INDICATOR.           00628000
+         OI    ADTFLG1,ADTFRO TURN ON THE READ-ONLY INDICATOR.          00629000
+         DROP  R15                                                      00630000
+         MVI   ERRCODE,X'06'  TELL HIM THAT THE DISK IS R/O (NOW).      00631000
+         B     RETURN         ...                                       00632000
+ERROR25  MVI   ERRCODE,25        CAN'T DO IT WITHOUT           @VA02374 00632300
+         B     RETURN            WORK SPACE                    @VA02374 00632600
+         EJECT                                                          00633000
+*********************************************************************** 00634000
+*                                                                       00635000
+*                             CALCULATE DISPLACEMENT FOR 1/4 OF 1/4     00636000
+*                                                                       00637000
+**********************************************************************  00638000
+QQCALC   L     TEMP,XDISKAD   CALCULATE POSITION IN BUFFER              00639000
+         LH    TEMP,0(0,TEMP) ...                                       00640000
+         SRL   TEMP,14        GET 1/4 OF 1/4 NUMBR                      00641000
+         N     TEMP,=XL4'00000003'  NOW ISOLATE NUMBER (0 TO 3)         00642000
+         MH    TEMP,H200+2    EACH 1/4 OF 1/4 IS 200 BYTES              00643000
+         A     TEMP,DIOFREE   ADD RELOCATION FACTOR                     00644000
+         L     BUFFAD,XBUFFAD GET ORIGINAL 200 BYTE BUFFER ADDRESS      00645000
+         BR    RETREG         RETURN TO CALLER                          00646000
+         SPACE 2                                                        00647000
+*        SUBROUTINE TO FILL IN SEEK-ADDRESS INFORMATION AND/OR          00648000
+*        READ-WRITE CCW'S.   (JAS)                                      00649000
+*              'JFILL1' FILLS IN BOTH FOR 'REGULAR' CALLS.              00650000
+*              'JFILL2' FILLS IN BOTH FOR LARGE BLOCKS.                 00651000
+*              'JFILL3' FILLS IN ONLY CCW'S FOR 16-TH TRACKS.           00652000
+*        (IN ANY CASE, R13 = RETURN-REGISTER)                           00653000
+*                                                                       00654000
+JFILL1   LA    R10,SEEKADR    FOR REGULAR CASE, SET R10 = A(SEEKADR)    00655000
+         MVC   CCW1A(8),CCW1       ASSUME DEVICE IS NOT A 3330          00656000
+         LA    R8,CCW1A       ALSO POINT R8 TO CCW1 FOR CAW LATER.      00657000
+*        (AT ENTRY TO 'JFILL2', R10 MUST POINT TO SEEK-AD'S)            00658000
+JFILL2   SR    R14,R14        CLEAR R14,                                00659000
+         ST    R13,DOUBLE     SAVE R13 (ONLY REGISTER WE HAVE HANDY)    00660000
+         LA    R13,TBL3330    SET TENTATIVELY FOR 3330.                 00661000
+         CLI   DEVTYP,X'09'   IS IT A 3330 ?                            00662000
+         BE    R13OK          BRANCH IF YES.                            00663000
+         LA    R13,TBL3350    SET TENTATIVELY FOR 3350         @V304498 00663100
+         CLI   DEVTYP,TYP3350 IS THIS A 3350 ?                 @V304498 00663200
+         BE    R13OK          YES, OBTAIN DISK ADDRESS         @V304498 00663300
+         LA    R13,TBL2314    SET R13 TENTATIVELY FOR 2314,             00664000
+         CLI   DEVTYP,X'08'   IS UNIT-TYPE = 08 (2314) ?                00665000
+         BE    R13OK          BE IF YES 08, 2314.                       00666000
+         LA    R13,TBL3340    MUST BE 3340                     @V2A2014 00667100
+R13OK    EQU   *              ...                                       00668000
+         USING JTABLE,R13     ...                                       00669000
+         LH    R15,0(,DISKAD) OBTAIN THE DISK-ADDRESS,                  00670000
+         N     R15,=X'0000FFFF'                                   P0992 00671000
+         BCTR  R15,0          DECREMENT IT BY ONE (BLOCK NUMBER - 1)    00672000
+         LTR   R15,R15        WAS BLOCK-NUMBER = 0  (INVALID)           00673000
+         BM    ERROR5         BM IT IT WAS, ERROR 5 (NO MESSAGE)        00674000
+         D     R14,RECCYL     DIVIDE BY NUMBER RECORDS PER CYLINDER,    00675000
+         ST    R15,0(,R10)    STORE 00-00-00 & CYLINDER NUMBER,         00676000
+         LR    R15,R14        REMAINDER INTO R15,                       00677000
+         SR    R14,R14        AND CLEAR R14 AGAIN,                      00678000
+         D     R14,RECHED     DIVIDE BY NUMBER RECORDS PER HEAD(S),     00679000
+         LA    R14,1(,R14)    RECORD NUMBER STARTS WITH 1 (NOT 0)       00680000
+         CLI   NUMHED+1,01    IS IT PER 'ONE' HEAD ?                    00681000
+         BE    R15OK          BE IF YES (ALL OK AS IS)                  00682000
+         AR    R15,R15        IF NOT, DOUBLE THE HEAD NUMBER,           00683000
+         CH    R14,OVEREC     CHECK RECORD NUMBER FOR TRACK OVERFLOW    00684000
+         BNH   R15OK          BNH IF NOT IN 'NEXT TRACK',               00685000
+         LA    R15,1(,R15)    INCR. HEAD NUMBER IF REC 9 UP, ETC.       00686000
+R15OK    STH   R15,4(,R10)    STORE 00 & HEAD-NUMBER.                   00687000
+*                             (NOTE -- HEAD NUMBER REMAINS IN R15)      00688000
+         STC   R14,6(,R10)    AND STORE RECORD NUMBER (1-4 OR 1-15)     00689000
+         L     R14,0(,R10)    CYLINDER NUMBER BACK INTO R14 PER SPEC    00690000
+         L     R13,DOUBLE     RESTORE R13 AND PROCEED TO JFILL3 ...     00691000
+         DROP  R13            ...                                       00692000
+*                                                                       00693000
+JFILL3   EQU   *              NOW CONTINUE (OR CAN ENTER HERE)...       00694000
+         TM    DEVTYP,RPSTYP  RPS TYPE DEVICE ?                @V2A2014 00695100
+         BNO   JFILL3A        NO...BR                          @V2A2014 00695200
+         TM    DIOFLAG,TOOBIG IS THIS A STANDARD DIAGNOSE CALL?         00697000
+         BNZ   JFILL3A        IF NOT, THIS CALC DONE ELSEWHERE @VA01695 00698100
+         STM   R14,R15,DOUBLE GET SOME WORKING ROOM,           @VA01695 00698200
+         SR    R14,R14        AND A CLEAN REGISTER                      00700000
+         IC    R14,6(,R10)    NEED THE RECORD NUMBER.                   00701000
+         IC    R15,SECTNUMS(R14) GET THE RIGHT SECTOR NUMBER;  @VA01695 00702100
+         CLI   DEVTYP,TYP3330 3330 ?                           @V2A2014 00702200
+         BE    STRSECT        YES..BR                          @V2A2014 00702300
+         IC    R15,SECT3350(R14) NO..USE 3350 SECTORS          @V304498 00702340
+         CLI   DEVTYP,TYP3350 3350 ?                           @V304498 00702350
+         BE    STRSECT        YES..BR                          @V304498 00702360
+         IC    R15,SECT3340(R14) NO..USE 3340 SECTORS          @V2A2014 00702400
+STRSECT  STC   R15,7(,R10)    STORE WHERE NEEDED.              @VA01695 00702600
+         MVC   CCW1(4),CCW1A  BETTER MAKE SOME ROOM                     00705000
+         MVC   CCW1A(8),CCWX  MOVE IN THE SET SECTOR CCW                00706000
+         LA    R8,CCW1        AND POINT TO THE READJUSTED STRING        00707000
+         LM    R14,R15,DOUBLE GET THOSE REGISTERS BACK.                 00708000
+JFILL3A  EQU   *              NICE PLACE TO RESUME.                     00709000
+         ICM   BUFFAD,8,IOCOMM  INSERT OP CODE (06 OR 05),     @VA01695 00710100
+         ST    BUFFAD,RWCCW     STORE OP-CODE + DATA ADDRESS,  @VA01695 00710200
+         STH   BUFFSZ,RWCCW+6      STORE COUNT (TENTATIVELY)            00712000
+         C     BUFFSZ,RECSZ   IS IT TOO LARGE (> RECSIZ) ?              00713000
+         BCR   13,R13         'BNH' IF NOT TOO LARGE, EXIT VIA R13.     00714000
+         MVC   RWCCW+6(2),RECSZ+2  IF TOO LARGE, SUBSTITUTE RECSIZ.     00715000
+         BR    R13       (R14 & R15 MEANINGFUL FOR JFILL1 OR JFILL2)    00716000
+         EJECT                                                          00717000
+*        CONSTANTS & DISK TABLES ...                                    00718000
+*                                                                       00719000
+RECSZ    DC    F'800'         CMS USUALLY READS & WRITES 800 BYTES      00720000
+*                                                                       00721000
+TBL2314  DS    0F             2314-TABLE (FOR GENERAL USE) ...          00731000
+*              (INDICATED BY 'UNIT TYPE' OF X'08' A LA 'OS')            00732000
+         DC    F'150'         NUMBER OF RECORDS PER CYLINDER            00733000
+         DC    F'15'          NUMBER OF RECORDS PER ...                 00734000
+         DC    H'2'           PER TWO HEADS.                            00735000
+         DC    H'8'           OVERFLOW-RECORD NUMBER                    00736000
+         DC    H'20'          NUMBER OF HEADS (TRACKS) PER CYLINDER     00737000
+         DC    H'203'         MAXIMUM NUMBER OF CYLINDERS               00738000
+*                                                                       00738050
+TBL3350  DS    0F             3350 TABLE (FOR GENERAL USE)     @V304498 00738100
+*              ( INDICATED BY 'UNIT TYPE' OF X'0B' A LA 'OS')           00738150
+         DC    F'570'         NUMBER OF RECORDS PER CYLINDER   @V304498 00738200
+         DC    F'19'          NUMBER OF RECORDS PER ...        @V304498 00738250
+         DC    H'1'           PER ONE HEAD                     @V304498 00738300
+         DC    H'20'          OVERFLOW-RECORD NUMBER (N/A)     @V304498 00738350
+         DC    H'30'          NUMBER OF TRACKS PER CYLINDER    @V304498 00738400
+         DC    H'115'         MAXIMUM NUMBER OF CYLINDERS      @V304498 00738450
+*                                                                       00739000
+TBL3330  DS    0F             3330-TABLE (FOR GENERAL USE) ...          00740000
+*              (INDICATED BY 'UNIT TYPE' OF X'09' A LA 'OS')            00741000
+         DC    F'266'         NUMBER OF RECORDS PER CYLINDER            00742000
+         DC    F'14'          NUMBER OF RECORDS PER ...                 00743000
+         DC    H'1'           PER ONE HEAD.                             00744000
+         DC    H'15'          OVERFLOW-RECORD NUMBER (N/A)              00745000
+         DC    H'19'          NUMBER OF HEADS (TRACKS) PER CYLINDER     00746000
+         DC    H'246'         MAXIMUM NUMBER OF CYLINDERS               00747000
+*                                                                       00748000
+TBL3340  DS    0F             3340 TABLE                       @V2A2014 00748050
+         DC    F'96'                                           @V2A2014 00748100
+         DC    F'8'                                            @V2A2014 00748150
+         DC    H'1'                                            @V2A2014 00748200
+         DC    H'9'                                            @V2A2014 00748250
+         DC    H'12'                                           @V2A2014 00748300
+         DC    H'682'                                          @V2A2014 00748350
+*                                                                       00748400
+H8       DC    H'8'                                                     00749000
+WRTINHIB EQU   X'02'               SENSE BYTE 1, BIT 6         @VA01921 00749500
+*                                                                       00750000
+SECTNUMS DC    XL1'00'                                                  00751000
+         DC    X'020B141D252E374049525B646D75'                 @VA01695 00752100
+*                                                                       00753000
+SECT3340 DC    XL1'00'                                         @V2A2014 00753100
+         DC    X'020910171E252C32'                             @V2A2014 00753200
+*                                                                       00753300
+SECT3350 DC    XL1'00'                                         @V304498 00753600
+         DC    AL1(2,8,15,21,27,34,40,46,53,59,65,71,78,84,90) @V304498 00753610
+         DC    AL1(97,103,109,116)                             @V304498 00753620
+*                                                                       00753630
+         LTORG                                                          00754000
+*                                                                       00755000
+JTABLE   DSECT                                                          00756000
+RECCYL   DS    1F             NUMBER OF RECORDS PER CYLINDER            00757000
+RECHED   DS    1F             NUMBER OF RECORDS PER ...                 00758000
+NUMHED   DS    1H             PER ONE OR TWO HEADS.                     00759000
+OVEREC   DS    1H             OVERFLOW-RECORD NUMBER (OR N/A)           00760000
+HEDCYL   DS    1H             NUMBER OF HEADS (TRACKS) PER CYLINDER     00761000
+MAXCYL   DS    1H             MAXIMUM NUMBER OF CYLINDERS               00762000
+         SPACE 2                                                        00763000
+*        PARAMETERS FOR HANDLING CHAINED CCW'S, ETC.                    00764000
+*                                                                       00765000
+PRACLIM  EQU   15      PRACTICAL LIMIT FOR NO. OF REC. FOR ONE 'SIO'    00766000
+*                                                                       00767000
+TYP3340  EQU   X'07'          DEVICE TYPE 3340                 @V2A2014 00767100
+TYP3350  EQU   X'0B'          DEVICE TYPE 3350                 @V304498 00767150
+TYP2314  EQU   X'08'          DEVICE TYPE 2314                 @V2A2014 00767200
+TYP3330  EQU   X'09'          DEVICE TYPE 3330                 @V2A2014 00767300
+RPSTYP   EQU   X'01'          ROTATIONAL POSITION SENSING      @V2A2014 00767400
+JSNEED   EQU   PRACLIM*6      (FOR R0) NO DBL WORDS NEEDED FROM FREE    00768000
+DSEEKA   EQU   (PRACLIM*5)*8  OFFSET (IN BYTES) OF SEEK ADDRESSES       00769000
+         EJECT                                                          00770000
+         NUCON                                                          00771000
+         DIOSECT                                                        00772000
+         ADT                                                            00773000
+         FVS                                                            00774000
+         REGEQU                                                         00775000
+*********************************************************************   00776000
+*                                                                       00777000
+*                             CONSTANTS AND DEFINITIONS                 00778000
+*                                                                       00779000
+*********************************************************************   00780000
+*                                                                       00781000
+*              REGISTER ASSIGNMENTS                                     00782000
+*                                                                       00783000
+BASE     EQU   R2                                                       00784000
+PLIST    EQU   3                                                        00785000
+DISKIO   EQU   R4                                                       00786000
+BUFFAD   EQU   R5                                                       00787000
+BUFFSZ   EQU   R6                                                       00788000
+DISKAD   EQU   R7                                                       00789000
+RETREG   EQU   R14            ...                                       00790000
+TEMP     EQU   R15            ...                                       00791000
+XR1      EQU   5                                                        00792000
+*                                                                       00793000
+*              FORMAT OF PARAMETER LIST                                 00794000
+*                                                                       00795000
+XPLIST   DSECT                                                          00796000
+XBUFFAD  DC    A(0)           BUFFER ADDRESS                            00797000
+XBUFFSZ  DC    F'0'           BUFFER SIZE                               00798000
+XDISKAD  DC    A(0)           ADDRESS OF DISK ADDRESS LIST              00799000
+XMODE    DC    A(0)           ACTIVE DISK TABLE ADDRESS (OR MODE)       00800000
+*                                                                       00801000
+READ     EQU   X'06'                                                    00802000
+WRITE    EQU   X'05'                                                    00803000
+SILI     EQU   X'20'                                                    00804000
+PCI      EQU   X'80'                                                    00805000
+CC       EQU   X'40'                                                    00806000
+CE       EQU   X'08'                                                    00807000
+DE       EQU   X'04'                                                    00808000
+UC       EQU   X'02'                                                    00809000
+PROGCHK  EQU   X'20'                                                    00810000
+PROTCHK  EQU   X'10'                                                    00811000
+         END                                                            00812000

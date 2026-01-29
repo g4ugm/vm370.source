@@ -1,0 +1,269 @@
+EPS      TITLE 'DMKEPS     (CP)     VM/370 - RELEASE 6'                 00001000
+         ISEQ  73,80          VALIDATE SEQUENCING OF SYSIN              00002000
+*********************************************************************** 00003000
+*                                                                       00004000
+* MODULE NAME -                                                         00005000
+*                                                                       00006000
+*        DMKEPS                                                         00007000
+*                                                                       00008000
+* FUNCTION -                                                            00009000
+*                                                                       00010000
+*        TO PROMPT THE USER TO ENTER A PASSWORD, TYPE MASKING           00011000
+*        CHARACTERS IF APPROPRIATE, READ THE PASSWORD FROM THE          00012000
+*        TERMINAL, AND CHECK IT FOR A MATCH.                            00013000
+*                                                                       00014000
+* ATTRIBUTES -                                                          00015000
+*                                                                       00016000
+*        REENTRANT, PAGEABLE, CALLED VIA SVC                            00017000
+*                                                                       00018000
+* ENTRY POINT -                                                         00019000
+*                                                                       00020000
+*        DMKEPSWD                                                       00021000
+*                                                                       00022000
+* ENTRY CONDITIONS -                                                    00023000
+*                                                                       00024000
+*        GPR  0 = 0, 1, 2, OR 3, INDICATING MSG TO BE TYPED AS FOLLOWS: 00025000
+*                                0 = 'ENTER PASSWORD'                   00026000
+*                                1 = 'ENTER READ PASSWORD'              00027000
+*                                2 = 'ENTER WRITE PASSWORD'             00028000
+*                                3 = 'ENTER MULT PASSWORD'              00029000
+*        GPR  0 = 4, 5, 6, OR 7, INDICATING THE SAME FOUR               00030000
+*                      MESSAGES AS ABOVE, BUT ALSO REQUESTING           00031000
+*                      THAT IF AN INVALID PASSWORD IS ENTERED           00032000
+*                      IT BE RETURNED IN REGISTERS 0 & 1.               00033000
+*        GPR  1 = ADDRESS OF 8-BYTE PASSWORD TO BE COMPARED             00034000
+*        GPR 11 = ADDRESS OF USER'S VMBLOK                              00035000
+*        GPR 12 = ADDRESS OF DMKEPSWD                                   00036000
+*        GPR 13 = ADDRESS OF STANDARD SAVE AREA                         00037000
+*                                                                       00038000
+* EXIT CONDITIONS -                                                     00039000
+*                                                                       00040000
+*        CC = 0 IF PASSWORD MATCHES                                     00041000
+*        CC = 1 OR 2 IF 'PASSWORD INCORRECT'                            00042000
+*        CC = 3 IF PERMANENT ERROR ON TERMINAL                          00043000
+*                                                                       00044000
+* CALLS TO OTHER ROUTINES -                                             00045000
+*                                                                       00046000
+*        DMKFREE  - OBTAIN FREE STORAGE                                 00047000
+*        DMKQCNWT - SEND PROMPTING MESSAGE TO TERMINAL                  00048000
+*        DMKQCNRD - READ PASSWORD FROM TERMINAL                         00049000
+*        DMKDSPCH - GO TO 'DISPATCH' WHILE AWAITING PASSWORD            00050000
+*        DMKSCNFD - GET PASSWORD FROM TERMINAL INPUT LINE               00051000
+*        DMKFRET  - RETURN FREE STORAGE                                 00052000
+*                                                                       00053000
+* EXTERNAL REFERENCES -                                                 00054000
+*                                                                       00055000
+*        NONE                                                           00056000
+*                                                                       00057000
+* TABLES / WORK AREAS / CONTROL BLOCKS                                  00058000
+*                                                                       00059000
+*        VMBLOK                                                         00060000
+*        TERMINAL RDEVBLOK                                              00061000
+*                                                                       00062000
+* REGISTER USAGE -                                                      00063000
+*                                                                       00064000
+*        GPR 4 & 5 = HOLD PASSWORD TO BE COMPARED AGAINST (FROM CALLER) 00065000
+*        GPR   8   = ADDRESS OF TERMINAL RDEVBLOK                       00066000
+*        GPR   9   = ADDRESS OF COMMAND BUFFER                          00067000
+*        GPR  11   = VMBLOK ADDRESS                                     00068000
+*        GPR  12   = BASE REGISTER                                      00069000
+*        GPR  13   = ADDRESS OF STANDARD SAVE AREA                      00070000
+*                                                                       00071000
+*        GPRS 0-3 AND 14-15 ARE WORK REGISTERS                          00072000
+*                                                                       00073000
+*        GPR 6-7, AND 10 ARE NOT USED                                   00074000
+*                                                                       00075000
+* NOTES -                                                               00076000
+*                                                                       00077000
+*        THIS MODULE WAS ORIGINALLY CONTAINED WITHIN THE DMKLNK         00078000
+*        MODULE BUT WAS SEPERATED BECAUSE OF SPACE CONSIDERATIONS       00079000
+*        AND ALSO BECAUSE THE ENTRY POINT NAME VIOLATED STANDARDS.      00080000
+*        IT CURRENTLY CONTAINS A SINGLE ENTRY AT 'DMKEPSWD' AND         00081000
+*        IS CALLED BY 'LOGON' AND  'LINK'.   ------9/23/81              00082000
+         EJECT                                                          00083000
+* OPERATION -                                                           00084000
+*                                                                       00085000
+*        1.  SAVES PASSWORD TO BE COMPARED AGAINST IN TWO REGISTERS;    00086000
+*        TYPES PROMPTING MESSAGE SPECIFIED BY GPR 0 AT INPUT -          00087000
+*        EITHER 'ENTER PASSWORD', 'ENTER READ PASSWORD',                00088000
+*        'ENTER WRITE PASSWORD', OR 'ENTER MULT PASSWORD'.              00089000
+*                                                                       00090000
+*        2.  CALLS DMKFREE TO GET A BUFFER INTO WHICH TO READ THE       00091000
+*        PASSWORD.  IF THE TERMINAL IS A TELETYPE, OR IF THE            00092000
+*        TERMINAL RDEVBLOK INDICATES THAT THE TERMINAL DOES NOT         00093000
+*        HAVE A PRINT-INHIBIT FEATURE, 'MASKING' CHARACTERS OF          00094000
+*        OVERPRINTED H'S, S'S, AND *'S ARE TYPED ON THE TERMINAL        00095000
+*        AFTER THE PROMPTING MESSAGE.  OTHERWISE, A "BY-PASS" OR        00096000
+*        PRINT-INHIBIT CHARACTER IS SENT TO THE TERMINAL VIA DMKQCNWT.  00097000
+*        FOR A 3215-TYPE TERMINAL (WHERE NEITHER PRINT-INHIBIT,         00098000
+*        BACKSPACE, NOR LINE-FEED WITHOUT CARRIAGE RETURN IS            00099000
+*        AVAILABLE), A SIMPLE MASKING LINE OF "XXXXXXXX" IS             00100000
+*        ALWAYS GIVEN.                                                  00101000
+*                                                                       00102000
+*        3. DMKQCNRD IS CALLED TO HAVE THE PASSWORD ENTERED, AND        00103000
+*        CONTROL IS THEN TRANSFERRED TO DMKDSPCH, WITH THE RETURN       00104000
+*        SPECIFIED TO COME BACK TO STEP 4 WHEN THE PASSWORD HAS BEEN    00105000
+*        ENTERED.                                                       00106000
+*                                                                       00107000
+*        4.  WHEN THE PASSWORD HAS BEEN ENTERED, DMKEPSWD CHECKS FOR    00108000
+*        A PERMANENT ERROR ON THE TERMINAL (WHICH COULD OCCUR, FOR      00109000
+*        EXAMPLE, IF THE USER TURNED OFF THE TERMINAL INSTEAD OF        00110000
+*        ENTERING THE PASSWORD, OR IF THE COMMUNICATIONS LINE OPENED);  00111000
+*        IF SO, RETURNS THE FREE STORAGE AND EXITS TO THE CALLER WITH   00112000
+*        A CONDITION-CODE 3.                                            00113000
+*                                                                       00114000
+*        IF THERE WAS NO PROBLEM OF THIS KIND, DMKEPSWD CHECKS FOR      00115000
+*        A ZERO BYTE COUNT (I.E. NULL LINE WAS ENTERED).  IF YES, GOES  00116000
+*        TO STEP 9.                                                     00117000
+*                                                                       00118000
+*        5.  OTHERWISE, BLANK-FILLS AN EIGHT-BYTE AREA (SAVEWRK6) AND   00119000
+*        CALLS DMKSCNFD TO OBTAIN THE PASSWORD.  IF THE LINE WAS BLANK, 00120000
+*        GOES TO STEP 9.  IF THE PASSWORD WAS MORE THAN 8 BYTES,        00121000
+*        TREATS AS AN ERROR (RETURNS CONDITION-CODE 2 TO THE CALLER     00122000
+*        IN STEP 8 AFTER RETURNING THE FREE STORAGE IN STEP 7).         00123000
+         EJECT                                                          00124000
+*        6.  IF THE PASSWORD IS NOT NULL, AND NO MORE THAN 8 BYTES,     00125000
+*        THEN IT IS SAVED (IN SAVEWRK6) FOR COMPARING WITH THAT         00126000
+*        PROVIDED AT ENTRY, JUST BEFORE RETURN IS MADE IN STEP 8.       00127000
+*                                                                       00128000
+*        7.  THE FREE STORAGE USED FOR THE INPUT BUFFER IS NOW RETURNED 00129000
+*        VIA A CALL TO DMKFRET.                                         00130000
+*                                                                       00131000
+*        8.  FINALLY, THE PASSWORD ENTERED IS COMPARED AGAINST THE      00132000
+*        PASSWORD PROVIDED BY THE CALLER, AND EXIT IS IMMEDIATELY MADE  00133000
+*        TO THE CALLER, WITH THE CONDITION-CODE SET FROM THE COMPARE.   00134000
+*                                                                       00135000
+*        9.  IF A NULL OR BLANK LINE WAS ENTERED, THEN THE MASKING      00136000
+*        CHARACTERS ARE TYPED FOR EITHER TELETYPE OR OTHER TERMINAL,    00137000
+*        AND REJOINS MAIN LOGIC AT STEP 3 ABOVE, TO HAVE THE USER       00138000
+*        AGAIN ENTER THE PASSWORD.  (FOR A 3215-TYPE TERMINAL, A        00139000
+*        SIMPLE MASKING LINE OF "XXXXXXXX" IS GIVEN TO PROMPT THE       00140000
+*        USER TO RE-ENTER THE PASSWORD.)                                00141000
+*                                                                       00142000
+* PROMPTING MESSAGES:                                                   00143000
+*                                                                       00144000
+*        'ENTER PASSWORD'                                               00145000
+*        'ENTER READ PASSWORD'                                          00146000
+*        'ENTER WRITE PASSWORD'                                         00147000
+*        'ENTER MULT PASSWORD'                                          00148000
+*                                                                       00149000
+         EJECT                                                          00150000
+         COPY OPTIONS                                                   00151000
+         COPY LOCAL                                                     00152000
+         EJECT                                                          00153000
+DMKEPS   CSECT                                                          00154000
+         DC    CL8'DMKEPS'    MODULE IDENTIFIER                         00155000
+         EXTRN DMKQCNRD                                                 00156000
+         EXTRN DMKSCNFD                                                 00157000
+         USING PSA,R0                                                   00158000
+         USING VMBLOK,R11                                               00159000
+         USING SAVEAREA,R13                                             00160000
+         SPACE                                                          00161000
+         ENTRY DMKEPSWD       "ENTER PASSWORD" ENTRY                    00162000
+         USING DMKEPSWD,R12                                             00163000
+         SPACE                                                          00164000
+DMKEPSWD ENTER                "ENTER PASSWORD" ENTRY                    00165000
+         TM    VMOSTAT,VMKILL IS THE USER BEING LOGGED OFF?             00166000
+         BO    SETCC3         YES--EXIT WITH CC=3                       00167000
+         LM    R4,R5,0(R1)    SAVE PASSWORD TO BE CHECKED AGAINST       00168000
+         MVI   SAVEWRK1,X'00' INIT INVALID PASSWORD RETURN FLAG         00169000
+         C     R0,F4          RETURN INVALID PASSWORD?         @V60BBBB 00170000
+         BL    NOPASRET       BR IF NOT                        @V60BBBB 00171000
+         OI    SAVEWRK1,RETPASS   TURN ON FLAG TO CAUSE ANY    @V60BBBB 00172000
+*                             INVALID PASSWORD TO BE RETURNED.          00173000
+         S     R0,F4          GET REGISTER BACK TO THE RANGE   @V60BBBB 00174000
+*                             UNDERSTOOD BY FOLLOWING CODE.             00175000
+NOPASRET DS    0H                                              @V60BBBB 00176000
+         LTR   R2,R0          R0 INTO R2 AND SET CONDITION-CODE         00177000
+         MSG   'ENTER PASSWORD:'   (TENTATIVELY)                        00178000
+         BZ    ENTP02              TRF IF R0 WAS 0 - REGULAR PASSWORD.  00179000
+         MSG   'ENTER READ PASSWORD:'   (TENTATIVELY)                   00180000
+         S     R2,F2               (R2) - 2 GIVES US CLUE TO R0         00181000
+         BM    ENTP02              TRF IF R0 WAS 1.                     00182000
+         MSG   'ENTER WRITE PASSWORD:'  (TENTATIVELY)                   00183000
+         BZ    ENTP02              TRF IF R0 WAS 2.                     00184000
+         MSG   'ENTER MULT PASSWORD:'   (R0 MUST HAVE BEEN 3)           00185000
+*                                                                       00186000
+ENTP02   L     R2,=A(NOTRESP)      SET NON-COMMAND MSG         @V60C2B8 00187000
+         CALL  DMKQCNWT,PARM=NORET(,R2)      PROMPT USER       @V60C2B8 00188000
+         LA    R0,BUFSIZE     NOW WE NEED AN INPUT BUFFER               00189000
+         CALL  DMKFREE        GET ONE FOR THE PASSWORD                  00190000
+         LR    R9,R1          INTO R9 THE ADDRESS SHALL GO              00191000
+ENTP03   EQU   *              READ THE PASSWORD                @V200820 00192000
+         LA    R0,BUFINLTH-2  SET EXPECTED INPUT COUNT                  00193000
+         CALL  DMKQCNRD,PARM=(EDIT+UCASE+INHIBIT)              @V6AE6AE 00194000
+         BZ    ENTP04         ALL O.K. - CHECK COUNT           @VA04462 00195000
+         C     R2,F8          ATTN OR LINE DROP?               @VA04462 00196000
+         BH    ENTP13         LINE DROP - EXIT GRACEFULLY      @VA04462 00197000
+         B     ENTP03         RETRY THE READ                   @VA04462 00198000
+         EJECT                                                          00199000
+ENTP04   EQU   *              CHECK FOR VALID INPUT COUNT      @VA04462 00200000
+         LTR   R2,R0          BE CAREFUL OF ZERO INPUT COUNT   @V200820 00201000
+         BNP   ENTP03         TRY AGAIN IF NULL LINE           @V200820 00202000
+         USING BUFFER,R9                                                00203000
+         STM   R1,R2,BUFNXT   STORE POINTER AND COUNT FOR SCANFLD       00204000
+         MVC   SAVEWRK6(8),BLANKS  BLANK-FILL WHERE WE WILL PUT PASSWRD 00205000
+         CALL  DMKSCNFD       GET THE PASSWORD                          00206000
+         BNZ   ENTP03         TRY AGAIN IF NULL INPUT          @V200820 00207000
+         C     R0,F8          PASSWORD MORE THAN 8 BYTES ?     @VA11769 00208000
+         BH    ENTP03         YES GO READ AGAIN                @VA11769 00209000
+         LR    R15,R0                                                   00210000
+         BCTR  R15,0                                                    00211000
+         EX    R15,SAVEPASS   SAVE 8-BYTE BLANK-FILLED PASSWORD         00212000
+PASSFRET LA    R0,BUFSIZE     NOW GIVE BACK THE INPUT BUFFER            00213000
+         LR    R1,R9          ...                                       00214000
+         CALL  DMKFRET        ...                                       00215000
+         CL    R4,SAVEWRK6    WELL, DOES THE PASSWORD MATCH ?           00216000
+         BNE   PASSCHK1       TRF IF NOT.                      @V60BBBB 00217000
+         CL    R5,SAVEWRK6+4  IF 1ST HALF MATCHES, CHECK 2ND HALF       00218000
+         BE    PASSEXIT       RETURN IF ALL'S WELL             @V60BBBB 00219000
+PASSCHK1 BALR  R2,0           SAVE CONDITION CODE              @V60BBBB 00220000
+         TM    SAVEWRK1,RETPASS      SHOULD INVALID            @V60BBBB 00221000
+*                             PASSWORD BE RETURNED ?                    00222000
+         BZ    PASSCHK2       BR IF NOT                        @V60BBBB 00223000
+         MVC   SAVER0(L'UDIRPASS),SAVEWRK6 RETURN INVALID PSWD.@V60BBBB 00224000
+PASSCHK2 SPM   R2             RESTORE CONDITION CODE           @V60BBBB 00225000
+PASSEXIT DS    0H             EXIT WITH CONDITION-CODE SET     @V60BBBB 00226000
+         EXIT                 FROM COMPARE.                    @V60BBBB 00227000
+*********************************************************************** 00228000
+*                                                                     * 00229000
+*        FATAL ERROR FROM TERMINAL ON ENTRY OF PASSWORD:              * 00230000
+*                                                                     * 00231000
+*********************************************************************** 00232000
+ENTP13   LA    R0,BUFSIZE     GIVE BACK THE FREE STORAGE BUFFER         00233000
+         LR    R1,R9          ...                                       00234000
+         CALL  DMKFRET        ...                                       00235000
+SETCC3   ST    R11,SAVER11    BESURE TO RETURN CORRECT R11              00236000
+         TM    SAVEWRK1,RETPASS RETURN INVALID PASSWORD ?      @VA11681 00237000
+         BZ    SETCC3A        NO BRANCH                        @VA11681 00238000
+         MVC   SAVER0(8),=C'TERM/ERR' FILL INV PASSWORD AREA   @VA11681 00239000
+SETCC3A  EQU   *                                               @VA11681 00240000
+         TM    FFS,X'FF'      SET CONDITION-CODE 3                      00241000
+         EXIT                 AND EXIT FORTHWITH.                       00242000
+         DROP  R9,R12                                          @V200820 00243000
+         EJECT                                                          00244000
+*********************************************************************** 00245000
+*                                                                     * 00246000
+*        EXECUTED INSTRUCTIONS AND CONSTANTS:                         * 00247000
+*                                                                     * 00248000
+*********************************************************************** 00249000
+*                                                                       00250000
+SAVEPASS MVC   SAVEWRK6(*-*),0(R1)      TO SAVE THE PASSWORD            00251000
+*                                                                       00252000
+RETPASS  EQU   X'80'                    FLAG BIT IN SAVEWRK1   @V60BBBB 00253000
+*                                       WHICH INDICATES ANY             00254000
+*                                       INVALID PASSWORDS ARE           00255000
+*                                       TO BE RETURNED.                 00256000
+         LTORG                                                          00257000
+         EJECT                                                          00258000
+OSVSCOM  MSSCOM                                                @V60B6B8 00259000
+DMKEPS   CSECT                                                 @V60B6B8 00260000
+         PSA                  (R0)                                      00261000
+*        JPSCBLOK                                              @V60BBBB 00262000
+         COPY  SAVE                                                     00263000
+         COPY  VMBLOK         (R11)                                     00264000
+         COPY  RBLOKS                                                   00265000
+         COPY  EQU                                                      00266000
+         COPY  UDIRECT                                                  00267000
+         COPY  CONBUF                                                   00268000
+         END                                                            00269000

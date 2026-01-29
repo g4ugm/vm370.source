@@ -1,0 +1,1378 @@
+DAS      TITLE 'DMKDAS     (CP)        VM/370 - RELEASE 6'              00001000
+         ISEQ  73,80          VALIDATE INPUT SERIALIZATION     @V200820 00002000
+*.                                                                      00003000
+*                                                                       00004000
+* MODULE NAME : DMKDAS                                                  00005000
+*                                                                       00006000
+*                                                                       00007000
+*                                                                       00008000
+* FUNCTION : TO EXAMINE THE ERROR CONDITION RESULTING FROM A UNIT CHECK 00009000
+*           WHILE EXECUTING A CP GENERATED DASD CHANNEL PROGRAM.        00010000
+*           THE ORIGINAL CHANNEL PROGRAM WILL BE RETRIED WHEN POSSIBLE  00011000
+*           TO CORRECT THE FAILING CONDITION. IF THE ERROR CONDITION    00012000
+*           IS UNCORRECTABLE CONTROL WILL BE PASSED TO THE MESSAGE      00013000
+*           WRITER (DMKMSW) FOR OPERATOR AWARENESS. UPON RETURNING      00014000
+*           FROM MESSAGE WRITER THE ORIGINAL CHANNEL PROGRAM MAY BE     00015000
+*           RE-EXECUTED OR TERMINATED. ALSO STATISTICAL COUNTERS        00016000
+*           FOR 2314 TYPE DEVICE WILL BE UPDATED.                       00016100
+*                                                                       00017000
+*                                                                       00018000
+*                                                                       00019000
+* ATTRIBUTES : REENTRANT,RESIDENT,CALLED VIA SVC.                       00020000
+*                                                                       00021000
+*                                                                       00022000
+* ENTRY POINT : DMKDASER - TO RETRY THE FAILING DASDI CHANNEL PROGRAM   00023000
+*                                                                       00026000
+*                                                                       00027000
+* ENTRY CONDITIONS : GPR8=ADDRESS OF RDEVBLOK                           00028000
+*                    GPR10=ADDRESS OF IOBLOK                            00029000
+*                    GPR12=BASE ADDRESS                                 00030000
+*                    GPR13=ADDRESS OF SAVE AREA                         00031000
+*                                                                       00032000
+*                                                                       00033000
+* EXIT CONDITIONS : 1. WHEN RETRY IS POSSIBLE.                          00034000
+*                        IOBFLAG=IOBRSTRT                               00035000
+*                        IOBRCAW=ADDRESS OF RESTART CCW STRING.         00036000
+*                   2. WHEN RETRY IS NOT POSSIBLE.                      00037000
+*                        IOBSTAT=IOBFATAL                               00038000
+*                                                                       00039000
+*                                                                       00040000
+* CALLS TO OTHER ROUTINES :                                             00041000
+*                     1. DMKMSW - TO PROVIDE OPERATOR COMMUNICATION     00042000
+*                                 IN ATTEMPTING TO CORRECT THE          00043000
+*                                 ERROR CONDITION.                      00044000
+*                     2. DMKFREE - TO OBTAIN STORAGE FOR DASD           00045000
+*                                  ENVIRONMENTAL SENSE DATA. THIS       00046000
+*                                  CONDITION OCCURS WHEN THE CONTROL    00047000
+*                                  UNIT INDICATES AN OVERFLOW OF THE    00048000
+*                                  USAGE COUNTER.                       00049000
+*                     3. DMKFRET - TO RETURN STORAGE OBTAINED BY DMKFRE 00050000
+*                     4. DMKQCNWT - TO WRITE MSG DAS956A TO OPERATOR    00051000
+*                     5. DMKCVTBH - TO CONVERT REAL DEVICE ADDRESS      00052000
+*                     6. DMKIOEST - TO UPDATE STATISTICAL DATA COUNTERS 00053000
+*                     7. DMKTRKIN - TO HANDLE TRACK CONDITION CHECKS    00053100
+*                                                                       00056000
+*                                                                       00057000
+* EXTERNAL REFERENCES :                                                 00058000
+*              DMKMSW                                                   00060000
+*              DMKIOEST                                                 00060100
+*                                                                       00061000
+*                                                                       00062000
+*        TABLES AND WORKAREAS:  BUFFER TO CONTAIN CHANNEL PROGRAM       00063000
+*                               & LABEL READ FROM DASD VOLUME.          00064000
+*                                                                       00065000
+* REGISTER USAGE :                                                      00066000
+*                 GPR  0=PSA ADDRESSABILITY                             00067000
+*                 GPR  1=SCRATCH                                        00067100
+*                 GPR  2=SCRATCH                                        00067200
+*                 GPR  3=USED FOR TESTING RE-OCCURRING ERRORS           00067300
+*                 GPR  4=SCRATCH                                        00068000
+*                 GPR  5=GENERAL USAGE IS FOR BAL REGISTER              00069000
+*                 GPR  6=SCRATCH                                        00070000
+*                 GPR  7=IOERBLOK ADDRESS                               00071000
+*                 GPR  8=RDEVBLOK ADDRESS.                              00072000
+*                 GPR  9=SCRATCH                                        00073000
+*                 GPR 10=IOBLOK ADDRESS.                                00074000
+*                 GPR 11=VMBLOK ADDRESS.                                00075000
+*                 GPR 12=BASE ADDRESS.                                  00076000
+*                 GPR 13=SAVE AREA ADDRESS.                             00077000
+*                 GPR 14=EXTERNAL LINKAGE REGISTER.                     00078000
+*                 GPR 15=EXTERNAL LINKAGE REGISTER.                     00079000
+*                                                                       00080000
+*                                                                       00081000
+* NOTES : NONE.                                                         00082000
+*                                                                       00083000
+*                                                                       00084000
+*                                                                       00085000
+* OPERATION : A. IF THE RETRY COUNT IN THE IOBLOK IS ZERO, STORE        00086000
+*                THE ADDRESS OF THE IOERBLOK IN THE RDEVBLOK.           00087000
+*             B. TEST FOR CHANNEL ERRORS.                               00088000
+*                1. CHANNEL DATA CHECKS ARE RETRIED 10 TIMES.           00089000
+*                2. INTERFACE AND CHANNEL CONTROL CHECKS ARE            00090000
+*                   RETRIED 10 TIMES.                                   00091000
+*             C. TEST FOR THE SPECIFIC TYPE OF ERROR.                   00092000
+*                1. EQUIPMENT CHECK - THE OPERATION IS RETRIED 10 TIMES 00093000
+*                2. NO RECORD FOUND (NRF) CONDITION (2314/2319) A READ  00094000
+*                   HOME ADDRESS IS EXECUTED AND THE DATA IS COMPARED   00095000
+*                   TO THE SEEK ADDRESS. IF THE COMPARISON IS UNEQUAL   00096000
+*                   A RECALIBRATE IS EXECUTED AND THE ORIGINAL CHANNEL  00097000
+*                   PROGRAM IS RETRIED FOR A MAXIMUM OF 10 TIMES. IF    00098000
+*                   THE COMPARISON IS EQUAL RETURN TO THE CALLER.       00099000
+*                   NO RECORD FOUND CONDITION (2305/3330/3340) RETURN   00100000
+*                   TO CALLER                                           00101000
+*                3. SEEK CHECKS ARE RETRIED 10 TIMES, EXCEPT THE        00102000
+*                   3330/3350 HAVE ALREADY BEEN RETRIED BY HARDWARE.    00103000
+*                4. INTERVENTION REQUIRED - READ THE VOLID; IF PACK     00104000
+*                   WAS CHANGED UNLOAD THE ENVIRONMENTAL BUFFER         00105000
+*                   (3330/3350/3340) AND IF THE VOLUME WAS USED BY THE  00106000
+*                   SYSTEM MARK DEVICE OFFLINE (MSG DMKDAS956).         00107000
+*                   IN ANY CASE RESTART THE OPERATION.                  00108000
+*                5. BUS-OUT CHECK - RETRY THE OPERATION ONCE.           00109000
+*                6. DATA CHECKS (2314/2319) ARE RETRIED 256 TIMES WITH  00110000
+*                   RECALIBRATIONS BEING EXECUTED EVERY 16 TIMES.       00111000
+*                   EXCEPTIONS ARE : (A) THE 3330/3350 HAS ALREADY      00112000
+*                   BEEN RETRIED BY THE HARDWARE. (B). 3340 AND 2305    00113000
+*                   WILL BE RETRIED 10 TIMES.                           00114000
+*                7. OVERRUN - THE OPERATION IS RETRIED 10 TIMES.        00115000
+*                8. MISSING ADDRESS MARKER-THE OPERATION IS RETRIED     00116000
+*                   10 TIMES.                                           00117000
+*                9. COMMAND REJECT - RETURN TO THE CALLER               00118000
+*               10. TRACK CONDITION CHECK - IF THIS IS A DEFECTIVE      00119000
+*                   TRACK CALL DMKTRKIN FOR 3340/3344 DISKS. FOR OTHER  00120100
+*                   TYPES, AN OPERATOR MESSAGE IS ISSUED.               00120200
+*               11. END-OF CYL,TRACK OVERFLOW,AND FILE PROTECT          00122000
+*                   CONDITIONS- RETURN TO CALLER.                       00123000
+*               12. CHAINING CHECK- TEST FOR COMMAND REJECT.            00124000
+*                   IF NOT PRESENT RETRY THE OPERATION 10 TIMES.        00125000
+*               13. ENVIRONMENTAL DATA PRESENT (3330/3340/3350/2305)    00126000
+*                   RE-EXECUTE THE ORIGINAL CHANNEL PROGRAM.            00127000
+*                                                                       00128000
+*                                                                       00129000
+*             D. IF THE RETRY PROCEDURE HAS BEEN EXHAUSTED AND          00130000
+*                UNSUCCESSFUL CALL DMKMSW FOR OPERATION OPTIONS.        00131000
+*                (I.E. CANCEL,RETRY,IGNORE) THE RESPONSES ALLOWED       00132000
+*                WILL BE BASED ON THE CONDITION CAUSING THIS ERROR.     00133000
+*                                                                       00134000
+*             E. WHEN THE RETRY PROCEDURE IS FINISHED (EITHER CORRECTED 00135000
+*                OR UNCORRECTABLE), CALL DMKIOEST TO CAUSE STATISTICAL  00135100
+*                COUNTERS FOR 2314 TYPE DEVICES TO BE UPDATED.          00135200
+*                                                                       00135300
+*             F. CYL POSITION VERIFICATION WILL ONLY BE                 00135400
+*                PERFORMED IF THE FIRST CCW IN THE CHANNEL PROGRAM      00136000
+*                IS A SEEK AND THE SEEK COMMAND IS VALID.               00137000
+*                                                                       00138000
+* ERROR MESSAGES:                                                       00139000
+*                                                                       00140000
+*        DMKDAS956A DASD CCU VOLID VOLID NOT MOUNTED; NOW OFFLINE       00141000
+*.                                                                      00142000
+         EJECT                                                          00143000
+         COPY  OPTIONS                                                  00144000
+DMKDAS   CSECT                                                          00145000
+         ENTRY DMKDASER       HANDLE ERRORS FOR DASD DEVICES            00148000
+         SPACE                                                          00149000
+         EXTRN DMKMSWR                                                  00150000
+         EXTRN DMKCVTBH                                                 00152000
+         EXTRN DMKIOEST                                        @VA03757 00153100
+         EXTRN DMKTRKIN                                        @V56BDA8 00153200
+         USING SAVEAREA,R13                                             00154000
+         USING PSA,R0                                                   00155000
+         USING IOERBLOK,R7    ADDRESSABILITY FOR IOERBLOK      @VA08187 00156000
+         USING STATDASD,R4    ADDRESSABILITY FOR STATISICAL DATA        00157000
+         USING RDEVBLOK,R8                                              00158000
+         USING IOBLOK,R10                                               00159000
+         USING DMKDAS,R12,R6  ADDRESSABILITY                   @VA08187 00160000
+         EJECT                                                          00387000
+DMKDASER ENTER                HANDLE ERRORS FOR DASD DEVICES:           00388000
+         LA    R6,4095(R12)   ADDRESSABILITY FOR 2ND BASE      @VA08187 00389000
+         LA    R6,1(,R6)      ...                              @VA08187 00390000
+         SWITCH          MAKE SURE WE ARE ON THE IO PROCESSOR  @V4075A0 00391100
+         ICM   R7,15,RDEVIOER GET THE FIRST IOERBLOK, IF ANY.           00392000
+         BP    NOTFIRST       IF NONE THIS IS THE FIRST TIME IN         00393000
+         L     R7,IOBIOER     LOAD IOERBLOK IN REG.7                    00394000
+         ST    R7,RDEVIOER    STORE ADDR IOERBLOK IN RDEVBLOK           00395000
+         SR    R3,R3          CLEAR ADDR. FOR SECOND ERROR              00396000
+         ST    R3,IOBIOER                                               00397000
+         STH   R3,IOBRCNT     ZERO THE IOBRCNT FOR THE FIRST TIME IN    00398000
+         NI    IOBSTAT,X'FF'-IOBFATAL   INSURE BIT IS OFF               00399000
+         NI    IOBFLAG,X'FF'-(IOBRSTRT+IOBERP) MASK OFF BITS   @VM08912 00400000
+         LTR   R7,R7          IS THERE AN IOERBLOK             @VM08912 00401000
+         BZ    CORRECT1       NO, GO TO EXIT                   @VM08912 00402000
+         BAL   R5,SKLOOP      NORMALLY, THIS GETS USER'S SEEK  @V56BDA8 00403000
+*                             ADDRESS INTO IOERADDR & SETS IOERDASD ON. 00403010
+         OI    IOBFLAG,IOBERP INDICATE ERP IN CONTROL                   00404000
+         NI    IOERFLG2,X'FF'-IOERMSW CLEAR MSG. WRITER FLAG   @VM08912 00405000
+         NI    IOERFLG3,X'FF'-IOERREAD RESET FLAG              @VA03757 00405100
+         TM    IOERDATA,X'08' DATA CHECK PRESENT ??            @VA03757 00405200
+         BZ    NOTFIRST       NO, CONTINUE                     @VA03757 00405300
+         BAL   R5,RDOPCK      GO CHECK IF FAILING COMMAND WAS  @V56BDA8 00405400
+*                             A READ OPERATION. IF SO, SET IOERREAD ON. 00405410
+NOTFIRST EQU   *              R7 WILL POINT TO THE FIRST IOERBLOK       00406000
+         TM    IOERIND3,IOERDEC    IS MSG WTR WAITING FOR OPER RESP?    00407000
+         BNO   NOTMSW         NO- BRANCH  MSG WTR (DMKMSWR) NOT WAITING*00408000
+                              YES- IGNORE INT(S) UNTIL OPER RESPONDES   00409000
+EXIT5    EQU   *                                               @VM08912 00410000
+         BAL   R5,CKIOB       RETURN ANY IOERBLOK                       00411000
+         NI    IOBFLAG,X'FF'-IOBRSTRT INSURE NO RESTART        @VA00881 00412000
+         EXIT                                                  @VA00881 00413000
+NOTMSW   EQU   *                                                        00414000
+         LH    R4,IOBRCNT     INSERT I/O ERROR CTR.                     00415000
+         A     R4,F1          INCREASE COUNT BY 1                       00416000
+         STH   R4,IOBRCNT     STORE NEW VALUE                           00417000
+         L     R3,IOBIOER     GET THE ADDRESS OF THE SECOND    @VA01254 00418000
+*                             IOERBLOK                                  00419000
+         TM    IOERCSW+5,IFCC+CCC+CDC IS THIS A CHANNEL ERROR ?@VA01254 00420000
+         BNZ   DASCOUNT       YES, GO TEST FOR VOL1            @VA01254 00421000
+         LTR   R3,R3          DOES SECOND IOERBLOK EXIST ?     @VA01254 00422000
+         BZ    DASCOUNT       NO, GO TEST FOR VOL1             @VA01254 00423000
+         TM    IOERCSW+5-IOERBLOK(R3),IFCC+CCC+CDC IS CHANNEL  @VA01254 00424000
+*                             ERROR                                     00425000
+*                             INDICATED ?                               00426000
+         BZ    DASCOUNT       NO, GO INCREMENT COUNT           @VA01254 00427000
+         BAL   R5,FRETPTR     RELEASE RECOVERY CCW WORK AREA.  @V56BDA8 00428000
+         ST    R3,RDEVIOER    SAVE 2ND IOERBLOK ADDR (THAT HAD @V56BDA8 00429000
+*                             CHANNEL CHECK) AS IF IT WAS THE FIRST.    00429050
+         MVC   IOERPNT-IOERBLOK(L4,R3),IOERPNT-IOERBLOK(R7)    @V56BDA8 00429100
+*                             KEEPS PTR TO POSSIBLE CHAIN OF SDR BLOCKS 00429150
+         ST    R7,IOBIOER     SAVE ORIGINAL IOERBLOK ADDR      @VM08849 00430000
+         LR    R7,R3          GET CURRENT IOERBLOK ADDRESS     @VM08849 00431000
+         B     CHANPRG        GO PRINT CHANNEL MESSAGE         @VA01254 00432000
+DASCOUNT EQU   *                                               @VA01254 00433000
+         TM    IOERFLG2,IOERVOL1   READING THE VOL1 LABEL               00434000
+         BO    VOLREAD        YES- BRANCH                               00435000
+         TM    IOERFLG1,IOERPEND   IS D.E. INTERRUPT EXPECTED           00436000
+         BO    PENDING        BRANCH IF YES.                            00437000
+         TM    IOERFLG2,IOERMSW IS THE MESSAGE WRITER ACTIVE   @VM08912 00438000
+         BO    EXIT5          YES, GO FRET IOERBLOK            @VM08912 00439000
+         TM    IOERFLG3,IOERALTR+IOERRDR0 ALT TRACK SUPPORT?   @V56BDA8 00439020
+         BNZ   CKALTERR       ALTERNATE TRACK SUPPORT ACTIVE   @V56BDA8 00439025
+         MVC   SAVEWRK2(L'IOERLOC+L'IOERDW),IOERLOC SAVE START @V56BDA8 00439030
+*                             AND LENGTH OF WORK AREA WHERE RECOVERY    00439035
+*                             CCWS JUST EXECUTED WERE LOCATED.  THEN    00439040
+*                             CALL FRETPTR (BELOW) TO FREE THE WORK     00439045
+*                             AREA.  OBVIOUSLY WE CAN'T USE WORK AREA   00439050
+*                             AFTER THAT,BUT WE STILL NEED TO KNOW      00439055
+*                             WHERE IT WAS SO THE ADDRESS IN IOERCSW    00439060
+*                             CAN BE CHECKED LATER TO SEE IF FAILURE    00439065
+*                             OCCURRED ON ONE OF THE RECOVERY CCWS.     00439070
+         DC    0AL4(SAVEWRK3) PUT SYMB IN XREF FOR ABOVE INSTR @V56BDA8 00439075
+         LTR   R3,R3          CLEAR IT                         @VA07807 00439100
+         BZ    FRETBYP        BRANCH FOR FRET                  @VA07807 00439200
+         TM    IOERDATA+2-IOERBLOK(R3),X'10' TEST FOR ERROR    @VA07807 00439300
+         BO    *+8                                             @VA07807 00439400
+FRETBYP  DS    0H                                              @VA07807 00439500
+         BAL   R5,FRETPTR     RELEASE RECOVERY CCW WORK AREA.  @V56BDA8 00440000
+         TM    IOERFLG2,IOERSTAT+IOERHA+IOERCAL+IOERECF                 00441000
+         BNZ   TSTERR         BRANCH IF ENTRY FROM RECOVERY ACTION      00442000
+         CLC   IOBRCNT,F1+2   TEST FOR FIRST TIME                       00443000
+         BNE   RECUR          BRANCH IF NOT 1ST, KEEPING ADDR  @V56BDA8 00444000
+*                             OF 2ND IOERBLOK IN R3.                    00444010
+         LR    R3,R7          R3 GETS ADDR OF ORIGINAL IOERBLOK@V56BDA8 00445000
+RECUR   LTR   R3,R3          DID OPERATION FINISH CORRECTLY             00446000
+         BZ    SDRCORR        BRANCH IF YES                    @VA03757 00447100
+         CLI   RDEVTYPE,TYP3340 3340/3344?                     @V56BDA8 00447150
+         BNE   NOT3340A       NO SPECIAL HANDLING              @V56BDA8 00447160
+         CLC   IOERCSW+1(L3),IOERCSW+1-IOERBLOK(R3) SAME       @V56BDA8 00447170
+*                             FAILING CCW?                              00447180
+         BE    NOT3340A       YES, NORMAL RETRY PATH           @V56BDA8 00447190
+SECNDERR ST    R3,RDEVIOER    SAVE CURRENT IOERBLOK ADDR       @V56BDA8 00447200
+         MVC   IOERPNT-IOERBLOK(L4,R3),IOERPNT-IOERBLOK(R7)    @V56BDA8 00447210
+*                             KEEPS PTR TO POSSIBLE CHAIN OF SDR BLOCKS 00447220
+         ST    R7,IOBIOER     SAVE ORIGINAL IOERBLOK ADDR      @V56BDA8 00447230
+         LR    R7,R3          GET CURRENT IOERBLOK ADDR        @V56BDA8 00447240
+RECURALT BAL   R5,UPSK3340    MAKE SURE SEEK ADDR IS CURRENT.  @V56BDA8 00447250
+*                             THIS GETS SEEK ADDR FROM SENSE,           00447260
+*                             AND SETS IOERDASD FLAG ON.                00447270
+NOT3340A DS    0H                                              @V56BDA8 00447280
+         TM    IOERCSW+5,X'0F'     TEST FOR CHANNEL ERROR'S             00448000
+         BNZ   CHANCK         BRANCH ON CHANNEL ERROR.         @V56BDA8 00449000
+         TM    IOERCSW+5,PRGC+PRTC  IS THIS A CHANNEL PROG. CHECK ?     00450000
+         BNZ   CHANPRG        IF SO ,,BRANCH                            00451000
+         B     UNITCK         BRANCH . MUST BE A UNIT CHECK.            00452000
+CORRECT1 EQU   *                                               @VM08912 00455000
+         NI    IOBFLAG,X'FF'-(IOBERP+IOBRSTRT) TURN OFF FLAGS  @VM08912 00456000
+         EXIT                                                           00457000
+         SPACE                                                          00457910
+*  THIS ROUTINE FRETS ANY CCW WORK AREA HANGING OFF THE IOERBLOK        00457920
+*  POINTED TO BY R7.                                                    00457930
+FRETPTR  SR    R0,R0          CLEAR REG.0                               00458000
+         LH    R0,IOERDW    LOAD REG.0 WITH CT OF DW'S                  00459000
+         L     R1,IOERLOC     LOAD REG.1 OF ADDR. OF STORAGE OBTAINED   00460000
+         LTR   R1,R1          WAS CORE REALLY GOTTEN                    00461000
+         BCR   8,R5           BRANCH IF NO.                             00462000
+         MVC   IOERDW,ZEROES     CLEAR OLD DATA.                        00463000
+         MVC   IOERLOC,ZEROES      CLEAR OLD DATA.                      00464000
+         CALL  DMKFRET        FREE CORE                                 00465000
+         BR    R5                  RETURN TO CALLER                     00466000
+         SPACE 1                                                        00467000
+*        THIS ROUTINE WILL ALLOW A MAXIMUN                              00468000
+*        OF 10 RETRIES FOR CHANNEL ERROR'S                              00469000
+*                                                                       00470000
+CHANCK   CLC   IOBRCNT,F10+2  HAVE 10 CHANNEL ERRORS OCCURRED ?         00471000
+         BNH   CHANRTY        BRANCH IF NO                     @VA01254 00472000
+CHANPRG  MVI   IOERNUM,20     SET CHANNEL ERROR MESSAGE.                00473000
+         OI    IOERIND3,IOERCAN+IOERINFO     SET INDICATOR'S            00474000
+         TM    IOBFLAG,IOBCP  CP ERROR ?                                00475000
+         BO    *+8            IF YES, BRANCH                            00476000
+         OI    IOERFLG2,IOERCEMD   NO DIAG RECORDING                    00477000
+         B     CALLWTR                                                  00478000
+CHANRTY  BAL   R5,CKIOB       TEST FOR 2'ND IOERBLOK                    00479000
+         OI    IOBFLAG,IOBRSTRT    TELL IOS TO RETRY                    00480000
+         MVC   IOBRCAW(4),IOBCAW SET RESTART CAW ADDRESS       @VA01254 00481000
+         EXIT                      EXIT TO IOS                          00482000
+*                                                                       00483000
+*  ENTRY WILL BE MADED HERE WHEN A PENDING D.E. INT. OCCUR'S            00484000
+*                                                                       00485000
+PENDING  NI    IOERFLG1,X'FF'-IOERPEND TURN OFF PENDING DE BIT          00486000
+         BAL   R5,FRETPTR     RELEASE ALLOCATED STORAGE        @VM08912 00487000
+         BAL   R5,GETSTBUF    GET A BUFFER TO READ THE VOL1 LABEL       00488000
+         STH   R0,IOERDW      SAVE THE SIZE OF THE STAT BUFFER (DW)     00489000
+         ST    R4,IOERLOC     AND IT'S LOCATION ALSO                    00490000
+         ST    R4,IOBRCAW     SET UP THE RESTART CAW (TO READ VOLID)    00491000
+         OI    IOERFLG2,IOERVOL1   TURN ON THE READING VOLID FLAG       00492000
+         XC    IOBRCNT,IOBRCNT INSURE 10 RETRIES FOR VOLREAD   @VA08413 00492100
+         B     RETRYK00       READ THE VOLID.                  @V56BDA8 00493100
+         SPACE                                                          00494000
+VOLREAD  L     R4,IOERLOC     POINT TO CHANNEL PGM             @VA07801 00495000
+         ICM   R1,15,IOBIOER  DID OPERATION FINISH CORRECTLY   @VA07801 00495200
+         BNP   READOK         YES - BRANCH                     @VA07801 00495400
+         LA    R15,STATREL+8  VERIFY IF RELEASE CCW FAILED     @VA07801 00495600
+         L     R5,IOBCSW      LAST CCW EXECUTED + 8            @VA07801 00495800
+         LA    R5,0(R5)       CLEAR GARBAGE                    @VA07801 00496000
+         CLR   R5,R15         WHERE DID CHANNEL PGM END        @VA07801 00496200
+         BL    TRY10          ERROR, RETRY 10 TIMES            @VA07801 00496400
+         BH    IOERCLR        SENSE AFTER REL. FAILED, CONT.   @VA07801 00496600
+         BAL   R5,CKIOB       FRET IOERBLOK IF REL. FAILED     @VA07801 00496800
+         B     LABRED         LABEL READ, CONTINUE             @VA07801 00497000
+TRY10    CLC   IOBRCNT,F10+2  TEN ERRORS?                      @VA07801 00497200
+         BNH   RETRYK00       NO- RETRY                        @V56BDA8 00498100
+         LA    R4,IOERPNT     POINT TO THE ERROR POINTER                00499000
+         BAL   R5,NXTPTR      CHAIN IN THE ERROR BLOCK                  00500000
+         L     R4,IOERLOC     POINT TO THE STATDASD BUFFER     @VA04703 00500500
+         LA    R5,CLEANUP     SET UP THE RETURN POINTER                 00501000
+         B     ERROR95F       MARK OFFLINE AND GIVE MESSAGE    @V4075A0 00502100
+         SPACE                                                          00503000
+IOERCLR  BAL   R5,CKIOB       FRET 2ND IOERBLOK                @VA07801 00504000
+READOK   L     R5,RDEVCUB     CHECK FOR ALTERNATE CONTROL UNIT @VA07801 00504100
+         LTR   R5,R5          ALTERNATE CONTROL UNIT?          @VA07801 00504200
+         BNZ   LABRED         YES, DO NOT IND. 2/4 CHANSW      @VA07801 00504300
+*                              IN CASE ALTCU HAS NO FEATURE             00504400
+         OI    RDEVFTR,FTRRSRL 2/4 CHANSW FEATURE PRESENT      @VA07801 00504500
+LABRED   TM    IOERFLG2,IOERSTAT STATISTICAL DATA UNLOADED     @VA07801 00504600
+         BO    STATIN              YES- BRANCH                          00506000
+         BAL   R5,COMPVOL1    COMPARE THE VOL1 LABEL                    00507000
+         BE    STATIN         IF THIS THE SAME VOLUME; BRANCH           00508000
+         TM    RDEVTYPE,TYP3330+TYP3340+TYP3350 3330/3340/3350?@V304498 00509000
+         BZ    STATIN         NO - SKIP THE UNLOAD             @V2A2029 00510000
+         LA    R0,IOERSIZE    GET AN IOERBLOK FOR THE STAT DATA         00511000
+         CALL  DMKFREE                                                  00512000
+         MVC   0(IOERSIZE*8,R1),IOERBLOK COPY THE IOER BLOCK            00513000
+         MVC   IOERVSER-IOERBLOK(6,R1),RDEVSER    MOVE IN THE VOLID     00514000
+         LA    R4,IOERPNT     POINT TO THE IOERBLOK POINTER             00515000
+         BAL   R5,NXTPTR      CHAIN IN THE IOERBLOK                     00516000
+         L     R4,IOERLOC     POINT TO THE STATDASD BUFFER     @VA04703 00516500
+         LM    R15,R0,PACKCHG * BUILD THE BUFFER UNLOAD CCW             00517000
+         ALR   R15,R1         * TO READ THE ENVIRONMENTAL DATA          00518000
+         STM   R15,R0,STATSNS * INTO THE IOERBLOK.                      00519000
+         OI    IOERFLG2,IOERSTAT   TURN ON THE STATISTICAL DATA FLAG    00520000
+         B     RETRYK00       AND GO READ THE DATA.            @V56BDA8 00521100
+         SPACE                                                          00522000
+STATIN   BAL   R5,TESTVOL     TEST IF THE VOLUME WAS SWAPPED OR IN USE *00523000
+                              BY THE SYSTEM, IF YES MARK OFFLINE.       00524000
+CLEANUP  NI    IOERFLG2,X'FF'-(IOERSTAT+IOERVOL1) TURN FLAG'S  @VA02256 00525000
+*                             OFF                                       00526000
+         BAL   R5,FRETPTR     RETURN THE STAT BUFFER                    00527000
+         SWITCH          MAKE SURE WE ARE ON THE IO PROCESSOR  @V4075A0 00527100
+         NI    IOBFLAG,X'FF'-IOBERP     TURN OFF EREP BIT               00528000
+         NI    RDEVSTAT,X'FF'-RDEVNRDY  RESET INTERVENTION REQUIRED     00529000
+         OI    IOBFLAG,IOBRSTRT    TURN ON RESTART BIT                  00530000
+         SLR   R3,R3                                           @V56BDA8 00530900
+         STH   R3,IOBRCNT     RESET RETRY COUNT                         00531000
+         MVC   IOBRCAW,IOBCAW SET RESTART CAW ADDR.                     00532000
+         EXIT  GO BACK TO IOS                                           00533000
+*                                                                       00534000
+*  MORE ERROR TESTING IS REQUIRED                                       00535000
+*                                                                       00536000
+UNITCK   TM    RDEVFTR,FTREXTSN EXTENDED SENSE TYPE DASD ?     @V304498 00537000
+         BNZ   HISPEED        BRANCH IF YES                             00538000
+*                                                                       00539000
+*  MUST BE A 2319 OR 2314 TO ENTER AT THIS POINT                        00540000
+*                                                                       00541000
+TSTEQUIP TM    IOERDATA,X'10' EQUIPMENT CHECK ERROR ?                   00542000
+         BZ    TSTNRF         BRANCH IF NOT.                            00543000
+         MVC   IOBRCAW,IOBCAW      SET UP RESTART CAW.                  00544000
+         CLC   IOBRCNT,F2+2        IS THIS THE THIRD ERROR ?            00545000
+         BNH   RETRY          BRANCH NO.                                00546000
+EQCK     MVI   IOERNUM,EQUIP  INDICATE EQUIPMENT CHECK ERROR            00547000
+         OI    IOERIND3,IOERCAN+IOERINFO                       @VA01426 00548000
+*                             DISPLAY INFORMATION MSG 503I              00549000
+         B     CALLWTR                                                  00550000
+TSTNRF   TM    IOERDATA+1,X'08'    NRF ERROR                            00551000
+         BZ    TSTSEEK        BRANCH NO                                 00552000
+         TM    IOERDATA+1,X'02'    MISSING ADDRESS MARKER ?             00553000
+         BZ    READHA         BRANCH NO.                                00554000
+         CLC   IOBRCNT,F10+2  HAS ERROR HAPPENED 11 TIMES ?             00555000
+         BNH   RECAL          BRANCH NO TO RECALIBRATE.                 00556000
+         MVI   IOERNUM,MADM   SET MESSAGE NUMBER.                       00557000
+         OI    IOERIND3,IOERINFO+IOERCAN SET INDICATES         @VA07665 00558100
+         B     CALLWTR        CALL WRITTER                              00559000
+RECAL    LA    R0,2           GET 2 DW'S FROM STORAGE                   00560000
+         CALL  DMKFREE                                                  00561000
+         ST    R1,IOERLOC                                               00562000
+         STH   R0,IOERDW                                                00563000
+         MVC   0(16,R1),RESTORE    MOVE IN RESTORE AND TIC COMMAND      00564000
+         ST    R1,IOBRCAW     SET UP RESTART CAW                        00565000
+         L     R5,IOBCAW      CHAIN ORIGINAL CCW'S             @VA08187 00566000
+         ST    R5,8(0,R1)     MOVE IN TIC COMMAND CODE AND     @VA08187 00567000
+         MVI   8(R1),X'08'         RESTORE CCW.                         00568000
+         B     RETRY          BRANCH TO RETRY OPERATION.                00569000
+         SPACE 1                                                        00570000
+READHA   LA    R0,1                                                     00571000
+         CALL  DMKFREE        CONSTRUCT READ HOME ADDR. CCW             00572000
+         ST    R1,IOERLOC     STORE ADDR. OF CCW                        00573000
+         STH   R0,IOERDW    STORE SIZE OF STORAGE OBTAINED              00574000
+         ST    R1,IOBRCAW     SET RESTART ADDR.                         00575000
+         MVC   0(8,R1),HACCW  MOVE IN RD HA COMMAND                     00576000
+         OI    IOERFLG2,IOERHA     SET ON TO INDICATE OPERATION IN PROG 00577000
+         LA    R5,IOERADR+3   SET READIN AREA TO IOERBLOK      @VA08187 00578000
+         ST    R5,0(R1)       ...                              @VA08187 00578100
+         MVI   0(R1),X'1A'    SET COMMAND CODE TO READ HA               00580000
+         B     RETRY                                                    00581000
+*                                                                       00582000
+* WHEN THE INTERRUPT OCCUR'S FROM THIS CHANNEL PROGRAM                  00583000
+* THE HOME ADDRESS READ WILL BE COMPARED AGAINST THE                    00584000
+* INITIAL SEEK ADDR. IF EQUAL CONTROL WILL PASS TO IOS                  00585000
+* OTHERWISE IT WILL BE TREATED AS A SEEK CHECK AND THE                  00586000
+* OPERATION RETRIED.                                                    00587000
+*                                                                       00588000
+TSTSEEK   TM    IOERDATA,X'01' IS ERROR BECAUSE OF A SEEK CHECK ?       00589000
+         BZ    TSTINT         BRANCH IF NOT SEEK CHECK                  00590000
+SEEKCK   TM    IOERDATA,X'80' COMMAND REJECT ERROR ?           @V2A2029 00591000
+         BO    COMREJ         BRANCH IF YES                             00592000
+         CLC   IOBRCNT,F10+2                                            00593000
+         BNH   RECAL          BRANCH TO EXECUTE A RESTORE COMMAND       00594000
+         MVI   IOERNUM,SKCK                                             00595000
+         OI    IOERIND3,IOERINFO+IOERCAN SET INDICATES         @VA07665 00600100
+         B     CALLWTR                                                  00601000
+COMREJ   MVI   IOERNUM,REJ    MOVE IN REJECT MESSAGE                    00602000
+         OI    IOERIND3,IOERCAN+IOERINFO                                00603000
+         TM    IOBFLAG,IOBCP  CP ERROR ?                                00604000
+         BO    *+8            IF YES, BRANCH                            00605000
+         OI    IOERFLG2,IOERCEMD   NO DIAG RECORDING                    00606000
+         B     CALLWTR                                                  00607000
+TSTINT   TM    IOERDATA,X'40' INTERVENTION REQUIRED                     00608000
+         BZ    BUSCK          BRANCH IF NO                              00609000
+         MVC   IOBRCAW,IOBCAW      SET UP RESTART CAW.                  00610000
+PENDE    OI    IOERFLG1,IOERPEND   TURN ON D.E. BIT                     00611000
+         MVI   IOERNUM,INTREQU SET MSG. NUMBER                          00612000
+         OI    IOERIND3,IOERACT    TURN ON ACTION BIT                   00613000
+         SWITCH          MAKE SURE WE ARE ON THE IO PROCESSOR  @V4075A0 00613100
+         OI    RDEVSTAT,RDEVNRDY   INDICATE INTERVENTION REQUIRED       00614000
+         B     CALLWTR                                                  00615000
+BUSCK    TM    IOERDATA,X'20' IS THIS A BUS OUT ERROR                   00616000
+         BZ    DATACK         BRANCH IF NO                              00617000
+         MVC   IOBRCAW,IOBCAW      SET UP RESTART CAW.                  00618000
+         CLC   IOBRCNT,F1+2   IS THIS THE SECOND ERROR ?       @VM01012 00619000
+         BH    BUSMSG         BRANCH YES                                00620000
+         B     RETRY                                                    00621000
+BUSMSG   MVI   IOERNUM,BUSOUTCK SET BUSOUT  MESSAGE UP.                 00622000
+         OI    IOERIND3,IOERINFO+IOERCAN     TURN ON INDICATOR'S        00623000
+         B     CALLWTR                                                  00624000
+DATACK   TM    IOERDATA,X'08' TEST FOR DATA CHECK                       00625000
+         BZ    OVERRUN        BRANCH IF NOT DATA CHECK                  00626000
+         MVC   IOBRCAW,IOBCAW      SET UP RESTART CAW.                  00627000
+         CLC   IOBRCNT,F256+2 HAS ERROR HAPPENED 256 TIMES ?            00628000
+         BH    DATAMSG        BRANCH IF YES                             00629000
+         TM    IOBRCNT+1,X'0F'     IS THIS MULTI OF 16 TIMES ?          00630000
+         BO    RECAL          BRANCH EVERY 16 TIMES.                    00631000
+         B     RETRY                                                    00632000
+DATAMSG  MVI   IOERNUM,DATAER                                           00633000
+         OI    IOERIND3,IOERINFO+IOERCAN SET INDICATES         @VA07665 00638100
+         B     CALLWTR                                                  00639000
+         SPACE 1                                                        00640000
+OVERRUN  TM    IOERDATA,X'04'                                           00641000
+         BZ    MISSMRK                                                  00642000
+         B     OVERRUN1                                        @VA08385 00642250
+OVERRUN2 L     R11,ECFREG11-ECFDSECT(R9) SAVE REG11            @VA08385 00642500
+OVERRUN1 MVC   IOBRCAW,IOBCAW      SET UP RESTART CAW.                  00643000
+         CLC   IOBRCNT,F10+2                                            00644000
+         BH    OVERMSG                                                  00645000
+         B     RETRY                                                    00646000
+OVERMSG  MVI   IOERNUM,OVERERR     INDICATE OVERRUN MESSAGE             00647000
+         OI    IOERIND3,IOERDEC+IOERCAN+IOERETRY                        00648000
+         B     CALLWTR        CALL MESSAGE WRITTER.                     00649000
+         SPACE 1                                                        00650000
+MISSMRK  TM    IOERDATA+1,X'02'    TEST FOR MISSING ADDRESS MARKER      00651000
+         BZ    REJECT         BRANCH IF NO.                             00652000
+         CLC   IOBRCNT,F10+2  IS COUNTER > 10 ?                         00653000
+         BH    MRKMSG         BRANCH IF YES.                            00654000
+         MVC   IOBRCAW,IOBCAW SET RESTART ADDR.                         00655000
+         B     RETRY                                                    00656000
+MRKMSG   MVI   IOERNUM,MADM   INDICATE MISSING ADDRESS MARKER           00657000
+         OI    IOERIND3,IOERINFO+IOERCAN                                00658000
+         B     CALLWTR                                                  00659000
+REJECT   TM    IOERDATA,X'80' IS IT A COMMAND REJECT ?                  00660000
+         BZ    BDTRK          BRANCH IF NO.                             00661000
+         TM    IOERDATA+1,X'04'    FILE PROTECT ERROR                   00662000
+         BO    FILPROT        BRANCH ON PROTECT ERROR.                  00663000
+CHKREL   TM    IOBSPEC2,IOBREL IS THIS SPECIAL DMKDSB CH PGM   @VA07801 00663100
+         BO    FINISH         YES, THEN LEAVE IT ALONE         @VA07801 00663200
+         B     COMREJ         MUST BE INVALID COMMAND                   00664000
+BDTRK    TM    IOERDATA,X'02'  IS THIS A TRACK CONDITION CHECK ?        00665000
+         BZ    TRKOV          BRANCH NO.                                00666000
+         MVI   IOERNUM,TRKCOND     SET TRACK CONDITION                  00667000
+         OI IOERIND3,IOERCAN+IOERINFO                                   00668000
+         TM    IOBFLAG,IOBCP  CP ERROR ?                                00669000
+         BO    *+8            IF YES, BRANCH                            00670000
+         OI    IOERFLG2,IOERCEMD   NO DIAG RECORDING                    00671000
+         B     CALLWTR        CALL MESSAGE WRITTER                      00672000
+         SPACE 1                                                        00673000
+TRKOV    TM    IOERDATA+1,X'40'    TRACK OVERRUN ERROR ?                00674000
+         BZ    ENDCYL         BRANCH IF NO                              00675000
+         MVI   IOERNUM,TKOVER MESSAGE FOR WRITTER                       00676000
+         OI    IOERIND3,IOERINFO+IOERCAN                                00677000
+         TM    IOBFLAG,IOBCP  CP ERROR ?                                00678000
+         BO    *+8            IF YES, BRANCH                            00679000
+         OI    IOERFLG2,IOERCEMD   NO DIAG RECORDING                    00680000
+         B     CALLWTR                                                  00681000
+         SPACE 1                                                        00682000
+ENDCYL   TM    IOERDATA+1,X'20'    IS THIS AN EOC CONDITION             00683000
+         BZ    FILPROT        BRANCH IF NOT                             00684000
+EOCERR   OI    IOERFLG2,IOERCEMD DO NOT RECORD PROG ERROR      @VA02358 00685000
+         B     FATAL                                                    00686000
+FILPROT  TM    IOERDATA+1,X'04'    FILE PROTECT ERROR ?                 00687000
+         BZ    SHDNOT         BRANCH IF NO.                             00688000
+         MVI   IOERNUM,PROTECT     SET MESSAGE NUMBER                   00689000
+         TM    IOBFLAG,IOBCP  CP ERROR ?                                00690000
+         BO    *+8            IF YES, BRANCH                            00691000
+         OI    IOERFLG2,IOERCEMD   NO DIAG RECORDING                    00692000
+         OI    IOERIND3,IOERCAN+IOERINFO                                00693000
+         B     CALLWTR                                                  00694000
+         SPACE 1                                                        00695000
+SHDNOT   MVI   IOERNUM,BDSNS                                            00696000
+         OI    IOERIND3,IOERCAN+IOERINFO                                00697000
+         B     CALLWTR                                                  00698000
+         SPACE 1                                                        00699000
+TSTERR   TM    IOERFLG2,IOERSTAT                                        00700000
+         BZ    NOTSTAT                                                  00701000
+         NI    IOERFLG2,X'FF'-IOERSTAT                                  00702000
+         LTR   R3,R3                                                    00703000
+         BZ    SDRCORR        BRANCH IF NO IOERBLOK            @VA03757 00704000
+         L     R4,IOERPNT                                               00705000
+         MVC   IOERBLOK(IOERSIZE*8),0(R3)                               00706000
+         ST    R4,IOERPNT                                               00707000
+         MVC   IOERVSER-IOERBLOK(6,R7),RDEVSER RESTORE VOLID   @VA02536 00708000
+         B     RECUR                                                    00709000
+NOTSTAT  LTR   R3,R3                                                    00710000
+         BZ    NOIOER         NO IOERBLOK                      @VA01094 00711000
+         CLC   IOBRCNT,F10+2  10 ERRORS YET?                   @VA01094 00712000
+         BH    RECFAIL        YES--FATAL                       @VA01094 00713000
+         TM    IOBCSW+4,UC    IS THERE UNIT CHECK?             @VA01094 00714000
+         BZ    RECFAIL        RECOVERY FAILURE                 @V56BDA8 00715050
+         CLI   RDEVTYPE,TYP3340 3340/3344?                     @V56BDA8 00715100
+         BNE   UNITCK         NO, PROCESS SECOND FAILURE       @V56BDA8 00715150
+         L     R1,SAVEWRK2    RECOVERY WORKAREA ADDRESS        @V56BDA8 00715200
+         LH    R0,SAVEWRK3    LENGTH IN DBLEWRDS               @V56BDA8 00715250
+         SLL   R0,3           LENGTH IN BYTES                  @V56BDA8 00715300
+         AR    R0,R1          END OF RECOVERY WORKAREA         @V56BDA8 00715350
+         CLM   R1,7,IOERCSW+1-IOERBLOK(R3) BELOW OUR AREA?     @V56BDA8 00715400
+         BNL   SECNDERR       YES, A NEW ERROR                 @V56BDA8 00715450
+         CLM   R0,7,IOERCSW+1-IOERBLOK(R3) ABOVE US?           @V56BDA8 00715500
+         BL    SECNDERR       YES, A NEW ERROR                 @V56BDA8 00715550
+         B     HISPEED        ELSE TAKE MORMAL RETRY PATH      @V56BDA8 00715600
+NOIOER   EQU   *                                               @VA01094 00717000
+         TM    IOERFLG2,IOERCAL                                         00718000
+         BO    DSKCAL                                                   00719000
+         SR    R5,R5          CLEAR REG.5                               00720000
+         TM    IOERFLG2,IOERHA                                          00721000
+         BO    FINHA                                                    00722000
+         TM    IOERFLG2,IOERECF    ERROR CORRECTION FUNCTION FINISHED   00723000
+         BO    FINISH         YES - ERROR WAS FULLY CORRECTED           00724000
+         MVI   IOERNUM,FALSE                                            00725000
+         OI    IOERIND3,IOERINFO+IOERCAN                                00726000
+         B     CALLWTR                                                  00727000
+         SPACE 1                                                        00728000
+RECFAIL  MVI   IOERNUM,RECERR INDICATE ERROR WHILE RECOVERING           00729000
+         OI    IOERIND3,IOERINFO+IOERCAN                                00730000
+         B     CALLWTR                                                  00731000
+FINHA    NI    IOERFLG2,X'FF'-IOERHA    TURN OFF HOME ADDRESS BIT       00732000
+         CLC   IOBRCNT,F10+2  10 ERRORS YET ?                           00733000
+         BNH   SKLOOP         IF NOT ,TAKE THE BRANCH                   00734000
+         MVI   IOERNUM,SKCK   SET MESSAGE FOR SEEK CHECK                00735000
+         OI    IOERIND3,IOERCAN+IOERINFO     TURN ON CANCEL BIT         00736000
+         B     CALLWTR        ISSUE MESSAGE TO OPERATOR                 00737000
+         SPACE 1                                                        00738000
+SKLOOP   L     R4,IOBCAW      LOAD REG.4 WITH ADDR OF 1'ST CCW.         00739000
+         LTR   R4,R4          IS IOBLOK ACTIVE ?                        00740000
+         BZ    FATAL          EXIT IF NON-ACTIVE IOBLOK.                00741000
+         SPACE                                                          00742000
+         CLI   0(R4),X'0B'    IS FIRST CMD A SEEK?             @VA00684 00743000
+         BE    SKADCK         YES, CHECK IF THIS ONE FAILED    @VA00684 00744000
+         CLI   0(R4),X'07'    TRY OTHER SEEK                   @VA00684 00745000
+         BNE   SKRET          NOPE, THEN CAN'T USE IT FOR CYL  @VA00684 00746000
+SKADCK   LA    R1,8(,R4)      POINT TO END OF SEEK...          @VA00684 00747000
+         CLM   R1,B'0111',IOERCSW+1 AND SEE IF WE FAILED ON IT?@VA00684 00748000
+         BE    SKRET          YUP, THEN IT WOULD FAIL AGAIN.   @VA00684 00749000
+FULLSEEK L     R4,0(R4)       PICK UP ADDR. OF                          00750000
+         LA    R4,0(R4)       SEEK DATA AND                             00751000
+         MVC   IOERADR(4),2(R4)    MOVE IT INTO IOERADR                 00752000
+         OI    IOERIND3,IOERDASD   INDICATE HOME ADDRESS                00754000
+SKRET    EQU   *                                               @VA00684 00755000
+         LTR   R5,R5          TEST FOR 1'ST ENTRY INTO THIS MODULE      00756000
+         BCR   7,R5           BRANCH IF 1'ST TIME                       00757000
+         TM    IOERIND3,IOERDASD IS HA COMPARAND VALID?        @VA00684 00758000
+         BZ    PROGERR        NOPE, DON'T BOTHER TO CHECK IT   @VA00684 00759000
+         CLC   IOERADR(4),IOERADR+4     ENTRY MUST BE RESULT OF         00760000
+         BNE   RECAL                    A READ HOME ADDRESS BECAUSE OF  00761000
+PROGERR  OI    IOERFLG2,IOERCEMD   DO NOT RECORD PROGRAMING ERRORS.     00762000
+         B     FATAL               A NO RECORD FOUND CONDITION.         00763000
+         SPACE 1                                                        00764000
+         SPACE 1                                                        00765000
+DSKCAL   NI    IOERFLG2,X'FF'-IOERCAL   TURN OFF RECALIBRATE BIT        00766000
+         MVC   IOBRCAW,IOBCAW IN IOERBLOK AND RETRY OPERATION.          00767000
+         SPACE 1                                                        00768000
+RETRY    MVC   IOBRCAW(L1),IOBCAW GET ORIGINAL KEY FOR RESTART @V56BDA8 00769100
+RETRYK00 OI    IOBFLAG,IOBRSTRT TURN ON RESTART FLAG           @V56BDA8 00769200
+         NI    IOERMSG,0      RESET MSG CODE.                           00770000
+         NI    IOERIND3,IOERDASD   RESET ALL BUT HOME ADDR. INDICATOR.  00771000
+         NI    IOERIND4,0     RESET OPERATOR FLAGS.                     00772000
+         BAL   R5,CKIOB       MAKE SURE THAT STORAGE IS                 00773000
+         EXIT                                IOS WILL RETRY OPERATION   00776000
+*  THIS ROUTINE WILL CHECK FOR A SECOND IOERBLOK . IF ONE WAS           00777000
+*  OBTAINED STORAGE WILL BE GIVEN BACK TO THE SYSTEM.                   00778000
+*                                                                       00779000
+CKIOB    L     R1,IOBIOER     GET ADDR. OF 2ND IOERBLOK        @VA08187 00780000
+         LA    R1,0(R1)       CLEAR HI BYTE                             00781000
+         LTR   R1,R1          WAS BLOCK REALY OBTAINED ?                00782000
+         BZ    NOTUSED        BRANCH IF NO.                             00783000
+         TM    IOERCSW+5-IOERBLOK(R1),IFCC+CCC+CDC IS CHANNEL  @VA01254 00784000
+*                             ERROR                                     00785000
+*                             INDICATED ?                               00786000
+         BZ    CKEND          NO, GO FRET IOERBLOK             @VA01254 00787000
+         LR    R3,R1          SAVE THE IOERBLOK POINTER        @VA01254 00788000
+         L     R1,IOERCCRA-IOERBLOK(R3) CHANNEL REC ADDR       @V508690 00789500
+         L     R0,IOERCCRL-IOERBLOK(R3) CHANNEL REC LENGTH     @V508690 00790500
+         CALL  DMKFRET        RELEASE STORAGE                  @VA01254 00793000
+         LR    R1,R3          GET IOERBLOK POINTER             @VA01254 00794000
+CKEND    EQU   *                                               @VA01254 00795000
+         LA    R0,IOERSIZE    LOAD IOERBLOK SIZE.                       00796000
+         AH    R0,IOEREXT-IOERBLOK(,R1) INCLUDE EXTRA SIZE (IF ANY)     00797000
+         CALL  DMKFRET                                                  00798000
+NOTUSED  MVC   IOBIOER,ZEROES CLEAR ADDRESS IN IOBLOK IN CASE           00799000
+         BR    R5                       RETURN TO CALLER.               00800000
+         SPACE 1                                                        00801000
+CALLWTR  EQU   *              CALL MSG WRITTER                          00802000
+         TM    IOERFLG2,IOERCEMD   ERROR FROM DIAG INTERFACE            00803000
+         BO    FATAL          EXIT IF DIAG ERROR                        00804000
+         BAL   R5,CKIOB       RETURN ANY IOERBLOK                       00805000
+         L     R0,=C'DAS '    IDENT INFO FOR MSG WRITTER                00806000
+         OI    IOERFLG2,IOERMSW SET MESSAGE WRITER INDICATOR   @VM08912 00807000
+         MVI   SAVEWRK2+2,X'00' CLEAR SP CON INDICATOR FOR     @VA07193 00807020
+*                             MVI BELOW                                 00807040
+         ST    R9,SAVEWRK3    SAVE REG 9                       @VA05482 00807050
+         TM    RDEVFLAG,RDEVOWN SYSTEM PACK?                   @VA05483 00807070
+         BNO   CALLMSW        NO. CONSOLE SPOOLING OK          @VA05483 00807090
+         L     R11,ASYSOP     GET VMBLOK OF SYSTEM OPERATOR    @VA04231 00807300
+         LTR   R11,R11        SYSTEM OPERATOR LOGGED ON?       @VA04231 00807400
+         BNP   CALLMSW        NO, NO PROBLEM                   @VA04231 00807500
+         USING VMBLOK,R11                                      @VA04231 00807700
+         LH    R9,VMVTERM     LOCATE VIRTUAL CONSOLE           @VA04231 00807800
+         LTR   R9,R9          IS THERE ONE?                    @VA04231 00807900
+         BM    CALLMSW        NO, GO PUT OUT MSG               @VA04231 00808000
+         AL    R9,VMDVSTRT    INDEX TO THE VDEVBLOK            @VA04231 00808100
+         USING VDEVBLOK,R9                                     @VA04231 00808200
+         TM    VDEVFLAG,VDEVCSPL OPER SPOOLED HIS CONSOLE?     @VA04231 00808300
+         BZ    CALLMSW        NO, CONTINUE                     @VA04231 00808400
+         MVI   SAVEWRK2+2,X'E2' REMEMBER THAT HE DID           @VA04231 00808500
+         NI    VDEVFLAG,X'FF'-VDEVCSPL TURN OFF CONS SPOOLING  @VA04231 00808600
+         DROP  R11                                             @VA04231 00808700
+CALLMSW  L     R11,SAVER11    RELOAD VMBLOK PTR                @VA03414 00808800
+         CALL  DMKMSWR        GO TO MSG WTR MODULE             @VA03414 00808900
+         CLI   SAVEWRK2+2,X'E2' DID WE TURN OFF CONS SPOOLING? @VA04231 00809000
+         BNE   CLEARMWR       NO, CONTINUE                     @VA04231 00809100
+         OI    VDEVFLAG,VDEVCSPL PUT HIS FLAG BACK ON          @VA04231 00809200
+         DROP  R9                                              @VA04231 00809300
+CLEARMWR L     R9,SAVEWRK3    RESTORE R9                       @VA04231 00809400
+         NI    IOERFLG2,X'FF'-IOERMSW CLEAR MESSAGE WRITER FLAG@VM08912 00810000
+         TM    IOERFLG1,IOERPEND   CHECK FOR INT. REQ.                  00811000
+         BZ    NOTINT         IF SO EXIT BACK TO IOS WITH               00812000
+         NI    IOBFLAG,X'FF'-IOBRSTRT   NO RESTART INDICATED            00813000
+         B     SDRCOUNT       GO UPDATE COUNTERS THEN EXIT     @VA03757 00814000
+NOTINT   TM    IOERIND4,IOERSTRT   CHECK MESSAGE RESPONSE FOR RESTART   00815000
+         BZ    IGNORE         BRANCH IF NO RESTART                      00816000
+         MVC   IOBRCNT,F1+2   RESET ERROR COUNTER TO 1                  00817000
+         MVC   IOBRCAW,IOBCAW AND SET RESTART CAW                       00818000
+         B     RETRY          TO RE-EXECUTE ORIGINAL CHANNEL PROGRAM    00819000
+IGNORE   TM    IOERIND4,IOERIGNR   TEST FOR OPERATOR IGNORE RESPONSE    00820000
+         BO    FINISH         BRANCH IF YES                             00821000
+         SPACE 1                                                        00822000
+FATAL    EQU   *                                               @VA03757 00822100
+         BAL   R5,CKIOB       CONDITION MUST BE FATAL...       @VA03757 00822200
+         OI    IOBSTAT,IOBFATAL EXIT WITH FATAL BIT ON         @VA03757 00822300
+         SPACE 1                                                        00822400
+SDRCORR  EQU   *              HERE IF ERROR WAS CORRECTED....  @VA03757 00822500
+         BAL   R5,FRETPTR     RELEASES RECOVERY CCW WORK AREA  @V56BDA8 00823010
+*                             THAT IS HANGING OFF OF THE IOERBLOK THAT  00823020
+*                             IS POINTED TO BY R7.                      00823030
+         NI    IOBFLAG,X'FF'-IOBERP-IOBRSTRT                            00824000
+SDRCOUNT CLI   RDEVTYPE,TYP2314 SDR TYPE ??                    @VA03757 00825000
+         BNE   NOCALL         NO, DONT CALL UPDATE             @VA03757 00825100
+         SR    R1,R1          ZERO PARAMETER REG               @VA03757 00825200
+         CALL  DMKIOEST       GO TO STATISTICAL COUNTER UPDATE @VA03757 00825300
+NOCALL   EQU   *                                               @VA03757 00825400
+         EXIT                                                           00826000
+         SPACE 1                                                        00827000
+FINISH   BAL   R5,CKIOB       OPERATOR ANSWERED WITH IGNORE OPTION.     00828000
+         BAL   R5,FRETPTR     RELEASE STORAGE USED AND EXIT.            00829000
+         NI    IOBFLAG,X'FF'-IOBERP-IOBRSTRT                            00830000
+         NI    IOBSTAT,X'FF'-IOBFATAL                                   00831000
+         EXIT                                                           00832000
+         SPACE 1                                                        00833000
+HISPEED  MVC   IOERVSER-IOERBLOK(6,R7),RDEVSER RESTORE VOLID   @VA02536 00834000
+         CLC   IOBRCNT,F1+2                                    @VA02536 00835000
+         BNE   TESTSTAT                                                 00836000
+         TM   RDEVTYPE,TYP2305                                          00837000
+         BO    T2305                                                    00838000
+         TM    IOERDATA+2,X'10'                                         00839000
+         BZ    TESTPERM                                                 00840000
+         LA    R0,IOERSIZE                                              00841000
+         CALL  DMKFREE                                                  00842000
+         MVC   0(IOERSIZE*8,R1),IOERBLOK                                00843000
+         MVC   IOERVSER-IOERBLOK(6,R1),RDEVSER    MOVE IN THE OLD VOLID 00844000
+         ST    R1,IOERPNT                                               00845000
+         OI    IOERFLG2,IOERSTAT                                        00846000
+         MVC   IOBRCAW,IOBCAW                                           00847000
+         B     RETRY                                                    00848000
+T2305    TM    IOERDATA+2,X'80'                                         00849000
+         BZ    TESTPERM                                                 00850000
+         LA    R0,IOERSIZE+128/8                                        00851000
+         CALL  DMKFREE                                                  00852000
+         MVC   0(IOERSIZE*8,R1),IOERBLOK                                00853000
+         MVI   IOEREXT+1-IOERBLOK(R1),128/8 SAVE SIZE OF       @VA00705 00854000
+*                                    EXTENDED SENSE AREA                00855000
+         ST    R1,IOERPNT                                               00856000
+         OI    IOERFLG2,IOERSTAT                                        00857000
+         B     CLRUNIT                                                  00858000
+         SPACE 1                                                        00859000
+TESTSTAT TM    RDEVTYPE,TYP2305                                         00860000
+         BO    STAT2305                                                 00861000
+         DROP  R7                                                       00862000
+         USING IOERBLOK,R3                                              00863000
+         TM    IOERDATA+2,X'10'                                         00864000
+         BZ    TESTPERM                                                 00865000
+         LA    R0,IOERSIZE                                              00866000
+         CALL  DMKFREE                                                  00867000
+         MVC   0(IOERSIZE*8,R1),IOERBLOK                                00868000
+         MVC   IOERVSER-IOERBLOK(6,R1),RDEVSER    MOVE IN THE OLD VOLID 00869000
+         DROP  R3                                                       00870000
+         USING IOERBLOK,R7                                              00871000
+         L     R4,IOBCAW      LOAD KEY                         @VA07807 00871100
+         LTR   R4,R4          TEST FOR IT                      @VA07807 00871200
+         BNZ   BYMVCAW                                         @VA07807 00871300
+         MVC   IOBRCAW,IOBCAW                                           00872000
+BYMVCAW  DS    0H                                              @VA07807 00872100
+         LA    R4,IOERPNT                                               00873000
+         BAL   R5,NXTPTR                                                00874000
+         OI    IOBFLAG,IOBRSTRT TURN ON RESTART FLAG           @VA07807 00874100
+         NI    IOERMSG,0      RESET MSG CODE                   @VA07807 00874200
+         NI    IOERIND3,IOERDASD RESET ALL BUT HOME ADDR IND   @VA07807 00874300
+         NI    IOERIND4,0     RESET OPERATOR FLAGS             @VA07807 00874400
+         LR    R4,R15         SAVE R15 ACROSS FRET             @VA07807 00874500
+         BAL   R5,CKIOB       MAKE SURE THAT STORAGE IS        @VA07807 00874600
+         IC    R1,IOBCAW      GET ORIGINAL KEY                 @VA07807 00874800
+         STC   R1,IOBRCAW     STORE IN RESTART CAW             @VA07807 00874900
+         EXIT                      IOS WILL RETRY OPERATION    @VA07807 00875000
+         SPACE  1                                                       00876000
+STAT2305 EQU   *                                                        00877000
+         DROP  R7                                                       00878000
+         USING IOERBLOK,R3                                              00879000
+         TM    IOERDATA+2,X'80'                                         00880000
+         BZ    TESTPERM                                                 00881000
+         LA    R0,IOERSIZE+128/8                                        00882000
+         CALL  DMKFREE                                                  00883000
+         MVC   0(IOERSIZE*8,R1),IOERBLOK                                00884000
+         MVI   IOEREXT+1-IOERBLOK(R1),128/8 SAVE SIZE OF       @VA00705 00885000
+*                                   EXTENDED SENSE AREA                 00886000
+         DROP  R3                                                       00887000
+         USING IOERBLOK,R7                                              00888000
+         LA    R4,IOERPNT                                               00889000
+         BAL   R5,NXTPTR                                                00890000
+CLRUNIT  LR    R4,R1                                                    00891000
+         MVC   IOERVSER-IOERBLOK(6,R1),RDEVSER    MOVE IN THE OLD VOLID 00892000
+         LA    R0,2                                                     00893000
+         CALL  DMKFREE                                                  00894000
+         STH   R0,IOERDW                                                00895000
+         ST    R1,IOERLOC                                               00896000
+         ST    R1,IOBRCAW                                               00897000
+         MVC   0(8,R1),UNLOAD                                           00898000
+         MVC   8(8,R1),TICCW                                            00899000
+         SPACE 1                                                        00900000
+         LA    R4,IOERSIZE*8(R4)   GET ADDR. FOR WHERE SNS DATA WILL GO 00901000
+         AL    R4,UNLOAD                                                00902000
+         ST    R4,0(R1)                                                 00903000
+         L     R4,IOBCAW      CHAIN A TIC COMD. TO USERS CCW STRING.    00904000
+         LA    R4,0(R4)                                                 00905000
+         AL    R4,TICCW                                                 00906000
+         ST    R4,8(R1)                                                 00907000
+         B     RETRY                                                    00908000
+NXTPTR   LR    R15,R4         SAVE IOERPNT                     @VA08187 00909000
+         L     R4,0(R4)                                                 00910000
+         LTR   R4,R4                                                    00911000
+         BNZ   NXTPTR                                                   00912000
+         ST    R1,0(R15)      CHAIN BLOK IN                    @VA08187 00913000
+         BR    R5                                                       00914000
+         SPACE 1                                                        00915000
+TESTPERM TM    IOERDATA+1,X'80'    PERMANENT ERROR CONDITION ?          00916000
+         BZ    NOTPERM        BRANCH NO                                 00917000
+         MVI   IOERNUM,PERM        SET UP MESSAGE NUMBER.               00918000
+         OI    IOERIND3,IOERCAN+IOERINFO                                00919000
+         B     CALLWTR                                                  00920000
+         SPACE 1                                                        00921000
+NOTPERM  TM    IOERDATA,X'10' IS THIS AN EQUIP CHECK ERROR              00922000
+         BZ    NOTEQIP                                                  00923000
+         MVC   IOBRCAW,IOBCAW      SET UP CAW.                          00924000
+         CLC   IOBRCNT,F10+2  HAS THIS ERROR OCCURRED 10 TIMES ?        00925000
+         BH    EQCK                IF YES BRANCH                        00926000
+         B     RETRY                                                    00927000
+         SPACE 1                                                        00928000
+NOTEQIP  TM    IOERDATA,X'20' BUSOUT CHECK ?                            00929000
+         BO    BUSCK          BRANCH IF YES                             00930000
+         TM    IOERDATA,X'40' INT. REQ. CONDITION ?                     00931000
+         BO    TSTINT         BRANCH IF YES                             00932000
+         CLI   RDEVTYPE,TYP3340 3340 DEVICE TYPE ?             @V2A2029 00933000
+         BNE   NOSEEK         NO - DO NOT TEST FOR SEEK CHECK  @V2A2029 00934000
+         TM    IOERDATA,X'01' SEEK CHECK ERROR ?               @V2A2029 00935000
+         BO    SEEKCK         YES --BRANCH                     @V2A2029 00936000
+NOSEEK   EQU   *                                               @V2A2029 00937000
+         TM    IOERDATA,X'80' COMMAND REJECT ERROR ?                    00938000
+         BZ    NOTCOMRJ       NO, DO NEXT TEST                 @V56BDA8 00939100
+*  NOTE: THE IOBALTSK FLAG, TESTED BELOW, CAUSES US TO CALL DMKTRKIN,   00939110
+*  SO IT HAD BETTER NOT GET SET FOR DEVICES NOT HANDLED BY DMKTRKIN.    00939120
+*  PRESENTLY DMKTRKIN IS LIMITED TO HANDLING 3340/3344.                 00939130
+         TM    IOBSTAT,IOBALTSK IS THERE A SEEK TO AN          @V56BDA8 00939140
+*                             ALTERNATE?                                00939150
+         BO    CKALTERR       YES, CALL ALTERNATE TRACK ROUTINE@V56BDA8 00939160
+         B     CHKREL         ELSE, TREAT AS COMMAND REJECT    @V56BDA8 00939170
+NOTCOMRJ EQU   *                                               @V56BDA8 00939180
+         TM    IOERDATA+1,X'08'    NO RECORD FOUND ERROR ?              00940000
+         BO    PROGERR        YES- BRANCH                               00941000
+         TM    IOERDATA,X'04' OVERRUN ERROR ?                           00942000
+         BO    OVERRUN        BRANCH YES                                00943000
+         CLI   RDEVTYPE,TYP3340 3340 DEVICE TYPE ?             @V2A2029 00944000
+         BNE   NOTRKC         NO - DO NOT TEST FOR TRK COND.   @V2A2029 00945000
+         TM    IOERDATA,X'02' TRACK CONDITION ERROR ?          @V2A2029 00946000
+         BZ    NOTRKC         NO, BRANCH TO CHECK NEXT         @V56BDA8 00947050
+CKALTERR CALL  DMKTRKIN       CALL ALTERNATE TRACK ROUTINE     @V56BDA8 00947100
+         SWITCH                                                @V56BDA8 00947150
+         B     *+4(R1)        BRANCH ON RETURN VECTOR          @V56BDA8 00947200
+         B     FINISH         0 - RECOVERY COMPLETE            @V56BDA8 00947250
+         B     RETRYK00       4 - DO AN IO OPERATION           @V56BDA8 00947300
+         B     EOCERR         8 - END OF CYLINDER CONDITION    @V56BDA8 00947350
+         B     RECURALT       12 - ANOTHER ERROR               @V56BDA8 00947400
+         B     RECFAIL        16 - RECOVERY FAILURE            @V56BDA8 00947450
+         B     FILPROT        20 - FILE PROTECT EXCEPTION      @V56BDA8 00947500
+         B     BDTRK          24 - PERMANENT TRACK CONDITION   @V56BDA8 00947550
+         B     CHKREL         28 - COMMAND REJECT              @V56BDA8 00947600
+         SPACE 2                                                        00947650
+NOTRKC   EQU   *                                               @V2A2029 00948000
+         TM    IOERDATA+1,X'40'    IS THIS A TRACK OVERFLOW             00949000
+         BO    TRKOV          BRANCH YES.                               00950000
+*                                                                       00951000
+         TM    IOERDATA,X'08' DATA CHECK ERROR ?                        00952000
+         BO    DATCHECK       BRANCH IF YES                             00953000
+         TM    IOERDATA+1,X'20'    EOC CONDITION                        00954000
+         BO    EOCERR         YES--DO NOT RECORD               @VA02358 00955000
+         TM    IOERDATA+1,X'04'    FILE PROTECT ERROR ?                 00956000
+         BO    FILPROT        BRANCH IF YES.                            00957000
+         B     SHDNOT                                                   00958000
+DATCHECK TM    IOERDATA+2,X'40'    CORRECTABLE ERROR ?                  00959000
+         BO    CORRERR        YES --                           @V2A2029 00960000
+         TM    RDEVTYPE,TYP2305+TYP3340 3340 OR 2305 ?         @V2A2029 00961000
+         BZ    DATAMSG        NO, BRANCH-GIVE ERROR MSG        @V2A2029 00962000
+         CLC   IOBRCNT(2),F10+2 OVER 10 RETRIES ?              @V2A2029 00963000
+         BH    DATAMSG        YES, BRANCH- GIVE ERROR MSG      @V2A2029 00964000
+         MVC   IOBRCAW,IOBCAW SET UP RESTART ADDRESS           @V2A2029 00965000
+         B     RETRY          RETRY THE OPERATION              @V2A2029 00966000
+CORRERR  LA    R0,20          GET FREE STORAGE                 @V2A2029 00967000
+         CALL  DMKFREE                                                  00968000
+         ST    R1,IOERLOC     STORE STORAGE LOCATION                    00969000
+         STH   R0,IOERDW    STORE SIZE OF STORAGE .                     00970000
+         LR    R9,R1          SET BUFFER ADDRESS                        00971000
+         XC    0(160,R9),0(R9)      CLEAR BUFFER                        00972000
+         USING ECFDSECT,R9                                              00973000
+         STM   R2,R5,ECFREG2  SAVE REGS 2-5                    @VA08187 00974000
+         ST    R11,ECFREG11   SAVE REG.11                               00975000
+         LH    ERREG2,IOERDATA+18  LOAD BACKWARD DISP.                  00976000
+         N     ERREG2,XRIGHT16     CLEAR HI ORDER BYTES                 00977000
+         L     CCWREG,IOERCSW      PICK UP CCW ADDR. FROM CSW           00978000
+         LA    CCWREG,0(CCWREG)    CLEAR HI ORDER BYTE                  00979000
+         LTR   CCWREG,CCWREG  IS CCW ADDR. PRESENT                      00980000
+         BZ    EQCK           IF NOT TREAR AS EQUIP CHECK               00981000
+         S     CCWREG,F8      SUBTRACT 8 GIVING TRUE CCW ADDRESS        00982000
+         BM    EQCK           IF NEGATIVE, INDICATE EQUIPMENT  @VM08849 00983000
+*                             CHECK                                     00984000
+         L     R1,IOBCAW      POINT AT FIRST CCW               @VA04842 00984575
+         LA    R1,0(,R1)      CLEAR KEY                        @VA04842 00985150
+         L     R0,FFS         FOR RCWHEAD COMPARE              @VA04842 00985725
+         SLR   R15,R15        CLEAR RESTART REGISTER           @VA08187 00986300
+CHKZERO  CLI   0(CCWREG),X'00'     IS THIS A DATA CHAIN CCW?   @VA04842 00986875
+         BE    CHKFIRST       YES..FIND PREVIOUS CCW           @VA04842 00987450
+         LR    R2,CCWREG      ADDRESS INTO REG 2               @VA04842 00988025
+         S     R2,F8          LOOK AT PREVIOUS CCW             @VA04842 00988600
+         CH    R0,4(,R2)      CCWREG REALLY FIRST IN RCWTASK?  @VA04842 00989175
+         BE    CHKCD          YES...FIND VALID RESTART CCW     @VA04842 00989750
+         B     BYPASSW        NO...OK TO RESTART HERE          @VA04842 00990325
+         SPACE ,                                               @VA04842 00990900
+CHKFIRST S     CCWREG,F8      BACK UP TO PREVIOUS CCW          @VA04842 00991475
+         B     CHKZERO        KEEP LOOKING...                  @VA04842 00992050
+         SPACE ,                                               @VA04842 00992625
+CHKCD    S     R1,F16         BEGINNING OF FIRST RCWTASK       @VA04842 00993200
+CHKCD1   LH    R0,10(,R1)     GET COUNT OF CCWS                @VA04842 00993775
+         LR    R2,R1          R2 = RCWTASK NOW UNDER SCRUTINY  @VA04842 00994350
+         LA    R1,8(,R1)      POINT TO FIRST CCW-8             @VA04842 00994925
+NEXTCCW  LA    R1,8(,R1)      POINT AT NEXT CCW                @VA04842 00995500
+         CLR   R1,CCWREG      IS IT 'OUR' CCW?                 @VA04842 00996075
+         BE    CHKCCW2        IF SO, LOOK NO FURTHER           @VA04842 00996650
+         CLI   0(R1),CDTIC    CHAIN DATA TIC CCW?              @VA04842 00997225
+         BE    CHKCCW         YES...SEE WHERE IT GOES          @VA04842 00997800
+         CLI   0(R1),X'08'    ORDINARY TIC?                    @VA04842 00998375
+         BE    NEXTCCW1       FORGET IT...TRY AGAIN            @VA04842 00998950
+         TM    4(R1),CD       START OF CD CHAIN?               @VA04842 00999525
+         BO    MAYBE          LET'S SEE                        @VA04842 01000100
+NEXTCCW1 SLR   R15,R15        CLEAR REG15                      @VA08187 01000675
+         B     CHKCCW1        CONTINUE LOOKING...              @VA04842 01001250
+         SPACE ,                                               @VA04842 01001825
+CHKCCW   CLM   CCWREG,B'0111',1(R1)     IS IT THE ONE WE WANT? @VA04842 01002400
+         BE    DATACCW        YES...THEN R6 IS THE RESTART CCW @VA04842 01002975
+         B     CHKCCW1        NO...KEEP LOOKING                @VA04842 01003550
+         SPACE ,                                               @VA04842 01004125
+MAYBE    LTR   R15,R15        IS REG15 VALID                   @VA08187 01004700
+         BNZ   CHKCCW1        YES...SAVE IT                    @VA04842 01005275
+         LR    R15,R1         REMEMBER POSSIBLE RESTART ADDRESS@VA08187 01005850
+CHKCCW1  BCT   R0,NEXTCCW     CHECK ENTIRE RCWTASK?            @VA04842 01006425
+         L     R1,0(,R2)      POINT AT NEXT RCWTASK            @VA04842 01007000
+         LTR   R1,R1          IS THERE ONE?                    @VA04842 01007575
+         BNZ   CHKCD1         YES...KEEP LOOKING               @VA04842 01008150
+CHKCCW2  LTR   R15,R15        IS REG15 VALID                   @VA08187 01008725
+         BZ    BYPASSW        THEN USE CCWREG TO RESTART       @VA04842 01009300
+DATACCW  LR    CCWREG,R15     GET ADDRESS OF CHAINING CCW      @VA08187 01009875
+BYPASSW  EQU   *                                               @VA04842 01010450
+         ST    R11,ECFREG11   SAVE IT                          @VA08385 01010500
+         MVC   ECFCNT+2(2),6(CCWREG)    MOVE IN CCW CNT.                01012000
+         CLI   RDEVTYPE,TYP2305 2305 TYPE ECF CORRECTION ?     @V304498 01013000
+         BE    DISPZ          YES, APPLY 2305 ECF              @V304498 01014000
+         MVC   TOTALCNT+1(3),IOERDATA+15     FETCH RESTART DISP.        01015000
+         L     ERREG1,TOTALCNT     LOAD NUMBER READ BY C.U.             01016000
+         SR    ERREG1,ERREG2  CALC FORWARD DISP.                        01017000
+*  ERROR DISP OF 3 OR MORE USE SENSE BYTES 20,21,22                     01018000
+*  ERROR DISP OF 2 USE SENSE BYTES 21,22                                01019000
+*  ERROR DISP OF 1 USE SENSE BYTE 22                                    01020000
+         C     ERREG2,F2      BACKWARD DISP OF 2               @VM08849 01021000
+         BH    ECCNT          NO - USE 3 BYTE ECC COUNT        @VM08849 01022000
+         LR    ERREG3,ERREG2  SET UP FOR COUNT OF TWO          @VM08849 01023000
+         BE    ECADDR         YES - COUNT EQUALS 2             @VM08849 01024000
+         BCT   ERREG2,LENCHK  DISP EQUAL ZERO--BRANCH          @VA02257 01025000
+         B     ECADDR         ERREG3 EQUALS 1                  @VM08849 01026000
+*                                                                       01027000
+*  CALCULATE FORWARD DISPLACEMENT FOR 2305                              01028000
+*                                                                       01029000
+DISPZ    DS    0H             CONNECTOR                                 01030000
+         L     ERREG1,ECFCNT  GET CCW CNT.                              01031000
+         SR    ERREG1,ERREG2  DECR BY ECC DISP.                         01032000
+         LH    ERREG2,IOERCSW+6    LOAD RESIDUAL CNT.                   01033000
+         N     ERREG2,XRIGHT16     CLEAR HI ORDER BYTES                 01034000
+         SR    ERREG1,ERREG2  DECR BY RESIDUAL CNT.                     01035000
+         BM    OVERRUN2       BRANCH ON NEGATIVE DISP.         @VA08385 01036100
+*                                                                       01037000
+ECCNT    LA    ERREG3,3       SET LOOP TO 3                    @VM08849 01038000
+ECADDR   LA    ERREG2,IOERDATA+23 POINT TO ECC BYTE+3          @VM08849 01039000
+         SR    ERREG2,ERREG3  POINT TO CORRECT ECC BYTE        @VM08849 01040000
+ECFLOOP1 CL    ERREG1,ECFCNT  IS ERROR IN THIS SEG ?                    01041000
+         BNL   ENDSEG         BRANCH IF NO                              01042000
+*                                                                       01043000
+*  CALCULATE FORWARD ERROR DISPLACEMENT FOR 3330/3340/3350              01044000
+*                                                              @VA00922 01045000
+         ST    ERREG1,IDALCNT SAVE FWD DISP IN CASE IDAL       @VA03061 01046000
+         TM    4(CCWREG),SKIP SUPPRESS DATA FLG. ON ?          @VA00922 01047000
+         BO    ECFINCR        YES -                            @VA00922 01048000
+         L     R15,0(CCWREG)  GET DATA ADDR. FROM CCW          @VA08187 01049000
+         LA    R15,0(,R15)    REMOVE CMD. CODE                 @VA08187 01050000
+         TM    4(CCWREG),IDA  IS IDAL FLG. ON ?                @VA00922 01051000
+         BO    IDALIST        YES - GO FIND RIGHT IDA WORD     @VA00922 01052000
+         AR    R15,R1         NO - ADD FWD DISP. VALUE         @VA08187 01053000
+         B     ECFBYTE        OR' IN CORRECTION BYTES          @VA00922 01054000
+         SPACE 1                                               @VA00922 01055000
+*  HERE TO PROCESS ERROR'S IN IDAL CCW STRINGS                 @VA00922 01056000
+*                                                              @VA00922 01057000
+IDALIST  L     R2,0(,R15)     GET ENTRY WITHIN IDAL LIST       @VA08187 01058000
+         L     R3,F4096       CHECK BOTH HALFS OF PAGE         @VA00922 01059000
+         O     R2,=X'00000800'  FORCE TO 2'ND HALF OF PAGE     @VA00922 01060000
+         N     R2,F4095       ONLY LEAVE DISP. OF IDAL WORD    @VA00922 01061000
+         SLR   R3,R2          SUBTRACT OUT DISP. VALUE         @VA00922 01062000
+         CL    R3,IDALCNT     IS ERROR IN THIS IDA WORD ?      @VA00922 01063000
+         BH    FNDIDAW        YES -                            @VA03061 01064000
+         L     R2,IDALCNT     NO - GET REMAINING BYTE COUNT    @VA00922 01065000
+         SLR   R2,R3          REDUCE COUNT BY THIS IDA WORD    @VA00922 01066000
+         ST    R2,IDALCNT     SAVE NEW RESULT                  @VA00922 01067000
+         LA    R15,4(,R15)    POINT TO NEXT IDA WORD           @VA08187 01068000
+         B     IDALIST        KEEP LOOKING FOR CORRECT IDA WORD@VA00922 01069000
+FNDIDAW  L     R2,0(,R15)     LOAD ADDRESS FROM IDA WORD       @VA08187 01070000
+         AL    R2,IDALCNT     ADD IN RECOMPUTED DISP.          @VA00922 01071000
+NXTBYTE  XC    0(1,R2),0(R11) OR' IN CORRECTION BYTE           @VA00922 01072000
+         B     ECFINCR        GO INCREMENT FOR NEXT BYTE       @VA03061 01073000
+*                                                              @VA00922 01074000
+*  HERE TO EXCLUSIVE OR ECC BYTE INTO STORAGE FOR CHANNEL      @VA00922 01075000
+*  PROGRAMS THAT DO NOT CONTAIN AN IDAL LIST                   @VA00922 01076000
+*                                                              @VA00922 01077000
+ECFBYTE  XC    0(1,R15),0(ERREG2) APPLY CORRECTION TO CORE     @VA08187 01078000
+ECFINCR  DS    0H             CONNECTOR                                 01079000
+         LA    ERREG2,1(ERREG2)    POINT TO NEXT ECC BYTE               01080000
+ECFINCR1 LA    ERREG1,1(ERREG1)    INCR DISP. VALUE                     01081000
+         BCT   ERREG3,ECFLOOP1     DECR LOOP CTR.                       01082000
+         L     R11,ECFREG11   MAKE SURE IT'S SAVED             @VA08385 01082500
+         SPACE 1                                                        01083000
+         CLI   RDEVTYPE,TYP2305 PROCESS 2305 CHAN PROGRAM      @V304498 01084000
+         BE    ECFOVCK        YES, TEST FOR CMD CHAINING       @V304498 01085000
+         B     LENCHK         CORRECTION DONE -- GO CHECK LEN  @VA03061 01086000
+         SPACE 1                                                        01087000
+ENDSEG   EQU   *                                                        01088000
+         CLI   RDEVTYPE,TYP2305 PROCESS 2305 CHAN PROGRAM ?    @V304498 01089000
+         BE    ECFOVCK        YES, CHECK COMMAND CHAINING ?    @V304498 01090000
+         TM    4(CCWREG),X'80'     IS THIS CCW DOING ANY DATA CHAINING  01091000
+         BZ    LENCHK         BRANCH IF NO.                             01092000
+         L     R15,TOTALCNT   LOAD TOTAL BYTES TRANSFERRED     @VA08187 01093000
+         S     R15,ECFCNT     DECREASE BY CCW CNT              @VA08187 01094000
+         ST    R15,TOTALCNT   STORE NEW RESULT                 @VA08187 01095000
+         S     ERREG1,ECFCNT  DECR DISP BY CCW CNT.                     01096000
+         BM    SETLEN         BRANCH IF DISP. NEGATIVE                  01097000
+         LA    CCWREG,8(CCWREG)    INCR TO NEXT CCW                     01098000
+         TM    0(CCWREG),X'08' IS THIS A TIC CCW               @VA00669 01099000
+         BZ    SETECNT        NO                               @VA00669 01100000
+         TM    0(CCWREG),X'07' TRY OTHER BITS                  @VA00669 01101000
+         BNZ   SETECNT        NOT A TIC CCW                    @VA00669 01102000
+         L     CCWREG,0(CCWREG)    PICK UP NEXT CCW ADDR.               01103000
+SETECNT  MVC   ECFCNT+2(2),6(CCWREG)    UPDATE COUNT AREA               01104000
+         B     ECFLOOP1                                                 01105000
+         SPACE 1                                                        01106000
+LENCHK   TM    IOERDATA+23,X'01'   DID CONTROL UNIT INDICATE INCORRECT  01107000
+         BZ    MER210         BRANCH IF NO                              01108000
+         CLC   TOTALCNT(4),ECFCNT  COMPARE COUNT                        01109000
+         BNE   MER210         BRANCH ON INCORRECT LEN.                  01110000
+* IF NO INCORRECT LENGTH TREAT THIS ERROR AS A EQUIP. CHECK             01111000
+*                                                                       01112000
+*                                                                       01113000
+         MVC   IOBRCAW,IOBCAW      SET UP RESTART CAW                   01114000
+         CLC   IOBRCNT,F10+2  HAS ERROR OCCURRED 10 TIMES ?             01115000
+         BNH   RETRY          BRANCH IF NO                              01116000
+         B     EQCK           CALL MESSAGE WRITTER                      01117000
+         SPACE 1                                                        01118000
+MER210   EQU   *                                                        01119000
+         CLC   TOTALCNT(4),ECFCNT  IS COUNT EQUAL                       01120000
+         BE    ECFOVCK        IF YES BRANCH                             01121000
+SETLEN   EQU   *                                               @VA02277 01122000
+         TM    4(CCWREG),X'20'     SUPPRESS LEN. BIT ON ?               01123000
+         BO    ECFOVCK        BRANCH IF YES                             01124000
+         OI    IOBCSW+5,X'40'     SET INCORRECT LENTH BIT IN CSW        01125000
+         B     NOERROR                                                  01126000
+         SPACE 1                                                        01127000
+ECFOVCK  EQU   *                                                        01128000
+         TM    4(CCWREG),X'40'     IS COMMAND CHAINING BIT ON ?         01129000
+         BZ    NOERROR        BRANCH IF LAST CCW IN CHAIN               01130000
+         MVC   SECTVAL+1(1),IOERDATA+13      GET SECTOR POINTER         01131000
+         LA    ERREG2,8(CCWREG)    POINT AT NEXT CCW                    01132000
+         TM    0(ERREG2),X'08' IS THIS CCW A TIC               @VA00669 01133000
+         BZ    NOTIC          NO                               @VA00669 01134000
+         TM    0(ERREG2),X'07' TRY OTHER BITS                  @VA00669 01135000
+         BNZ   NOTIC          NOT A TIC, SKIP                  @VA00669 01136000
+         L     ERREG2,0(ERREG2)    IF YES POINT TO NEXT CCW             01137000
+ECFBLD   EQU   *                                                        01138000
+NOTIC    CLI   RDEVTYPE,TYP3340 3340/3344?                     @V56BDA8 01139100
+         BNE   NOTICA         NO, SKIP CALL                    @V56BDA8 01139200
+         BAL   ERREG4,UPSK3340 ENSURE CORRECT RESTART CCHH     @V56BDA8 01139300
+NOTICA   TM    IOERIND3,IOERDASD IS SEEK ADDR PRESENT?         @V56BDA8 01139400
+         BO    SEEKBLD        BRANCH IF YES.                            01140000
+         B     DATAMSG        IF SEEK ADDR. NOT PRESENT TREAT AS ERROR  01141000
+*                                                                       01142000
+*                                                                       01143000
+*********************                                                   01144000
+SEEKBLD  XC    CCW1(48),CCW1  CLEAR STORAGE FOR CCW BUILDING..          01145000
+         MVC   SEEKADR+2(4),IOERADR     MOVE IN SEEK AUG.               01146000
+         MVC   SEEKADR+5(1),IOERDATA+6  CHANGE LOW ORDER HEAD ADDR.     01147000
+         NI    SEEKADR+5,X'1F'     RESET BIT'S 0-1-2-                   01148000
+         MVC   CCW1,SEEK      BUILD MODEL SEEK CCW                      01149000
+         LA    ERREG4,SEEKADR      GET ADDR. OF SEEK AUG.               01150000
+         AL    ERREG4,SEEK    AND ADD COMMAND CODE                      01151000
+         ST    ERREG4,CCW1    STORE RESULT IN CCW1                      01152000
+         CLI   RDEVTYPE,TYP2305 USE 2305 CYL/HEAD ADDRESS ?    @V304498 01153000
+         BNE   SECTOR         NO, SKIP 2305 CCHH ADDRESS       @V304498 01154000
+L2305    MVC   SEEKADR+3(1),IOERDATA+5  MOVE IN CYL. ADDR. FOR 2305     01155000
+         MVC   SEEKADR+5(1),IOERDATA+6  MOVE IN HEAD NUM. FOR 2305      01156000
+SECTOR   MVC   CCW2,SETSECT   BUILD MODEL SECTORE CCW                   01157000
+         LA    ERREG4,IOERDATA+13  RESOLVE ADDRESS FOR CCW              01158000
+         AL    ERREG4,SETSECT      STORE REAL ADDR.                     01159000
+         ST    ERREG4,CCW2    IN CCW 2                                  01160000
+         MVC   CCW3,SRCHEQ    BUILD MODEL SEARCH CCW                    01161000
+         LA    ERREG4,IOERDATA+8   GET THE ADDRESS OF SRID DATA         01162000
+         AL    ERREG4,SRCHEQ  GET COMMAND CODE                          01163000
+         ST    ERREG4,CCW3    STORE ADDR. AND CC OF CCW                 01164000
+         MVC   CCW4,TICCW     BUILD MODEL TIC CCW.                      01165000
+         LA    ERREG4,CCW3    PICK UP ADDR OF SEARCH CCW.               01166000
+         AL    ERREG4,TICCW   INSERT COMMAND CODE                       01167000
+         ST    ERREG4,CCW4    STORE TIC COMMAND AND ADDR.               01168000
+         TM    0(ERREG2),X'10'     DOES CCW OPERATE ON COUNT FIELD ?    01169000
+         BNO   BLDCNT  IF THERE IS NO COUNT CODE, INCLUDE READ @VA03438 01170000
+*                       COUNT COMMAND IN CCW CHAIN             @VA03438 01171000
+         MVC   CCW5,TICCW     BUILD MODEL TIC CCW                       01172000
+         LR    ERREG4,ERREG2  LOAD CCW ADDR                    @VA00669 01173000
+         LA    ERREG4,0(ERREG4)    CLEAR OUT PROTECT KEY                01174000
+         AL    ERREG4,TICCW   INSERT TIC COMMAND CODE                   01175000
+         ST    ERREG4,CCW5    STORE COMPLETED CCW                       01176000
+         B     LOADREGS                                                 01177000
+BLDCNT   MVC   CCW5,RDCOUNT   BUILD READ COUNT CCW                      01178000
+         TM    0(ERREG2),X'80'    IS IT A MULTI-TRACK COMMAND  @VA03438 01179000
+         BNO   NOMT     IF NOT, BRANCH                         @VA03438 01180000
+         OI    CCW5,X'80'   ISSUE A MULTI-TRACK READ COUNT     @VA03438 01181000
+*                           COMMAND                            @VA03438 01182000
+NOMT     MVC   CCW6,TICCW       BUILD TIC CCW                  @VA03438 01183000
+         LR    ERREG4,ERREG2  LOAD CCW ADDR                    @VA00669 01184000
+         LA    ERREG4,0(ERREG4)    CLEAR OUT PROTECT KEY.               01185000
+         AL    ERREG4,TICCW   INSERT 08 COMMAND FOR TIC                 01186000
+         ST    ERREG4,CCW6    STORE COMPLETED CCW                       01187000
+LOADREGS LA    ERREG4,CCW1    LOAD THE ADDRESS OF THE FIRST CCW         01188000
+         ST    ERREG4,IOBRCAW      SET UP RESTATR CAW ADDRESS.          01189000
+         LM    R2,R5,ECFREG2  RESTORE REGS 2-5                 @VA08187 01190000
+         L     R11,ECFREG11                                             01191000
+         OI    IOERFLG2,IOERECF                                         01192000
+         B     RETRY                                                    01193000
+*****  RESTORE ALL REGISTER'S                                           01194000
+******                                                                  01195000
+*                                                                       01196000
+NOERROR  MVI   IOBCSW+4,X'0C'  SET ON C.E. + D.E.                       01197000
+         B     FINISH                                                   01198000
+         SPACE 1                                                        01198050
+RDOPCK   EQU   *              HERE ON FIRST ERROR & DATA CK    @VA03757 01198100
+         L     R3,IOERCSW     GET FAILING CCW ADDRESS PLUS 8   @VA03757 01198150
+         LA    R3,0(,R3)      CLEAR HI-ORDER BYTE              @VA03757 01198200
+         S     R3,F8          GET FAILING CCW ADDRESS          @VA03757 01198250
+         BM    NOREAD         NO CCW                           @VA03757 01198300
+         TM    0(R3),X'01'    WRITE OR CONTROL OP ???          @VA03757 01198350
+         BO    NOREAD         YES, FORGET READ FLAG            @VA03757 01198400
+         TM    0(R3),X'02'    IS IT A READ OP ??               @VA03757 01198450
+         BZ    NOREAD         NO, FORGET READ FLAG             @VA03757 01198500
+         OI    IOERFLG3,IOERREAD TURN ON READ FLAG FOR SDR     @VA03757 01198550
+NOREAD   EQU   *                                               @VA03757 01198600
+         BR    R5             RETURN TO IN LINE CODE           @VA03757 01198650
+         SPACE 2                                                        01198672
+UPSK3340 IC    R0,IOERDATA+6  XCCXHHHH                         @V56BDA8 01198674
+         SRL   R0,5           XXXXXCC                          @V56BDA8 01198676
+         STC   R0,IOERADR     STORE HIGH CC                    @V56BDA8 01198678
+         NI    IOERADR,X'03'  CLEAR UNUSED BITS                @V56BDA8 01198680
+         MVC   IOERADR+1(L1),IOERDATA+5 STORE LOW CC           @V56BDA8 01198682
+         MVC   IOERADR+2(L2),ZEROES CLEAR HH FIELD             @V56BDA8 01198684
+         MVN   IOERADR+3(L1),IOERDATA+6 COPY HH                @V56BDA8 01198686
+         OI    IOERIND3,IOERDASD INDICATE GOOD SEEK ADDRESS    @V56BDA8 01198688
+         BR    R5             RETURN TO CALLER                 @V56BDA8 01198690
+         EJECT                                                          01198700
+         SPACE 3                                                        01199000
+*        BUILD A BUFFER TO READ THE VOLID OF PACK                       01199050
+         SPACE                                                          01199100
+GETSTBUF LA    R0,STATSIZE    GET A BUFFER TO READ THE VOL1    @VA08187 01199150
+*                             LABEL                                     01199200
+         CALL  DMKFREE                                         @VA08187 01199250
+         LR    R4,R1          SAVE THE POINTER TO THE BUFFER   @VA08187 01199300
+         XC    STATDASD(STATSIZE*8),STATDASD ZERO OUT THE      @VA08187 01199350
+*                             BUFFER                                    01199400
+         MVC   STATVOL1(6),BLANKS INITIALIZE LABL AND VOL1     @VA08187 01199450
+         MVC   STATDASD(RDVOLEND-RDVOLID),RDVOLID MOVE MDL CCWS@VA08187 01199500
+         LA    R14,((RDVOLEND-8)-RDVOLID)/8 GET LOOP COUNT     @VA08187 01199550
+         LA    R1,STATSEEK    ADDR OF THE FIRST TO DO          @VA08187 01199600
+RESOLVAD L     R15,0(R1)      GET THE CURRENT ADDRESS          @VA08187 01199650
+         ALR   R15,R4         ADJUST BY BEGINNING OF GOTTEN STG@VA08187 01199700
+         ST    R15,0(R1)      AND RESTORE                      @VA08187 01199750
+         LA    R1,8(R1)       BUMP TO NEXT CCW                 @VA08187 01199800
+         BCT   R14,RESOLVAD   CONTINUE UNTIL ALL CCW'S ARE DONE@VA08187 01199850
+         BR    R5             RETURN TO THE CALLING ROUTINE    @VA08187 01199900
+         SPACE 3                                                        01199950
+*        COMPARE THE VOLID READ TO THE VOLID IN THE REAL DEVICE BLOCK   01200000
+         SPACE                                                          01200050
+COMPVOL1 CLC   STATVOL1,=C'VOL1' STANDARD VOL 1 LABEL          @VA08187 01200100
+         BE    STANDLBL       YES -                            @VA08187 01200150
+         CLC   STATVOL1,=C'CMS=' PACK HAVE CMS TYPE LABEL      @VA08187 01200200
+         BE    STANDLBL       YES -                            @VA08187 01200250
+         MVC   STATLABL+4(2),STATLABL MOVE LABEL IN PIECES     @VA08187 01200300
+         MVC   STATLABL(4),STATVOL1 PREVENT OVERLAP            @VA08187 01200350
+STANDLBL EQU   *              HERE FOR STANDARD LABEL          @VA08187 01200400
+         CLC   STATLABL,RDEVSER WAS THE PACK CHANGED ?         @VA08187 01200450
+         BCR   8,R5           RETURN WITH THE CONDITION CODE   @VA08187 01200500
+*                             SET                                       01200550
+         MVI   STATPACK,X'FF' INDICATE PACK WAS CHANGED        @VA08187 01200600
+         BR    R5             RETURN WITH THE CONDITION CODE   @VA08187 01200650
+*                             SET                                       01200700
+         SPACE 3                                                        01200750
+*        TEST IF PACK WAS CHANGED AND IN USE BY THE SYSTEM              01200800
+         SPACE                                                          01200850
+TESTVOL  CLI   STATPACK,X'FF' WAS THE PACK CHANGE              @VA08187 01200900
+         BCR   7,R5           NO- RETURN TO THE CALLER         @VA08187 01200950
+         SWITCH MAKE          SURE WE ARE ON THE IO PROCESSOR  @VA08187 01201000
+         TM    RDEVFLAG,RDEVSYS+RDEVOWN WAS PACK IN USE BY     @VA08187 01201050
+*                             SYSTEM                                    01201100
+         BNZ   ERROR956       DO NOT MOVE IN NEW VOLID; VARY   @VA08187 01201150
+*                             OFFLINE                                   01201200
+         MVC   RDEVSER,STATLABL MOVE IN THE NEW VOLID          @VA08187 01201250
+         TM    RDEVSTAT,RDEVDED DEVICE DEDICATED ?             @VA08187 01201300
+         BO    *+8            YES --                           @VA08187 01201350
+         OI    RDEVFLAG,RDEVMOUT INDICATE VOLUME MOUNTED; NOT  @VA08187 01201400
+*                             ATTACHED                                  01201450
+         CLI   RDEVTYPE,TYP3340 3340 TYPE ?                    @VA08187 01201500
+         BCR   7,R5           NO - RETURN TO CALLER            @VA08187 01201550
+         NI    RDEVFTR,X'FF'-(FTRRPS+FTR70MB+FTR35MB) RESET    @VA08187 01201600
+         TM    STATSDAT+2,X'80' RPS FEATURE PRESENT ?          @VA08187 01201650
+         BZ    *+8            NO -                             @VA08187 01201700
+         OI    RDEVFTR,FTRRPS INDICATE RPS FEATURE             @VA08187 01201750
+         TM    STATSDAT+2,X'02' 3340 70MB PACK MOUNTED ?       @VA08187 01201800
+         BZ    SET35MB        NO -- MUST BE 35MB PACK          @VA08187 01201850
+         OI    RDEVFTR,FTR70MB INDICATE 70MB PACK MOUNTED      @VA08187 01201900
+         BR    R5             RETURN TO CALLER                 @VA08187 01201950
+SET35MB  OI    RDEVFTR,FTR35MB INDICATE 35MB PACK MOUNTED      @VA08187 01202000
+         BR    R5             RETURN TO CALLER IF NOT IN USE   @VA08187 01202050
+*                             BY SYSTEM                                 01202100
+         SPACE 1                                                        01202150
+ERROR95F SWITCH MAKE          SURE WE ARE ON THE IO PROCESSOR  @VA08187 01202200
+ERROR956 OI    RDEVSTAT,RDEVDISA MARK THE DEVICE OFFLINE       @VA08187 01202250
+         LH    R1,IOBRADD     GET THE REAL DEVICE ADDRESS      @VA08187 01202300
+         CALL  DMKCVTBH       AND CONVERT IT                   @VA08187 01202350
+         LR    R3,R1          SAVE CONVERTED ADDRESS           @VA08187 01202400
+         LA    R0,(L'DAS956+7)/8   GET A MSG BUFFER            @VA08187 01202450
+         CALL  DMKFREE                                         @VA08187 01202500
+         MVC   0(L'DAS956,R1),DAS956    MOVE IN THE MSG        @VA08187 01202550
+         STCM  R3,7,DAS956AD(R1) FILL IN THE CONVERTED ADDRESS @VA08187 01202600
+         MVC   DAS956VS(6,R1),STATLABL THE VOLID ALSO          @VA08187 01202650
+         LR    R3,R0          SAVE THE BUFFER LENGTH (DW)      @VA08187 01202700
+         LA    R0,L'DAS956    SET UP THE MSG LENGTH            @VA08187 01202750
+         LA    R2,DFRET+NORET+OPERATOR+ALARM PARM REG          @VA08187 01202800
+         CALL  DMKQCNWT       TELL THE OPERATOR                @VA08187 01202850
+         BR    R5             RETURN TO THE CALLER             @VA08187 01202900
+         EJECT                                                          01202950
+*                                                                       01203000
+*                                                                       01203050
+*                                                                       01203100
+EQUIP    EQU   3              EQUIPMENT CHECK MESSAGE          @VA08187 01203150
+MADM     EQU   14             MISSING ADDRESS MARKER MESSAGE   @VA08187 01203200
+SKCK     EQU   7              SEEK CHECK  MESSAGE              @VA08187 01203250
+INTREQU  EQU   1              INTERVENTION REQUIRED MESSA      @VA08187 01203300
+PERM     EQU   8                                               @VA08187 01203350
+RECERR   EQU   18                                              @VA08187 01203400
+FALSE    EQU   17                                              @VA08187 01203450
+BDSNS    EQU   16                                              @VA08187 01203500
+PROTECT  EQU   13                                              @VA08187 01203550
+TKOVER   EQU   9                                               @VA08187 01203600
+BUSOUTCK EQU   2                                               @VA08187 01203650
+DATAER   EQU   4                                               @VA08187 01203700
+OVERERR  EQU   5                                               @VA08187 01203750
+TRKCOND  EQU   6                                               @VA08187 01203800
+REJ      EQU   0                                               @VA08187 01203850
+DAS956   DC    C'DMKDAS956A DASD XXX VOLID XXXXXX NOT MOUNTED; NOW OFFL*01217000
+               INE'                                                     01218000
+DAS956AD EQU   16             DISP OF THE UNIT ADDRESS                  01219000
+DAS956VS EQU   26             DISP OF THE VOL SER NO                    01220000
+         SPACE                                                          01221000
+RDVOLID  CCW   X'07',STATCCHH-STATDASD,CC+SILI,6   SEEK                 01222000
+         CCW   X'08',STATSRCH-STATDASD,CC+SILI,1               @V407438 01222250
+         CCW   X'03',0,SILI,1 TIC/NOP FOR 3330V'S              @V407438 01222500
+         CCW   X'31',STATCCHH+2-STATDASD,CC+SILI,5    SRCHID            01223000
+         CCW   X'08',STATSRCH-STATDASD,CC+SILI,1 TIC                    01224000
+         CCW   X'06',STATVOL1-STATDASD,CC+SILI,10 READ DATA    @V2A2029 01225000
+         CCW   X'04',STATSDAT-STATDASD,SILI+CC,IOERSNSZ SENSE  @VA07801 01225500
+         CCW   X'94',STATSDAT-STATDASD,SILI+CC,IOERSNSZ RELSE  @VA07801 01226000
+         CCW   X'04',STATSDAT-STATDASD,SILI,IOERSNSZ SENSE     @VA07801 01226500
+VOL1CCHH DC    X'0000000000000300' SEARCH AURGUMENT                     01227000
+RDVOLEND EQU   *              END OF CH PGMS + SEEK/SRCH ARG   @V407438 01227250
+         SPACE                                                          01227500
+PACKCHG  CCW   X'A4',IOERDATA-IOERBLOK,SILI,24   BUFFER UNLOAD COMMAND  01228000
+UNLD2305 CCW   X'24',IOERDATA-IOERBLOK,SILI,128  DITTO FOR 2305 ONLY    01229000
+         SPACE                                                          01230000
+         DS    0D                                                       01231000
+RESTORE  DC    X'1300000060000001' RECALIBRATE CCW                      01232000
+TICCCW   DC    X'0800000020000005'                                      01233000
+HACCW    DC    X'1A00000020000005' READ HOME ADDR. CCW                  01234000
+SEEK     DC    X'07'                                                    01235000
+         DC    AL3(0)                                                   01236000
+         DC    X'60'                                                    01237000
+         DC    X'00'                                                    01238000
+         DC    X'0006'                                                  01239000
+SETSECT  DC    X'23'          SET SECTOR COMMAND                        01240000
+         DC    AL3(0)                                                   01241000
+         DC    X'60'                                                    01242000
+         DC    X'00'                                                    01243000
+         DC    X'0001'                                                  01244000
+SRCHEQ   DC    X'31'          SEARCH ID EQUAL COMMAND                   01245000
+         DC    AL3(0)                                                   01246000
+         DC    X'60'                                                    01247000
+         DC    X'00'                                                    01248000
+         DC    X'0005'                                                  01249000
+TICCW    DC    X'08'          TIC COMMAND CODE                          01250000
+         DC    AL3(0)                                                   01251000
+         DC    X'60'                                                    01252000
+         DC    X'00'                                                    01253000
+         DC    X'0001'                                                  01254000
+RDCOUNT  DC    X'12'          READ COUNT COMMAND CODE                   01255000
+         DC    AL3(0)                                                   01256000
+         DC    X'70'                                                    01257000
+         DC    X'00'                                                    01258000
+         DC    X'0001'                                                  01259000
+UNLOAD   DC    X'24'          BUFFER OFFLINE UNLOAD COMMAND CODE        01260000
+         DC    AL3(0)                                                   01261000
+         DC    X'60'                                                    01262000
+         DC    X'00'                                                    01263000
+         DC    X'0080'                                                  01264000
+ERREG2   EQU   4                                               @VA08385 01265100
+CCWREG   EQU   5                                                        01266000
+ERREG1   EQU   1                                                        01267000
+ERREG3   EQU   11                                              @VA08385 01268100
+ERREG4   EQU   5                                                        01269000
+CDTIC    EQU   X'18'          CHAIN DATA TIC OP-CODE           @VA04842 01270500
+L1       EQU   1              FOR USE AS SYMBOLIC LENGTH.      @V56BDA8 01270610
+L2       EQU   2              FOR USE AS SYMBOLIC LENGTH.      @V56BDA8 01270620
+L3       EQU   3              FOR USE AS SYMBOLIC LENGTH.      @V56BDA8 01270630
+L4       EQU   4              FOR USE AS SYMBOLIC LENGTH.      @V56BDA8 01270640
+         LTORG                                                 @V407438 01270750
+         EJECT                                                          01271000
+         COPY  IOER           GET IOERSNSZ DEFINED             @V407438 01271250
+         EJECT                                                          01271500
+STATDASD DSECT                                                          01273000
+STATSEEK DS    D              SEEK CCW                                  01274000
+STATTIC1 DS    D              TIC TO "STATSRCH"                @V407438 01274250
+STATNOP  DS    D              NOP, END HERE FOR 3330V CYL FAULT@V407438 01274500
+STATSRCH DS    D              SEARCH ID EQUAL CCW                       01275000
+STATTIC  DS    D              TIC CCW                                   01276000
+STATREAD DS    D              READ DATA CCW                             01277000
+STATSCCW DS    D              SENSE CCW (3340)                 @VA07801 01277500
+STATREL  DS    D              RELEASE CCW                      @VA07801 01278000
+STATSEN  DS    D              SENSE FOR DETECTING RELEASE      @VA07801 01278500
+STATCCHH DS    D              SEARCH AURGUMENT (BBCCHHR)                01279000
+STATVOL1 DS    CL4            (VOL1)                                    01280000
+STATLABL DS    CL6            VOLUME SERIAL NUMBER.                     01281000
+         DS    CL4                                                      01282000
+STATPACK DS    CL1            PACK CHANGE SWITCH                        01283000
+STATCALL DS    CL1            CALLED FROM SHUTDOWN                      01284000
+STATSDAT DS    CL(IOERSNSZ)   SENSE INFORMATION                @V407438 01285000
+STATREGS DS    D              GPR7-8 SAVE AREA                          01286000
+STATGR13 DS    F              USED TO SAVE GPR-13                       01287000
+         DS    F                                                        01288000
+         ORG   STATSEEK                                                 01289000
+STATSNS  DS    D              BUFFER UNLOAD CCW                         01290000
+         ORG                                                            01291000
+STATSIZE EQU   (*-STATDASD)/8 SIZE OF DSECT IN DOUBLE WORDS             01293000
+ECFDSECT DSECT                                                          01294000
+CCW1     DS    D                                                        01295000
+CCW2     DS    D                                                        01296000
+CCW3     DS    D                                                        01297000
+CCW4     DS    D                                                        01298000
+CCW5     DS    D                                                        01299000
+CCW6     DS    D                                                        01300000
+ECFCSW   DS    D                                                        01301000
+ECFCCW   DS    D                                                        01302000
+ECFCNT   DS    F                                                        01303000
+ECFREG2  DS    F                                                        01304000
+ECFREG3  DS    F                                                        01305000
+ECFREG4  DS    F                                                        01306000
+ECFREG5  DS    F                                                        01307000
+ECFREG15 DS    F                                               @VA08187 01308000
+ECFBWK   DS    F                                                        01309000
+ECFFWD   DS    F                                                        01310000
+ECFCCWRD DS    F                                                        01311000
+TOTALCNT DS    F                                                        01312000
+IDALCNT  DS    F                                               @VA00922 01313000
+ECFREG11 DS    F                                                        01314000
+SECTVAL  DS    H                                                        01315000
+*                                                                       01316000
+SEEKADR  DS    CL6                                                      01317000
+         EJECT                                                          01318000
+         COPY  RBLOKS                                          @V200820 01319000
+         COPY  VBLOKS                                          @VA04231 01319400
+         COPY  VMBLOK                                          @VA04231 01319800
+         COPY  IOBLOKS                                         @V200820 01320000
+         COPY  DEVTYPES                                        @V200820 01321000
+         COPY  EQU                                             @V200820 01322000
+         COPY  SAVE                                            @V200820 01324000
+         PSA                                                   @V200820 01325000
+         END   DMKDAS                                          @V200820 01326000

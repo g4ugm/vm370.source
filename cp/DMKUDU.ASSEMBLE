@@ -1,0 +1,1734 @@
+UDU      TITLE 'DMKUDU     (CP)        VM/370 - RELEASE 6'              00001000
+         ISEQ  73,80          VALIDATE SEQUENCING OF INPUT              00002000
+*.                                                                      00003000
+*        MODULE NAME                                                    00004000
+*                                                                       00005000
+*              DMKUDU         USER DIRECTORY UPDATE MODULE              00006000
+*                          ...NEW MODULE TO SUPPORT DIRECTORY UPDATE-   00007000
+*                             IN-PLACE FUNCTION.                        00008000
+*                                                                       00009000
+*        FUNCTION                                                       00010000
+*                                                                       00011000
+*              UPDATE THE CP DIRECTORY DIRECTLY IN PLACE ON THE         00012000
+*              OBJECT DASD PAGE AND THE VIRTUAL SYSTEM PAGE (IF USED)   00013000
+*              ON THE PAGING DEVICE.                                    00014000
+*                                                                       00015000
+*        ATTRIBUTES                                                     00016000
+*                                                                       00017000
+*              REENTRANT, PAGEABLE                                      00018000
+*                                                                       00019000
+*        ENTRY POINTS                                                   00020000
+*                                                                       00021000
+*              DMKUDUMN        UPDATE DIRECTORY                         00022000
+*                                                                       00023000
+*        ENTRY CONDITIONS                                               00024000
+*                                                                       00025000
+*              R1  CONTAINS THE REAL ADDRESS OF THE PARAMETER LIST      00026000
+*                                                                       00027000
+*        EXIT CONDITIONS                                                00028000
+*                                                                       00029000
+*              CC = 0   UPDATE WAS SUCCESSFUL                           00030000
+*              CC = 2   ERROR, R2 CONTAINS ERROR CODE                   00031000
+*                                                                       00032000
+*        CALLS TO OTHER ROUTINES                                        00033000
+*                                                                       00034000
+*              DMKCPVAC        TO CALL 'ACNT' CMD PROCESSOR             00035000
+*              DMKFREE         TO OBTAIN FREE STORAGE                   00036000
+*              DMKFRET         TO RETURN FREE STORAGE                   00037000
+*              DMKLOCKQ        TO LOCK THE CP DIRECTORY                 00038000
+*              DMKLOCKD        TO UNLOCK THE CP DIRECTORY               00039000
+*              DMKPGTVG        TO OBTAIN A VIRTUAL SYSTEM PAGE          00040000
+*              DMKPGTVR        TO RETURN A VIRTUAL SYSTEM PAGE          00041000
+*              DMKRPAGT        TO READ A PAGE FROM DASD                 00042000
+*              DMKRPAPT        TO WRITE A PAGE TO DASD                  00043000
+*              DMKSCNAU        TO LOCATE A USER'S VMBLOK                00044000
+*                                                                       00045000
+*        EXTERNAL REFERENCES                                            00046000
+*                                                                       00047000
+*              DMKSYSPL   POINTER TO START OF DIRECTORY ON SYSRES       00048000
+*              DMKSYSUD   DASD ADDRESS (0CCCPPDD) OF DIRECTORY          00049000
+*                                                                       00050000
+*                                                                       00051000
+*        TABLES / WORK AREAS                                            00052000
+*                                                                       00053000
+*            UNCNTRL      A CONTROL BLOCK BUILT IN FREE STORAGE         00054000
+*            UIPARMS      A CONTROL BLOCK, CONTIGUOUS WITH UCNTRL,      00055000
+*                         CONTAINING THE PARAMETERS OF THE OPERATION    00056000
+*                                                                       00057000
+*                                                                       00058000
+*        OPERATION (SPECIFIC DETAILS OF EACH OPERATION ARE GIVEN        00059000
+*                   IN ROUTINE PREFACES)                                00060000
+*                                                                       00061000
+*        THE FOLLOWING IS COMMON FUNCTION TO ALL OPERATIONS:            00062000
+*                                                                       00063000
+*              1. OBTAIN FREE STORAGE (VIA DMKFREE) FOR CONTROL BLOCKS  00064000
+*                 UCNTRL AND UIPARMS AND MOVE PARAMETERS INTO THIS      00065000
+*                 STORAGE.                                              00066000
+*                                                                       00067000
+*              2. LOCK THE CP DIRECTORY                                 00068000
+*                                                                       00069000
+*              3. READ UDIRBLOKS AND LOCATE DATA FOR SPECIFIED USERID.  00070000
+*                                                                       00071000
+*              4. IDENTIFY THE OPERATIONS AND BRANCH TO PROCESSOR FOR   00072000
+*                 REQUESTED FUNCTION.                                   00073000
+*                                                                       00074000
+*              5. ON RETURN, IF THERE WAS NO ERROR, TEST WHETHER        00075000
+*                 OPERATION INVOLVES UPDATING UDIRBLOCK. IF NOT, GO TO  00076000
+*                 STEP 7.                                               00077000
+*                                                                       00078000
+*              6. LOCATE THE SWPTABLE FOR THE VIRTUAL SYSTEM PAGE       00079000
+*                 CONTAINING THE UDIRBLOK AND SAVE THE 'SWPCYL',        00080000
+*                 'SWPDPAGE', AND 'SWPCODE' FOR LATER USE.              00081000
+*                                                                       00082000
+*              7. WRITE THE UPDATED PAGE TO THE OBJECT DASD.            00083000
+*                                                                       00084000
+*              8. IF THE OPERATION DOES NOT INVOLVE A UDIRBLOK, GO TO   00085000
+*                 STEP 10.                                              00086000
+*                                                                       00087000
+*              9. WRITE THE PAGE CONTAINING THE UPDATED UDIRBLOK TO     00088000
+*                 PAGING DASD.                                          00089000
+*                                                                       00090000
+*             10. UNLOCK THE DIRECTORY.                                 00091000
+*                                                                       00092000
+*             11. RETURN FREE STORAGE OBTAINED FOR CONTROL BLOCKS.      00093000
+*                                                                       00094000
+*             12. RETURN SYSTEM VIRTUAL PAGE OBTAINED FOR HOLDING       00095000
+*                 UMAC AND UDEV BLOCKS (IF NECESSARY).                  00096000
+*                                                                       00097000
+*             13. RETURN TO CALLER WITH CC SET AND RETCODE IN R2        00098000
+*                                                                       00099000
+*                                                                       00100000
+*        REGISTER  USAGE                                                00101000
+*                                                                       00102000
+*              R0 = DASD PTR                                            00103000
+*              R1 = REAL ADDRESS OF PAGE IN STORAGE AND PARMETER        00104000
+*                   REGISTER                                            00105000
+*              R2 = UDIRBLOK POINTER AND OPTIONS REGISTER               00106000
+*              R3 = UNCTRL REGISTER                                     00107000
+*              R4 = POINTER TO LIST OF DIRECTORY PAGES,                 00108000
+*                   POINTER TO UPDATED VIRTUAL PAGE                     00109000
+*              R5 = CONTAINS ADDRESS OF END OF PAGE                     00110000
+*                   ...SAVE SWPCYL DATA                                 00111000
+*              R6 = CONTAINS REAL ADDRESS OF PAGE                       00112000
+*              R7 = WORK REGISTER, SWAPTABLE POINTER                    00113000
+*              R8 = WORK REGISTER                                       00114000
+*              R9 = WORK REGISTER AND INTERNAL LINKS                    00115000
+*              R10 = POINTER TO SYSLOCS                                 00116000
+*              R11 = VMBLOK                                             00117000
+*              R12 = BASE                                               00118000
+*              R13 = SAVE                                               00119000
+*              R14 = SYSTEM USE                                         00120000
+*              R15 = SYSTEM USE                                         00121000
+*                                                                       00122000
+*                                                                       00123000
+*        MESSAGES                                                       00124000
+*                                                                       00125000
+*              NONE                                                     00126000
+*                                                                       00127000
+*                                                                       00128000
+*                                                                       00129000
+*.                                                                      00130000
+         EJECT                                                          00131000
+DMKUDU   CSECT                                                 @V60C1BD 00132000
+         USING PSA,R0                                          @V60C1BD 00133000
+         USING SYSLOCS,R10                                     @V60C1BD 00134000
+         USING VMBLOK,R11                                      @V60C1BD 00135000
+         USING DMKUDU,R12                                      @V60C1BD 00136000
+         USING SAVEAREA,R13                                    @V60C1BD 00137000
+         SPACE 3                                                        00138000
+         EXTRN DMKPGTVG,DMKPGTVR                               @V60C1BD 00139000
+         EXTRN DMKRPAPT,DMKRPAGT                               @V60C1BD 00140000
+         EXTRN DMKSYSOW,DMKSYSOC                               @V60C1BD 00141000
+         EXTRN DMKLOCKQ,DMKLOCKD                               @V60C1BD 00142000
+         EXTRN DMKSCNAU,DMKCPVAC                               @V60C1BD 00143000
+         SPACE 2                                                        00144000
+         DC    CL8'DMKUDU'                                     @V60C1BD 00145000
+         EJECT                                                          00146000
+DMKUDUMN RELOC                                                 @V60C1BD 00147000
+         SPACE 1                                                        00148000
+         LR    R7,R1          SAVE R1 OVER CALL                @V60C1BD 00149000
+         L     R10,ASYSLC     POINT TO SYSLOCS                 @V60C1BD 00150000
+         SPACE 1                                                        00151000
+*   GET FREE STORAGE FOR UCNTRL CONTROL BLOCK                           00152000
+         LA    R0,UCNTRLSZ+UIPARMSZ    SPECIFY SIZE TO GET     @V60C1BD 00153000
+         CALL  DMKFREE                                         @V60C1BD 00154000
+         LR    R3,R1          USE R3 FOR UCNTRL ADDRESSABILITY @V60C1BD 00155000
+         USING UCNTRL,R3                                       @V60C1BD 00156000
+         SPACE 1                                                        00157000
+*   CLEAR CONTROL BLOCK AND SET UP PARAMETERS                           00158000
+         XC    UCNTRL(UCNTRLSZ*8+UIPARMSZ*8),UCNTRL  CLR UCNTRL@V60C1BD 00159000
+         MVC   UIPARMS(UIPARMSZ*8),0(R7)  MOVE PARMS TO CTL BLK@V60C1BD 00160000
+         SPACE 1                                                        00161000
+*   ALTER USERID AND PASSWORDS IN PARAMETER LIST WITH MASK              00162000
+         XC    UUSERID(L'UUSERID+L'UCURPASS),MASK  MASK 2 FLDS @V60C1BD 00163000
+         MVC   UDEVCODE(1),DMKSYSUD+3   SAVE DASD DEVICE CODE  @V60C1BD 00164000
+         SPACE 1                                                        00165000
+*   LOCATE THE UDIRBLOK FOR THE USERID                                  00166000
+*   LOCK THE DIRECTORY FIRST                                            00167000
+LOCKDIR  LA    R1,=CL8' DIRCT'                                 @V60C1BD 00168000
+         CALL  DMKLOCKQ       LOCK DIRECTORY                   @V60C1BD 00169000
+         SPACE 1                                                        00170000
+         BAL   R9,READUDIR    LOCATE UDIRBLOK FOR USER         @V60C1BD 00171000
+         BNZ   PREXIT         BR IF ERROR                      @V60C1BD 00172000
+         EJECT                                                          00173000
+*--------------------------------------------------------------         00174000
+*   IDENTIFY OPERATION AND BRANCH TO THE ROUTINE TO PROCESS IT          00175000
+*--------------------------------------------------------------         00176000
+         LA    R14,OPTABLE                                     @V60C1BD 00177000
+         USING OPRSECT,R14                                     @V60C1BD 00178000
+COP      CLC   OPERATN(L'UOP),UOP   IS THIS THE OPERATION?     @V60C1BD 00179000
+         BE    OPFOUND        BR IF YES                        @V60C1BD 00180000
+         CLI   OPERATN,X'FF'  END OF TABLE?                    @V60C1BD 00181000
+         LA    R14,LOPTABLE(,R14)  INCREMENT TO NEXT ENTRY     @V60C1BD 00182000
+         BNE   COP            BR IF NOT END OF TABLE, CONTINUE @V60C1BD 00183000
+         SPACE 1                                                        00184000
+*   NO OPERATION MATCH FOUND... ERROR!                                  00185000
+         LA    R15,ERROP      GET ERROR CODE                   @V60C1BD 00186000
+         STH   R15,URETCODE   STORE IN CONTROL                 @V60C1BD 00187000
+         B     PREXIT                                          @V60C1BD 00188000
+         SPACE 1                                                        00189000
+*   THE OPERATION HAS BEEN IDENTIFIED                                   00190000
+OPFOUND  LH    R14,OPADDR  GET ROUTINE ADDRESS (DISPLACEMENT)  @V60C1BD 00191000
+         LA    R14,0(R12,R14) ADD IN BASE REG. VALUE           @V60C1BD 00192000
+         DROP  R14                                             @V60C1BD 00193000
+         SPACE 1                                                        00194000
+*--------------------------------------------------------------         00195000
+         BR    R14            GO TO ROUTINE                    @V60C1BD 00196000
+*--------------------------------------------------------------         00197000
+         EJECT                                                          00198000
+*--------------------------------------------------------------         00199000
+*   COMMON ERROR EXIT   |                                               00200000
+*------------------------                                               00201000
+EXITCC1  STH   R15,URETCODE                                    @V60C1BD 00202000
+         B     PREXIT         GO TO ERROR EXIT DIRECTLY        @V60C1BD 00203000
+         SPACE 5                                                        00204000
+*--------------------------------------------------------------         00205000
+*   COMMON EXIT FOR UDEV FUNCTIONS, CC = 0   |                          00206000
+*---------------------------------------------                          00207000
+DEVXCC0  L     R6,URPAGDEV    SET UP UDEV REAL PAGE ADDRESS    @V60C1BD 00208000
+         L     R4,UVPAGBUF    SET UP UDEV VIRTUAL PAGE ADDRESS @V60C1BD 00209000
+         L     R0,UDASDDEV    SET UP OBJECT DASD ADDRESS       @V60C1BD 00210000
+         OI    UFLAGS,UDEVF   INDICATE A UDEV UPDATE           @V60C1BD 00211000
+         B     EXITCC0                                         @V60C1BD 00212000
+         SPACE 2                                                        00213000
+*--------------------------------------------------------------         00214000
+*   COMMON EXIT FOR UMAC FUNCTIONS, CC = 0   |                          00215000
+*---------------------------------------------                          00216000
+MACXCC0  L     R6,URPAGMAC    SET UP UMAC REAL PAGE ADDRESS    @V60C1BD 00217000
+         L     R4,UVPAGBUF    SET UP UMAC VIRTUAL PAGE ADDRESS @V60C1BD 00218000
+         L     R0,UDASDMAC    SET UP OBJECT DASD ADDRESS       @V60C1BD 00219000
+         OI    UFLAGS,UMACF   INDICATE A UMAC UPDATE           @V60C1BD 00220000
+         B     EXITCC0                                         @V60C1BD 00221000
+         SPACE 2                                                        00222000
+*--------------------------------------------------------------         00223000
+*   COMMON EXIT FOR UDIR FUNCTIONS, CC = 0   |                          00224000
+*---------------------------------------------                          00225000
+DIRXCC0  L     R6,URPAGDIR    SET UP UDIR REAL PAGE ADDRESS    @V60C1BD 00226000
+         L     R4,UVPAGDIR    SET UP UPDATED VIRTUAL PAGE ADDR @V60C1BD 00227000
+         L     R0,UDASDDIR    SET UP OBJECT DASD ADDRESS       @V60C1BD 00228000
+         OI    UFLAGS,UDIRF   INDICATE A UDIR UPDATE           @V60C1BD 00229000
+         SPACE 2                                                        00230000
+*--------------------------------------------------------------         00231000
+*  COMMON EXIT, CC = 0  |                                               00232000
+*------------------------                                               00233000
+EXITCC0  SR    R15,R15        SET CC = 0                       @V60C1BD 00234000
+         STH   R15,URETCODE   SET RETCODE TO 0                 @V60C1BD 00235000
+*   FALL THROUGH TO "OPRET"                                             00236000
+         SPACE 5                                                        00237000
+*--------------------------------------------------------------         00238000
+*   RETURN POINT FROM INDIVIDUAL ROUTINES                               00239000
+*--------------------------------------------------------------         00240000
+OPRET    BNE   PREXIT         BR IF THERE WAS AN ERROR         @V60C1BD 00241000
+         SPACE 1                                                        00242000
+         TM    UFLAGS,UNOUPF+UTESTMD  UPDATE/TEST SUPPRESSION? @V60C1BD 00243000
+         BNZ   PREXIT         BR IF YES                        @V60C1BD 00244000
+         EJECT                                                          00245000
+*--------------------------------------------------------------         00246000
+*   IF THE UPDATE WAS CONCERNED WITH A UMAC OR UDEV BLOCK, THE          00247000
+*   ONLY UPDATING NEEDED IS TO THE OBJECT DASD.  IN THIS CASE,          00248000
+*   THE DATA IN THE SWPTABLE DOES NOT NEED TO BE OF CONCERN.            00249000
+*                                                                       00250000
+*   IF THE UPDATE WAS TO A UDIR BLOCK, THEN THE OBJECT AND THE          00251000
+*   PAGING DASD NEED TO BE UPDATED.  IN THIS CASE, THE SWPTABLE         00252000
+*   DATA DASD ADDRESS IS SAVED OVER THE UPDATE TO THE OBJECT            00253000
+*   DASD SO THAT THE SAME PAGE SLOT CAN BE REUSED WHEN UPDATING         00254000
+*   THE PAGING DASD. THE SETTING OF THE 'SWPRECMP' FLAG IS ALSO         00255000
+*   SAVED SO THAT IT CAN BE RESTORED FOLLOWING THE WRITING OF           00256000
+*   THE PAGE TO THE OBJECT DASD. (NOTE: THE 'SWPRCMP' FLAG IS           00257000
+*   SET TO B'1' BEFORE WRITING TO OBJECT DASD TO INDICATE THAT          00258000
+*   THE OBJECT DASD PAGE IS NOT TO BE RELEASED BY DMKRPAPT).            00259000
+*                                                                       00260000
+*   SAVE THE CURRENT SWPTABLE 'SWPCYL/SWPDPAGE/SWPCODE':                00261000
+*     1. REAL PAGE ADDR/256) + A(CORETBL) = CORETABLE FOR PAGE          00262000
+*     2. GET SWPTABLE ADDRESS FROM CORETABLE                            00263000
+*     3. GET 0CCCPPDD FROM SWPTABLE                                     00264000
+*                                                                       00265000
+*   NECESSARY REGISTER CONDITION:                                       00266000
+*    R6 = REAL ADDRESS OF PAGE BEING UPDATED                            00267000
+*--------------------------------------------------------------         00268000
+         TM    UFLAGS,UDIRF   IS UDIR TO BE UPDATED?           @V60C1BD 00269000
+         BNO   WROBJ          BR IF NOT                        @V60C1BD 00270000
+         SRL   R6,8           CALC. CORTABLE INDEX (PG ADR/256)@V60C1BD 00271000
+         A     R6,ACORETBL    SET R5 = ADDR OF CORTABLE ENTRY  @V60C1BD 00272000
+         USING CORTABLE,R6                                     @V60C1BD 00273000
+         L     R7,CORSWPNT    SET R7 = SWAPTABLE ENTRY ADDRESS @V60C1BD 00274000
+         USING SWPFLAG,R7                                      @V60C1BD 00275000
+         DROP  R6                                              @V60C1BD 00276000
+         L     R5,SWPCYL      GET 0CCCPPDD FROM SWPTABLE       @V60C1BD 00277000
+         ST    R5,USVDASD     SAVE PAGING DASD ADDRESS         @V60C1BD 00278000
+         SR    R8,R8          ZERO R8                          @V60C1BD 00279000
+         ST    R8,SWPCYL      ZERO SWPTABLE DASD               @V60C1BD 00280000
+         OI    UFLAGS,URECMP  ASSUME SWPRECMP IS B'1'          @V60C1BD 00281000
+         TM    SWPFLAG,SWPRECMP   IS SWPRECMP FLAG B'1'?       @V60C1BD 00282000
+         BO    WROBJ          BR IF YES                        @V60C1BD 00283000
+         NI    UFLAGS,255-URECMP   INDICATE SWPRECMP WAS B'0'  @V60C1BD 00284000
+         OI    SWPFLAG,SWPRECMP  SET RECOMP BIT FOR OBJECT DASD@V60C1BD 00285000
+*                     WRITE SO THAT DASD PAGE, IF ON DRUM, WILL         00286000
+*                     NOT BE RELEASED...PLAN TO REUSE IT.               00287000
+         SPACE 1                                                        00288000
+*--------------------------------------------------------------         00289000
+*   WRITE THE UPDATED PAGE BACK TO THE OBJECT DASD                      00290000
+*                                                                       00291000
+*   CURRENT NECESSARY REGISTER STATUS:                                  00292000
+*    R0 = ADDRESS OF OBJECT DASD                                        00293000
+*    R4 = VIRTUAL ADDRESS OF UPDATED PAGE                               00294000
+*    R6 = REAL ADDRESS OF UPDATED PAGE                                  00295000
+*--------------------------------------------------------------         00296000
+*   WRITE THE PAGE TO OBJECT DASD                                       00297000
+WROBJ    CLC   0(8,R6),ZEROES CHECK TO SEE IF DASD DATA IS ZERO@V60C1BD 00298000
+         BE    PGZ            BR IF SO, THIS IS NOT GOOD...    @V60C1BD 00299000
+         IC    R0,DMKSYSUD+3  GET DEVICE CODE FROM SYSTEM      @V60C1BD 00300000
+         LR    R1,R4          SET UP VIRTUAL PAGE ADDRESS      @V60C1BD 00301000
+         LA    R2,SYSTEM      SPECIFY SYSTEM OPTION            @V60C1BD 00302000
+         CALL  DMKRPAPT       WRITE UPDATED PAGE TO OBJECT DASD@V60C1BD 00303000
+         BZ    WPAGING        BR IF WRITE WAS OK               @V60C1BD 00304000
+         SPACE 1                                                        00305000
+         LA    R1,ERRWRIT1    SETUP RETCODE FOR WRITE ERROR    @V60C1BD 00306000
+         STH   R1,URETCODE    STORE IN CONTROL BLOCK           @V60C1BD 00307000
+         TM    UFLAGS,UDIRF   IS OPERATION UPDATING UDIR BLK?  @V60C1BD 00308000
+         BNO   PREXIT         BR IF NOT                        @V60C1BD 00309000
+         B     REFLAG         FIX UP SWPTABLE FLAG BEFORE EXIT @V60C1BD 00310000
+         SPACE 1                                                        00311000
+*--------------------------------------------------------------         00312000
+*   UPDATE THE PAGE ON PAGING DASD                                      00313000
+*                                                                       00314000
+*--------------------------------------------------------------         00315000
+WPAGING  TM    UFLAGS,UDIRF   IS OPERATION UPDATING UDIR BLOCK?@V60C1BD 00316000
+         BNO   PREXIT         BR IF NOT, DON'T UPDTE PAG'G DASD@V60C1BD 00317000
+         SPACE 1                                                        00318000
+*   CHECK IF THE OBJECT AND PAGING DASD ADDRESS ARE SAME, I.E.,         00319000
+*   THE PAGE HAS NEVER BEEN WRITTEN OUT TO PAGING DASD.                 00320000
+         C     R0,USVDASD     ARE DASD ADDRESSES EQUAL?        @V60C1BD 00321000
+         BE    REFLAG         BR IF YES, DON'T WRITE TWICE     @V60C1BD 00322000
+         SPACE 1                                                        00323000
+         L     R0,USVDASD     GET DASD ADDR SAVED FROM SWPTABLE@V60C1BD 00324000
+         L     R1,UVPAGDIR    GET UDIR VIRTUAL PAGE ADDRESS    @V60C1BD 00325000
+         LA    R2,SYSTEM      SPECIFY SYSTEM OPTION            @V60C1BD 00326000
+         CALL  DMKRPAPT       WRITE UPDATED PAGE TO PAGING DASD@V60C1BD 00327000
+         BNZ   WPERR          BR IF WRITE ERROR                @V60C1BD 00328000
+         SPACE 1                                                        00329000
+*   SET SWPRECMP FLAG IN SWPTABLE TO ITS ORIGINAL VALUE SO THAT         00330000
+*   PAGE CAN BE RELEASED WHEN NECESSARY. R7 POINTS TO SWPTABLE          00331000
+REFLAG   NI    SWPFLAG,255-SWPRECMP  SET SWPRECMP TO B'0'      @V60C1BD 00332000
+         TM    UFLAGS,URECMP  WAS SWPRECMP B'1'?               @V60C1BD 00333000
+         BNO   PREXIT         BR IF NOT, LEAVE IT SET TO B'0'  @V60C1BD 00334000
+         OI    SWPFLAG,SWPRECMP    SET BIT TO THE WAY IT WAS   @V60C1BD 00335000
+         DROP  R7                                              @V60C1BD 00336000
+         SPACE 2                                                        00337000
+*--------------------------------------------------------------         00338000
+*   PREPARE TO EXIT...                                                  00339000
+*   UNLOCK THE DIRECTORY (ALL CASES) AND EXIT                           00340000
+*--------------------------------------------------------------         00341000
+PREXIT   LA    R1,=CL8' DIRCT'     SPECIFY DIRECTORY LOCK NAME @V60C1BD 00342000
+         CALL  DMKLOCKD       UNLOCK THE DIRECTORY             @V60C1BD 00343000
+         EJECT                                                          00344000
+*   FREE SYSTEM VIRTUAL PAGE IF PRESENT                                 00345000
+         L     R1,UVPAGBUF    GET ADDR. OF SYSTEM VIRTUAL PAGE @V60C1BD 00346000
+         LTR   R1,R1          IS THERE ONE?                    @V60C1BD 00347000
+         BZ    SVURET         BR IF NOT                        @V60C1BD 00348000
+         CALL  DMKPGTVR       FREE SYSTEM PAGE                 @V60C1BD 00349000
+         SPACE 1                                                        00350000
+SVURET   LH    R2,URETCODE    SAVE RETCODE FROM CONTROL BLOCK  @V60C1BD 00351000
+         SPACE 1                                                        00352000
+*   FREE UCNTRL BLOCK                                                   00353000
+         LA    R0,UCNTRLSZ+UIPARMSZ     SPECIFY SIZE TO FRET   @V60C1BD 00354000
+         LR    R1,R3          POINT TO STORAGE TO FRET         @V60C1BD 00355000
+         CALL  DMKFRET        FRET UCNTRL BLOCK                @V60C1BD 00356000
+         SPACE 1                                                        00357000
+         ST    R2,SAVEREGS+R2*4    PASS RETCODE BACK TO CALLER @V60C1BD 00358000
+         LTR   R2,R2          SET CC, 0 = NO ERROR, ^0 = ERROR @V60C1BD 00359000
+         SPACE 1                                                        00360000
+*--------------------------------------------------------------         00361000
+*   EXIT CONDITIONS:                                                    00362000
+*                                                                       00363000
+*   R2 CONTAINS RETURN CODE WHICH IS PASSED BACK TO THE CALLER          00364000
+*                                                                       00365000
+*   CC = 0   INDICATES THAT OPERATION IS SUCCESSFUL (R2 = 0)            00366000
+*   CC = 2   INDICATES THAT AN ERROR HAS OCCURRED AND THAT R2           00367000
+*            CONTAINS AN ERROR CODE IDENTIFYING THE ERROR               00368000
+*                                                                       00369000
+*--------------------------------------------------------------         00370000
+UDUEXIT  EXIT                 RETURN TO CALLER                 @V60C1BD 00371000
+         SPACE 3                                                        00372000
+*--------------------------------------------------------------         00373000
+*   IF THE DASD DISPL. & POINTER IN A BLOCK TO BE WRITTEN TO            00374000
+*   THE OBJECT DASD ARE 0, THERE IS A PROBLEM... RETURN ERROR.          00375000
+*--------------------------------------------------------------         00376000
+PGZ      LA    R1,ERRPGZ      SETUP RETCODE FOR ERROR          @V60C1BD 00377000
+         STH   R1,URETCODE    STORE IN CONTROL BLOCK           @V60C1BD 00378000
+         B     REFLAG                                          @V60C1BD 00379000
+         SPACE 3                                                        00380000
+WPERR    LA    R1,ERRWRIT2    SETUP RETCODE FOR WRITE ERROR    @V60C1BD 00381000
+         STH   R1,URETCODE    STORE IN CONTROL BLOCK           @V60C1BD 00382000
+         B     REFLAG                                          @V60C1BD 00383000
+         EJECT                                                          00384000
+*--------------------------------------------------------------         00385000
+* LOGPASS |                                                             00386000
+*----------                                                             00387000
+*   THE UDIRBLOK FOR THE USERID HAS BEEN FOUND AND THE CURRENT          00388000
+*   LOGON PASSWORDS MATCH.                                              00389000
+*                                                                       00390000
+*   OPERATION:                                                          00391000
+*   1. OBSCURE NEW PASSWORD                                             00392000
+*   2. MOVE NEW PASSWORD TO UDIRBLOK                                    00393000
+*                                                                       00394000
+*--------------------------------------------------------------         00395000
+LOGPASS  DS    0H                                              @V60C1BD 00396000
+         L     R5,UDIRAD      GET REAL ADDRESS OF UDIR         @V60C1BD 00397000
+         USING UDIRBLOK,R5                                     @V60C1BD 00398000
+         XC    UNEWPASS(L'UNEWPASS),MASK    OBSCURE NEW PASSWD @V60C1BD 00399000
+         TM    UFLAGS,UTESTMD TEST MODE?                       @V60C1BD 00400000
+         BO    TMBY1          BR IF YES                        @V60C1BD 00401000
+         MVC   UDIRPASS(L'UDIRPASS),UNEWPASS  EST. NEW PASSWD  @V60C1BD 00402000
+TMBY1    DS    0H                                              @V60C1BD 00403000
+         B     DIRXCC0        NORMAL EXIT                      @V60C1BD 00404000
+         SPACE 1                                                        00405000
+         DROP  R5                                              @V60C1BD 00406000
+         EJECT                                                          00407000
+*--------------------------------------------------------------         00408000
+*  MDISK  |    ROUTINE TO UPDATE MDISK DATA                             00409000
+*----------                                                             00410000
+*   THE UDIRBLOK FOR THE USERID HAS BEEN FOUND AND THE CURRENT          00411000
+*   LOGON PASSWORDS MATCH                                               00412000
+*                                                                       00413000
+*   OPERATION:                                                          00414000
+*   1. READ UMACBLOK FOR USERID                                         00415000
+*   2. CONVERT DEVICE ADDRESS FROM EBCDIC TO HEX                        00416000
+*   3. LOCATE AND READ THE UDEVBLOK CORRESPONDING TO THE DEVICE         00417000
+*   4. VALIDATE THE LINK MODE AND CALCULATE THE VALUE FOR THE           00418000
+*      LINK MODE                                                        00419000
+*   5. CHECK RELATION BETWEEN GIVEN LINK PASSWORDS AND SIZE             00420000
+*      OF UDEVBLOK.  IF PASSWORDS ARE GIVEN AND UDEVBLOK IS             00421000
+*      SHORT, OR IF BLANK PASSWORDS GIVEN AND UDEVBLOK IS               00422000
+*      LONG, REJECT THE TRANSACTION                                     00423000
+*   6. ESTABLISH NEW PASSWORDS AND/OR LINK MODE IN UDEVBLOK             00424000
+*                                                                       00425000
+*--------------------------------------------------------------         00426000
+MDISK    DS    0H                                              @V60C1BD 00427000
+         SPACE 1                                                        00428000
+*   GET THE UMACBLOK (NEED IN ORDER TO REFERENCE UDEV)                  00429000
+         BAL   R9,READUMAC                                     @V60C1BD 00430000
+         BNZ   OPRET          BR IF ERROR READING UMAC         @V60C1BD 00431000
+         SPACE 1                                                        00432000
+*   CONVERT THE ADDRESS OF THE DEVICE TO BE FOUND TO HEX SO IT          00433000
+*   CAN BE USED AS A SEARCH ARGUMENT                                    00434000
+         LA    R1,UMDISKAD    POINT TO MDISK ADDRESS (3 BYTES) @V60C1BD 00435000
+         LA    R2,L'UMDISKAD  SET UP LENGTH OF FIELD           @V60C1BD 00436000
+         BAL   R9,BCDTOHEX    CONVERT ADDRESS TO HEX           @V60C1BD 00437000
+         BNZ   MDSKERR1       BR IF CONVERSION ERROR           @V60C1BD 00438000
+         STH   R2,ULOCDVAD    SAVE ADDRESS IN UCNTRL           @V60C1BD 00439000
+         SPACE 1                                                        00440000
+*   GET THE UDEVBLOK                                                    00441000
+         BAL   R9,READUDEV                                     @V60C1BD 00442000
+         BNZ   OPRET          BR IF ERROR READING UDEV         @V60C1BD 00443000
+         SPACE 1                                                        00444000
+         L     R5,UDEVAD      GET REAL ADDRESS OF UDEV         @V60C1BD 00445000
+         USING UDEVBLOK,R5                                     @V60C1BD 00446000
+         SPACE 1                                                        00447000
+*   VALIDATE THE LINK MODE AND CALC. VALUE FOR UDEVMODE                 00448000
+         LA    R9,MAXLNKMD    SET UP LIMIT OF SEARCH           @V60C1BD 00449000
+         LA    R7,LINKMDTB    POINT TO START OF LINK MODE TABLE@V60C1BD 00450000
+         USING LNKMSECT,R7                                     @V60C1BD 00451000
+LNKLOOP  CLC   UMDISKMD(L'UMDISKMD),LNKMD  DO LINK MODES MATCH?@V60C1BD 00452000
+         BE    MDMATCH        BR IF YES                        @V60C1BD 00453000
+         LA    R7,LNKMDLN(,R7)     STEP TO NEXT TABLE ENTRY    @V60C1BD 00454000
+         BCT   R9,LNKLOOP     KEEP LOOKING                     @V60C1BD 00455000
+         B     MDSKERR2       ERROR, INVALID LINK MODE         @V60C1BD 00456000
+         SPACE 1                                                        00457000
+MDMATCH  SR    R8,R8          CLEAR REG.                       @VMI0024 00458000
+         IC    R8,LNKMVALU    GET MODE VALUE FOR UDEVMODE      @VMI0024 00459000
+         MVC   UWORK(L'UDEVSTAT),UDEVSTAT    ISOLATE UDEVSTAT  @V60C1BD 00460000
+         XC    UWORK(L'UDEVSTAT),MASK   UNMASK UDEVSTAT        @V60C1BD 00461000
+         C     R7,=A(VRRSEP)  IS MATCH A VRR MODE?             @VMI0024 00462000
+         BL    MSKSTAT        BR IF NOT VRR MODE               @VMI0024 00463000
+         OI    UWORK,UDEVVRR  INDICATE VIRT. RES/REL           @VMI0024 00464000
+MSKSTAT  CLC   UMDISKRP(L'UMDISKRP),BLANKS   PASSWORD GIVEN?   @VMI0044 00465000
+         BE    BLPW           BR IF NOT                        @V60C1BD 00466000
+         TM    UWORK,UDEVLONG   LONG UDEVBLOK?                 @V60C1BD 00467000
+         BNO   MDSKERR3       BR IF NOT, ERROR                 @V60C1BD 00468000
+         CLI   UMDISKRP,C' '  IS THERE A READ PASSWORD?        @V60C1BD 00469000
+         BE    MDB1           BR IF NOT                        @V60C1BD 00470000
+         O     R8,=A(UDEVLR)  SIGNAL THAT READ LINKS ALLOWED   @V60C1BD 00471000
+MDB1     CLI   UMDISKWP,C' '  IS THERE A WRITE PASSWORD?       @V60C1BD 00472000
+         BE    MDB2           BR IF NOT                        @V60C1BD 00473000
+         O     R8,=A(UDEVLW)  SIGNAL THAT WRITE LINKS ALLOWED  @V60C1BD 00474000
+MDB2     CLI   UMDISKMP,C' '  IS THERE A MULTIPLE PASSWORD?    @V60C1BD 00475000
+         BE    MDB3           BR IF NOT                        @V60C1BD 00476000
+         O     R8,=A(UDEVLM)  SIGNAL THAT MULT. LINKS ALLOWED  @V60C1BD 00477000
+MDB3     X     R8,MASK        OBSCURE NEW LINK MODE            @V60C1BD 00478000
+         TM    UFLAGS,UTESTMD TEST MODE?                       @V60C1BD 00479000
+         BO    TMBY2          BR IF YES                        @V60C1BD 00480000
+         STC   R8,UDEVMODE    ESTABLISH NEW LINK MODE          @V60C1BD 00481000
+         MVC   UDEVPASR(L'UDEVPASR*3),UMDISKRP  EST. NEW PASSWD@V60C1BD 00482000
+         XC    UDEVPASR(L'UDEVPASR*3),MASK   OBSCURE NEW PASSWD@V60C1BD 00483000
+         MVC   UDEVSTAT(L'UDEVSTAT),UWORK  SET NEW UDEVSTAT    @VMI0024 00484000
+         XC    UDEVSTAT(L'UDEVSTAT),MASK   MASK UDEVSTAT       @VMI0044 00485000
+TMBY2    DS    0H                                              @V60C1BD 00486000
+         B     DEVXCC0        NORMAL RETURN                    @V60C1BD 00487000
+         SPACE 1                                                        00488000
+BLPW     DS    0H                                              @V60C1BD 00489000
+         TM    UWORK,UDEVLONG   LONG UDEVBLOK?                 @V60C1BD 00490000
+         BO    MDSKERR4       BR IF YES, ERROR                 @V60C1BD 00491000
+         TM    UFLAGS,UTESTMD TEST MODE?                       @V60C1BD 00492000
+         BO    TMBY2          BR IF YES                        @V60C1BD 00493000
+         X     R8,MASK        OBSCURE NEW LINK MODE            @V60C1BD 00494000
+         STC   R8,UDEVMODE    ESTABLISH NEW LINK MODE          @V60C1BD 00495000
+         MVC   UDEVSTAT(L'UDEVSTAT),UWORK  SET NEW UDEVSTAT    @VMI0024 00496000
+         XC    UDEVSTAT(L'UDEVSTAT),MASK   MASK UDEVSTAT       @VMI0044 00497000
+         B     DEVXCC0        NORMAL RETURN                    @V60C1BD 00498000
+         SPACE 1                                                        00499000
+MDSKERR1 LA    R15,ERRMDSK1   INVALID MDISK IN PLIST           @V60C1BD 00500000
+         B     EXITCC1        ERROR RETURN                     @V60C1BD 00501000
+         SPACE 1                                                        00502000
+MDSKERR2 LA    R15,ERRMDSK2   INVALID LINK MODE                @V60C1BD 00503000
+         B     EXITCC1        ERROR RETURN                     @V60C1BD 00504000
+         SPACE 1                                                        00505000
+MDSKERR3 LA    R15,ERRMDSK3   INVALID PASSWORDS...SHORT UDEV.  @V60C1BD 00506000
+         B     EXITCC1        ERROR RETURN                     @V60C1BD 00507000
+         SPACE 1                                                        00508000
+MDSKERR4 LA    R15,ERRMDSK4   BLANK PASSWORDS WITH LONG UDEV.  @V60C1BD 00509000
+         B     EXITCC1        ERROR RETURN                     @V60C1BD 00510000
+         SPACE 1                                                        00511000
+         DROP  R5,R7                                           @V60C1BD 00512000
+         EJECT                                                          00513000
+*--------------------------------------------------------------         00514000
+* STORAGE |                                                             00515000
+*----------                                                             00516000
+*   THE UDIRBLOK FOR THE USERID HAS BEEN FOUND AND THE CURRENT          00517000
+*   LOGON PASSWORDS MATCH.                                              00518000
+*                                                                       00519000
+*   OPERATION:                                                          00520000
+*   1. READ THE UMACBLOK FOR THE USERID                                 00521000
+*   2. FIND THE LENGTH OF THE STORAGE ARGUMENT                          00522000
+*   3. CHECK THAT LAST BYTE IS A K AND CONVERT "K" TO BYTES             00523000
+*   4. IF OPERATION IS "STORAGE", THEN CHECK THAT NEW SIZE DOES         00524000
+*      NOT EXCEED THE USER'S MAXIMUM STORAGE                            00525000
+*   5. IF OPERATION IS "MAXSTOR", THEN CHECK THAT NEW SIZE DOES         00526000
+*      NOT EXCEED 16M                                                   00527000
+*   6. ESTABLISH NEW STORAGE SIZE IN UMACBLOK                           00528000
+*                                                                       00529000
+*--------------------------------------------------------------         00530000
+STORAGE  DS    0H                                              @V60C1BD 00531000
+         SPACE 1                                                        00532000
+*   GET THE UMACBLOK                                                    00533000
+         BAL   R9,READUMAC                                     @V60C1BD 00534000
+         BNZ   OPRET          BR IF ERROR READING UMAC         @V60C1BD 00535000
+         SPACE 1                                                        00536000
+         L     R5,UMACAD      GET REAL ADDRESS OF UMAC         @V60C1BD 00537000
+         USING UMACBLOK,R5                                     @V60C1BD 00538000
+*   CONVERT STORAGE FROM EBCDIC TO BINARY VALUE                         00539000
+         LA    R1,USTORAGE    SET FIELD ADDRESS IN REG         @V60C1BD 00540000
+         LA    R2,L'USTORAGE  SET MAX. FIELD LENGTH            @V60C1BD 00541000
+         BAL   R9,FINDLA      TO ROUTINE TO FIND FIELD LENGTH  @V60C1BD 00542000
+         BNZ   STORERR4       BR IF ERROR IN DATA              @V60C1BD 00543000
+         LTR   R2,R2          IS LENGTH VALID?                 @V60C1BD 00544000
+         BNP   STORERR4       BR IF NOT                        @V60C1BD 00545000
+         BCTR  R2,0           DECREMENT FIELD LENGTH           @V60C1BD 00546000
+         LA    R8,0(R2,R1)    POINT TO LAST BYTE OF FIELD      @V60C1BD 00547000
+         CLI   0(R8),C'K'     IS LAST BYTE A 'K'?              @V60C1BD 00548000
+         BNE   STORERR4       BR IF NOT                        @V60C1BD 00549000
+         SPACE 1                                                        00550000
+*   CHECK FIELD FOR NUMERICS, R2 = LENGTH OF NUMERIC PORTION            00551000
+         BAL   R9,FINDLN      CHECK NUMERIC PORTION            @V60C1BD 00552000
+         BNE   STORERR4       BR IF ERROR IN DATA              @V60C1BD 00553000
+         BCTR  R2,0           DECREMENT LENGTH FOR EXECUTE     @V60C1BD 00554000
+         LA    R8,USTORAGE    SET FIELD ADDRESS IN REG         @V60C1BD 00555000
+         EX    R2,PACKINST    EXECUTE A PACK INSTRUCTION       @V60C1BD 00556000
+         TM    UWORK+7,X'0C'  CHECK FOR A HEX C-F IN SIGN POS. @V60C1BD 00557000
+         BNO   STORERR3       BR IF NOT PROPER SIGN            @V60C1BD 00558000
+         CVB   R8,UWORK       CONVERT TO BINARY                @V60C1BD 00559000
+         SPACE 1                                                        00560000
+*   STORAGE VALUE IS NOW IN 'K'.  CALCULATE BYTES.                      00561000
+         SLL   R8,10          CALCULATE BYTES FROM 'K'         @V60C1BD 00562000
+         CLC   UOP(L'UOP),KSTORAGE  FOR NORMAL STORAGE?        @V60C1BD 00563000
+         BE    NORMSTOR       BR IF YES                        @V60C1BD 00564000
+         C     R8,=F'16777216'     OVER MAX.?                  @V60C1BD 00565000
+         BH    STORERR2       BR IF YES                        @V60C1BD 00566000
+         X     R8,MASK        OBSCURE STORAGE SIZE             @V60C1BD 00567000
+         TM    UFLAGS,UTESTMD TEST MODE?                       @V60C1BD 00568000
+         BO    TMBY3          BR IF YES                        @V60C1BD 00569000
+         ST    R8,UMACMCOR    SET NEW MAX. STORAGE SIZE        @V60C1BD 00570000
+TMBY3    DS    0H                                              @V60C1BD 00571000
+         B     MACXCC0        TO NORMAL EXIT                   @V60C1BD 00572000
+         SPACE 1                                                        00573000
+NORMSTOR L     R7,UMACMCOR    GET MAXIMUM STORAGE SIZE         @V60C1BD 00574000
+         X     R7,MASK        UNMASK MAXIMUM STORAGE SIZE      @V60C1BD 00575000
+         CR    R8,R7          DOES NEW STORAGE EXCEED MAX.?    @V60C1BD 00576000
+         BH    STORERR1       BR IF YES, ERROR                 @V60C1BD 00577000
+         X     R8,MASK        OBSCURE NEW STORAGE SIZE         @V60C1BD 00578000
+         TM    UFLAGS,UTESTMD TEST MODE?                       @V60C1BD 00579000
+         BO    TMBY4          BR IF YES                        @V60C1BD 00580000
+         ST    R8,UMACCORE    ESTABLISH NEW STORAGE SIZE       @V60C1BD 00581000
+TMBY4    DS    0H                                              @V60C1BD 00582000
+         B     MACXCC0        BR TO NORMAL EXIT                @V60C1BD 00583000
+         SPACE 1                                                        00584000
+STORERR1 LA    R15,ERRSTOR1                                    @V60C1BD 00585000
+         B     EXITCC1        ERROR RETURN                     @V60C1BD 00586000
+         SPACE 1                                                        00587000
+STORERR2 LA    R15,ERRSTOR2                                    @V60C1BD 00588000
+         B     EXITCC1        ERROR RETURN                     @V60C1BD 00589000
+         SPACE 1                                                        00590000
+STORERR3 LA    R15,ERRSTOR3                                    @V60C1BD 00591000
+         B     EXITCC1        ERROR RETURN                     @V60C1BD 00592000
+         SPACE 1                                                        00593000
+STORERR4 LA    R15,ERRSTOR4                                    @V60C1BD 00594000
+         B     EXITCC1        ERROR RETURN                     @V60C1BD 00595000
+         DROP  R5                                              @V60C1BD 00596000
+         EJECT                                                          00597000
+*--------------------------------------------------------------         00598000
+* PRIVLEGE |                                                            00599000
+*-----------                                                            00600000
+*   THE UDIRBLOK HAS BEEN READ AND THE LOGON PASSWORDS MATCH            00601000
+*                                                                       00602000
+*   OPERATION:                                                          00603000
+*   1. READ THE UMACBLOK FOR THE USERID                                 00604000
+*   2. CHECK FOR BLANK PRIVILEGE ARGUMENT                               00605000
+*   3. USE "TRT" INSTRUCTION TO DEVELOP A CODED VALUE                   00606000
+*      REPRESENTING THE PRIVILEGE CLASSES                               00607000
+*   4. WHEN ALL ARGUMENT BYTES HAVE BEEN EXAMINED, CHECK THAT           00608000
+*      DEVELOPED CODED VALUE IS VALID                                   00609000
+*   5. ESTABLISH NEW PRIVILEGE VALUE                                    00610000
+*                                                                       00611000
+*--------------------------------------------------------------         00612000
+PRIVLEGE DS    0H                                              @V60C1BD 00613000
+         SPACE 1                                                        00614000
+*   GET THE UMACBLOK                                                    00615000
+         BAL   R9,READUMAC                                     @V60C1BD 00616000
+         BNZ   OPRET          BR IF ERROR READING UAMC         @V60C1BD 00617000
+         SPACE 1                                                        00618000
+         L     R5,UMACAD      GET REAL ADDRESS OF UMAC         @V60C1BD 00619000
+         USING UMACBLOK,R5    NORMALLY R2, (CAN'T DUE TO TRT)  @V60C1BD 00620000
+         SPACE 1                                                        00621000
+*   SOME INITIAL CHECKING OF PRIVILEGE FIELD                            00622000
+         CLC   UPRIV(L'UPRIV),BLANKS     IS FIELD ALL BLANKS?  @V60C1BD 00623000
+         BE    PRIVERR1       BR IF YES                        @V60C1BD 00624000
+         LA    R8,X'FF'       SETUP TO TEST FOR BLANKS FROM TRT@V60C1BD 00625000
+         LA    R4,X'BD'       SETUP TO INDICATE ERROR FROM TRT @V60C1BD 00626000
+         SR    R2,R2          ZERO FUNCTION REGISTER           @V60C1BD 00627000
+         SR    R9,R9          ZERO ACCUMULATION REGISTER       @V60C1BD 00628000
+         LA    R1,UPRIV       POINT TO START OF PRIV. CLASSES  @V60C1BD 00629000
+         SPACE 1                                                        00630000
+PRIVLP   LA    R7,UPRIV+8     SET UP A(END OF OPERAND +1)      @V60C1BD 00631000
+         SR    R7,R1          CALC. LENGTH OF TRT              @V60C1BD 00632000
+         BNP   PRIVEND        BR IF END OF OPERAND REACHED     @V60C1BD 00633000
+         BCTR  R7,0           DECREMENT LENGTH FOR EXECUTED TRT@V60C1BD 00634000
+         EX    R7,TRTINST     EXECUTE TRT                      @V60C1BD 00635000
+         BZ    PRIVERR2       BR IF NO VALID ARGUMENTS         @V60C1BD 00636000
+         CR    R2,R8          A BLANK (END OF FIELD)?          @V60C1BD 00637000
+         BE    PRIVEND        BR IF YES                        @V60C1BD 00638000
+         CR    R2,R4          IS FUNCTION VALID?               @V60C1BD 00639000
+         BE    PRIVERR4       BR IF NOT                        @V60C1BD 00640000
+         SPACE 1                                                        00641000
+*   A VALID OPERAND BYTE HAS BEEN FOUND AND IS IN R2. ADD THIS          00642000
+*   INTO CUMULATIVE PRIVILEGE CLASS FIELD IN R9.                        00643000
+*   R1 POINTS TO LIST BYTE CORRESPONDING TO FUNCTION                    00644000
+         OR    R9,R2          ACCUMULATE PRIVILEGE CLASS VALUE @V60C1BD 00645000
+         LA    R1,1(,R1)      STEP TO NEXT OPERAND BYTE        @V60C1BD 00646000
+         B     PRIVLP         CYCLE                            @V60C1BD 00647000
+         SPACE 1                                                        00648000
+PRIVEND  LTR   R9,R9          ANYTHING ACCUMULATED?            @V60C1BD 00649000
+         BNP   PRIVERR3       BR IF NOT                        @V60C1BD 00650000
+         CR    R9,R8          IS ACCUM. CLASS OVER X'FF' ?     @V60C1BD 00651000
+         BH    PRIVERR3       BR IF YES                        @V60C1BD 00652000
+         X     R9,MASK        OBSCURE PRIVILEGE CLASS          @V60C1BD 00653000
+         TM    UFLAGS,UTESTMD TEST MODE?                       @V60C1BD 00654000
+         BO    TMBY5          BR IF YES                        @V60C1BD 00655000
+         STC   R9,UMACCLEV    ESTABLISH NEW PRIVILEGE CLASS    @V60C1BD 00656000
+TMBY5    DS    0H                                              @V60C1BD 00657000
+         B     MACXCC0        NORMAL EXIT                      @V60C1BD 00658000
+         SPACE 1                                                        00659000
+PRIVERR1 LA    R15,ERRPRIV1                                    @V60C1BD 00660000
+         B     EXITCC1        ERROR RETURN                     @V60C1BD 00661000
+         SPACE 1                                                        00662000
+PRIVERR2 LA    R15,ERRPRIV2                                    @V60C1BD 00663000
+         B     EXITCC1        ERROR RETURN                     @V60C1BD 00664000
+         SPACE 1                                                        00665000
+PRIVERR3 LA    R15,ERRPRIV3                                    @V60C1BD 00666000
+         B     EXITCC1        ERROR RETURN                     @V60C1BD 00667000
+         SPACE 1                                                        00668000
+PRIVERR4 LA    R15,ERRPRIV4                                    @V60C1BD 00669000
+         B     EXITCC1        ERROR RETURN                     @V60C1BD 00670000
+         SPACE 2                                                        00671000
+*   EXECUTED TRT INSTRUCTION                                            00672000
+TRTINST  TRT   0(*-*,R1),TRPRVTBL  TRANSLATE VALID BYTE        @V60C1BD 00673000
+         SPACE 1                                                        00674000
+         DROP  R5             DROP UMACBLOK REFERENCE          @V60C1BD 00675000
+         EJECT                                                          00676000
+*--------------------------------------------------------------         00677000
+* PRIORTY  |                                                            00678000
+*-----------                                                            00679000
+*   THE UDIRBLOK HAS BEEN READ AND THE LOGON PASSWORDS MATCH            00680000
+*                                                                       00681000
+*   OPERATION:                                                          00682000
+*   1. READ THE UMACBLOK FOR THE USERID                                 00683000
+*   2. CHECK PRIORITY ARGUMENT PRIOR TO CONVERSION TO BINARY            00684000
+*   3. CHECK THAT CONVERTED VALUE FALLS BETWEEN 0 AND 99                00685000
+*   4. ESTABLISH NEW PRIORITY                                           00686000
+*                                                                       00687000
+*--------------------------------------------------------------         00688000
+PRIORTY  DS    0H                                              @V60C1BD 00689000
+         SPACE 1                                                        00690000
+*   GET THE UMACBLOK                                                    00691000
+         BAL   R9,READUMAC                                     @V60C1BD 00692000
+         BNE   OPRET          BR IF ERROR READING UMAC         @V60C1BD 00693000
+         SPACE 1                                                        00694000
+         L     R5,UMACAD      GET REAL ADDRESS OF UMAC         @V60C1BD 00695000
+         USING UMACBLOK,R5                                     @V60C1BD 00696000
+         SPACE 1                                                        00697000
+*   FIND LENGTH OF PRIORITY FIELD                                       00698000
+         LA    R1,UPRIOR      SET UP ADDRESS OF PRIORITY FIELD @V60C1BD 00699000
+         LA    R2,L'UPRIOR    SET UP LENGTH OF UPRIOR FIELD    @VMI0025 00700000
+         BAL   R9,FINDLN      FIND LENGTH (NUMERIC ONLY)       @V60C1BD 00701000
+         BNZ   PRIERR1        BR IF ERROR                      @V60C1BD 00702000
+         LTR   R2,R2          IS LENGTH VALID?                 @V60C1BD 00703000
+         BNP   PRIERR2        BR IF NOT                        @V60C1BD 00704000
+         C     R2,F2          IS LENGTH OVER 2 BYTES?          @V60C1BD 00705000
+         BH    PRIERR4        BR IF YES                        @V60C1BD 00706000
+         LA    R8,UPRIOR      SET UP ADDRESS OF PRIORITY FIELD @V60C1BD 00707000
+         BCTR  R2,0           DECREMENT LEN. FOR EXECUTED PACK @V60C1BD 00708000
+         EX    R2,PACKINST    EXECUTE A PACK INSTRUCTION       @V60C1BD 00709000
+         TM    UWORK+7,X'0C'  CHECK FOR HEX C-F IN SIGN        @V60C1BD 00710000
+         BNO   PRIERR3        BR IF NOT PROPER SIGN            @V60C1BD 00711000
+         CVB   R8,UWORK       CONVERT TO BINARY                @V60C1BD 00712000
+         C     R8,=F'99'      CHECK FOR VALID RANGE            @V60C1BD 00713000
+         BH    PRIERR4        BR IF > 99                       @V60C1BD 00714000
+         X     R8,MASK        OBSCURE PRIORITY                 @V60C1BD 00715000
+         TM    UFLAGS,UTESTMD TEST MODE?                       @V60C1BD 00716000
+         BO    TMBY6          BR IF YES                        @V60C1BD 00717000
+         STC   R8,UMACPRIR    ESTABLISH NEW PRIORITY           @V60C1BD 00718000
+TMBY6    DS    0H                                              @V60C1BD 00719000
+         B     MACXCC0                                         @V60C1BD 00720000
+         SPACE 1                                                        00721000
+PRIERR1  LA    R15,ERRPRI1                                     @V60C1BD 00722000
+         B     EXITCC1        ERROR RETURN                     @V60C1BD 00723000
+         SPACE 1                                                        00724000
+PRIERR2  LA    R15,ERRPRI2                                     @V60C1BD 00725000
+         B     EXITCC1        ERROR RETURN                     @V60C1BD 00726000
+         SPACE 1                                                        00727000
+PRIERR3  LA    R15,ERRPRI3                                     @V60C1BD 00728000
+         B     EXITCC1        ERROR RETURN                     @V60C1BD 00729000
+         SPACE 1                                                        00730000
+PRIERR4  LA    R15,ERRPRI4                                     @V60C1BD 00731000
+         B     EXITCC1        ERROR RETURN                     @V60C1BD 00732000
+         SPACE 1                                                        00733000
+         DROP  R5                                              @V60C1BD 00734000
+         EJECT                                                          00735000
+*--------------------------------------------------------------         00736000
+* EDITCHAR |                                                            00737000
+*-----------                                                            00738000
+*   THE UDIRBLOK HAS BEEN READ AND THE LOGON PASSWORDS MATCH            00739000
+*                                                                       00740000
+*   1. READ THE UMACBLOK FOR THE USERID                                 00741000
+*   2. ESTABLISH THE NEW EDIT CHARACTERS                                00742000
+*                                                                       00743000
+*--------------------------------------------------------------         00744000
+EDITCHAR DS    0H                                              @V60C1BD 00745000
+         SPACE 1                                                        00746000
+*   GET THE UMACBLOK                                                    00747000
+         BAL   R9,READUMAC                                     @V60C1BD 00748000
+         BNE   OPRET          BR IF ERROR READING UMAC         @V60C1BD 00749000
+         SPACE 1                                                        00750000
+         L     R5,UMACAD      GET REAL ADDRESS OF UMAC         @V60C1BD 00751000
+         USING UMACBLOK,R5                                     @V60C1BD 00752000
+         TM    UFLAGS,UTESTMD TEST MODE?                       @V60C1BD 00753000
+         BO    TMBY7          BR IF YES                        @V60C1BD 00754000
+         MVC   UMACLEND(L'UEDITCH),UEDITCH  EST. NEW EDIT CHAR.@V60C1BD 00755000
+         XC    UMACLEND(L'UEDITCH),MASK  OBSCURE EDIT CHAR.    @V60C1BD 00756000
+TMBY7    DS    0H                                              @V60C1BD 00757000
+         B     MACXCC0        NORMAL RETURN                    @V60C1BD 00758000
+         SPACE 1                                                        00759000
+         DROP  R5                                              @V60C1BD 00760000
+         EJECT                                                          00761000
+*--------------------------------------------------------------         00762000
+* OPTIONS |                                                             00763000
+*----------                                                             00764000
+*   THE UDIRBLOK HAS BEEN READ AND THE LOGON PASSWORDS MATCH            00765000
+*                                                                       00766000
+*   OPERATION:                                                          00767000
+*   1. READ THE UMACBLOK FOR THE USERID                                 00768000
+*   2. SCAN FOR ARGUMENTS. VALIDATE EACH ARGUMENT AND DEVELOP           00769000
+*      A CODED VALUE.                                                   00770000
+*   3. FOR OPTIONS "CPUID" AND "AFFINITY", SCAN FOR OPTION              00771000
+*      ARGUMENT FOLLOWING OPTION. CONVERT OPTION ARGUEMENTS TO          00772000
+*      PROPER FORMAT FOR DIRECTORY.                                     00773000
+*   4. ESTABLISH NEW CODED OPTION VALUE AND CPUID/AFFINITY              00774000
+*      VALUES IF PRESENT.                                               00775000
+*                                                                       00776000
+*--------------------------------------------------------------         00777000
+OPTIONS  DS    0H                                              @V60C1BD 00778000
+         SPACE 1                                                        00779000
+*   GET THE UMACBLOK                                                    00780000
+         BAL   R9,READUMAC                                     @V60C1BD 00781000
+         BNE   OPRET          BR IF ERROR READING UMAC         @V60C1BD 00782000
+         SPACE 1                                                        00783000
+         L     R5,UMACAD      GET REAL ADDRESS OF UMAC         @V60C1BD 00784000
+         USING UMACBLOK,R5                                     @V60C1BD 00785000
+         SR    R0,R0          ZERO REG. USED FOR OPTION VALUE  @V60C1BD 00786000
+         LA    R4,MAXOPTNS    SET UP MAX. NO. OF OPTIONS       @V60C1BD 00787000
+         LA    R1,UOPTIONS    POINT TO FIRST ARGUMENT          @V60C1BD 00788000
+**                                                                      00789000
+         MVC   UWORK(L'UMACPUID),UMACPUID  SAVE CURRENT CPUID  @V60C1BD 00790000
+         MVC   UWORK+3(L'UMACAFF),UMACAFF  SAVE CURRENT AFFIN. @V60C1BD 00791000
+**                                                                      00792000
+         SPACE 1                                                        00793000
+*   FIND OPTION LENGTH                                                  00794000
+OPTNLP1  LA    R2,L'OPTNAME   SET MAX LENGTH OF OPTION NAME    @V60C1BD 00795000
+         BAL   R9,FINDLA      FIND LENGTH OF OPTION            @V60C1BD 00796000
+         BNZ   OPTNERR1       BR IF ERROR IN LENGTH            @V60C1BD 00797000
+         LTR   R2,R2          IS SIZE ZERO?                    @V60C1BD 00798000
+         BZ    OPTNSET        BR IF YES, ASSUME END OF ARGS    @V60C1BD 00799000
+         BCTR  R2,0           DECREMENT LENGTH FOR EXECUTE     @V60C1BD 00800000
+         LA    R7,OPTIONTB    POINT TO START OF OPTION TABLE   @V60C1BD 00801000
+         USING OPTNSECT,R7                                     @V60C1BD 00802000
+OPTNLP2  EX    R2,CLCOPTN     IS THERE A MATCH?                @V60C1BD 00803000
+         BE    OPMATCH        BR IF YES                        @V60C1BD 00804000
+         LA    R7,OPTNLN(,R7)  STEP TO NEXT OPTION IN TABLE    @V60C1BD 00805000
+         CLI   OPTNAME,X'FF'  AT END OF OPTION TABLE?          @V60C1BD 00806000
+         BNE   OPTNLP2        BR IF NOT, CYCLE                 @V60C1BD 00807000
+         B     OPTNERR1       ERROR, INVALID OPTION            @V60C1BD 00808000
+         SPACE 1                                                        00809000
+OPMATCH  SR    R9,R9          CLEAR REGISTER                   @V60C1BD 00810000
+         ICM   R9,B'0011',OPTNVALU    GET OPTION VALUE         @V60C1BD 00811000
+         OR    R0,R9          ACCUMULATE OPTION VALUE          @V60C1BD 00812000
+         LA    R1,1(R1,R2)    ADD OPTION LENGTH TO START ADDR. @V60C1BD 00813000
+*                             AND COMPENSATE FOR BCTR                   00814000
+         CLI   0(R1),X'FF'    AT END OF ARG. LIST?             @V60C1BD 00815000
+         BE    OPTNSET        BR IF YES                        @V60C1BD 00816000
+         CLI   0(R1),C' '     A BLANK? (SHOULD BE)             @V60C1BD 00817000
+         BNE   OPTNERR1       BR IF NOT A BLANK                @V60C1BD 00818000
+         LA    R1,1(,R1)      POINT TO START OF NEXT OPTION    @V60C1BD 00819000
+         CLI   OPTNFLG,X'FF'  DO ARGUMENTS FOLLOW OPTION?      @V60C1BD 00820000
+         BE    OPTNARG        BR IF YES                        @V60C1BD 00821000
+OPTNBCT  BCT   R4,OPTNLP1     BR IF WITHIN MAX. NO. OF OPTIONS @V60C1BD 00822000
+         B     OPTNERR2                                        @V60C1BD 00823000
+         SPACE 1                                                        00824000
+OPTNSET  C     R0,=A(OPTNMAXV)  IS OPTION VALUE WITHIN BOUNDS? @V60C1BD 00825000
+         BH    OPTNERR3       BR IF NOT                        @V60C1BD 00826000
+         X     R0,MASK        OBSCURE OPTION BYTE              @V60C1BD 00827000
+         TM    UFLAGS,UTESTMD TEST MODE?                       @V60C1BD 00828000
+         BO    TMBY8          BR IF YES                        @V60C1BD 00829000
+         STH   R0,UMACOPT     ESTABLISH NEW OPTION BYTE        @V60C1BD 00830000
+**                                                                      00831000
+         MVC   UMACPUID(L'UMACPUID),UWORK    ESTABLISH CPUID   @V60C1BD 00832000
+         MVC   UMACAFF(L'UMACAFF),UWORK+3    ESTABLISH AFFINITY@V60C1BD 00833000
+**                                                                      00834000
+TMBY8    DS    0H                                              @V60C1BD 00835000
+         B     MACXCC0        NORMAL RETURN                    @V60C1BD 00836000
+         SPACE 1                                                        00837000
+*   CHECK OPTION ARGUMENTS                                              00838000
+OPTNARG  C     R9,=A(VCPUID)  CPUID OPTION?                    @V60C1BD 00839000
+         BNE   OPTNAFF        BR IF NOT                        @V60C1BD 00840000
+         LA    R2,LVCPUID     SET UP MAX LENGTH OF CPUID ARG.  @V60C1BD 00841000
+         BAL   R9,FINDLA      FIND LENGTH OF CPUID ARGUMENT    @V60C1BD 00842000
+         BNZ   OPTNERR1       BR IF ERROR                      @V60C1BD 00843000
+         BAL   R9,BCDTOHEX    CONVERT TO HEX                   @V60C1BD 00844000
+         BNZ   OPTNERR1       BR IF ERROR                      @V60C1BD 00845000
+**                                                                      00846000
+         STCM  R2,B'0111',UWORK      SAVE NEW CPUID            @V60C1BD 00847000
+         XC    UWORK(L'UMACPUID),MASK   OBSCURE CPUID          @V60C1BD 00848000
+**                                                                      00849000
+         B     OPTNBCT                                         @V60C1BD 00850000
+         SPACE 1                                                        00851000
+OPTNAFF  C     R9,=A(VAFFIN)  AFFINITY OPTION?                 @V60C1BD 00852000
+         BNE   OPTNERR1       BR IF NOT, ERROR                 @V60C1BD 00853000
+         LA    R2,LVAFFIN     SET UP MAX LENGTH OF AFFIN. ARG. @V60C1BD 00854000
+         BAL   R9,FINDLN      FIND LENGTH OF AFFINITY ARGUMENT @V60C1BD 00855000
+         BNZ   OPTNERR1       BR IF ERROR                      @V60C1BD 00856000
+         BAL   R9,BCDTOBIN    CONVERT TO BINARY                @V60C1BD 00857000
+         BNZ   OPTNERR1       BR IF ERROR                      @V60C1BD 00858000
+**                                                                      00859000
+         STC   R2,UWORK+3     SAVE AFFINITY                    @V60C1BD 00860000
+         OI    UWORK+3,UMACFFON    SPECIFY AFFINITY            @V60C1BD 00861000
+         XC    UWORK+3(L'UMACFFON),MASK  OBSCURE AFFINITY      @V60C1BD 00862000
+**                                                                      00863000
+         B     OPTNBCT                                         @V60C1BD 00864000
+         SPACE 1                                                        00865000
+OPTNERR1 LA    R15,ERROPTN1   INVALID OPTION                   @V60C1BD 00866000
+         B     EXITCC1        ERROR RETURN                     @V60C1BD 00867000
+         SPACE 1                                                        00868000
+OPTNERR2 LA    R15,ERROPTN2   NO FENCE AT END OF PLIST         @V60C1BD 00869000
+         B     EXITCC1        ERROR RETURN                     @V60C1BD 00870000
+         SPACE 1                                                        00871000
+OPTNERR3 LA    R15,ERROPTN3   INVALID ACCUM. OPTION VALUE      @V60C1BD 00872000
+         B     EXITCC1        ERROR RETURN                     @V60C1BD 00873000
+         SPACE 1                                                        00874000
+*   EXECUTED INSTRUCTION                                                00875000
+CLCOPTN  CLC   0(*-*,R1),OPTNAME  LOOK FOR OPTION MATCH        @V60C1BD 00876000
+         SPACE 1                                                        00877000
+         DROP  R5,R7                                           @V60C1BD 00878000
+         EJECT                                                          00879000
+*--------------------------------------------------------------         00880000
+*   IPL   |                                                             00881000
+*----------                                                             00882000
+*   THE UDIRBLOK HAS BEEN READ AND THE LOGON PASSWORDS MATCH            00883000
+*                                                                       00884000
+*   OPERATION:                                                          00885000
+*   1. READ THE UMACBLOK FOR THE USERID                                 00886000
+*   2. ESTABLISH THE NEW IPL DATA                                       00887000
+*                                                                       00888000
+*--------------------------------------------------------------         00889000
+IPL      DS    0H                                              @V60C1BD 00890000
+         SPACE 1                                                        00891000
+*   GET THE UMACBLOK                                                    00892000
+         BAL   R9,READUMAC                                     @V60C1BD 00893000
+         BNE   OPRET          BR IF ERROR READING UMAC         @V60C1BD 00894000
+         SPACE 1                                                        00895000
+         L     R5,UMACAD      GET REAL ADDRESS OF UMAC         @V60C1BD 00896000
+         USING UMACBLOK,R5                                     @V60C1BD 00897000
+         TM    UFLAGS,UTESTMD TEST MODE?                       @V60C1BD 00898000
+         BO    TMBY9          BR IF YES                        @V60C1BD 00899000
+         MVC   UMACIPL(L'UMACIPL),UIPL  ESTABLISH NEW IPL NAME @V60C1BD 00900000
+         XC    UMACIPL(L'UMACIPL),MASK  OBSCURE IPL NAME       @V60C1BD 00901000
+TMBY9    DS    0H                                              @V60C1BD 00902000
+         B     MACXCC0                                         @V60C1BD 00903000
+         SPACE 1                                                        00904000
+         DROP  R5                                              @V60C1BD 00905000
+         EJECT                                                          00906000
+*--------------------------------------------------------------         00907000
+* DISTRIB |                                                             00908000
+*----------                                                             00909000
+*   THE UDIRBLOK HAS BEEN READ AND THE LOGON PASSWORDS MATCH            00910000
+*                                                                       00911000
+*   OPERATION:                                                          00912000
+*   1. READ THE UMACBLOK                                                00913000
+*   2. ESTABLISH THE NEW DISTRIBUTION DATA                              00914000
+*                                                                       00915000
+*--------------------------------------------------------------         00916000
+DISTRIB  DS    0H                                              @V60C1BD 00917000
+         SPACE 1                                                        00918000
+*   GET THE UMACBLOK                                                    00919000
+         BAL   R9,READUMAC                                     @V60C1BD 00920000
+         BNE   OPRET          BR IF ERROR READING UMAC         @V60C1BD 00921000
+         SPACE 1                                                        00922000
+         L     R5,UMACAD      GET REAL ADDRESS OF UMAC         @V60C1BD 00923000
+         USING UMACBLOK,R5                                     @V60C1BD 00924000
+         TM    UFLAGS,UTESTMD TEST MODE?                       @V60C1BD 00925000
+         BO    TMBY10         BR IF YES                        @V60C1BD 00926000
+         MVC   UMACDIST(L'UMACDIST),UDISTRIB  EST. NEW DIST.   @V60C1BD 00927000
+         XC    UMACDIST(L'UMACDIST),MASK  OBSCURE DISTRIBUTION @V60C1BD 00928000
+TMBY10   DS    0H                                              @V60C1BD 00929000
+         B     MACXCC0                                         @V60C1BD 00930000
+         SPACE 1                                                        00931000
+         DROP  R5                                              @V60C1BD 00932000
+         EJECT                                                          00933000
+*--------------------------------------------------------------         00934000
+* ACCOUNT |                                                             00935000
+*----------                                                             00936000
+*   THE UDIRBLOK HAS BEEN READ AND THE LOGON PASSWORDS MATCH            00937000
+*                                                                       00938000
+*   OPERATION:                                                          00939000
+*   1. IF THE OPERATION IS TEMPORARY, BYPASS READING THE UMACBLOK       00940000
+*      AND SET A FLAG TO SUPPRESS UPDATING THE OBJECT DIRECTORY         00941000
+*      AND GO TO STEP 4.                                                00942000
+*   2. ELSE, READ THE UMACBLOK                                          00943000
+*   3. IF THE OPERATION IS NORMAL, GO TO STEP 10 TO ESTABLISH NEW       00944000
+*      ACCOUNT DATA.                                                    00945000
+*   4. ELSE, CHECK IF OBJECT USER IS ACTIVE. IF NOT, GO TO STEP 10      00946000
+*      TO ESTABLISH NEW ACCOUNT DATA.                                   00947000
+*   5. GET FREE STORAGE FOR A COMMAND BUFFER.                           00948000
+*   6. CALL DMKCPVAC (ACNT COMMAND) TO CREATE AN ACCOUNTING RECORD      00949000
+*      BASED ON THE CURRENT ACCOUNT DATA.                               00950000
+*   7. RETURN COMMAND BUFFER FREE STORAGE.                              00951000
+*   8. UPDATE ACCOUNTING FIELD IN OBJECT USERID'S VMBLOK.               00952000
+*   9. IF OPERATION IS TEMPORARY, RETURN TO MAIN LINE.                  00953000
+*  10. ESTABLISH NEW ACCOUNT DATA IN OBJECT DIRECTORY AND RETURN.       00954000
+*                                                                       00955000
+*--------------------------------------------------------------         00956000
+ACCOUNT  DS    0H                                              @V60C1BD 00957000
+         SPACE 1                                                        00958000
+*   CHECK WHETHER OPERATION IS TEMPORARY.  IF SO, DO NOT GET            00959000
+*   THE UMACBLOK, AND SET NO-UPDATE FLAG.                               00960000
+         CLC   UOP(L'UOP),KTACCT    IS OPERATION TEMPORARY?    @V60C1BD 00961000
+         BNE   ACCRDMAC       BR IF NOT                        @V60C1BD 00962000
+         SPACE 1                                                        00963000
+         OI    UFLAGS,UNOUPF  SET NO-UPDATE FLAG               @V60C1BD 00964000
+         B     ACHKACT        GO CHECK FOR ACTIVE OBJECT USER  @V60C1BD 00965000
+         SPACE 1                                                        00966000
+*   GET THE UMACBLOK                                                    00967000
+ACCRDMAC BAL   R9,READUMAC                                     @V60C1BD 00968000
+         BNE   OPRET          BR IF ERROR READING UMAC         @V60C1BD 00969000
+         SPACE 1                                                        00970000
+         L     R5,UMACAD      GET REAL ADDRESS OF UMAC         @V60C1BD 00971000
+         USING UMACBLOK,R5                                     @V60C1BD 00972000
+         SPACE 1                                                        00973000
+*   IF OPERATION IS NORMAL ACCOUNT, JUST UPDATE THE OBJECT              00974000
+*   DIRECTORY.  IF OPERATION IS IMMEDIATE, UPDATE THE                   00975000
+*   VMBLOK AS WELL, BUT BEFOREHAND, CAUSE AN ACCOUNTING RECORD          00976000
+*   TO BE CREATED.                                                      00977000
+         CLC   UOP(L'UOP),KACCOUNT   NORMAL ACCOUNT?           @V60C1BD 00978000
+         BE    NACCT          BR IF YES                        @V60C1BD 00979000
+         SPACE 1                                                        00980000
+*   CHECK WHETHER USER IS ACTIVE                                        00981000
+ACHKACT  BAL   R9,FINDVMBK                                     @V60C1BD 00982000
+         BNZ   NACCT          BR IF VMBLOK NOT FOUND           @V60C1BD 00983000
+         ST    R1,UOBJVMBK    SAVE OBJECT VMBLOK               @V60C1BD 00984000
+         SPACE 1                                                        00985000
+*   CREATE ACCOUNTING RECORD VIA ACNT COMMAND                           00986000
+         ST    R11,UVMBLOK    SAVE CALLER'S VMBLOK ADDRESS     @V60C1BD 00987000
+         L     R11,ASYSOP     GET SYSTEM OP'S VMBLOK ADDRESS   @V60C1BD 00988000
+         LA    R0,BUFSIZE     GET CONSOLE BUFFER SIZE          @V60C1BD 00989000
+         CALL  DMKFREE        GET COMMAND BUFFER               @V60C1BD 00990000
+         LR    R9,R1          ACNT NEEDS BUFFER ADDRESS IN R9  @V60C1BD 00991000
+         USING BUFFER,R9                                       @V60C1BD 00992000
+         MVC   0(8,R1),BLANKS BLANK BUFFER                     @V60C1BD 00993000
+         MVC   8((BUFSIZE-1)*8,R1),0(R1)                       @V60C1BD 00994000
+         MVC   0(5,R1),=CL5'ACNT '   SET COMMAND NAME          @V60C1BD 00995000
+         MVC   5(L'UWORK,R1),UWORK  SET READABLE USERID IN CMD @V60C1BD 00996000
+         LA    R0,13          SET MAX. LENGTH OF 'ACNT'+USERID @V60C1BD 00997000
+         ST    R0,BUFCNT      SET UP START OF CMD AT END OF BUF@V60C1BD 00998000
+         LA    R1,5(,R1)      POINT TO USERID                  @V60C1BD 00999000
+         ST    R1,BUFNXT      PUT INTO BUFFER CNTRL FIELD      @V60C1BD 01000000
+         DROP  R9                                              @V60C1BD 01001000
+         TM    UFLAGS,UTESTMD TEST MODE?                       @V60C1BD 01002000
+         BO    TMBY11         BR IF YES                        @V60C1BD 01003000
+         CALL  DMKCPVAC       CALL ACNT PROCESSOR              @V60C1BD 01004000
+TMBY11   DS    0H                                              @V60C1BD 01005000
+         SPACE 1                                                        01006000
+*   FREE BUFFER                                                         01007000
+         LA    R0,BUFSIZE     GET BUFFER SIZE                  @V60C1BD 01008000
+         LR    R1,R9          POINT TO BUFFER                  @V60C1BD 01009000
+         CALL  DMKFRET        FREE BUFFER                      @V60C1BD 01010000
+         L     R11,UVMBLOK    RESTORE CALLER'S VMBLOK          @V60C1BD 01011000
+         SPACE 1                                                        01012000
+*   UPDATE ACCOUNT FIELD IN OBJECT VMBLOK                               01013000
+         L     R1,UOBJVMBK    GET OBJECT VMBLOK                @V60C1BD 01014000
+         TM    UFLAGS,UTESTMD TEST MODE?                       @V60C1BD 01015000
+         BO    TMBY12         BR IF YES                        @V60C1BD 01016000
+         MVC   VMACNT-VMBLOK(L'UACCOUNT,R1),UACCOUNT           @V60C1BD 01017000
+TMBY12   DS    0H                                              @V60C1BD 01018000
+         SPACE 1                                                        01019000
+*  CHECK FOR TEMPORARY UPDATE AGAIN                                     01020000
+         CLC   UOP(L'UOP),KTACCT   TEMPORARY?                  @V60C1BD 01021000
+         BE    MACXCC0        BR IF YES                        @V60C1BD 01022000
+         SPACE 1                                                        01023000
+NACCT    DS    0H                                              @V60C1BD 01024000
+         TM    UFLAGS,UTESTMD TEST MODE?                       @V60C1BD 01025000
+         BO    TMBY13         BR IF YES                        @V60C1BD 01026000
+         MVC   UMACACCT(L'UMACACCT),UACCOUNT  EST. NEW ACCT.   @V60C1BD 01027000
+         XC    UMACACCT(L'UMACACCT),MASK  OBSCURE ACCOUNT DATA @V60C1BD 01028000
+TMBY13   DS    0H                                              @V60C1BD 01029000
+         B     MACXCC0                                         @V60C1BD 01030000
+         SPACE 1                                                        01031000
+         DROP  R5                                              @V60C1BD 01032000
+         EJECT                                                          01033000
+*--------------------------------------------------------------         01034000
+*   SUBROUTINE TO READ UDIRBLOK PAGES AND LOCATE A SPECIFIED            01035000
+*   USERID'S UDIRBLOK.                                                  01036000
+*--------------------------------------------------------------         01037000
+*                                                                       01038000
+*   ENTRY CONDITIONS:                                                   01039000
+*    R3:   ADDRESS OF UCNTRL                                            01040000
+*    R9:   RETURN ADDRESS                                               01041000
+*                                                                       01042000
+*   EXIT CONDITIONS:                                                    01043000
+*    R3:   ADDRESS OF UCNTRL (WITH DATA FILLED IN UCNTRL)               01044000
+*    CC0:  OPERATION WAS SUCCESSFUL                                     01045000
+*    CC1:  ERROR, 'URETCODE' IN UCNTRL CONTAINS DETAILS                 01046000
+*                                                                       01047000
+*   OPERATION:                                                          01048000
+*    THE OBJECTIVE IS TO READ UDIRBLOK PAGES AND LOCATE THE UDIRBLOK    01049000
+*    OF THE USERID.  THE UCNTRL BLOCK IS UPDATED WITH PERTINENT         01050000
+*    DATA ABOUT AND FROM THE UDIRBLOK NEEDED IN PROCESSING THE          01051000
+*    REQUEST.  THE DATA FIELDS NEEDED ARE: 1) THE OBJECT DASD ADDRESS   01052000
+*    OF THE UDIRBLOK, 2) THE VIRTUAL SYSTEM PAGE ADDRESS OF THE         01053000
+*    UDIRBLOK, 3) THE REAL PAGE ADDRESS OF THE UDIRBLOK, 4) THE         01054000
+*    READ ADDRESS OF THE USER'S ENTRY IN THE UDIRBLOK, 5) THE           01055000
+*    ADDRESS OF THE USER'S UMACBLOK, AND 6) THE DISPLACEMENT OF THE     01056000
+*    THE USER'S UMACBLOK ENTRY.                                         01057000
+*    THE 'TRANS' MACRO IS USED TO READ UDIRBLOK PAGES USING THE         01058000
+*    VIRTUAL PAGE ADDRESSES FROM THE DMKSYSPL LIST.  CONCURRENTLY,      01059000
+*    THE OBJECT DASD ADDRESS OF EACH PAGE CORRESPONDING TO A PAGE IN    01060000
+*    THE LIST IS EXTRACTED, INITIALLY FROM DMKSYSUD AND THEN FROM       01061000
+*    EACH UDIRBLOK, AND SAVED.                                          01062000
+*                                                                       01063000
+*    1. GET THE DASD ADDRESS OF THE FIRST UDIRBLOK PAGE ON OBJECT       01064000
+*       DASD AND POINTER TO LIST OF SYSTEM VIRTUAL PAGES OF             01065000
+*       UDIRBLOKS.                                                      01066000
+*    2. PAGE IN A UDIRBLOK PAGE USING THE 'TRANS' MACRO.                01067000
+*    3. SAVE THE REAL ADDRESS OF THE UDIRBLOK PAGE AND SEARCH FOR THE   01068000
+*       USER'S UDIRBLOK ENTRY.  IF NOT FOUND IN A PAGE, SAVE THE        01069000
+*       OBJECT DASD ADDRESS OF THE NEXT PAGE AND TRANS IN THE NEXT      01070000
+*       PAGE USING THE VIRTUAL ADDRESS IN THE LIST.  CONTINUE THIS      01071000
+*       PROCESS UNTIL THE USER IS FOUND OR THE END OF THE LIST IS       01072000
+*       REACHED (SIGNALLED BY THE LAST ENTRY BEING NEGATIVE).  THERE    01073000
+*       IS A CHECK TO MAKE SURE THAT FOR EACH VIRTUAL PAGE IN           01074000
+*       THE LIST THERE IS A CORRESPONDING OBJECT DASD ADDRESS.          01075000
+*    4. IF THE USER'S ENTRY IS FOUND, THE PLIST CURRENT PASSWORD IS     01076000
+*       COMPARE WITH THE DIRECTORY CURRENT PASSWORD.  A MISMATCH IS     01077000
+*       AN ERROR UNLESS THE PLIST PASSWORD IS BLANK IN WHICH CASE       01078000
+*       THE TEST MODE IS INDICATED. (NO UPDATING IS DONE IN THE         01079000
+*       TEST MODE).                                                     01080000
+*    5. IF THE USER'S ENTRY IS FOUND, THE DATA DESCRIBED ABOVE IS       01081000
+*       SAVED AND CONTROL IS RETURNED TO THE CALLER WITH CC=0 AND       01082000
+*       'URETCODE' IN THE UCNTRL SET TO 0.                              01083000
+*    6. IF ANY ERRORS ARE ENCOUNTERED, AN ERROR CODE IS PLACED IN       01084000
+*       'URETCODE' AND THE CC IS SET TO 1 BEFORE RETURNING TO THE       01085000
+*       CALLER.                                                         01086000
+*                                                                       01087000
+*   NOTES:                                                              01088000
+*    1) THE FIRST UDIRBLOK IN A PAGE IS USED FOR CONTROL, IT DOES       01089000
+*       NOT CONTAIN DATA FOR A USERID.  THE 'UDIRDISP' FIELD CONTAINS   01090000
+*       THE DISPLACEMENT TO THE LAST UDIRBLOK IN THE PAGE, AND THE      01091000
+*       'UDIRDASD' FIELD CONTAINS THE ADDRESS OF THE NEXT UDIR PAGE.    01092000
+*                                                                       01093000
+*--------------------------------------------------------------         01094000
+*   INITIALIZATION...                                                   01095000
+READUDIR DS    0H                                              @V60C1BD 01096000
+         L     R0,DMKSYSUD    GET POINTER TO FIRST DASD PAGE   @V60C1BD 01097000
+         L     R4,DMKSYSPL    GET ADDRESS OF LIST OF POINTERS  @V60C1BD 01098000
+         L     R1,0(,R4)      GET ADDRESS FROM LIST            @V60C1BD 01099000
+         B     CALLRU                                          @V60C1BD 01100000
+         SPACE 1                                                        01101000
+*   ...WHEN NEW PAGE IS NEEDED:                                         01102000
+         USING UDIRBLOK,R2                                     @V60C1BD 01103000
+NEWPAGE  L     R2,URPAGDIR    GET ADDRESS OF FIRST UDIR IN PAGE@V60C1BD 01104000
+         L     R0,UDIRDASD    GET NEXT DASD PTR                @V60C1BD 01105000
+         LA    R4,4(,R4)      INCREMENT LIST PTR. TO NEXT ENTRY@V60C1BD 01106000
+         L     R1,0(,R4)      GET NEXT VIRTUAL PAGE ADDRESS    @V60C1BD 01107000
+         LTR   R1,R1          END OF LIST?                     @V60C1BD 01108000
+         BM    LISTEND        BR IF YES                        @V60C1BD 01109000
+         SPACE 1                                                        01110000
+*   CHECK IF THERE IS A VALID DASD PTR. THERE SHOULD BE, AND IF NOT,    01111000
+*   THERE IS AN ERROR.                                                  01112000
+CALLRU   LTR   R0,R0          IS THERE A VALID DASD PTR?       @V60C1BD 01113000
+         BM    SYNCHERR       BR IF NOT                        @V60C1BD 01114000
+         IC    R0,DMKSYSUD+3  GET DEVICE CODE FROM SYSTEM      @V60C1BD 01115000
+         BNZ   RUREAD         BR IF YES                        @V60C1BD 01116000
+         SPACE 1                                                        01117000
+*   START FROM BEGINNING, USING PTR IN DMKSYSUD                         01118000
+         L     R0,DMKSYSUD    GET POINTER TO START OF UDIRBLOKS@V60C1BD 01119000
+RUREAD   TRANS R2,R1,OPT=(BRING+SYSTEM+DEFER),IOER=RDERROR     @V60C1BD 01120000
+         SPACE 1                                                        01121000
+*--------------------------------------------------------------         01122000
+*   UDIRBLOK PAGE NOW IN REAL STORAGE AND REGISTERS ARE:                01123000
+*        R0 = DASD POINTER (0CCCPPDD)                                   01124000
+*        R1 = VIRTUAL PAGE STORAGE ADDRESS                              01125000
+*        R2 = REAL PAGE STORAGE ADDRESS                                 01126000
+*        R3 = UCNTRL ADDRESS                                            01127000
+*                                                                       01128000
+*   SEARCH FOR USERID PASSED IN PLIST (IN UIPARMS CONTROL BLK)          01129000
+*   (UDIRBLOKS ARE PACKED SEQUENTIALLY IN THE PAGE)                     01130000
+*--------------------------------------------------------------         01131000
+         LH    R5,UDIRDISP    GET DISPL TO END OF UDIRBLOK PAGE@V60C1BD 01132000
+         AR    R5,R2          SET R5 TO REAL ADDR. OF PAGE END @V60C1BD 01133000
+         ST    R2,URPAGDIR    PUT REAL PAGE ADDR. IN CTL. BLOCK@V60C1BD 01134000
+FINDUSER LA    R2,UDIRSIZE*8(,R2)  POINT TO 1ST (NEXT) UDIRBLOK@V60C1BD 01135000
+         CLR   R2,R5          HAS END OF PAGE BEEN REACHED?    @V60C1BD 01136000
+         BH    NEWPAGE        BR IF YES... GET NEW PAGE        @V60C1BD 01137000
+         CLC   UUSERID(L'UUSERID),UDIRUSER     USERID MATCH?   @V60C1BD 01138000
+         BNE   FINDUSER       BR IF NOT                        @V60C1BD 01139000
+         SPACE 1                                                        01140000
+*   FOR SAFETY, CHECK THAT THE LOGON PASSWORDS MATCH                    01141000
+         CLC   UCURPASS(L'UCURPASS),UDIRPASS  LOG PASSWD MATCH?@V60C1BD 01142000
+         BE    UF             BR IF YES                        @V60C1BD 01143000
+*   IF THE CURRENT PASSWORD PASSED IN THE PLIST IS BLANK, THIS          01144000
+*   INDICATES THAT THE TEST MODE IS REQUESTED.  NO UPDATING IS          01145000
+*   PERFORMED.                                                          01146000
+         CLC   UCURPASS(L'UCURPASS),MBLANKS  BLANK PASSWORD?   @VMI0009 01147000
+         BNE   MATCHERR                    BR IF NOT           @V60C1BD 01148000
+         OI    UFLAGS,UTESTMD SET TEST MODE FLAG               @V60C1BD 01149000
+UF       DS    0H                                              @V60C1BD 01150000
+         SPACE 1                                                        01151000
+*   THE USERID HAS BEEN LOCATED.  RETURN DATA TO CALLER                 01152000
+         ST    R0,UDASDDIR    PUT DASD ADDR. INTO CONTROL BLOCK@V60C1BD 01153000
+         ST    R1,UVPAGDIR    VIRT. PAGE ADDR. TO CTL. BLOCK   @V60C1BD 01154000
+         ST    R2,UDIRAD      REAL UDIRBLOK ADDR. TO CTL BLK   @V60C1BD 01155000
+         MVC   UDISPMAC(L'UDISPMAC+L'UDASDMAC),UDIRDISP  SAVE  @V60C1BD 01156000
+*                             DISPLACEMENT OF UMAC IN UCNTRL.           01157000
+         SPACE 1                                                        01158000
+RDRETCC0 SR    R15,R15        ZERO R15 FOR RETCODE AND CC      @V60C1BD 01159000
+         STH   R15,URETCODE   SET RETURN CODE AND CC TO 0      @V60C1BD 01160000
+         BR    R9             RETURN TO CALLER                 @V60C1BD 01161000
+         SPACE 1                                                        01162000
+MATCHERR LA    R15,ERRMATCH   INDICATE A PASSWORD MISMATCH     @V60C1BD 01163000
+         B     RDRETCC1                                        @V60C1BD 01164000
+         SPACE 1                                                        01165000
+LISTEND  LTR   R0,R0          IS THERE A DASD PTR?             @V60C1BD 01166000
+         LA    R15,ERRUID     SET UP FOR NO USERID ERROR       @V60C1BD 01167000
+         BZ    RDRETCC1       BR IF NOT, THERE SHOULDN'T BE    @V60C1BD 01168000
+         SPACE 1                                                        01169000
+*   THERE IS A SYNCHRONISM ERROR. THE END OF THE VIRTUAL PAGE           01170000
+*   LIST DOESN'T CORRESPOND TO THE END OF THE DASD PTRS.                01171000
+SYNCHERR LA    R15,ERRSYNC    INDICATE A SYNCH ERROR           @V60C1BD 01172000
+         B     RDRETCC1       RETURN CC = 1                    @V60C1BD 01173000
+         SPACE 1                                                        01174000
+RDERROR  LA    R15,ERREAD     SET RETURN CODE FOR READ ERROR   @V60C1BD 01175000
+         SPACE 1                                                        01176000
+RDRETCC1 STH   R15,URETCODE   STORE IN CONTROL BLOCK           @V60C1BD 01177000
+         TM    *+1,X'F0'      SET CC = 1                       @V60C1BD 01178000
+         BR    R9             RETURN TO CALLER                 @V60C1BD 01179000
+         SPACE 1                                                        01180000
+         DROP  R2                                              @V60C1BD 01181000
+         EJECT                                                          01182000
+*--------------------------------------------------------------         01183000
+*   SUBROUTINE TO LOCATE AND READ UMACBLOKS   |                         01184000
+*----------------------------------------------                         01185000
+*                                                                       01186000
+*   ON ENTRY:                                                           01187000
+*    R3  = ADDRESS OF UCNTRL BLOCK                                      01188000
+*    R9  = RETURN ADDRESS                                               01189000
+*                                                                       01190000
+*   ON EXIT:                                                            01191000
+*    R3 =  ADDRESS OF UCNTRL BLOCK (FILLED IN)                          01192000
+*    CC0:  OPERATION WAS SUCCESSFUL                                     01193000
+*    CC1:  ERROR, 'URETCODE' CONTAINS DETAILS                           01194000
+*                                                                       01195000
+*   OPERATION:                                                          01196000
+*    1. DETERMINE IF A VIRTUAL PAGE BUFFER FOR UMAC AND UDEV BLOCKS     01197000
+*       IS AVAILABLE.  IF NOT, GET ONE VIA 'DMKPGTVG' AND PUT ITS       01198000
+*       ADDRESS IN UCNTRL.                                              01199000
+*    2. GET DASD ADDRESS OF 'UMACBLOK' FROM UCNTRL BLOCK                01200000
+*    3. READ THE 'UMACBLOK' VIA 'DMKRPAGT'                              01201000
+*    4. SAVE THE DASD ADDRESS IF THE FIRST 'UDEVBLOK' IN UCNTRL         01202000
+*    5. RETURN TO THE CALLER WITH UCNTRL FILLED IN AND THE CC SET.      01203000
+*                                                                       01204000
+*---------------------------------------------------------------------- 01205000
+READUMAC DS    0H                                              @V60C1BD 01206000
+         L     R1,UVPAGBUF    GET BUFFER ADDRESS               @V60C1BD 01207000
+         LTR   R1,R1          IS THERE A BUFFER?               @V60C1BD 01208000
+         BNZ   GMACAD         BR IF YES                        @V60C1BD 01209000
+         SPACE 1                                                        01210000
+*   GET A BUFFER FOR UMAC AND UDEV PAGES                                01211000
+         CALL  DMKPGTVG       GET A VIRTUAL PAGE BUFFER        @V60C1BD 01212000
+         ST    R1,UVPAGBUF    SAVE ADDRESS IN UCNTRL           @V60C1BD 01213000
+GMACAD   L     R0,UDASDMAC    GET DASD ADDR OF UMAC FROM UCNTRL@V60C1BD 01214000
+         LTR   R0,R0          IS THERE A UMAC DASD ADDRESS?    @V60C1BD 01215000
+         BZ    MACERR1        BR IF NONE, ERROR                @V60C1BD 01216000
+         SPACE 1                                                        01217000
+*   READ UMAC DASD PAGE INTO VIRTUAL STORAGE                            01218000
+         IC    R0,DMKSYSUD+3  POINT TO DEVICE IN OWNED LIST    @V60C1BD 01219000
+         LA    R2,SYSTEM      SPECIFY SYSTEM OPTION            @V60C1BD 01220000
+         CALL  DMKRPAGT                                        @V60C1BD 01221000
+         TRANS R2,R1,OPT=(BRING,DEFER,SYSTEM),IOER=MACERR2     @V60C1BD 01222000
+         ST    R2,URPAGMAC    SAVE REAL UMAC PG. ADDR IN UCNTRL@V60C1BD 01223000
+         AH    R2,UDISPMAC    ADD DISPL. TO UMAC PAGE ADDRESS  @V60C1BD 01224000
+         USING UMACBLOK,R2                                     @V60C1BD 01225000
+         ST    R2,UMACAD      SAVE 'UMACBLOK' ADDRESS IN UCNTRL@V60C1BD 01226000
+         MVC   UDISPDEV(L'UDISPDEV+L'UDASDDEV),UMACDISP SAVE   @V60C1BD 01227000
+*                             UDEV DISP/DASD FROM UMAC                  01228000
+         SPACE 1                                                        01229000
+*   RETURN TO CALLER                                                    01230000
+         SR    R15,R15        ...FOR CC = 0                    @V60C1BD 01231000
+         STH   R15,URETCODE   NO ERROR                         @V60C1BD 01232000
+         BR    R9             RETURN                           @V60C1BD 01233000
+         SPACE 1                                                        01234000
+MACERR1  DS    0H                                              @V60C1BD 01235000
+         LA    R15,ERRMAC1                                     @V60C1BD 01236000
+         B     RDMRTCC1       ERROR RETURN                     @V60C1BD 01237000
+MACERR2  DS    0H                                              @V60C1BD 01238000
+         LA    R15,ERRMAC2                                     @V60C1BD 01239000
+         B     RDMRTCC1       ERROR RETURN                     @V60C1BD 01240000
+         SPACE 1                                                        01241000
+RDMRTCC1 STH   R15,URETCODE   SAVE IN UCNTRL                   @V60C1BD 01242000
+         TM    *+1,X'F0'      SET CC = 1                       @V60C1BD 01243000
+         BR    R9             RETURN                           @V60C1BD 01244000
+         SPACE 1                                                        01245000
+         DROP  R2                                              @V60C1BD 01246000
+         EJECT                                                          01247000
+*--------------------------------------------------------------         01248000
+*  SUBROUTINE TO LOCATE AND READ UDEVBLOKS  |                           01249000
+*--------------------------------------------                           01250000
+*                                                                       01251000
+*   ON ENTRY:                                                           01252000
+*    R3  = ADDRESS OF UCNTRL                                            01253000
+*    R9  = RETURN ADDRESS                                               01254000
+*                                                                       01255000
+*   ON EXIT:                                                            01256000
+*    R3  = ADDRESS OF UCNTRL                                            01257000
+*    CC0:  OPERATION WAS SUCCESSFUL                                     01258000
+*    CC1:  ERROR, 'URETCODE' CONTAINS DETAILS                           01259000
+*                                                                       01260000
+*   OPERATION:                                                          01261000
+*    1. DETERMINE IF A VIRTUAL PAGE BUFFER FOR UMAC AND UDEV BLOCKS     01262000
+*       IS AVAILABLE.  IF NOT, GET ONE VIA 'DMKPGTVG' AND PUT ITS       01263000
+*       ADDRESS IN UCNTRL.                                              01264000
+*    2. GET DASD ADDRESS OF FIRST 'UDEVBLOK' FROM UCNTRL BLOCK          01265000
+*    3. READ THE FIRST 'UDEVBLOK' VIA 'DMKRPAGT'                        01266000
+*    4. KEEP READING UDEVBLOK'S UNTIL THE SPECIFIED DEVICE IS FOUND.    01267000
+*    5. SAVE THE DATA RELATED TO THE UDEVBLOK.                          01268000
+*    6. RETURN TO THE CALLER WITH UCNTRL FILLED IN AND THE CC SET.      01269000
+*                                                                       01270000
+*--------------------------------------------------------------         01271000
+READUDEV DS    0H                                              @V60C1BD 01272000
+         L     R1,UVPAGBUF    GET BUFFER ADDRESS               @V60C1BD 01273000
+         LTR   R1,R1          IS THERE A BUFFER?               @V60C1BD 01274000
+         BNZ   GDEVAD         BR IF YES                        @V60C1BD 01275000
+         SPACE 1                                                        01276000
+*   GET A UMAC/UDEV BUFFER                                              01277000
+         CALL  DMKPGTVG       GET A VIRTUAL PAGE BUFFER        @V60C1BD 01278000
+         ST    R1,UVPAGBUF    SAVE ADDRESS IN UCNTRL           @V60C1BD 01279000
+GDEVAD   L     R0,UDASDDEV    GET DASD ADDR OF UDEV FROM UCNTRL@V60C1BD 01280000
+         LTR   R0,R0          IS THERE A UDEV DASD ADDRESS?    @V60C1BD 01281000
+         BZ    DEVERR1        BR IF NONE, ERROR                @V60C1BD 01282000
+         SPACE 1                                                        01283000
+*   READ UDEV DASD PAGE INTO VIRTUAL STORAGE                            01284000
+GNEXTDVP IC    R0,DMKSYSUD+3  POINT TO DEVICE IN OWNED LIST    @V60C1BD 01285000
+         LA    R2,SYSTEM      SPECIFY SYSTEM OPTION            @V60C1BD 01286000
+         CALL  DMKRPAGT                                        @V60C1BD 01287000
+         TRANS R2,R1,OPT=(BRING,DEFER,SYSTEM),IOER=DEVERR2     @V60C1BD 01288000
+         ST    R2,URPAGDEV    SAVE REAL UDEV PG. ADDR IN UCNTRL@V60C1BD 01289000
+         AH    R2,UDISPDEV    ADD DISPL. TO UDEV PAGE ADDRESS  @V60C1BD 01290000
+         USING UDEVBLOK,R2                                     @V60C1BD 01291000
+SVDEVAD  ST    R2,UDEVAD      SAVE 'UDEVBLOK' ADDRESS IN UCNTRL@V60C1BD 01292000
+         SPACE 1                                                        01293000
+*   FIND THE UDEVBLOK                                                   01294000
+         CLC   UDEVADD(L'UDEVADD),ULOCDVAD   THE DEVICE?       @V60C1BD 01295000
+         BE    DEVRET         BR IF YES                        @V60C1BD 01296000
+         SPACE 1                                                        01297000
+*   DEVICE NOT THIS ONE, CONTINUE TO LOOK                               01298000
+         L     R0,UDEVDASD    GET DASD ADDRESS OF NEXT UDEV    @V60C1BD 01299000
+         LTR   R0,R0          ANY MORE?                        @V60C1BD 01300000
+         BZ    DEVERR3        BR IF NOT, DEVICE NOT FOUND      @V60C1BD 01301000
+         LH    R2,UDEVDISP    GET DISPLACEMENT OF NEXT UDEV    @V60C1BD 01302000
+         STH   R2,UDISPDEV    SAVE DISPLACEMENT IN UCNTRL      @V60C1BD 01303000
+         C     R0,UDASDDEV    SAME AS CURRENT DASD ADDRESS?    @V60C1BD 01304000
+         ST    R0,UDASDDEV    SAVE NEXT DASD ADDRESS IN UCNTRL @V60C1BD 01305000
+         BNE   GNEXTDVP       BR IF NOT, GET NEXT PAGE         @V60C1BD 01306000
+         A     R2,URPAGDEV    CALC. REAL ADDRESS OF NEXT UDEV  @V60C1BD 01307000
+         B     SVDEVAD                                         @V60C1BD 01308000
+         SPACE 1                                                        01309000
+*   RETURN TO CALLER                                                    01310000
+DEVRET   SR    R15,R15        ...FOR CC = 0                    @V60C1BD 01311000
+         STH   R15,URETCODE   NO ERROR                         @V60C1BD 01312000
+         BR    R9             RETURN                           @V60C1BD 01313000
+         SPACE 1                                                        01314000
+DEVERR1  DS    0H                                              @V60C1BD 01315000
+         LA    R15,ERRDEV1                                     @V60C1BD 01316000
+         B     RDVRTCC1       ERROR RETURN                     @V60C1BD 01317000
+         SPACE 1                                                        01318000
+DEVERR2  DS    0H                                              @V60C1BD 01319000
+         LA    R15,ERRDEV2                                     @V60C1BD 01320000
+         B     RDVRTCC1       ERROR RETURN                     @V60C1BD 01321000
+         SPACE 1                                                        01322000
+DEVERR3  DS    0H             DEVICE NOT FOUND ERROR           @V60C1BD 01323000
+         LA    R15,ERRDEV3                                     @V60C1BD 01324000
+         B     RDVRTCC1       ERROR RETURN                     @V60C1BD 01325000
+         SPACE 1                                                        01326000
+RDVRTCC1 STH   R15,URETCODE   SAVE IN UCNTRL                   @V60C1BD 01327000
+         TM    *+1,X'F0'      SET CC = 1                       @V60C1BD 01328000
+         BR    R9             RETURN                           @V60C1BD 01329000
+         SPACE 1                                                        01330000
+         DROP  R2                                              @V60C1BD 01331000
+         EJECT                                                          01332000
+*--------------------------------------------------------------         01333000
+*   SUBROUTINE TO FIND THE VMBLOK OF THE USER BEING UPDATED  |          01334000
+*-------------------------------------------------------------          01335000
+*                                                                       01336000
+*   ON ENTRY:                                                           01337000
+*    R9 = RETURN REGISTER                                               01338000
+*                                                                       01339000
+*   ON EXIT:                                                            01340000
+*    CC = 0 THEN,                                                       01341000
+*    R1 = ADDRESS OF VMBLOK                                             01342000
+*                                                                       01343000
+*    CC ^= 0 THEN VMBLOK NOT FOUND                                      01344000
+*                                                                       01345000
+*   REGISTER USAGE: R0-R2,R14,R15 ( AND R6-R8 IN FINDLA )               01346000
+*   REGISTER TRANSPARENCY: R3-R5,R9-R13                                 01347000
+*                                                                       01348000
+*--------------------------------------------------------------         01349000
+FINDVMBK DS    0H                                              @V60C1BD 01350000
+         LR    R0,R9          SAVE RETURN REGISTER             @V60C1BD 01351000
+         MVC   UWORK(L'UUSERID),UUSERID  MOVE USERID TO WORK   @V60C1BD 01352000
+         XC    UWORK(L'UWORK),MASK   CONVERT TO READABLE USERID@V60C1BD 01353000
+         LA    R1,UWORK       POINT TO USERID IN WORK AREA     @V60C1BD 01354000
+         LA    R2,8           SET MAX. LENGTH OF USERID        @V60C1BD 01355000
+         BAL   R9,FINDLA      GET LENGTH OF USERID             @V60C1BD 01356000
+         LR    R9,R0          RESTORE RETURN REGISTER          @V60C1BD 01357000
+         SPACE 1                                                        01358000
+*   R1 = ADDRESS OF USERID FIELD, R2 = LENGTH OF USERID                 01359000
+         LR    R0,R2          DMKSCNAU NEEDS LENGTH IN R0      @V60C1BD 01360000
+         CALL  DMKSCNAU       LOCATE VMBLOK                    @V60C1BD 01361000
+         BR    R9             RETURN WITH CC SET               @V60C1BD 01362000
+         EJECT                                                          01363000
+*--------------------------------------------------------------         01364000
+*   SUBROUTINE TO LOCATE THE LENGTH OF A DATA FIELD  |                  01365000
+*-----------------------------------------------------                  01366000
+*                                                                       01367000
+*   ENTRY POINTS:                                                       01368000
+*    FINDLA: ALLOW ALPHA BYTES                                          01369000
+*    FINDLN: DO NOT ALLOW ALPHA BYTES                                   01370000
+*                                                                       01371000
+*   ON ENTRY:                                                           01372000
+*    R1 = ADDRESS OF BEGINNING OF FIELD                                 01373000
+*    R2 = MAXIMUM LENGTH OF FIELD                                       01374000
+*    R9 = RETURN REGISTER                                               01375000
+*                                                                       01376000
+*   ON EXIT:                                                            01377000
+*    CC = 0, THEN                                                       01378000
+*    R1 = ADDRESS OF BEGINNING OF FIELD                                 01379000
+*    R2 = LENGTH OF FIELD IN BYTES (OR ZERO IF ERROR)                   01380000
+*                                                                       01381000
+*    CC ^= 0, THEN                                                      01382000
+*    R1 = ADDRESS OF BEGINNING OF FIELD                                 01383000
+*    R2 = LENGTH OF FIELD UP TO AND INCLUDING OFFENDING BYTES           01384000
+*                                                                       01385000
+*   OPERATION:                                                          01386000
+*   1. SET REGISTER TO INDICATE WHETHER ALPHA BYTES ARE ALLOWED         01387000
+*   2. SCAN DATA UNTIL EITHER A BLANK IS FOUND OR UNTIL THE END OF      01388000
+*      THE DATA IS REACHED.  RETURN CC = 0 IF NO ERRORS FOUND           01389000
+*   3. TEST EACH BYTE FOR NUMERIC. IF ALPHA, CHECK IF ALPHA ALLOWED.    01390000
+*      IF NOT, RETURN CC ^= 0                                           01391000
+*                                                                       01392000
+*   REGISTER USAGE: R2,R6-R8                                            01393000
+*   REGISTER TRANSPARENCY: R0,R1,R3-R5,R9-R15                           01394000
+*                                                                       01395000
+*--------------------------------------------------------------         01396000
+FINDLA   DS    0H             FIND LENGTH, ALLOW ALPHA         @V60C1BD 01397000
+         SR    R6,R6          INDICATE ALPHA ALLOWED           @V60C1BD 01398000
+         B     FINDCM         TO COMMON CODE                   @V60C1BD 01399000
+         SPACE 1                                                        01400000
+FINDLN   DS    0H             FIND LENGTH, ALLOW ONLY NUMERIC  @V60C1BD 01401000
+         LA    R6,1           INDICATE ALPHA NOT ALLOWED       @V60C1BD 01402000
+         SPACE 1                                                        01403000
+FINDCM   LR    R7,R2          SAVE MAX. LENGTH                 @V60C1BD 01404000
+         SR    R2,R2          CLEAR REG. AND USE FOR COUNT     @V60C1BD 01405000
+         LR    R8,R1          SAVE START ADDRESS               @V60C1BD 01406000
+         SPACE 1                                                        01407000
+BLOOP    CLI   0(R8),C' '     IS CHARACTER A BLANK?            @V60C1BD 01408000
+         BER   R9             BR IF YES, EXIT (RETURN CC = 0)  @V60C1BD 01409000
+         LA    R2,1(,R2)      INCREMENT COUNT                  @V60C1BD 01410000
+         CLI   0(R8),C'0'     IS CHARACTER < THAN 0?           @V60C1BD 01411000
+         BL    ALPHA          BR IF YES                        @V60C1BD 01412000
+         CLI   0(R8),C'9'     IS CHARACTER > 9?                @V60C1BD 01413000
+         BHR   R9             BR IF YES, ERROR (RETURN CC = 2) @V60C1BD 01414000
+ALPHARET CR    R7,R2          HAS MAX. BEEN REACHED?           @V60C1BD 01415000
+         BER   R9             BR IF YES, EXIT (RETURN CC = 0)  @V60C1BD 01416000
+         LA    R8,1(,R8)      INCREMENT ADDRESS                @V60C1BD 01417000
+         B     BLOOP                                           @V60C1BD 01418000
+         SPACE 1                                                        01419000
+ALPHA    LTR   R6,R6          ARE ALPHA BYTES ALLOWED?         @V60C1BD 01420000
+         BNZR  R9             RETURN IF NOT (CC = 2)           @V60C1BD 01421000
+         B     ALPHARET                                        @V60C1BD 01422000
+         EJECT                                                          01423000
+*--------------------------------------------------------------         01424000
+*   SUBROUTINE TO CONVERT EBCDIC VALUE IN THE RANGE 0-9 AND             01425000
+*   A-O TO HEX VALUE.                                                   01426000
+*--------------------------------------------------------------         01427000
+*                                                                       01428000
+*   ON ENTRY:                                                           01429000
+*    R1 = ADDRESS OF FIRST BYTE OF FIELD TO BE CONVERTED                01430000
+*    R2 = LENGTH OF FIELD                                               01431000
+*    R9 = RETURN ADDRESS                                                01432000
+*                                                                       01433000
+*   ON RETURN:                                                          01434000
+*    CC = 0,                                                            01435000
+*     R2 = THE CONVERTED VALUE, RIGHT JUSTIFIED                         01436000
+*                                                                       01437000
+*    CC ^= 0,     ERROR                                                 01438000
+*     R2 = 0                                                            01439000
+*                                                                       01440000
+*   REGISTER USAGE: R1,R2,R6-R8                                         01441000
+*   REGISTER TRANSPARENCY: R1,R3-R5,R9-R15                              01442000
+*                                                                       01443000
+*--------------------------------------------------------------         01444000
+BCDTOHEX DS    0H                                              @V60C1BD 01445000
+         LR    R7,R2          SAVE FIELD LENGTH                @V60C1BD 01446000
+         SR    R6,R6          CLEAR REG                        @V60C1BD 01447000
+         LR    R8,R6          ...                              @V60C1BD 01448000
+L1       IC    R6,0(,R1)      GET DIGIT                        @V60C1BD 01449000
+         CLI   0(R1),C'0'     GREATER THAN ZERO?               @V60C1BD 01450000
+         BL    L3             NO  TRY A-F                      @V60C1BD 01451000
+         CLI   0(R1),C'9'     GREATER THAN NINE?               @V60C1BD 01452000
+         BH    BCDERR1        YES  ERROR                       @V60C1BD 01453000
+         S     R6,F240        MAKE DIGIT A HEX NO.(X'00'-X'09')@V60C1BD 01454000
+         B     L2             CONTINUE                         @V60C1BD 01455000
+L3       CLI   0(R1),C'A'     LESS THAN "A"?                   @V60C1BD 01456000
+         BL    BCDERR1        YES  ERROR                       @V60C1BD 01457000
+         CLI   0(R1),C'F'     GREATER THAN "F"?                @V60C1BD 01458000
+         BH    BCDERR1        YES  ERROR                       @V60C1BD 01459000
+         SH    R6,=AL2(C'A'-10)  MAKE CHAR HEX NO.(X'0A'-X'0F')@V60C1BD 01460000
+L2       SLL   R8,4           ASSEMBLE NEXT DIGIT              @V60C1BD 01461000
+         AR    R8,R6          ...                              @V60C1BD 01462000
+         LA    R1,1(,R1)      BUMP PTR                         @V60C1BD 01463000
+         BCT   R7,L1          LOOP THROUGH ENTIRE FIELD        @V60C1BD 01464000
+         LR    R2,R8          RETURN RESULT IN R1              @V60C1BD 01465000
+         SR    R8,R8          SET CC=0                         @V60C1BD 01466000
+         BR    R9             RETURN                           @V60C1BD 01467000
+         SPACE 1                                                        01468000
+BCDERR1  DS    0H                                              @V60C1BD 01469000
+         LA    R2,0           RETURN ZERO WITHOUT DISTURBING CC@V60C1BD 01470000
+         BR    R9                                              @V60C1BD 01471000
+         EJECT                                                          01472000
+*--------------------------------------------------------------         01473000
+*   SUBROUTINE TO CONVERT EBCDIC NUMERIC VALUE TO BINARY   |            01474000
+*-----------------------------------------------------------            01475000
+*                                                                       01476000
+*   ON ENTRY:                                                           01477000
+*    R1 = ADDRESS OF FIRST BYTE OF FIELD TO BE CONVERTED                01478000
+*    R2 = LENGTH OF FIELD                                               01479000
+*    R9 = RETURN ADDRESS                                                01480000
+*                                                                       01481000
+*   ON EXIT:                                                            01482000
+*    CC = 0,                                                            01483000
+*     R1 = UNCHANGED                                                    01484000
+*     R2 = THE CONVERTED VALUE                                          01485000
+*                                                                       01486000
+*    CC ^= 0,      ERROR                                                01487000
+*     R1 = UNCHANGED                                                    01488000
+*                                                                       01489000
+*   REGISTER USAGE: R1,R2,R7,R8,R9                                      01490000
+*   REGISTER TRANSPARENCY: R1,R3-R6,R9-R15                              01491000
+*                                                                       01492000
+*--------------------------------------------------------------         01493000
+BCDTOBIN LR    R8,R1          SAVE STARTING ADDRESS            @V60C1BD 01494000
+         LR    R7,R2          SAVE LENGTH                      @V60C1BD 01495000
+BCDBINLP TM    0(R1),X'F0'    IS BYTE NUMERIC?                 @V60C1BD 01496000
+         BNO   BCDBINER       BR IF NOT, ERROR                 @V60C1BD 01497000
+         LA    R1,1(,R1)      POINT TO THE NEXT BYTE           @V60C1BD 01498000
+         BCT   R2,BCDBINLP    DO IT TO ALL INPUT               @V60C1BD 01499000
+         LR    R1,R8          RESTORE STARTING ADDRESS         @V60C1BD 01500000
+         LR    R2,R7          RESTORE ORIGINAL LENGTH          @V60C1BD 01501000
+         BCTR  R2,0           DECREMENT LENGTH                 @V60C1BD 01502000
+         EX    R2,BCDPACK     PACK DATA INTO WORK AREA         @V60C1BD 01503000
+         CVB   R2,UWORK       SET UP DATA IN R2                @V60C1BD 01504000
+         CR    R9,R9          SET CC = 0                       @V60C1BD 01505000
+         BR    R9             RETURN WITH CC = 0               @V60C1BD 01506000
+         SPACE 1                                                        01507000
+BCDBINER CR    R9,R1          FORCE NON ZERO CC                @V60C1BD 01508000
+         BR    R9             RETURN WITH CC ^= 0              @V60C1BD 01509000
+         SPACE 1                                                        01510000
+*   EXECUTED INSTRUCTION                                                01511000
+BCDPACK  PACK  UWORK,0(*-*,R1)                                 @V60C1BD 01512000
+         EJECT                                                          01513000
+*--------------------------------------------------------------         01514000
+*   TABLE OF UPDATE-IN-PLACE OPERATIONS                                 01515000
+*--------------------------------------------------------------         01516000
+OPTABLE  DS    0F                                              @V60C1BD 01517000
+         DC    CL8'LOGPASS',AL2(LOGPASS-DMKUDU)                @V60C1BD 01518000
+         DC    CL8'MDISK',AL2(MDISK-DMKUDU)                    @V60C1BD 01519000
+KSTORAGE DC    CL8'STORAGE',AL2(STORAGE-DMKUDU)                @V60C1BD 01520000
+         DC    CL8'EDITCHAR',AL2(EDITCHAR-DMKUDU)              @V60C1BD 01521000
+         DC    CL8'OPTIONS',AL2(OPTIONS-DMKUDU)                @V60C1BD 01522000
+         DC    CL8'IPL',AL2(IPL-DMKUDU)                        @V60C1BD 01523000
+         DC    CL8'DISTRIB',AL2(DISTRIB-DMKUDU)                @V60C1BD 01524000
+         DC    CL8'MAXSTOR',AL2(STORAGE-DMKUDU)                @V60C1BD 01525000
+         DC    CL8'PRIVLEGE',AL2(PRIVLEGE-DMKUDU)              @V60C1BD 01526000
+         DC    CL8'PRIORITY',AL2(PRIORTY-DMKUDU)               @V60C1BD 01527000
+KACCOUNT DC    CL8'ACCOUNT',AL2(ACCOUNT-DMKUDU)   NORMAL ACCT  @V60C1BD 01528000
+KIACCT   DC    CL8'IACCOUNT',AL2(ACCOUNT-DMKUDU)  IMMED ACCT   @V60C1BD 01529000
+KTACCT   DC    CL8'TACCOUNT',AL2(ACCOUNT-DMKUDU)  TEMP ACCT    @V60C1BD 01530000
+         DC    8X'FF'         FENCE AT END OF TABLE            @V60C1BD 01531000
+         SPACE 2                                                        01532000
+*--------------------------------------------------------------         01533000
+*   TABLE OF VALID OPTIONS FOR OPTION OPERATION                         01534000
+*                                                                       01535000
+*   THE NAME OF THE OPTION IS FOLLOWED BY ON BYTE INDICATING            01536000
+*   IF THE OPTION IS FOLLOWED BY A VALUE (X'00'=NO VALUE,               01537000
+*   X'FF'=VALUE) AND A SECOND 2-BYTE VALUE AS DEFINED IN                01538000
+*   'UMACOPT' AND 'UMACOPT2'.                                           01539000
+*                                                                       01540000
+*--------------------------------------------------------------         01541000
+OPTIONTB DS    0F                                              @V60C1BD 01542000
+         DC    CL9'ISAM',X'00',AL2(VISAM)     ISAM             @V60C1BD 01543000
+OPTIONEL EQU   (*-OPTIONTB)   ELEMENT LENGTH                   @V60C1BD 01544000
+         DC    CL9'ECMODE',X'00',AL2(VECMODE) ECMODE           @V60C1BD 01545000
+         DC    CL9'REALTIMER',X'00',AL2(VREALTM)   REALTIMER   @V60C1BD 01546000
+         DC    CL9'VIRT=REAL',X'00',AL2(VIRTREAL)  VIRT=REAL   @V60C1BD 01547000
+         DC    CL9'ACCT',X'00',AL2(VACCT)     ACCT             @V60C1BD 01548000
+         DC    CL9'SVCOFF',X'00',AL2(VSVCOFF) SVCOFF           @V60C1BD 01549000
+         DC    CL9'BMX',X'00',AL2(VBMX)       BMX              @V60C1BD 01550000
+         DC    CL9'CPUID',X'FF',AL2(VCPUID)   CPUID            @V60C1BD 01551000
+         DC    CL9'AFFINITY',X'FF',AL2(VAFFIN)    AFFINITY     @V60C1BD 01552000
+MAXOPTNS EQU   (*-OPTIONTB)/OPTIONEL     MAX. NO. OF OPTIONS   @V60C1BD 01553000
+         DC    9X'FF',X'FF',X'FFFF'      FENCE AT END OF TABLE @V60C1BD 01554000
+         SPACE 1                                                        01555000
+*   THE FOLLOWING VALUES ARE THOSE DEFINED IN UMACBLOK FOR              01556000
+*   'UMACOPT' AND 'UMACOPT2', TWO CONTIGUOUS BYTES, THAT                01557000
+*   CONTAIN CODED DATA DEFINING THE VIRTUAL MACHINE OPTIONS.            01558000
+VISAM    EQU   X'8000'        ISAM VALUE                       @V60C1BD 01559000
+VECMODE  EQU   X'4000'        ECMODE VALUE                     @V60C1BD 01560000
+VREALTM  EQU   X'2000'        REALTIMER                        @V60C1BD 01561000
+VIRTREAL EQU   X'1000'        VIRT= REAL VALUE                 @V60C1BD 01562000
+VACCT    EQU   X'0800'        ACCT VALUE                       @V60C1BD 01563000
+VSVCOFF  EQU   X'0200'        SVCOFF VALUE                     @V60C1BD 01564000
+VBMX     EQU   X'0100'        BMX VALUE                        @V60C1BD 01565000
+VCPUID   EQU   X'0080'        CPUID VALUE                      @V60C1BD 01566000
+VAFFIN   EQU   X'0000'        AFFINITY VALUE (NONE)            @V60C1BD 01567000
+         SPACE 1                                                        01568000
+LVCPUID  EQU   6              MAX. LENGTH OF CPUID VALUE       @V60C1BD 01569000
+LVAFFIN  EQU   2              MAX. LENGTH OF AFFINITY VALUE    @V60C1BD 01570000
+         SPACE 1                                                        01571000
+OPTNMAXV EQU   VISAM+VECMODE+VREALTM+VIRTREAL+VACCT+VSVCOFF+VBMX+VCPUIDX01572000
+               +VAFFIN                                         @V60C1BD 01573000
+         SPACE 2                                                        01574000
+*--------------------------------------------------------------         01575000
+*   TABLE OF VALID LINK MODES FOR MDISK OPERATIONS                      01576000
+*--------------------------------------------------------------         01577000
+LINKMDTB DS    0F                                              @V60C1BD 01578000
+         DC    CL3'R  ',AL1(UDEVR)                             @VMI0024 01579000
+LINKMDEL EQU   (*-LINKMDTB)   ELEMENT LENGTH                   @VMI0024 01580000
+         DC    CL3'RR ',AL1(UDEVRR)                            @VMI0024 01581000
+         DC    CL3'W  ',AL1(UDEVW)                             @VMI0024 01582000
+         DC    CL3'WR ',AL1(UDEVWR)                            @VMI0024 01583000
+         DC    CL3'M  ',AL1(UDEVM)                             @VMI0024 01584000
+         DC    CL3'MR ',AL1(UDEVMR)                            @VMI0024 01585000
+         DC    CL3'MW ',AL1(UDEVMW)                            @VMI0024 01586000
+VRRSEP   EQU   *              VIRTUAL RESERVE/RELEASE SEPARATE @VMI0024 01587000
+         DC    CL3'RV ',AL1(UDEVR)                             @VMI0024 01588000
+         DC    CL3'RRV',AL1(UDEVRR)                            @VMI0024 01589000
+         DC    CL3'WV ',AL1(UDEVW)                             @VMI0024 01590000
+         DC    CL3'WRV',AL1(UDEVWR)                            @VMI0024 01591000
+         DC    CL3'MV ',AL1(UDEVM)                             @VMI0024 01592000
+         DC    CL3'MRV',AL1(UDEVMR)                            @VMI0024 01593000
+         DC    CL3'MWV',AL1(UDEVMW)                            @VMI0024 01594000
+MAXLNKMD EQU   (*-LINKMDTB)/LINKMDEL   NO. OF VALID LINK MODES @V60C1BD 01595000
+         EJECT                                                          01596000
+*--------------------------------------------------------------         01597000
+*   EXECUTED INSTRUCTIONS                                               01598000
+*--------------------------------------------------------------         01599000
+         SPACE 1                                                        01600000
+PACKINST PACK  UWORK+3(5),0(0,R8)                              @V60C1BD 01601000
+         SPACE 5                                                        01602000
+* -------------------------------------------------------------         01603000
+*   CONSTANTS AND MISCELLANY...                                         01604000
+* -------------------------------------------------------------         01605000
+         DS    0F                                              @V60C1BD 01606000
+MASK     DC    24X'AA'                                         @V60C1BD 01607000
+MBLANKS  DC    8X'EA'         MASKED BLANKS FOR TEST MODE CHECK@VMI0009 01608000
+         SPACE 2                                                        01609000
+*--------------------------------------------------------------         01610000
+*   TRANSLATE AND TEST TABLE FOR PRIVILEGE OPERATION                    01611000
+*      VALID PRIVILEGE CLASSES ARE A THROUGH H                          01612000
+*                                                                       01613000
+*   USE X'FF' AS FUNCTION FOR BLANK TO SIGNAL END OF FIELD              01614000
+*   AND X'BD' TO SIGNAL AN ERROR INPUT VALUE                            01615000
+*--------------------------------------------------------------         01616000
+TRPRVTBL DS    0D                                              @V60C1BD 01617000
+         SPACE 1                                                        01618000
+         DC    (X'40'-X'00')X'BD'  INVALID VALUES              @V60C1BD 01619000
+         SPACE 1                                                        01620000
+         DC    X'FF'  VALUE FOR X'40' (TO SIGNAL END OF FIELD) @V60C1BD 01621000
+         SPACE 1                                                        01622000
+         DC    (X'C1'-X'41')X'BD'  INVALID VALUES              @V60C1BD 01623000
+         SPACE 1                                                        01624000
+*   CLASS=        A     B     C     D     E     F     G     H           01625000
+         DC    X'80',X'40',X'20',X'10',X'08',X'04',X'02',X'01' @V60C1BD 01626000
+         SPACE 1                                                        01627000
+         DC    (X'100'-X'C9')X'BD'  INVALID VALUES             @V60C1BD 01628000
+         EJECT                                                          01629000
+*--------------------------------------------------------------         01630000
+*   ERROR CODE EQUATES                                                  01631000
+*--------------------------------------------------------------         01632000
+ERRWRIT1 EQU   10        ERROR IN DMKRPAPT WRITING OBJECT DASD @V60C1BD 01633000
+ERRWRIT2 EQU   11        ERROR IN DMKRPAPT WRITING PAGING DASD @V60C1BD 01634000
+         SPACE 1                                                        01635000
+ERREAD   EQU   20        ERROR DURING 'TRANS' OF UDIR PAGE     @V60C1BD 01636000
+ERRMAC1  EQU   21        NO UMAC ADDRESS IN UCNTRL             @V60C1BD 01637000
+ERRMAC2  EQU   22        ERROR DURING 'TRANS' OF UMAC PAGE     @V60C1BD 01638000
+ERRDEV1  EQU   24        NO UDEV ADDRESS IN UCNTRL             @V60C1BD 01639000
+ERRDEV2  EQU   25        ERROR DURING 'TRANS' OF UDEV PAGE     @V60C1BD 01640000
+ERRDEV3  EQU   26        UDEV BLOCK NOT FOUND                  @V60C1BD 01641000
+ERRSYNC  EQU   27        OBJ. DASD NOT IN SYNCH. WITH DMKSYSPL @V60C1BD 01642000
+ERROP    EQU   28        OPERATION INVALID                     @V60C1BD 01643000
+         SPACE 1                                                        01644000
+ERRUID   EQU   30        USERID NOT FOUND                      @V60C1BD 01645000
+ERRMATCH EQU   31        LOGON PASSWORD MISMATCH               @V60C1BD 01646000
+         SPACE 1                                                        01647000
+ERRSTOR1 EQU   40        STORAGE EXCEEDS MAXIMUM               @V60C1BD 01648000
+ERRSTOR2 EQU   41        MAX. STORAGE > 16M                    @V60C1BD 01649000
+ERRSTOR3 EQU   42        NO SIGN AFTER PACKING NEW SIZE        @V60C1BD 01650000
+ERRSTOR4 EQU   43        BAD BYTES IN STORAGE DATA             @V60C1BD 01651000
+         SPACE 1                                                        01652000
+ERRPRIV1 EQU   50        PRIVILEGE OPERAND ALL BLANKS          @V60C1BD 01653000
+ERRPRIV2 EQU   51        NO VALID PRIVILEGE CLASSES IN OPERAND @V60C1BD 01654000
+ERRPRIV3 EQU   52        ERROR IN ACCUMULATED PRIVILEGE VALUE  @V60C1BD 01655000
+ERRPRIV4 EQU   53        INVAILD DATA IN PRIVILEGE FIELD       @V60C1BD 01656000
+         SPACE 1                                                        01657000
+ERRPRI1  EQU   60        BAD BYTE IN PRIORITY FIELD            @V60C1BD 01658000
+ERRPRI2  EQU   61        PRIORITY FIELD ALL BLANKS             @V60C1BD 01659000
+ERRPRI3  EQU   62        NO SIGN AFTER PACKING NEW PRIORITY    @V60C1BD 01660000
+ERRPRI4  EQU   63        PRIORITY > 99                         @V60C1BD 01661000
+         SPACE 1                                                        01662000
+ERROPTN1 EQU   70        INVALID OPTION                        @V60C1BD 01663000
+ERROPTN2 EQU   71        NO FENCE AT END OF PLIST              @V60C1BD 01664000
+ERROPTN3 EQU   72        INVALID ACCUM. OPTION VALUE           @V60C1BD 01665000
+         SPACE 1                                                        01666000
+ERRMDSK1 EQU   80        INVALID MDISK ADDRESS IN PLIST        @V60C1BD 01667000
+ERRMDSK2 EQU   81        INVALID LINK MODE                     @V60C1BD 01668000
+ERRMDSK3 EQU   82        LINK PASSWORDS GIVEN AND SHORT UDEV.  @V60C1BD 01669000
+ERRMDSK4 EQU   83        BLANK LINK PASSWORDS WITH LONG UDEV.  @V60C1BD 01670000
+         SPACE 1                                                        01671000
+ERRPGZ   EQU   90        FIRST 8 BYTES OF UPDATED PAGE ARE 0   @V60C1BD 01672000
+         EJECT                                                          01673000
+*--------------------------------------------------------------         01674000
+*   DSECTS                                                              01675000
+*--------------------------------------------------------------         01676000
+         SPACE 1                                                        01677000
+* THE DSECT 'OPRSECT' IS USED TO REFERENCE THE TABLE (OPTABLE)          01678000
+* OF VALID UPDATE-IN-PLACE OPERATIONS                                   01679000
+OPRSECT  DSECT                                                 @V60C1BD 01680000
+         DS    0F                                              @V60C1BD 01681000
+OPERATN  DS    CL8                                             @V60C1BD 01682000
+OPADDR   DS    AL2                                             @V60C1BD 01683000
+LOPTABLE EQU   *-OPERATN                                       @V60C1BD 01684000
+         SPACE 3                                                        01685000
+*--------------------------------------------------------------         01686000
+* THE DSECT 'OPTNSECT' IS USED TO REFERENCE THE TABLE                   01687000
+* (OPTIONTB) OF VALID OPTIONS FOR THE OPTION OPERATION                  01688000
+OPTNSECT DSECT                                                 @V60C1BD 01689000
+         DS    0F                                              @V60C1BD 01690000
+OPTNAME  DS    CL9       OPTION NAME                           @V60C1BD 01691000
+OPTNFLG  DS    X         FLAG INDICATING OPTION ARGS. PRESENT  @V60C1BD 01692000
+OPTNVALU DS    2X        VALUE FOR 'UMACOPT' AND 'UMACOPT2'    @V60C1BD 01693000
+OPTNLN   EQU   *-OPTNAME      LENGTH OF OPTION TABLE ENTRY     @V60C1BD 01694000
+         SPACE 3                                               @V60C1BD 01695000
+*--------------------------------------------------------------         01696000
+* THE DSECT 'LINKMSECT' IS USED TO REFERENCE THE TABLE                  01697000
+* (LINKMDTB) OF VALID LINK MODES FOR THE MDISK OPERATION                01698000
+LNKMSECT DSECT                                                 @V60C1BD 01699000
+         DS    0F                                              @V60C1BD 01700000
+LNKMD    DS    CL3            LINK MODE (E.G., RR)             @VMI0024 01701000
+LNKMVALU DS    C              LINK MODE VALUE IN 'UDEVMODE'    @VMI0024 01702000
+LNKMDLN  EQU   *-LNKMD        LENGTH OF LINK TABLE ENTRY       @V60C1BD 01703000
+         SPACE 3                                               @V60C1BD 01704000
+DMKUDU   CSECT                                                 @V60C1BD 01705000
+         EJECT                                                          01706000
+*--------------------------------------------------------------         01707000
+*   THE FOLLOWING TWO COPY STATEMENTS MUST BE LOGICALLY AND             01708000
+*   PHYSICALLY CONTIGUOUS                                               01709000
+*--------------------------------------------------------------         01710000
+         SPACE 1                                                        01711000
+         COPY  UCNTRL                                          @V60C1BD 01712000
+         SPACE 1                                                        01713000
+         COPY  UIPARMS                                         @V60C1BD 01714000
+         SPACE 1                                                        01715000
+*--------------------------------------------------------------         01716000
+*   KEEP THE ABOVE TWO COPY STATEMENTS LOGICALLY AND                    01717000
+*   PHYSICALLY CONTIGUOUS                                               01718000
+*--------------------------------------------------------------         01719000
+         EJECT                                                          01720000
+         COPY  CORE                                            @V60C1BD 01721000
+         COPY  EQU                                             @V60C1BD 01722000
+         COPY  SAVE                                            @V60C1BD 01723000
+         COPY  VMBLOK                                          @V60C1BD 01724000
+         COPY  UDIRECT                                         @V60C1BD 01725000
+         SYSLOCS                                               @V60C1BD 01726000
+         PSA                                                   @V60C1BD 01727000
+         COPY  ALLOC                                           @V60C1BD 01728000
+         COPY  IOBLOKS                                         @V60C1BD 01729000
+         COPY  CONBUF                                          @V60C1BD 01730000
+         EJECT                                                          01731000
+DMKUDU   CSECT                                                 @V60C1BD 01732000
+         SPACE 5                                                        01733000
+         END   DMKUDU                                          @V60C1BD 01734000

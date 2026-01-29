@@ -1,0 +1,1628 @@
+CKS      TITLE 'DMKCKS     (CP)        VM/370 - RELEASE 6'              00001000
+DMKCKS   CSECT                                                 @V304235 00002000
+*                                                                       00003000
+*                                                                       00004000
+* MODULE NAME -                                                         00005000
+*                                                                       00006000
+*        DMKCKS                                                         00007000
+*                                                                       00008000
+* CONTENTS -                                                            00009000
+*                                                                       00010000
+*        DMKCKSPL - CHECKPOINT A CHANGE IN SPOOL FILE STATUS            00011000
+*        DMKCKSWM - RECOVER SPOOL FILE DATA AND ALLOCATION BLOCKS FROM  00012000
+*                   THE CHECKPOINT RECORDS PREVIOUSLY RECORDED          00013000
+*        DMKCKSIN - INITIALIZE CHECKPOINT CYLINDER TO PRESENT STATUS    00014000
+*                                                                       00015000
+* DATA AREAS DEFINED AS ENTRY POINTS -                                  00016000
+*                                                                       00017000
+*        DMKCKSMP - VIRTUAL ADDRESS IN SYSTEM VM SPACE OF MAP OF        00018000
+*                   CHECKPOINT CYLINDER                                 00019000
+*                                                                       00020000
+         EJECT                                                          00021000
+         COPY  OPTIONS                                         @V304298 00022000
+         EJECT                                                          00023000
+         ENTRY DMKCKSMP                                        @V304298 00024000
+         EXTRN DMKSYSCH,DMKSYSCN,DMKQCNSY                      @V304235 00025000
+         EXTRN DMKPTRUL                                        @V304298 00026000
+         EXTRN DMKLOCKQ,DMKLOCKD                               @V304298 00027000
+         EXTRN DMKPGTVR                                        @V304298 00028000
+         EXTRN DMKPGTTU                                        @V304298 00029000
+         EXTRN DMKSYSOW,DMKSYSOC                               @V304298 00030000
+         EXTRN DMKPGTVG,DMKSCNRU                               @V304298 00031000
+         EXTRN DMKRPAGT,DMKRPAPT                               @V304298 00032000
+         EXTRN DMKSCNRD                                        @V304298 00033000
+         EXTRN DMKRSPID                                        @V304298 00034000
+         EXTRN DMKRSPHQ                                        @V304298 00035000
+         EXTRN DMKERMSG                                        @V304298 00036000
+         EXTRN DMKLOCKT,DMKCVTBD                               @VM03200 00037000
+         EXTRN DMKQNTBL            3800 IMAGE LIBRARIES        @V60B9BA 00037100
+         SPACE 4                                                        00038000
+         USING PSA,R0                                          @V304298 00039000
+         USING SFBLOK,R7                                       @V304298 00040000
+         USING VMBLOK,R11                                      @V304298 00041000
+         USING SAVEAREA,R13                                    @V304298 00042000
+         EJECT                                                          00043000
+*                                                                       00044000
+* SUBROUTINE NAME -                                                     00045000
+*                                                                       00046000
+*        DMKCKSPL                                                       00047000
+*                                                                       00048000
+* FUNCTION -                                                            00049000
+*                                                                       00050000
+*        CHECKPOINT ANY ALTERATIONS IN THE SPOOL FILE SETUP SO THAT     00051000
+*        THE RECOVERY ROUTINE CAN GET THEM IF WARM START FAILS.         00052000
+*                                                                       00053000
+* ATTRIBUTES -                                                          00054000
+*                                                                       00055000
+*        SERIALLY REUSABLE, PAGEABLE, CALLED VIA SVC                    00056000
+*                                                                       00057000
+* ENTRY POINTS -                                                        00058000
+*                                                                       00059000
+*        DMKCKSPL                                                       00060000
+*                                                                       00061000
+* ENTRY CONDITIONS -                                                    00062000
+*                                                                       00063000
+*        GPR1  = ADDRESS OF SHQBLOK IF CHGSHQ IS ON                     00064000
+*        GPR2  = PARM REGISTER SIGNIFYING THE OPTIONS DESIRED ON        00065000
+*                THIS CHECKPOINT CALL.  THEY ARE:                       00066000
+*                RDRCHN - THIS IS TO BE A READER SFBLOK                 00067000
+*                PCHCHN - THIS IS TO BE A PUNCH SFBLOK                  00068000
+*                PRTCHN - THIS IS TO BE A PRINT SFBLOK                  00069000
+*                ADDSFB - CREATE A NEW SFBLOK ON THE CHECKPOINT CYL     00070000
+*                CHGSFB - CHANGE AN EXISTING SFBLOK'S STATUS            00071000
+*                DELSFB - DELETE AN SFBLOK FROM THE CHECKPOINT CYL      00072000
+*                OPNSFB - THIS IS AN OPEN CONSOLE FILE                  00073000
+*                ACTSFB - IT IS CURRENTLY BEING PRINTED OR PUNCHED      00074000
+*                CHGRDV - CHANGE STATUS OF GIVEN RDEVBLOK               00075000
+*                CHGSHQ - CHANGE STATUS OF GIVEN SHQBLOK                00076000
+*        GPR7  = ADDRESS OF SFBLOK TO BE CHECKPOINTED                   00077000
+*        GPR8  = ADDR OF RDEVBLOK IF ACTSFB OR CHGRDV IS ON             00078000
+*        GPR12 = BASE ADDRESS OF DMKCKSPL                               00079000
+*        GPR13 = ADDRESS OF STANDARD SAVEAREA                           00080000
+*                                                                       00081000
+* EXIT CONDITIONS -                                                     00082000
+*                                                                       00083000
+*        IF EVERYTHING SUCCEEDS, THEN RETURN IS MADE TO THE CALLER      00084000
+*        WITH CONDITION CODE 0 AND REGISTER 15 EQUAL TO 0.              00085000
+*        OTHERWISE, CHECKPOINTING IS STOPPED, THE CHECKPOINT            00086000
+*        CYLINDER INVALIDATED AND RETURN IS MADE TO THE CALLER          00087000
+*        AS IN THE NO ERROR SITUATION.                                  00088000
+*                                                                       00089000
+* CALLS TO OTHER ROUTINES -                                             00090000
+*        DMKLOCKQ - LOCK THE DMKCKSPL ROUTINE OR WAIT IF                00091000
+*                   ALREADY LOCKED                                      00092000
+*        DMKSCNRU - FIND REAL DEVICE BLOCK OF IPL DEVICE                00093000
+*        DMKPTRAN - GET THE MAP IN CORE                                 00094000
+*        DMKPTRUL - UNLOCK THE MAP PAGE                                 00095000
+*        DMKLOCKD - UNLOCK THE DMKCKSPL ROUTINE                         00096000
+*        DMKPGTVG - GET VIRTUAL ADDRESS FOR SLOT BUFFER                 00097000
+*        DMKRPAGT - READ INTO CORE A SLOT PAGE                          00098000
+*        DMKRPAPT - WRITE A SLOT PAGE TO DASD                           00099000
+*        DMKPGTVR - RELEASE THE VIRTUAL PAGE FOR THE SLOT BUFFER        00100000
+*                                                                       00101000
+*                                                                       00102000
+* EXTERNAL REFERENCES -                                                 00103000
+*                                                                       00104000
+*        SYSIPLDV - ADDRESS OF SYSTEM IPL DEVICE                        00105000
+*        DMKRSPID - CURRENT SPOOL FILE ID NUMBER                        00106000
+*        DMKRSPHQ - ADDRESS OF SHQBLOK CHAIN                            00107000
+*                                                                       00108000
+* TABLES WORKAREAS -                                                    00109000
+*                                                                       00110000
+*        NONE                                                           00111000
+*                                                                       00112000
+* REGISTER USAGE -                                                      00113000
+*                                                                       00114000
+*        GPR0  = DASD ADDRESS OF PAGE (CCPD FORM)                       00115000
+*        GPR1  = VIRT ADDRESS OF PAGE BUFFER                            00116000
+*        GPR2  = READ ADDRESS OF PAGE BUFFER (ALSO FILE ID)             00117000
+*        GPR3  = PAGE NUMBER OF SLOT FROM FINDSLOT                      00118000
+*        GPR4  = DISP WITHIN PAGE OF SLOT FROM FINDSLOT                 00119000
+*        GPR5  = POINTER TO MAP ENTRY FOR SLOT FROM FINDSLOT            00120000
+*        GPR6  = INTERNAL BAL REGISTER                                  00121000
+*        GPR7  = ADDRESS OF SFBLOK                                      00122000
+*        GPR8  = ADDR OF RDEVBLOK                                       00123000
+*        GPR9  =                                                        00124000
+*        GPR10 =                                                        00125000
+*        GPR11 = ADDRESS OF VMBLOK                                      00126000
+*        GPR12 = DMKCKS MODULE BASE                                     00127000
+*        GPR13 = ADDRESS OF STANDARD SAVE AREA                          00128000
+*        GPR14 = BALR RETURN ADDRESS                                    00129000
+*        GPR15 = BALR BRANCH ADDRESS                                    00130000
+*                                                                       00131000
+* OPERATION -                                                           00132000
+*                                                                       00133000
+*        1. IF CHECKPOINTING HAS TERMINATED RETURN TO CALLER.           00134000
+*                                                                       00135000
+*        2. FIND THE CCPD OF THE CHECKPOINT CYLINDERS AND THEN LOCK     00136000
+*              THE MAP OF THE CYLINDERS IN REAL CORE VIA TRANS.         00137000
+*                                                                       00138000
+*        2A. IF THE CHGSHQ FUNCTION IS SPECIFIED, THEN                  00139000
+*              LOOK FOR SHQBLOK SLOTS (X'AAAA' IN MAP) AND TRY TO       00140000
+*              FIND THE ONE WITH THE GIVEN USERID.  IF FOUND,           00141000
+*              CHANGE IT TO THE GIVEN ONE OR DELETE IT IF               00142000
+*              DELSFB IS SET.  IF THE GIVEN SHQBLOK IS NOT FOUND,       00143000
+*              THEN GET AN EMPTY SLOT AND MOVE A NEW SHQBLOK INTO IT.   00144000
+*              IF THE DELSFB FUNCTION IS SPECIFIED AND THE SLOT         00145000
+*              IS NOT FOUND, IGNORE THE REQUEST.                        00146000
+*              THEN GO TO STEP 6.                                       00147000
+*                                                                       00148000
+*        3. IF THE DELETE FUNCTION IS SPECIFIED, THEN FIND THE SLOT     00149000
+*              FROM THE MAP.  IF NOT FOUND, THEN GO TO STEP 6.  IF      00150000
+*              FOUND, PUT X'FFFF' INTO THE MAP ENTRY AND X'FFFFFFFF'    00151000
+*              INTO THE SLOT ITSELF.  THEN WRITE THE SLOT PAGE          00152000
+*              TO DASD AND GO TO STEP 6.                                00153000
+*                                                                       00154000
+*        4. IF THE CHANGE FUNCTION IS SPECIFIED, THEN FIND THE SLOT     00155000
+*              FROM THE MAP.  IF NOT FOUND, THEN ABEND.  IF             00156000
+*              FOUND THEN GET THE SLOT PAGE INTO REAL CORE              00157000
+*              AND UPDATE THE SFBLOK TO ITS NEW VALUES                  00158000
+*              AND WRITE THE SLOT PAGE TO DASD AND GO TO STEP 6.        00159000
+*                                                                       00160000
+*        5. IF IT IS THE ADD FUNCTION,THEN                              00161000
+*              FIND AN EMPTY SLOT FROM THE MAP,                         00162000
+*              READ THE SLOT PAGE INTO REAL CORE, FILL THE SLOT WITH    00163000
+*              THE NEW SFBLOK, WRITE THE SLOT PAGE TO DASD AND          00164000
+*              GO TO STEP 6.                                            00165000
+*                                                                       00166000
+*        5A. IF IT IS THE CHGRDV FUNCTION, THEN FIND THE ENTRY FOR      00167000
+*              THAT DEVICE, OR IF THERE IS NONE, CREATE ONE,            00168000
+*              AND UPDATE THE RDEVSTAT,RDEVFLAG, AND                    00169000
+*              RDEVCLAS FIELDS FOR THAT DEVICE.                         00170000
+*              IF IT IS A 3800 PRINTER, THEN ALSO CHECKPOINT            00170100
+*              THE CURRENT IMAGE LIBRARY, CURRENT TRANSLATE             00170200
+*              TABLE TO USE FOR THE SEPARATOR PAGE AND CURRENT          00170300
+*              FCB TO USE FOR THE SEPARATOR PAGE.                       00170400
+*              THEN GO TO STEP 6.                                       00171000
+*                                                                       00172000
+*        6. UNLOCK THE MAP PAGE VIA DMKPTRUL.                           00173000
+*                                                                       00174000
+*        7. UNLOCK THIS ROUTINE SO OTHERS CAN USE IT                    00175000
+*                                                                       00176000
+*        8. SET G15 TO 0 AND COND CODE TO 0 AND RETURN TO CALLER        00177000
+*                                                                       00178000
+*                                                                       00179000
+         EJECT                                                          00180000
+         DC    CL8'DMKCKS'                                     @V304298 00181000
+DMKCKSPL RELOC                                                 @V304298 00182000
+         CLI   DMKCKSSW,CKPTSTOP ARE WE CHECKPOINTING          @V304235 00183000
+         BE    EXIT0          EXIT IF NOT                      @V304298 00184000
+         LA    R1,CKSLOCK     LOCK THE ROUTINE                 @V304298 00185000
+         CALL  DMKLOCKQ       OR WAIT UNTIL UNLOCKED           @V304298 00186000
+         CLI   DMKCKSSW,CKPTSTOP ARE WE STILL CHECKPOINTING    @V304235 00187000
+         BE    EXITA          EXIT IF NOT                      @V304298 00188000
+         XC    SAVEWRK1,SAVEWRK1 CLEAR WORK AREAS              @V304298 00189000
+         XC    SAVEWRK2(32),SAVEWRK2 SAME AS ABOVE             @V304298 00190000
+         ICM   R1,B'1111',DMKCKSMP DO WE HAVE A MAP ?          @V304298 00191000
+         BZ    CKSABN1        ABEND IF NOT                     @V304298 00192000
+         MVC   CODSLOT(1),CKPTDVCD GET DEVICE CODE             @VM02131 00193000
+         BAL   R6,CKSINITM    GET CHECKPOINT MAP .....         @VM02131 00194000
+         TM    PARM1,CHGSHQ/256 IS IT A SHQBLOK CHANGE ?       @V304235 00195000
+         BZ    CKSPL1         XFER IF NOT                      @V304298 00196000
+         L     R3,RADDMAP     START AT BEGINNING OF MAP        @V304298 00197000
+LOOPSHQ  LH    R2,MAPSHQ      CODE FOR SHQBLOK                 @V304235 00198000
+         DROP  R7                                              @V304298 00199000
+         USING SHQBLOK,R7                                      @V304298 00200000
+         L     R7,SAVER1      POINT TO SHQBLOK                 @V304298 00201000
+         BAL   R6,FINDSLOT    FIND A SHQBLOK                   @V304298 00202000
+         BZ    SPLSHQ1        XFER IF FOUND                    @V304298 00203000
+         TM    PARM2,DELSFB   WAS IF DELETE ?                  @V304235 00204000
+         BO    CKSEXIT        EXIT IF SO                       @V304298 00205000
+         B     SPLSHQ3        FIND AN EMPTY SLOT               @V304298 00206000
+SPLSHQ1  STC   R3,PAGSLOT     GET PAGE FOR THE SLOT            @V304298 00207000
+         STCM  R3,B'1100',CYLSLOT GET CYLINDER FOR SLOT        @V304298 00208000
+         BAL   R6,GETSLOT     READ IT INTO CORE                @V304298 00209000
+         AL    R4,RADDSLOT    POINT TO SLOT                    @V304298 00210000
+         CLC   SHQUSER,SHQUSER-SHQBLOK(R4) DO THEY MATCH?      @V304298 00211000
+         BE    SPLSHQ2        XFER IF SO                       @V304298 00212000
+         BAL   R6,PUTSLOT     NEEDED FOR NORMAL SEQUENCE       @V304298 00213000
+         LA    R3,2(,R5)      START AT NEXT SLOT               @V304298 00214000
+         B     LOOPSHQ        AND TRY AGAIN                    @V304298 00215000
+SPLSHQ2  TM    PARM2,DELSFB   IS IT A DELETE FUNCTION ?        @V304235 00216000
+         BO    CKSPLA         XFER IF SO                       @V304298 00217000
+         MVC   4(SHQBSIZE*8-4,R4),SHQBLOK+4 MOVE IN THE NEW ONE@V304298 00218000
+         BAL   R6,PUTSLOT     WRITE IT OUT                     @V304298 00219000
+         B     CKSEXIT        AND EXIT                         @V304298 00220000
+SPLSHQ3  LH    R2,MAPFREE     FIND AN EMPTY SLOT               @V304235 00221000
+         BAL   R6,FINDSLOT    GO TO IT                         @V304298 00222000
+         BNZ   MSG400I        ERROR - IF CKPT AREA IS FULL     @VM03037 00223000
+         STC   R3,PAGSLOT     SAVE ITS PAGE LOCATION           @V304298 00224000
+         STCM  R3,B'1100',CYLSLOT GET CYLINDER FOR SLOT        @V304298 00225000
+         BAL   R6,GETSLOT     READ IT INTO CORE                @V304298 00226000
+         AL    R4,RADDSLOT    POINT TO IT                      @V304298 00227000
+         MVC   0(L'SLOTSHQ,R4),SLOTSHQ    CODE FOR SHQBLOK     @V304235 00228000
+         MVC   4(SHQBSIZE*8-4,R4),SHQBLOK+4 MOVE IT IN         @V304298 00229000
+         BAL   R6,PUTSLOT     WRITE IT OUT                     @V304298 00230000
+         MVC   0(L'MAPSHQ,R5),MAPSHQ     SET UP THE MAP ENTRY  @V304235 00231000
+         B     CKSEXIT        AND EXIT                         @V304298 00232000
+         DROP  R7                                              @V304298 00233000
+         USING SFBLOK,R7                                       @V304298 00234000
+         SPACE                                                          00235000
+CKSPL1   DS    0H                                              @V304298 00236000
+         TM    PARM2,DELSFB   IS IT THE DELETE FUNCTION ?      @V304235 00237000
+         BZ    CKSPL2         XFER IF NOT                      @V304298 00238000
+         LH    R2,SFBFILID    GET SPOOL FILE ID                @V304298 00239000
+         BAL   R6,FINDSLOT    FIND THE SLOT FOR THIS SFBLOK    @V304298 00240000
+         BNZ   CKSEXIT        FORGET IT IF NOT FOUND           @V304298 00241000
+         STC   R3,PAGSLOT     SAVE THE PAGE NUMBER OF SLOT     @V304298 00242000
+         STCM  R3,B'1100',CYLSLOT GET CYLINDER FOR SLOT        @V304298 00243000
+         BAL   R6,GETSLOT     BRING IT INTO CORE               @V304298 00244000
+         AL    R4,RADDSLOT    POINT TO THE SLOT                @V304298 00245000
+         CLC   SFBFILID,SFBFILID-SFBLOK(R4) DO THEY MATCH ?    @V304298 00246000
+         BNE   CKSABN2        ABEND IF NOT                     @V304235 00247000
+CKSPLA   MVC   0(L'SLOTFREE,R4),SLOTFREE    INVALIDATE THE SLOT@V304235 00248000
+         BAL   R6,PUTSLOT     WRITE AND RELEASE SLOT PAGE      @V304298 00249000
+         MVC   0(L'MAPFREE,R5),MAPFREE   MARK THE MAP AS EMPTY @V304235 00250000
+         L     R15,=A(DMKSYSCN)                                @V304235 00251000
+         LH    R2,0(R15)      GET CURRENT MAP COUNT            @V304235 00252000
+         BCTR  R2,0           DECREMENT IT .............       @V304235 00253000
+         STH   R2,0(R15)      AND SAVE NEW VALUE               @V304235 00254000
+         TM    DMKCKSSW,MSG90ISU 90% MSG ISSUED YET ??         @V304235 00255000
+         BZ    CKSEXIT        IF NOT, NO NEED TO CHECK ON IT   @V304235 00256000
+         CH    R2,SLOT90R     REACHED RESET VALUE YET ??       @V304235 00257000
+         BH    CKSEXIT        NO, NOTHING TO DO IN THAT CASE   @V304235 00258000
+         NI    DMKCKSSW,255-MSG90ISU ELSE RESET IT             @V304235 00259000
+         B     CKSEXIT        RETURN TO CALLER                 @V304298 00260000
+         SPACE 2                                                        00261000
+CKSPL2   TM    PARM2,CHGSFB   REQUESTING A CHANGE FUNCTION ?   @V304235 00262000
+         BZ    CKSPL4         XFER IF NOT                      @V304298 00263000
+         LH    R2,SFBFILID    GET THE SPOOL FILE ID            @V304298 00264000
+         BAL   R6,FINDSLOT    FIND SLOT FOR THIS SFBLOK        @V304298 00265000
+         BNZ   CKSPL4B        ASSUME ADD FUNCTION IF NOT FOUND @V304235 00266000
+         STC   R3,PAGSLOT     SAVE PAGE NUMBER OF SLOT         @V304298 00267000
+         STCM  R3,B'1100',CYLSLOT GET CYLINDER FOR SLOT        @V304298 00268000
+         BAL   R6,GETSLOT     BRING SLOT INTO CORE             @V304298 00269000
+         AL    R4,RADDSLOT    POINT TO THE SLOT                @V304298 00270000
+         CLC   SFBFILID,SFBFILID-SFBLOK(R4) DO THEY MATCH ?    @V304298 00271000
+         BNE   CKSABN2        ABEND IF NOT                     @V304235 00272000
+         TM    PARM2,RDRCHN+PRTCHN+PCHCHN HAS TYPE CHANGED ?   @V304235 00273000
+         BZ    CKSPL2A        XFER IF NOT                      @V304298 00274000
+         MVC   0(1,R4),PARM2  MOVE IN THE TYPE                 @V304235 00275000
+         B     CKSPL3         CONTINUE                         @V304298 00276000
+CKSPL2A  NI    0(R4),RDRCHN+PRTCHN+PCHCHN ISOLATE THE TYPE     @V304298 00277000
+         OC    0(1,R4),PARM2  SAVE THE FILE STATUS             @V304235 00278000
+CKSPL3   MVC   4(SFBSIZE*8-4,R4),SFBLOK+4 MOVE IN THE SFBLOK   @V304298 00279000
+         TM    0(R4),ACTSFB   IS IT ACTIVE ON A REAL DEVICE ?  @V304298 00280000
+         BZ    CKSPL3A        XFER IF NOT                      @V304298 00281000
+         USING RDEVBLOK,R8                                     @V304298 00282000
+         L     R8,SAVER8      RESTORE CALLER'S RDEVBLOK        @V304298 00283000
+         CALL  DMKSCNRD       GET ADDR OF DEVICE (CCU)         @V304298 00284000
+         STH   R1,2(,R4)      SAVE IT IN SLOT                  @V304298 00285000
+         MVC   SFBRECS-SFBLOK(4,R4),RDEVCLAS MOVE IN THE CLASS @V304298 00286000
+         DROP  R8                                              @V304298 00287000
+CKSPL3A  DS    0H                                              @V304298 00288000
+         BAL   R6,PUTSLOT     WRITE AND RELEASE SLOT PAGE      @V304298 00289000
+         B     CKSEXIT        RETURN TO CALLER                 @V304298 00290000
+         SPACE 2                                                        00291000
+CKSPL4   TM    PARM2,ADDSFB   IS IT AN ADD FUNCTION            @V304235 00292000
+         BZ    CKSPL5         XFER IF NOT                      @V304298 00293000
+CKSPL4A  DS    0H                                              @V304298 00294000
+         LH    R2,SFBFILID    GET THE SPOOL FILE ID            @V304298 00295000
+         BAL   R6,FINDSLOT    ALREADY EXIST ?                  @V304298 00296000
+         BNZ   CKSPL4B        XFER IF NOT FOUND(NORMAL)        @V304298 00297000
+         L     R15,=A(DMKRSPID) GET CURRENT FILE ID            @V304298 00298000
+         LH    R6,0(R15)      LOAD IT                          @V304298 00299000
+         STH   R6,SFBFILID    CHANGE THE ID OF THE CURRENT     @V304298 00300000
+*                             SFBLOK                                    00301000
+         LA    R6,1(,R6)      INCREMENT IT                     @V304298 00302000
+         C     R6,MAXFILE     GREATER THAN PERMISSABLE MAX ??  @V304235 00303000
+         BNH   CKSPL4AA       IF NOT, CONTINUE                 @V304235 00304000
+         LA    R6,1           ELSE, RESET ID NUMBER TO 1       @V304235 00305000
+CKSPL4AA STH   R6,0(R15)      AND SAVE IT FOR THE NEXT GUY     @V304235 00306000
+         B     CKSPL4A        TRY AGAIN                        @V304298 00307000
+CKSPL4B  DS    0H                                              @V304298 00308000
+         LH    R2,MAPFREE     FIND AN EMPTY MAP SLOT           @V304235 00309000
+         BAL   R6,FINDSLOT    ...                              @V304298 00310000
+         BNZ   MSG400I        ERROR IF EMPTY SLOT NOT FOUND    @VM03037 00311000
+         STC   R3,PAGSLOT     SAVE PAGE NUMBER OF SLOT         @V304298 00312000
+         STCM  R3,B'1100',CYLSLOT GET CYLINDER FOR SLOT        @V304298 00313000
+         BAL   R6,GETSLOT     BRING IT INTO CORE               @V304298 00314000
+         AL    R4,RADDSLOT    POINT TO THE SLOT                @V304298 00315000
+         MVC   0(1,R4),PARM2  SAVE THE TYPE                    @V304235 00316000
+         MVC   4(SFBSIZE*8-4,R4),SFBLOK+4 MOVE IN THE SFBLOK   @V304298 00317000
+         BAL   R6,PUTSLOT     WRITE AND RELEASE SLOT PAGE      @V304298 00318000
+         MVC   0(2,R5),SFBFILID MOVE SPOOL ID INTO MAP         @V304298 00319000
+         B     CKSEXIT        RETURN TO CALLER                 @V304298 00320000
+         SPACE 2                                                        00321000
+CKSPL5   TM    PARM1,CHGRDV/256 IS IT REAL DEVICE CHANGE ?     @V304235 00322000
+         BZ    CKSABN3        ABEND IF NOT                     @V304235 00323000
+         USING RDEVBLOK,R8                                     @V304298 00324000
+         L     R8,SAVER8      CALLER'S RDEVBLOK                @V304298 00325000
+         CALL  DMKSCNRD       GET DEVICE ADDRESS (CCU)         @V304298 00326000
+         LA    R2,X'E00'      GET MAP CODE FOR RDV ENTRY       @V304298 00327000
+         SLL   R2,4           GET IT IN POSITION               @V304298 00328000
+         OR    R2,R1          MOVE IN CCU                      @V304298 00329000
+         BAL   R6,FINDSLOT    FIND ITS SLOT                    @V304298 00330000
+         BZ    CKSPL6         XFER IF FOUND                    @V304298 00331000
+         LR    R9,R2          SAVE R2                          @V304298 00332000
+         LH    R2,MAPFREE     GET AN EMPTY MAP SLOT            @V304235 00333000
+         BAL   R6,FINDSLOT    GO TO IT                         @V304298 00334000
+         BNZ   MSG400I        ERROR IF EMPTY SLOT NOT FOUND    @VM03037 00335000
+         LR    R2,R9          RESTORE R2                       @V304298 00336000
+         STH   R2,0(,R5)      PUT IN MAP ENTRY                 @V304298 00337000
+CKSPL6   STC   R3,PAGSLOT     SAVE PAGE NUMBER OF SLOT         @V304298 00338000
+         STCM  R3,B'1100',CYLSLOT GET CYLINDER FOR SLOT        @V304298 00339000
+         LR    R9,R1          SAVE DEVICE ADDRESS              @V304298 00340000
+         BAL   R6,GETSLOT     BRING IT IN                      @V304298 00341000
+         AL    R4,RADDSLOT    POINT TO THE SLOT                @V304298 00342000
+         MVC   0(L'SLOTDEV,R4),SLOTDEV    CODE FOR REAL DEVICE @V304235 00343000
+         STH   R9,4(,R4)      DEVICE ADDRESS                   @V304298 00344000
+         MVC   6(2,R4),RDEVSTAT SAVE RDEVSTAT & RDEVFLAG       @V304298 00345000
+         MVC   8(4,R4),RDEVCLAS MOVE IN THE CLASS(ES)          @V304298 00346000
+         CLI   RDEVTYPE,TYP3800  IS IT A 3800 PRINTER ?        @V60B9BA 00346500
+         BNE   CKSPL6A           XFER IF NOT                   @V60B9BA 00346600
+         MVC   12(8,R4),RDEVIMAG CKPT THE IMAGE LIBRARY        @V60B9BA 00346700
+         MVC   20(4,R4),RDEVXSEP CKPT THE CHAR ARR TBL FOR SEP @V60B9BA 00346800
+         MVC   24(1,R4),RDEVFSEP CKPT THE FCB FOR SEP PAGE     @V60B9BA 00346900
+CKSPL6A  BAL   R6,PUTSLOT     WRITE & RELEASE SLOT PAGE        @V60B9BA 00347000
+         B     CKSEXIT        RETURN TO CALLER                 @V304298 00348000
+         SPACE 2                                                        00349000
+CKSEXIT  LR    R2,R5          GET REAL ADDR OF MAP INTO R2     @V304298 00350000
+         CALL  DMKPTRUL       UNLOCK THE MAP PAGE              @V304298 00351000
+EXITA    LA    R1,CKSLOCK     UNLOCK THE ROUTINE               @V304298 00352000
+         CALL  DMKLOCKD       ...                              @V304298 00353000
+EXIT0    SR    R15,R15        GET R15=0                        @V304298 00354000
+         LTR   R15,R15        GET CC=0                         @V304298 00355000
+         EXIT  ,              RETURN                           @V304298 00356000
+         EJECT                                                          00357000
+CKSABN1  ABEND 1              MAP NOT ALLOCATED                @V304298 00358000
+CKSABN2  ABEND 2              SLOT AND MAP DO NOT MATCH        @V304235 00359000
+CKSABN3  ABEND 3              NO FUNCTION SPECIFIED            @V304235 00360000
+         EJECT                                                          00361000
+*                                                                       00362000
+* SUBROUTINE NAME -                                                     00363000
+*                                                                       00364000
+*        DMKCKSIN                                                       00365000
+*                                                                       00366000
+* FUNCTION -                                                            00367000
+*                                                                       00368000
+*        INITIALIZE THE CHECKPOINT AFTER A SUCCESSFUL WARM START        00369000
+*        FROM THE STANDARD RECOVERY PROCEDURE OR                        00370000
+*        AFTER A COLD START.                                            00371000
+*                                                                       00372000
+* ATTRIBUTES -                                                          00373000
+*                                                                       00374000
+*        SERIALLY REUSABLE, PAGEABLE, CALLED VIA SVC FROM DMKCPI        00375000
+*                                                                       00376000
+* ENTRY POINTS -                                                        00377000
+*                                                                       00378000
+*        DMKCKSIN                                                       00379000
+*                                                                       00380000
+* ENTRY CONDITIONS -                                                    00381000
+*                                                                       00382000
+*        NONE                                                           00383000
+*                                                                       00384000
+* EXIT CONDITIONS -                                                     00385000
+*                                                                       00386000
+*        THE CHECKPOINT CYLINDER HAS BEEN INITIALIZED.                  00387000
+*                                                                       00388000
+* CALLS TO OTHER ROUTINES                                               00389000
+*                                                                       00390000
+*        DMKPGTVG - GET A VIRTUAL PAGE FOR THE MAP OR SLOT PAGE         00391000
+*        DMKSCNRU - FIND DEVICE BLOCK FOR IPL DEVICE                    00392000
+*        DMKPTRAN - GET VIRTUAL PAGES INTO REAL CORE                    00393000
+*        DMKPTRUL - UNLOCK THE REAL PAGE FOR THE MAP                    00394000
+*                                                                       00395000
+* EXTERNAL REFERENCES -                                                 00396000
+*                                                                       00397000
+*        SYSIPLDV - ADDRESS OF SYSTEM IPL DEVICE                        00398000
+*        DMKRSPPR - ANCHOR FOR PRINTER FILE CHAIN                       00399000
+*        DMKRSPPU - ANCHOR FOR PUNCH FILE CHAIN                         00400000
+*        DMKRSPRD - ANCHOR FOR READER FILE CHAIN                        00401000
+*                                                                       00402000
+* TABLES AND WORKAREAS -                                                00403000
+*                                                                       00404000
+*        ANCHRTBL - TABLE OF SPOOL FILE CHAIN ANCHORS                   00405000
+*                                                                       00406000
+* REGISTER USAGE -                                                      00407000
+*                                                                       00408000
+*        GPR0  = DASD ADDRESS OF PAGE IN CCPD FORM                      00409000
+*        GPR1  = VIRTUAL ADDRESS OF PAGE BUFFER                         00410000
+*        GPR2  = REAL ADDRESS OF PAGE BUFFER                            00411000
+*        GPR3  = POINTER TO SLOT ON CHECKPOINT CYLINDER                 00412000
+*        GPR4  = INCREMENT FOR LOOPING THRU SLOTS                       00413000
+*        GPR5  = COMPARAND                                              00414000
+*        GPR6  = INTERNAL BAL REGISTER                                  00415000
+*        GPR7  = POINTER TO SFBLOK                                      00416000
+*        GPR8  = POINTER TO LIST OF SPOOL FILE CHAIN ANCHORS            00417000
+*        GPR9  = POINTER TO MAP ENTRY                                   00418000
+*        GPR10 = PAGE NUMBER BEING UPDATED                              00419000
+*        GPR11 = ADDRESS OF VMBLOK                                      00420000
+*        GPR12 = DMKCKS MODULE BASE                                     00421000
+*        GPR13 = ADDRESS OF STANDARD SAVE AREA                          00422000
+*        GPR14 = BALR RETURN REGISTER                                   00423000
+*        GPR15 = BALR BRANCH REGISTER                                   00424000
+*                                                                       00425000
+* OPERATION -                                                           00426000
+*                                                                       00427000
+*        1. IF A MAP PAGE HAS BEEN ALLOCATED, THEN JUST EXIT SINCE      00428000
+*              DMKCKSWM HAS DONE THE INITIALIZATION PREVIOUSLY.         00429000
+*              IF NOT, THEN ALLOCATE ONE, LOCK IT IN REAL CORE,         00430000
+*              AND LOCATE THE CHECKPOINT CYLINDERS.                     00431000
+*                                                                       00432000
+*        2. LOOP THROUGH EACH SLOT ON THE CHECKPOINT CYLINDERS          00433000
+*              AND FILL IN AN SFBLOK IF THERE ARE STILL SOME REMAINING, 00434000
+*              AND INVALIDATE THE REST.  WHILE DOING THIS, FILL THE     00435000
+*              MAP ENTRIES WITH THE SPOOL FILE ID.  WHEN FINISHED,      00436000
+*              INSERT A DELIMITER AFTER THE LAST VALID SFBLOK ENTRY.    00437000
+*                                                                       00438000
+*        3. UNLOCK THE MAP PAGE AND RETURN TO CALLER.                   00439000
+*                                                                       00440000
+         EJECT                                                          00441000
+DMKCKSIN RELOC                                                 @V304298 00442000
+         ICM   R1,B'1111',DMKCKSMP DO WE HAVE A MAP YET ?      @V304298 00443000
+         BNZ   EXIT0          EXIT, DMKCKSWM HAS DONE IT ALL   @V304298 00444000
+         LA    R1,CKSLOCK     LOCK ROUTINE                     @VM02131 00445000
+         CALL  DMKLOCKQ       (AS A FLAG IN CASE OF ERRORS)    @VM02131 00446000
+         BAL   R6,CKSINIT     SET UP PROGRAM CONSTANTS         @V304235 00447000
+         LR    R9,R2          SAVE SLOT MAP ADDRESS            @VM02131 00448000
+         MVC   0(L'MAPEND,R2),MAPEND    FLAG END OF MAP        @VM02131 00449000
+         CALL  DMKPGTVG       GET A VIRTUAL PAGE ADDRESS       @VM02131 00450000
+         ST    R1,VPAGSLOT    AND SAVE IT ........             @VM02131 00451000
+         TRANS 2,1,OPT=(BRING,DEFER,LOCK,SYSTEM)               @VM02131 00452000
+         ST    R2,RADDSLOT    SAVE REAL PAGE ADDRESS           @VM02131 00453000
+         LR    R3,R2          STARTING SLOT ADDRESS            @VM02131 00454000
+         LH    R4,ENTRYSIZ    INCREMENT                        @VM02131 00455000
+         LA    R5,36*SFBSIZE*8-1(,R3)   COMPARAND              @VM02131 00456000
+CKSIN0   MVC   0(L'SLOTFREE,R3),SLOTFREE   FLAG SLOT AS EMPTY  @VM02131 00457000
+         BXLE  R3,R4,CKSIN0   CONTINUE ..........              @VM02131 00458000
+         LR    R5,R9          MAP ADDRESS HERE FOR EXITING     @VM02131 00459000
+         SPACE                                                          00460000
+CKSIN1   EQU   *                                               @VM02131 00461000
+         BAL   R6,NEXTCYL     GET NEXT RECORD                  @VM02131 00462000
+         B     CKSIN2         XFER IF DONE                     @VM02131 00463000
+         LM    R0,R1,CCPDSLOT GET CCPD FOR THIS PAGE           @VM02131 00464000
+         CALL  DMKRPAPT,PARM=SYSTEM     WRITE IT OUT           @VM02131 00465000
+         BZ    CKSIN1         CONTINUE IF NO PROBLEMS          @VM02131 00466000
+         B     MSG915E        OOPS ....... I/O ERROR           @VM02131 00467000
+         EJECT                                                          00468000
+CKSIN2   EQU   *                                               @VM02131 00469000
+         L     R2,RADDSLOT    UNLOCK SLOT PAGE                 @VM02131 00470000
+         CALL  DMKPTRUL                                        @VM02131 00471000
+         BAL   R6,PUTSLOT0    RELEASE VIRTUAL PAGE TOO ...     @VM02131 00472000
+         B     CKSEXIT        AND EXIT POST-HASTE .......      @VM02131 00473000
+         EJECT                                                          00474000
+* SUBROUTINE NAME -                                                     00475000
+*                                                                       00476000
+*        DMKCKSWM                                                       00477000
+*                                                                       00478000
+* FUNCTION -                                                            00479000
+*                                                                       00480000
+*        RECOVER SPOOL FILE INFORMATION FROM A PREVIOUSLY               00481000
+*        CHECKPOINTED SESSION. THIS  INFORMATION INCLUDES ALL           00482000
+*        CLOSED PRINTER AND PUNCH FILES, AND OPENED READER FILES.       00483000
+*                                                                       00484000
+* ATTRIBUTES -                                                          00485000
+*                                                                       00486000
+*        SERIALLY REUSABLE, PAGEABLE, CALLED VIA SVC FROM DMKWRM        00487000
+*                                                                       00488000
+* ENTRY POINTS -                                                        00489000
+*                                                                       00490000
+*        DMKCKSWM                                                       00491000
+*                                                                       00492000
+* ENTRY CONDITIONS -                                                    00493000
+*                                                                       00494000
+*        GPR2  = PARAMETER PASSED TO DMKWRM BY DMKCPI                   00495000
+*                                                                       00496000
+* EXIT CONDITIONS -                                                     00497000
+*                                                                       00498000
+*        THE CHECKPOINTED SPOOL FILES HAVE BEEN QUEUED UP ON THEIR      00499000
+*        PROPER QUEUES AND THEIR SFBLOKS HAVE BEEN PROPERLY             00500000
+*         INITIALIZED FOR SUBSEQUENT OPERATION.                         00501000
+*                                                                       00502000
+* CALLS TO OTHER ROUTINES -                                             00503000
+*                                                                       00504000
+*        DMKFREE  - GET CORE FOR AN SFBLOK                              00505000
+*        DMKPGTVG - GET A VIRTUAL PAGE FOR THE MAP, SLOT, OR            00506000
+*                   SPOOL FILE DASD BUFFER PAGE                         00507000
+*        DMKPGTVR - RELEASE SYSTEM V.M. SPACE                           00508000
+*        DMKSCNRU - FIND DEVICE BLOCK FOR IPL DEVICE                    00509000
+*        DMKPTRAN - GET VIRTUAL PAGES INTO REAL CORE                    00510000
+*        DMKPTRUL - UNLOCK THE VIRTUAL PAGES                            00511000
+*        DMKRPAGT - READ IN A DASD BUFFER PAGE                          00512000
+*                                                                       00513000
+* EXTERNAL REFERENCES -                                                 00514000
+*                                                                       00515000
+*        SYSIPLDV - ADDRESS OF SYSTEM IPL DEVICE                        00516000
+*        DMKRSPPR - ANCHOR FOR PRINTER FILE CHAIN                       00517000
+*        DMKRSPPU - ANCHOR FOR PUNCH FILE CHAIN                         00518000
+*        DMKRSPRD - ANCHOR FOR READER FILE CHAIN                        00519000
+*        DMKQNTBL - ANCHOR FOR 3800 IMAGE LIBRARIES                     00519100
+*                                                                       00520000
+* TABLES AND WORKAREAS -                                                00521000
+*                                                                       00522000
+*        ANCHRTBL - TABLE OF SPOOL FILE CHAIN ANCHORS                   00523000
+*                                                                       00524000
+* REGISTER USAGE -                                                      00525000
+*                                                                       00526000
+*        GPR0  = DASD ADDRESS OF PAGE IN CCPD FORM                      00527000
+*        GPR1  = VIRTUAL ADDRESS OF PAGE BUFFER                         00528000
+*        GPR2  = REAL ADDRESS OF PAGE BUFFER                            00529000
+*        GPR3  = POINTER TO SLOT ON CHECKPOINT CYLINDER                 00530000
+*        GPR4  = INCREMENT FOR LOOPING THRU SLOTS                       00531000
+*        GPR5  = COMPARAND                                              00532000
+*        GPR6  = INTERNAL BAL REGISTER                                  00533000
+*        GPR7  = POINTER TO SFBLOK                                      00534000
+*        GPR8  = ADDR OF FILE CHAIN ANCHORS                             00535000
+*        GPR9  = POINTER TO MAP ENTRY                                   00536000
+*        GPR10 = PAGE NUMBER BEING UPDATED                              00537000
+*        GPR11 = ADDRESS OF VMBLOK                                      00538000
+*        GPR12 = DMKCKS MODULE BASE                                     00539000
+*        GPR13 = ADDRESS OF STANDARD SAVE AREA                          00540000
+*        GPR14 = BALR RETURN REGISTER                                   00541000
+*        GPR15 = BALR BRANCH REGISTER                                   00542000
+*                                                                       00543000
+* OPERATION -                                                           00544000
+*                                                                       00545000
+*        1. IF THE MAP PAGE HAS ALREADY BEEN ALLOCATED, ABEND.          00546000
+*              OTHERWISE, GET A VIRTUAL PAGE FOR THE MAP AND            00547000
+*              SAVE IT IN DMKCKSMP.  THEN ALLOCATE A VIRTUAL PAGE       00548000
+*              FOR THE CHECKPOINT PAGES AND FOR SPOOL FILE              00549000
+*              DASD BUFFERS AND LOCK ALL THESE PAGES IN REAL CORE       00550000
+*                                                                       00551000
+*        2. GET NEXT(OR FIRST) SLOT IN CORE.  IF NO MORE SLOTS          00552000
+*              THEN GO TO STEP 9.  OTHERWISE, CONTINUE.                 00553000
+*                                                                       00554000
+*        3. IF THE SLOT IS EMPTY, REFLECT THIS IN THE MAP ENTRY FOR     00555000
+*              THE SLOT AND GO TO STEP 2. OTHERWISE, CONTINUE.          00556000
+*                                                                       00556100
+*       3A. IF IT IS A REAL DEVICE BLOCK ENTRY, UPDATE THE REAL         00556200
+*              DEVICE BLOCK WITH THE CURRENT STATUS.  IN THE CASE       00556300
+*              OF A 3800 PRINTER, UPDATE THE IMAGE LIBRARY NAME,        00556400
+*              PARAMETERS FOR PRINTING THE SEPARATOR PAGE, AND THEN     00556500
+*              UPDATE THE ACTIVITY COUNT IN THE IMAGE LIBRARY           00556600
+*              NAMED SYSTEM ENTRY.                                      00556700
+*                                                                       00557000
+*        4. INITIALIZE THE SFBLOK IN THE SLOT ENTRY FOR CLOSED          00558000
+*              PRINTER AND PUNCH FILES, ALSO FOR OPENED READER FILES.   00559000
+*                                                                       00560000
+*        5. CALL DMKFREE TO GET SPACE FOR THE SFBLOK AND MOVE THE       00561000
+*              SFBLOK INTO IT AND THEN CHAIN IT TO THE PROPER CHAIN.    00562000
+*                                                                       00563000
+*        6. MARK THE MAP ENTRY WITH THE PROPER SPOOL FILE ID.           00564000
+*                                                                       00565000
+*        7. IF THE FILE HAD ONLY ONE DASD BUFFER PAGE, MARK THAT        00566000
+*              CCPD AS BEING ALLOCATED IN THE RECBLOK CHAIN, WRITE OUT  00567000
+*              SLOT PAGE AND GO TO STEP 2.                              00568000
+*              OTHERWISE, CONTINUE.                                     00569000
+*                                                                       00570000
+*        8. READ IN EACH DASD BUFFER PAGE FOR THE FILE AND SET UP A     00571000
+*              RECBLOK ALLOCATION FOR EACH OF THESE PAGES.  THE         00572000
+*              NEXT ONE IS GOTTEN FROM THE CHAIN IN THE PREVIOUS ONE.   00573000
+*              EACH ONE OF THESE DASD BUFFERS MUST BE VALIDATED BEFORE  00574000
+*              BEING USED.  IF IT IS NOT VALID, TRUNCATE THE FILE AT    00575000
+*              THE PREVIOUS PAGE AND SO MARK SFBLAST IN THE SFBLOK.     00576000
+*              THEN GO TO STEP 2.                                       00577000
+*                                                                       00578000
+*        9. RELEASE ALL DASD AND VIRTUAL PAGES FOR THE SLOT PAGE        00579000
+*              AND THE DASD BUFFER PAGE.  THEN UNLOCK THE MAP PAGE AND  00580000
+*              RETURN TO CALLER.                                        00581000
+*                                                                       00582000
+         EJECT                                                          00583000
+DMKCKSWM RELOC                                                 @V304298 00584000
+         ICM   R1,B'1111',DMKCKSMP IS THERE A MAP YET ?        @V304298 00585000
+         BNZ   CKSABN1        ABEND IF SO                      @V304298 00586000
+         BAL   R6,CKSINIT     SET UP PROGRAM CONSTANTS         @V304235 00587000
+         CALL  DMKPGTVG       GET VIRTUAL PAGE FOR DASD BUFFER @V304298 00588000
+         ST    R1,VPAGBUFF    SAVE IT                          @V304298 00589000
+         L     R9,RADDMAP     MAP START                        @V304298 00590000
+         ST    R9,TOPSLOT     SAVE POSSIBLE LOC OF DELIMITER   @V304298 00591000
+         SPACE                                                          00592000
+CKSWM1   EQU   *                                               @VM02131 00593000
+         BAL   R6,NEXTCYL     GET NEXT CYLINDER ADDRESS        @VM02131 00594000
+         B     CKSWM9         XFER IF END OF CHECKPOINT AREA   @VM02131 00595000
+         BAL   R6,GETSLOT     GO TO IT                         @V304298 00596000
+         L     R3,RADDSLOT    SLOT ADDRESS                     @V304298 00597000
+         CLC   CYLSLOT(2),CKSSTART FIRST CYLINDER ?            @V304298 00598000
+         BNE   CKSWM1A        XFER IF NOT                      @V304298 00599000
+         CLI   PAGSLOT,X'01'  FIRST PAGE ?                     @V304298 00600000
+         BNE   CKSWM1A        XFER IF NOT                      @V304298 00601000
+         CLC   0(4,R3),ZEROES VALID CHECKPOINT DATA ?          @V304298 00602000
+         BE    MSG917E        XFER IF NOT                      @V304298 00603000
+CKSWM1A  DS    0H                                              @V304298 00604000
+         LH    R4,ENTRYSIZ    INCREMENT                        @V304298 00605000
+         LA    R5,36*SFBSIZE*8-1(,R3) COMPARAND                @V304298 00606000
+CKSWM2   CLC   0(L'SLOTFREE,R3),SLOTFREE    INVALID SLOT ?     @V304235 00607000
+         BNE   CKSWM2B        XFER IF NOT                      @V304298 00608000
+         MVC   0(L'MAPFREE,R9),MAPFREE MARK INVALID IN THE MAP @V304235 00609000
+         LA    R9,2(,R9)      NEXT ENTRY                       @V304298 00610000
+CKSWM2A  LR    R15,R9         SEE IF BEYOND END                @V304298 00611000
+         SL    R15,RADDMAP    GET DISPLACEMENT                 @V304298 00612000
+         C     R15,=F'4094'   INTO NEXT PAGE ?                 @V304298 00613000
+         BL    CKSWM7         NO                               @V408246 00614100
+         BAL   R6,PUTSLOT     YES, OUTPUT PAGE                 @V408246 00614600
+         B     CKSWM9         AND FINISH                       @V408246 00615100
+          EJECT                                                         00616000
+* HERE WE PROCESS REAL DEVICE CHANGE ENTRIES                            00617000
+CKSWM2B  DS    0H                                              @V304298 00618000
+         L     R15,=A(DMKSYSCN)                                @V304235 00619000
+         LH    R14,0(R15)     GET CURRENT MAP ENTRY COUNT      @V304235 00620000
+         LA    R14,1(,R14)    ADD ONE TO IT .....              @V304235 00621000
+         STH   R14,0(R15)     AND SAVE UPDATED VALUE           @V304235 00622000
+         USING RDEVBLOK,R8                                     @V304298 00623000
+         CLC   0(L'SLOTDEV,R3),SLOTDEV     IS IT A REAL DEVICE @V304235 00624000
+*                             STATUS ?                                  00625000
+         BNE   CKSWM2G        XFER IF NOT                      @V304298 00626000
+         LH    R1,4(,R3)      GET REAL DEVICE BLOK OF          @V304298 00627000
+         CALL  DMKSCNRU       SPOOLING DEVICE                  @V304298 00628000
+         BZ    CKSWM2B1       XFER IF IT IS STILL THERE        @V304298 00629000
+CKSWM2B0 MVC   0(L'SLOTFREE,R3),SLOTFREE MAKE THE SLOT INVALID @VM02131 00630000
+         L     R15,=A(DMKSYSCN)          ADJUST CURRENT MAP    @V304235 00631000
+         LH    R14,0(R15)                COUNT ......          @V304235 00632000
+         BCTR  R14,0                     ........              @V304235 00633000
+         STH   R14,0(R15)                AND SAVE IT           @V304235 00634000
+         B     CKSWM2         FINISH PROCESSING INVALID SLOT   @V304298 00635000
+CKSWM2B1 DS    0H                                              @V304298 00636000
+         SWITCH          MAKE SURE WE ARE ON THE IO PROCESSOR  @V4075A0 00636100
+         TM    6(R3),RDEVDISA DEVICE OFFLINE ?                 @V304298 00637000
+         BZ    CKSWM2C        XFER IF NOT                      @V304298 00638000
+         OI    RDEVSTAT,RDEVDISA SO MARK IT                    @V304298 00639000
+CKSWM2C  MVC   RDEVCLAS(4),8(R3) MOVE IN THE DEVICE CLASS(ES)  @V304298 00640000
+         TM    7(R3),RDEVDRAN DEVICE DRAINED ?                 @V304298 00641000
+         BNZ   CKSWM2D        XFER IF SO (DEFAULT IS DRAIN)    @V304298 00642000
+         TM    PARM2,DRAIN    WAS DRAIN REQUESTED ?            @V304235 00643000
+         BO    CKSWM2D        XFER IF SO                       @V304298 00644000
+         NI    RDEVFLAG,255-RDEVDRAN MARK IT NOT DRAINED       @V304298 00645000
+CKSWM2D  DS    0H                                              @V304298 00646000
+         CLI   RDEVTYPE,TYP3800   IS IT A 3800 PRINTER ?       @V60B9BA 00646325
+         BNE   CKSWM2E            XFER IF NOT                  @V60B9BA 00646350
+         MVC   RDEVIMAG,12(R3)    GET THE CURRENT IMAGE LIBRARY@V60B9BA 00646375
+         MVC   RDEVXSEP,20(R3)    GET THE CURRENT CHAR ARR TBL @V60B9BA 00646400
+         MVC   RDEVFSEP,24(R3)    GET FCB FOR SEP PAGE         @V60B9BA 00646425
+         TM    RDEVFLAG,RDEVDRAN   IS THE 3800 DRAINED ?       @V60B9BA 00646450
+         BO    CKSWM2E             XFER IF SO                  @V60B9BA 00646475
+         L     R1,=A(DMKQNTBL)     START OF 3800 IMAGE LIBS    @V60B9BA 00646500
+         LTR   R1,R1               ARE THERE ANY ?             @V60B9BA 00646525
+         BZ    CKSWM2D2            DRAIN THE DEVICE IF NOT     @V60B9BA 00646550
+         TRANS 2,1,OPT=(BRING,DEFER,SYSTEM)  GET IT IN         @V60B9BA 00646575
+         LR    R14,R2              POINT TO EACH SYSTEM ENTRY  @V60B9BA 00646600
+         USING NPRTBL,R14          ADDRESSIBILITY              @V60B9BA 00646625
+CKSWM2D0 CLC   RDEVIMAG,NPRNAME    IS THIS THE ONE ?           @V60B9BA 00646650
+         BNE   CKSWM2D1            XFER IF NOT                 @V60B9BA 00646675
+         LTR   R15,R15             ZERO IT                     @V60B9BA 00646700
+         IC    R15,NPRCNT          CURRENT COUNT               @V60B9BA 00646725
+         LA    R15,1(R15)          PLUS ONE                    @V60B9BA 00646750
+         STC   R15,NPRCNT          SAVE THE NEW COUNT          @V60B9BA 00646775
+         B     CKSWM2E             CONTINUE ONWARD             @V60B9BA 00646800
+CKSWM2D1 AL    R14,NPRPNT          NEXT ONE                    @V60B9BA 00646825
+         CLC   NPRPNT,ZEROES       IS THIS DUMMY LAST ENTRY?   @V60B9BA 00646850
+         BNE   CKSWM2D0            XFER IF NOT                 @V60B9BA 00646875
+CKSWM2D2 OI    RDEVFLAG,RDEVDRAN   MARK DEVICE DRAINED SINCE   @V60B9BA 00646900
+*                                  WE CAN'T FIND THE IMG LIB   @V60B9BA 00646925
+         DROP  R14                 NO LONGER NEEDED            @V60B9BA 00646950
+         SPACE                                                          00646975
+CKSWM2E  MVC   0(2,R9),4(R3)  FILL IN THE MAP ENTRY            @V60B9BA 00647000
+         OI    0(R9),X'E0'    SPECIAL CODE                     @V304298 00648000
+         B     CKSWM2H        ADVANCE TO NEXT ENTRY            @VM02131 00649000
+         SPACE 3                                                        00650000
+* HERE WE PROCESS CHECKPOINTED SPOOL HOLD QUEUE BLOCKS                  00651000
+CKSWM2G  DS    0H                                              @V304298 00652000
+         CLC   0(L'SLOTSHQ,R3),SLOTSHQ    IS IT A SHQBLOK ?    @V304235 00653000
+         BNE   CKSWM3         XFER IF NOT                      @V304298 00654000
+         LA    R0,SHQBSIZE    GET CORE FOR SHQBLOK             @V304298 00655000
+         CALL  DMKFREE        GO TO IT                         @V304298 00656000
+         MVC   4(SHQBSIZE*8-4,R1),4(R3) MOVE IT IN             @V304298 00657000
+         L     R7,=A(DMKRSPHQ) GET ANCHOR FOR SHQ CHAIN        @V304298 00658000
+         MVC   0(4,R1),0(R7)  WE POINT TO PREVIOUS FIRST       @V304298 00659000
+         ST    R1,0(R7)       WE ARE NOW FIRST                 @V304298 00660000
+         MVC   0(L'MAPSHQ,R9),MAPSHQ     FILL IN THE MAP ENTRY @V304235 00661000
+CKSWM2H  LA    R9,2(,R9)      ADVANCE TO NEXT MAP ENTRY        @VA04454 00662000
+         ST    R9,TOPSLOT     NEW POSSIBLE DELIMITER           @V304298 00663000
+         B     CKSWM2A        TEST FOR END                     @V304298 00664000
+         EJECT                                                          00665000
+* HERE WE PROCESS THE CHECKPOINTED SFBLOK                               00666000
+CKSWM3   DS    0H                                              @V304298 00667000
+         DROP  R7             TEMPORARILY                      @V304298 00668000
+         USING SFBLOK,R3      JUST FOR THE TIME BEING          @V304298 00669000
+         NI    SFBFLAG,X'FF'-(SFBINUSE+SFBEOF+SFBOPEN)         @V304298 00670000
+*                                  RESET THE FILE STATUS                00671000
+         TM    0(R3),ACTSFB   WAS IT BEING PRINTED ?           @V304298 00672000
+         BNZ   CKSWM3C        XFER IF SO                       @V304298 00673000
+CKSWM3A  TM    0(R3),OPNSFB   WAS IT AN OPEN CONSOLE FILE ?    @VM02131 00674000
+         BZ    CKSWM3B        XFER IF NOT                      @V304298 00675000
+         TM    SFBFLAG2,SFBMON   IS THIS A MONITOR SFB         @VA07888 00675100
+         BZ    CKSWM3A1          NO, ONLY MONITOR AND CONSOLE  @VA07888 00675200
+*        FILES ARE CHECKPOINTED  'OPEN'                                 00675300
+         MVC   SFBDIST(8),=C'        '  YES CLEAN UP DIST CODE @VA07888 00675400
+*        SINCE DMKCKP DIDNT GET A CHANCE                                00675500
+         B     CKSWM3B           AND SKIP USER HOLD SETTING    @VA07888 00675600
+CKSWM3A1 EQU   *                                               @VA07888 00675700
+         OI    SFBFLAG,SFBUHOLD PUT IT IN USER HOLD            @V304298 00676000
+CKSWM3B  XC    SFBRECS,SFBRECS CLEAR THE FIELD                 @V304298 00677000
+CKSWM3C  LA    R0,SFBSIZE     GET SIZE OF SFBLOK               @V304298 00678000
+         CALL  DMKFREE        GET CORE FOR ONE SFBLOK          @V304298 00679000
+         LR    R7,R1          SAVE ITS ADDRESS                 @V304298 00680000
+         DROP  R3             WE NEED IT NO LONGER             @V304298 00681000
+         USING SFBLOK,R7      BACK TO NORMAL                   @V304298 00682000
+         MVC   SFBLOK(SFBSIZE*8),0(R3) MOVE IN THE DATA        @V304298 00683000
+         TM    0(R3),ACTSFB   WAS IT ACTIVE ?                  @V304298 00684000
+         BZ    CKSWM3D        XFER IF NOT                      @V304298 00685000
+         LH    R1,2(,R3)      GET DEVICE ADDRESS               @V304298 00686000
+         LR    R2,R7          SAVE IT ACROSS CALL              @V304298 00687000
+         CALL  DMKSCNRU       GET RDEVBLOK                     @V304298 00688000
+         LR    R7,R2          RESTORE R7                       @V304298 00689000
+         BZ    CKSWM3C1       XFER IF DEVICE STILL THERE       @V304298 00690000
+         OI    SFBFLAG,SFBRECER ALLOCATION INCOMPLETE          @V304298 00691000
+         B     CKSWM3D        CHAIN THE SFBLOK                 @V304298 00692000
+CKSWM3C1 DS    0H                                              @V304298 00693000
+         SWITCH          MAKE SURE WE ARE ON THE IO PROCESSOR  @V4075A0 00693100
+         MVC   RDEVCLAS(4),SFBRECS GET THE DEVICE CLASS        @V304298 00694000
+         OI    SFBFLAG,SFBRECER INDICATE ALLOC INCOMPLETE      @V304298 00695000
+         OI    SFBFLAG2,SFBRSTRT INDICATE RESTARTED            @V304298 00696000
+         TM    RDEVSTAT,RDEVDISA DEVICE OFFLINE ?              @V304298 00697000
+         BO    CKSWM3D        CHAIN IT IF SO                   @V304298 00698000
+         TM    RDEVFLAG,RDEVDRAN BEING DRAINED ?               @V304298 00699000
+         BO    CKSWM3D        CHAIN IT IF SO                   @V304298 00700000
+         ST    R7,RDEVSPL     STORE IN RDEVBLOK                @V304298 00701000
+         MVI   0(R7),X'FF'    INDICATE SFBLOK                  @V304298 00702000
+         XC    SFBRECS,SFBRECS CLEAR FIELD                     @V304298 00703000
+         B     CKSWM4A        CONTINUE                         @V304298 00704000
+CKSWM3D  XC    SFBRECS,SFBRECS CLEAR FIELD                     @V304298 00705000
+         TM    0(R3),OPNSFB   WAS IT OPEN?                     @V304298 00706000
+         BZ    CKSWM3F        XFER IF NOT                      @V304298 00707000
+         MVC   SFBCOPY,F1+2   MAKE IT ONE COPY                 @V304298 00708000
+CKSWM3F  DS    0H                                              @V304298 00709000
+         DROP  R8                                              @V304298 00710000
+         EJECT                                                          00711000
+* NOW CHAIN IT TO THE PROPER ANCHOR                                     00712000
+         L     R8,ARSPPR      ASSUME PRINTER FILE              @V304298 00713000
+         TM    0(R3),PRTCHN   IS IT A PRINT FILE ?             @V304298 00714000
+         BO    CKSWM4         XFER IF SO                       @V304298 00715000
+         L     R8,ARSPPU      ASSUME PUNCH FILE                @V304298 00716000
+         TM    0(R3),PCHCHN   IS IT A PUNCH FILE ?             @V304298 00717000
+         BO    CKSWM4         XFER IF SO                       @V304298 00718000
+         L     R8,ARSPRD      IT IS A READER FILE              @V304298 00719000
+CKSWM4   MVC   SFBPNT,0(R8)   PUT NEW ONE AT                   @V304298 00720000
+         ST    R7,0(,R8)      TOP OF CHAIN                     @V304298 00721000
+         SPACE 2                                                        00722000
+* AT THIS POINT WE START ALLOCATING THE DASD BUFFERS                    00723000
+CKSWM4A  TM    SFBFLAG,SFBDUMP SYSTEM DUMP ?                   @V304298 00724000
+         BO    CKSWM6E        SPECIAL HANDLING IF SO           @V304298 00725000
+         MVC   CCPDBUFF(4),SFBSTART INITIALIZE TO FIRST PAGE   @V304298 00726000
+         MVC   PREVBUFF(4),ZEROES INITIALIZE                   @VA07106 00726050
+         CLC   SFBSTART,SFBLAST ONE PAGE SPOOL FILE ?          @V304298 00727000
+         BNE   CKSWM5P        XFER IF NOT                      @VA07888 00728500
+         TM    0(R3),OPNSFB+ACTSFB WAS IT AN OPEN OR ACTIVE    @V304298 00729000
+*                             FILE?                                     00730000
+         BNZ   CKSWM5P        XFER IF SO                       @VA07888 00731500
+         L     R1,SFBSTART    CCPD TO ALLOCATE IN R1           @V304298 00732000
+         BAL   R6,ALOCIT      GO ALLOCATE                      @V304298 00733000
+         B     CKSWM6C        GO TRY NEXT SLOT                 @V304298 00734000
+CKSWM5P  TM    0(R3),OPNSFB   OPEN SPOOL OR MONITOR FILE       @VA07888 00734200
+         BZ    CKSWM5         NO, WON'T RECOUNT RCDS           @VA07888 00734400
+         XC    SFBRECNO,SFBRECNO  CLEAR OLD CNT BEFORE START   @VA07888 00734600
+CKSWM5   LM    R0,R1,CCPDBUFF GET THE NEXT BUFFER IN CORE      @V304298 00735000
+         CALL  DMKRPAGT,PARM=SYSTEM+BRING+LOCK GO TO IT        @V304298 00736000
+         BNZ   MSG916E        XFER IF BAD IO                   @V304298 00737000
+         ST    R2,RADDBUFF    SAVE ITS REAL ADDRESS            @V304298 00738000
+         TM    0(R3),OPNSFB   WAS IT AN OPEN FILE ?            @V304298 00739000
+         BO    CKSWM5B        XFER IF SO                       @V304298 00740000
+         L     R1,CCPDBUFF    ALLOCATE THE PAGE                @V304298 00741000
+         USING SPLINK,R2      ADDRESSABILITY                   @VA07106 00741050
+         CLC   PREVBUFF(4),SPPREPAG BACK POINTER O.K. ??       @VA07106 00741150
+         BNE   CKSWM6A1       NO, DELETE THIS FILE             @VA07106 00741250
+         ST    R1,PREVBUFF    REMEMBER FOR NEXT DASD PAGE      @VA07106 00741350
+         BAL   R6,ALOCIT      GO TO IT                         @V304298 00742000
+         L     R2,RADDBUFF    POINT TO BUFFER                  @V304298 00744000
+* WITH BOTH ACTIVE AND INACTIVE FILES, SPNXTPAG FOR THE LAST            00745000
+* PAGE TO BE ALLOCATED POINTS TO SFBSTART.                              00746000
+* WHEN THIS PAGE HAS BEEN ALLOCATED, WE ARE DONE.                       00747000
+         TM    SFBFLAG2,SFBMON        IS THIS A MONITOR FILE?  @V50A2B5 00747100
+         BNO   CKSWM5AA               NO, CONTINUE             @V50A2B5 00747200
+         CLC   CCPDBUFF(4),SFBLAST    IS THIS THE LAST PAGE    @V50A2B5 00747300
+         BE    CKSWM6C                YES, CONTINUE            @V50A2B5 00747400
+CKSWM5AA EQU   *                                               @V50A2B5 00747500
+         CLC   SPNXTPAG(4),SFBSTART ARE WE DONE ?              @V304298 00748000
+         BE    CKSWM6C        XFER IF SO                       @V304298 00749000
+CKSWM5A  MVC   CCPDBUFF(4),SPNXTPAG READ IN THE NEXT PAGE      @V304298 00750000
+         B     CKSWM5         AND GO TO IT                     @V304298 00751000
+         EJECT                                                          00752000
+* AN OPEN FILE MUST BE CHECKED MORE CAREFULLY                           00753000
+CKSWM5B  L     R2,RADDBUFF    POINT TO THE DASD BUFFER         @V304298 00754000
+         CLC   SFBFILID,SPFILID  FILE ID OK AS CHECKPOINTED ?  @V60B9BA 00755000
+         BNE   CKSWM6         XFER IF NOT                      @V304298 00756000
+         CLC   SFBTIME(6),SPTIME   OTHER FIELD MATCH UP ?      @V60B9BA 00757000
+         BNE   CKSWM6         XFER IF NOT                      @V304298 00758000
+         SPACE 2                                                        00759000
+* THE PAGE IS VALID                                                     00760000
+         L     R1,CCPDBUFF    ALLOCATE THIS DASD PAGE          @V304298 00761000
+         CLC   PREVBUFF(4),SPPREPAG BACK POINT O.K. ??         @VA07106 00761050
+         BNE   CKSWM6A1       NO, DELETE THE FILE              @VA07106 00761150
+         ST    R1,PREVBUFF    SAVE FOR POSSIBLE LAST BUFFER    @V304298 00762000
+         BAL   R6,ALOCIT      GO TO IT                         @V304298 00763000
+* CALCULATE NUMBER OF RECORDS IN OPEN SPOOL FILE                        00764000
+         L     R15,SFBRECNO   LOAD PRESENT VALUE               @V304298 00765000
+         AL    R15,SPRECNUM   INCREMENT NUM IN BUFFER          @V304298 00766000
+         ST    R15,SFBRECNO   SAVE THE NEW VALUE               @V304298 00767000
+* CONSOLE FILE WILL CYCLE BACK TO FIRST PAGE EVEN THOUGH OPEN.          00768000
+         CLC   SPNXTPAG(4),SFBSTART IS THIS THE LAST PAGE      @V304298 00769000
+*                                  OF A CONSOLE FILE ?                  00770000
+         BNE   CKSWM5C        XFER IF NOT                      @V304298 00771000
+         MVC   SFBLAST(4),CCPDBUFF SET UP THE LAST PAGE        @V304298 00772000
+         B     CKSWM6C        AND TRY NEXT SLOT                @V304298 00773000
+CKSWM5C  DS    0H                                              @V304298 00774000
+         MVC   CCPDBUFF(4),SPNXTPAG SET UP FOR NEXT PAGE       @V304298 00775000
+         CLC   SPNXTPAG,ZEROES IS THERE ONE ?                  @V304298 00776000
+         BNE   CKSWM5         YES, SO READ IT IN               @V304298 00777000
+         SPACE 2                                                        00778000
+* WE GOT TO AN INVALID PAGE                                             00779000
+CKSWM6   MVC   SFBLAST(4),PREVBUFF PREVIOUS ONE IS THE END     @V304298 00780000
+* WE NOW READ THAT LAST PAGE BACK IN SO THAT WE CAN UPDATE ITS          00781000
+* SPNXTPAG AND THEN WRITE IT BACK OUT.                                  00782000
+* BUT FIRST CHECK IF THE INVALID PAGE WAS THE FIRST PAGE                00783000
+* IF SO, THEN THE FILE IS NO GOOD AND MUST BE DELETED                   00784000
+         CLC   CCPDBUFF(4),SFBSTART WAS IT THE FIRST ONE ?     @V304298 00785000
+         BNE   CKSWM6B        XFER IF NOT                      @V304298 00786000
+CKSWM6A1 L     R8,ARSPPR      ASSUME IT'S ON THE PRINT CHAIN   @V304298 00787000
+         C     R7,0(R8)       IS IT ?                          @V304298 00788000
+         BE    CKSWM6A        XFER IF SO                       @V304298 00789000
+         L     R8,ARSPPU      ASSUME THE PUNCH CHAIN           @V304298 00790000
+         C     R7,0(R8)       IS IT ?                          @V304298 00791000
+         BE    CKSWM6A        XFER IF SO                       @V304298 00792000
+         L     R8,ARSPRD      ASSUME READER CHAIN              @V304298 00793000
+         C     R7,0(R8)       IS IT ?                          @V304298 00794000
+         BE    CKSWM6A        XFER IF SO                       @V304298 00795000
+         ABEND 4              SOMETHING IS WRONG               @V304235 00796000
+         EJECT                                                          00797000
+CKSWM6A  MVC   0(4,R8),SFBPNT DELETE FROM THE CHAIN            @V304298 00798000
+         LA    R0,SFBSIZE     SIZE OF THE SFBLOK               @V304298 00799000
+         LR    R1,R7          ADDRESS OF SFBLOK                @V304298 00800000
+         CALL  DMKFRET        FRET ITS CORE                    @V304298 00801000
+         B     CKSWM2B0       ADJUST CURRENT MAP ETC .....     @VM02131 00802000
+         EJECT                                                          00803000
+CKSWM6B  DS    0H                                              @V304298 00804000
+         MVC   CCPDBUFF(4),SFBLAST THE PAGE TO READ IN         @V304298 00805000
+         LM    R0,R1,CCPDBUFF GET LAST PAGE INTO CORE          @V304298 00806000
+         CALL  DMKRPAGT,PARM=SYSTEM+BRING+LOCK GO TO IT        @V304298 00807000
+         BNZ   MSG916E        XFER IF BAD IO                   @V304298 00808000
+         ST    R2,RADDBUFF    SAVE ITS REAL ADDRESS            @V304298 00809000
+         MVC   SPNXTPAG(4),SFBSTART MOVE IN THE NEW VALUE      @V304298 00810000
+         CALL  DMKRPAPT,PARM=SYSTEM WRITE IT OUT               @V304298 00811000
+         BNZ   MSG916E        XFER IF BAD IO                   @V304298 00812000
+         DROP  R2                                              @V304298 00813000
+CKSWM6C  NI    0(R3),X'FF'-(OPNSFB+ACTSFB)                     @V304298 00814000
+*                                  CLEAR THESE FLAGS                    00815000
+         MVC   4(SFBSIZE*8-4,R3),SFBLOK+4 REINITIALIZE THE     @V304298 00816000
+*                                  CHECKPOINTED SFBLOK                  00817000
+         MVC   0(2,R9),SFBFILID SET UP THE MAP                 @V304298 00818000
+         LA    R9,2(,R9)      NEXT SLOT ENTRY                  @V304298 00819000
+         ST    R9,TOPSLOT     NEW POSSIBLE DELIMITER           @V304298 00820000
+* MAINTAIN HIGHEST SPOOL FILE ID                                        00821000
+         CLC   SPOOLID,SFBFILID IS NEW ONE HIGHER ?            @V304298 00822000
+         BH    CKSWM6D        XFER IF NOT                      @V304298 00823000
+         MVC   SPOOLID,SFBFILID MOVE IN NEW HIGHEST            @V304298 00824000
+CKSWM6D  DS    0H                                              @V304298 00825000
+         B     CKSWM2A        TEST FOR END                     @V304298 00826000
+         EJECT                                                          00827000
+* CODE FOR ALLOCATING THE BUFFERS OF A DUMP SPOOL FILE                  00828000
+* SINCE THESE ARE NOT CHAINED TOGETHER AS IS NORMAL, BUT                00829000
+* ARE CONTIGUOUS FROM FIRST PAGE TO LAST PAGE, THE ALLOCATION           00830000
+* OF DASD BUFFERS MUST BE HANDLED AS A SPECIAL CASE.                    00831000
+CKSWM6E  L     R1,SFBSTART    GET STARTING CCPD                @V304298 00832000
+         LR    R15,R1         SET UP THE COMPARAND             @V304298 00833000
+         LA    R8,X'FF'       MASK FOR DEVICE CODE             @V304298 00834000
+         N     R8,SFBSTART    ISOLATE DEVICE CODE              @V304298 00835000
+         L     R1,=A(DMKSYSOC) GET NUMBER OF OWNED DEVICES     @VA07295 00835050
+         CL    R8,0(R1)       WITHIN RANGE ?                   @VA07295 00835150
+         BNL   MSG916E        NO,BAD DEVICE CODE               @VA07295 00835250
+         LR    R1,R15         RESTORE R1 WITH COMPARAND        @VA07295 00835350
+         SLL   R8,3           GET DEV CODE TIMES 8             @V304298 00836000
+         A     R8,=A(DMKSYSOW) POINT TO OWNED LIST ENTRY       @V304298 00837000
+         LA    R0,OWNDVSER-OWNDLIST(,R8) POINT TO VOLID        @V304298 00838000
+         LH    R8,OWNDRDEV-OWNDLIST(,R8) POINT TO RDEVBLOK     @V304298 00839000
+         LTR   R8,R8          IS VOLUME MOUNTED?               @V304298 00840000
+         BM    MSG912W        ERROR DMKCKS912W                 @V305435 00841000
+         SLL   R8,3           CONVERT TO BYTE INDEX            @V304298 00842000
+         A     R8,ARIODV      REALLY GET THE RDEVBLOK          @V304298 00843000
+         USING RDEVBLOK,R8                                     @V304298 00844000
+         TM    RDEVFLAG,RDEVPREF PAGING ONLY VOLUME ?          @VA07295 00844050
+         BO    MSG916E        YES,MUST BE BAD DEVICE CODE      @VA07295 00844150
+         ICM   R15,B'0010',=AL1(57) PAGES FOR A 3330           @V304298 00845000
+         CLI   RDEVTYPE,TYP3330 IS IT A 3330 ?                 @V304298 00846000
+         BE    CKSWM6E1       XFER IF SO                       @V304298 00847000
+         ICM   R15,B'0010',=AL1(120) PAGES FOR A 3350          @V304498 00848000
+         CLI   RDEVTYPE,TYP3350 IS IT A 3350 ?                 @V304498 00849000
+         BE    CKSWM6E1       XFER IF SO                       @V304498 00850000
+         ICM   R15,B'0010',=AL1(32) PAGES FOR A 2314           @V304298 00851000
+         CLI   RDEVTYPE,TYP2314 IS IT A 2314 ?                 @V304298 00852000
+         BE    CKSWM6E1       XFER IF SO                       @V304298 00853000
+         ICM   R15,B'0010',=AL1(24) THEN IT'S A 2305 OR 3340   @V304298 00854000
+CKSWM6E1 DS    0H                                              @V304298 00855000
+         LA    R14,X'100'     INCREMENT ONE PAGE AT A TIME     @V304298 00856000
+LOOP6E   STM   R14,R15,HOLDR14 SAVE ACROSS CALL                @V304298 00857000
+         BAL   R6,ALOCIT      GO ALLOCATE THE PAGE             @V304298 00858000
+         LM    R14,R15,HOLDR14 RESTORE REGS                    @V304298 00859000
+         CL    R1,SFBLAST     IS THIS THE END ?                @V304298 00860000
+         BNL   CKSWM6C        TRY NEXT SLOT IF SO              @V304298 00861000
+         BXLE  R1,R14,LOOP6E  ALLOCATE NEXT PAGE               @V304298 00862000
+         SRL   R1,16          CYL NUM TO LOW ORDER             @V304298 00863000
+         LA    R1,1(,R1)      GO TO NEXT CYL                   @V304298 00864000
+         SLL   R1,8           GET READY FOR                    @V304298 00865000
+         LA    R1,1(,R1)      .. PAGE 1 ON THE CYLINDER        @V304298 00866000
+         SLL   R1,8           MAKE ROOM FOR DEVICE CODE        @V304298 00867000
+         IC    R1,SFBSTART+3  SAME DEV CODE AS BEFORE          @V304298 00868000
+         LR    R15,R1         SET UP THE COMPARAND             @V304298 00869000
+         LA    R8,X'FF'       MASK FOR DEVICE CODE             @V304298 00870000
+         N     R8,SFBSTART    ISOLATE DEVICE CODE              @V304298 00871000
+         SLL   R8,3           GET DEV CODE TIMES 8             @V304298 00872000
+         A     R8,=A(DMKSYSOW) POINT TO OWNED LIST ENTRY       @V304298 00873000
+         LA    R0,OWNDVSER-OWNDLIST(,R8) POINT TO VOLID        @V304298 00874000
+         LH    R8,OWNDRDEV-OWNDLIST(,R8) POINT TO RDEVBLOK     @V304298 00875000
+         LTR   R8,R8          IS VOLUME MOUNTED?               @V304298 00876000
+         BM    MSG912W        ERROR IF NOT                     @V305435 00877000
+         SLL   R8,3           CONVERT TO BYTE INDEX            @V304298 00878000
+         A     R8,ARIODV      REALLY GET THE RDEVBLOK          @V304298 00879000
+         USING RDEVBLOK,R8                                     @V304298 00880000
+         ICM   R15,B'0010',=AL1(57) PAGES FOR A 3330           @V304298 00881000
+         CLI   RDEVTYPE,TYP3330 IS IT A 3330 ?                 @V304298 00882000
+         BE    CKSWM6E2       XFER IF SO                       @V304298 00883000
+         ICM   R15,B'0010',=AL1(120) PAGES FOR A 3350          @V304498 00884000
+         CLI   RDEVTYPE,TYP3350 IS IT 3350 ?                   @V304498 00885000
+         BE    CKSWM6E2       XFER IF SO                       @V304498 00886000
+         ICM   R15,B'0010',=AL1(32) PAGES FOR A 2314           @V304298 00887000
+         CLI   RDEVTYPE,TYP2314 IS IT A 2314 ?                 @V304298 00888000
+         BE    CKSWM6E2       XFER IF SO                       @V304298 00889000
+         ICM   R15,B'0010',=AL1(24) THEN IT'S A 2305 OR 3340   @V304298 00890000
+CKSWM6E2 DS    0H                                              @V304298 00891000
+         B     LOOP6E         GO DO THE NEXT CYLINDER          @V304298 00892000
+         SPACE 2                                                        00893000
+CKSWM7   BXLE  R3,R4,CKSWM2   TRY NEXT SLOT                    @V304298 00894000
+CKSWM8   BAL   R6,PUTSLOT     WRITE & RELEASE SLOT PAGE        @V304298 00895000
+         B     CKSWM1         EXAMINE NEXT CHECKPOINT PAGE     @V304298 00896000
+         SPACE 3                                                        00897000
+CKSWM9   L     R9,TOPSLOT     GET DELIMITER LOCATION           @V304298 00898000
+         MVC   0(L'MAPEND,R9),MAPEND    DELIMIT MAP .......    @VM02131 00899000
+         LM    R0,R1,CCPDBUFF GET DASD AND VIRT ADDR           @V304298 00900000
+         SR    R0,R0          CLEAR PARM REGISTER              @V304298 00901000
+         CALL  DMKRPAGT,PARM=SYSTEM RELEASE STORAGE PAGE       @V304298 00902000
+         CALL  DMKPGTVR       RELEASE VIRT PAGE FOR DASD BUFFER@V304298 00903000
+         LR    R2,R9          RADD OF MAP PAGE                 @V304298 00904000
+         CALL  DMKPTRUL       UNLOCK THE MAP PAGE              @V304298 00905000
+         L     R15,=A(DMKRSPID) ADDR OF NEW SPOOL FILE ID      @V304298 00906000
+         LH    R14,SPOOLID    GET OUR HIGHEST                  @V304298 00907000
+         LA    R14,1(,R14)    ADD ONE TO IT                    @V304298 00908000
+         CH    R14,=H'9900'   MAX SPOOL FILE ID ?              @VA07575 00908100
+         BNH   *+8            NO - OK !                        @VA07575 00908200
+         LA    R14,1          RESET TO ONE                     @VA07575 00908300
+         STH   R14,0(R15)     MAKE THAT THE NEW ONE            @V304298 00909000
+         L     R15,=A(DMKSYSCN)  ..                            @V304235 00910000
+         LH    R14,0(R15)     GET COUNT OF SLOTS IN USE        @V304235 00911000
+         CH    R14,SLOT90P    90 % FULL ??                     @V304235 00912000
+         BL    EXIT0          RETURN TO CALLER IF NOT          @V304235 00913000
+         BAL   R6,MSG401I     ELSE, LET OPERATOR KNOW ....     @V304235 00914000
+         B     EXIT0          RETURN TO CALLER                 @V304298 00915000
+         EJECT                                                          00916000
+*********************************************************************** 00917000
+*                                                                       00918000
+* GETSLOT -                                                             00919000
+*        BRING THE SLOT SPECIFIED BY CCPDSLOT INTO CORE AND LOCK IT     00920000
+*                                                                       00921000
+*********************************************************************** 00922000
+         SPACE                                                          00923000
+GETSLOT  CALL  DMKPGTVG       GET VIRT ADDR FOR SLOT           @V304298 00924000
+         ST    R1,VPAGSLOT    SAVE IT                          @V304298 00925000
+         LM    R0,R1,CCPDSLOT GET DASD AND VIRT ADDR           @V304298 00926000
+         CALL  DMKRPAGT,PARM=BRING+SYSTEM+LOCK                 @V304298 00927000
+         BNZ   MSG915E        PERM IO ERROR                    @V304298 00928000
+         ST    R2,RADDSLOT    SAVE REAL ADDRESS                @V304298 00929000
+         CLI   FFS,X'FF'      SET CC=0                         @V304298 00930000
+         BR    R6             RETURN                           @V304298 00931000
+         SPACE 3                                                        00932000
+*********************************************************************** 00933000
+*                                                                       00934000
+* PUTSLOT -                                                             00935000
+*        WRITE AND RELEASE THE SLOT PAGE JUST GOTTEN                    00936000
+*                                                                       00937000
+*********************************************************************** 00938000
+         SPACE                                                          00939000
+PUTSLOT  LM    R0,R1,CCPDSLOT GET DASD AND VIRT ADDR           @V304298 00940000
+         CALL  DMKRPAPT,PARM=SYSTEM WRITE IT OUT               @V304298 00941000
+         BNZ   MSG915E        PERMANENT IO ERROR               @V304298 00942000
+PUTSLOT0 SR    R0,R0          CLEAR PARM REG                   @VM02131 00943000
+         CALL  DMKRPAGT,PARM=SYSTEM RELEASE STORAGE PAGE       @V304298 00944000
+         CALL  DMKPGTVR       RELEASE VIRTUAL PAGE             @V304298 00945000
+         CLI   FFS,X'FF'      SET CC=0                         @V304298 00946000
+         BR    R6             RETURN                           @V304298 00947000
+         EJECT                                                          00948000
+*********************************************************************** 00949000
+*                                                                       00950000
+* FINDSLOT -                                                            00951000
+*        THIS ROUTINE TAKES AS INPUT A SPOOL FILE ID AND RETURNS        00952000
+*        THE CYLINDER AND PAGE NUMBER AND DISPLACEMENT OF               00953000
+*        THE SPECIFIED SLOT.                                            00954000
+*        INPUT -                                                        00955000
+*              GPR2  = SPOOL FILE ID                                    00956000
+*                    = -1 IF WE WANT FIRST EMPTY SLOT                   00957000
+*        OUTPUT -                                                       00958000
+*              GPR3 = CYLINDER AND PAGE NUMBER OF SLOT (CCCCPPPP)       00959000
+*              GPR4 = DISPLACEMENT OF SLOT WITHIN PAGE                  00960000
+*              GPR5 = POINTER TO MAP ENTRY FOR THE SLOT                 00961000
+*              CC = 0 IF SLOT FOUND                                     00962000
+*              CC = 1 IF SLOT NOT FOUND(GPR 3,4,5 UNPREDICTABLE)        00963000
+*              GPR15 IS ALWAYS UNPREDICTABLE                            00964000
+*                                                                       00965000
+*********************************************************************** 00966000
+         SPACE                                                          00967000
+FINDSLOT DS    0H                                              @V304298 00968000
+         LA    R4,2           INCREMENT                        @V304298 00969000
+         CLM   R2,B'0011',MAPSHQ LOOKING FOR SHQBLOK ?         @V304235 00970000
+         BE    FSL2           XFER IF SO                       @V304298 00971000
+         L     R3,RADDMAP     SLOT ENTRY                       @V304298 00972000
+FSL2     LA    R5,4092(R3)    COMPARAND                        @V304298 00973000
+GETENTRY CLM   R2,B'0011',0(R3) DO WE HAVE A MATCH ?           @V304298 00974000
+         BE    FNDSLOT        XFER IF SO                       @V304298 00975000
+         CLC   0(L'MAPEND,R3),MAPEND IS IT THE END ?           @V304235 00976000
+         BE    ATEND          XFER IF SO                       @V304298 00977000
+         BXLE  R3,R4,GETENTRY TRY NEXT                         @V304298 00978000
+ATEND    CLM   R2,B'0011',MAPFREE REQUEST FOR EMPTY MAP SLOT ? @V304235 00979000
+         BNE   FSLOTRT1       RETURN CC=1 IF NOT               @V304298 00980000
+         CR    R3,R5          AT PHYSICAL END OF MAP ?         @V304298 00981000
+         BH    FSLOTRT1       IF SO, RETURN CC=1               @V304298 00982000
+         MVC   0(L'MAPFREE,R3),MAPFREE     MARK MAP SLOT EMPTY @V304235 00983000
+         MVC   2(L'MAPEND,R3),MAPEND FLAG NEW END OF MAP       @V304235 00984000
+FNDSLOT  DS    0H             IF HERE, WE FOUND THE SLOT       @V304298 00985000
+         CLM   R2,B'0011',MAPFREE  LOOKING FOR EMPTY SLOT ??   @V304235 00986000
+         BNE   FNDSLOT1       NO, CONTINUE                     @V304235 00987000
+         L     R15,=A(DMKSYSCN)                                @V304235 00988000
+         LH    R4,0(R15)      GET CURRENT MAP COUNT            @V304235 00989000
+         LA    R4,1(,R4)      ADD 1 TO IT                      @V304235 00990000
+         STH   R4,0(R15)      AND SAVE UPDATED VALUE           @V304235 00991000
+         TM    DMKCKSSW,MSG90ISU  90 % MSG ISSUED YET ??       @V304235 00992000
+         BO    FNDSLOT1       YES, NO NEED TO CHECK ON IT NOW  @V304235 00993000
+         CH    R4,SLOT90P     HIT 90% MARK YET ??              @V304235 00994000
+         BL    FNDSLOT1       NO, CONTINUE                     @V304235 00995000
+         ST    R6,SAVREG      SAVE R6 OVER CALL                @V304235 00996000
+         BAL   R6,MSG401I     LET OPER KNOW WE ARE 90% FULL    @V304235 00997000
+         L     R6,SAVREG      RESTORE REG 6                    @V304235 00998000
+FNDSLOT1 DS    0H                                              @V304235 00999000
+         LR    R15,R3         SET UP PTR TO MAP ENTRY(TEMP)    @V304298 01000000
+         SL    R3,RADDMAP     GET THE SLOT NUMBER - 1          @V304298 01001000
+         SRL   R3,1           ...                              @V304298 01002000
+         LR    R5,R3          ...                              @V304298 01003000
+         C     R5,MAXSLOTS    BIGGER THAN MAXIMUM ?            @V304298 01004000
+         BNL   FSLOTRT1       IF SO, RETURN CC=1               @V304298 01005000
+         SR    R4,R4          GET PAGE AND                     @V304298 01006000
+         D     R4,SLOTPPAG    ... DISPLACEMENT                 @V304298 01007000
+         MH    R4,ENTRYSIZ    DISPLACEMENT IN PAGE             @V304298 01008000
+         ST    R4,SAVREG      SAVE IT TEMPORARILY              @V304235 01009000
+         SR    R4,R4          ZERO IT FOR THE NEXT DIVIDE      @V304298 01010000
+         D     R4,PAGPCYL     GET CYL AND PAGE                 @V304298 01011000
+         LR    R3,R5          CYLINDER NUMBER                  @V304298 01012000
+         AH    R3,CKSSTART    GET ABSOLUTE CYLINDER NUMBER     @V304298 01013000
+         SLL   R3,16          GET IT IN POSITION               @V304298 01014000
+         OR    R3,R4          PAGE NUMBER - 1                  @V304298 01015000
+         AL    R3,F1          INCREMENT PG NUMBER, LEAVE CYL   @VA05106 01016100
+         L     R4,SAVREG      RESTORE DISPLACEMENT             @V304235 01017000
+         LR    R5,R15         PUT IT IN PERMANENT PLACE        @V304298 01018000
+         TM    FNDSLOT,0      SET CC=0                         @V304298 01019000
+         BR    R6             RETURN                           @V304298 01020000
+FSLOTRT1 TM    *,X'FF'        SET CC=1                         @V304298 01021000
+         BR    R6             RETURN                           @V304298 01022000
+         EJECT                                                          01023000
+*********************************************************************** 01024000
+*                                                                       01025000
+* CKSINIT -                                                             01026000
+*        THIS ROUTINE GETS A VIRTUAL PAGE ADDRESS FOR AND BRINGS        01027000
+*        IN THE CHECKPOINT SLOT MAP. THE FOLLOWING PROGRAM              01028000
+*        CONSTANTS ARE ALSO DEVELOPED HERE:                             01029000
+*                                                                       01030000
+*        MAXSLOTS - MAX NUMBER OF SLOTS AVAILABLE FOR CHECKPOINT        01031000
+*                   USE                                                 01032000
+*        SLOT90P  - NUMBER OF SLOTS WHICH MUST BE IN USE BEFORE         01033000
+*                   ISSUING DMKCKS401I (CHECKPOINT CYL 90% FULL)        01034000
+*        SLOT90R  - NUMBER OF SLOTS WHICH MUST BE AVAILABLE AFTER       01035000
+*                   DMKCKS401I HAS BEEN ISSUED BEFORE ISSUING IT        01036000
+*                   AGAIN < C(SLOT90P)-24 >                             01037000
+*        R10      - INTIALIZED TO 1ST CHECKPOINT RECORD FOR CALLS       01038000
+*                   TO ROUTINE 'NEXTCYL'.                               01039000
+*                                                                       01040000
+*        THIS SUBROUTINE IS CALLLED BY DMKCKSIN AND DMKCKSWM.           01041000
+*        NO ERROR CONDITIONS ARE RETRUN BY THIS ROUTINE.                01042000
+*                                                                       01043000
+* CKSINITM -                                                            01044000
+*           ROUTINE TO READ IN AND LOCK THE CHECKPOINT SLOT MAP.        01045000
+*           THIS ROUTINE IS CAALED BY DMKCKSPL.                         01046000
+*                                                                       01047000
+****************************************************************        01048000
+         SPACE                                                          01049000
+CKSINIT  DS    0H                                              @V304235 01050000
+         XC    SAVEWRK2(32),SAVEWRK2 CLEAR WORK AREAS          @V304235 01051000
+         CALL  DMKPGTVG       GET VIRTUAL PAGE FOR MAP         @V304235 01052000
+         ST    R1,DMKCKSMP    SAVE IT FOR EVERYBODY            @V304235 01053000
+         L     R1,=A(DMKSYSCH) ADDRESS OF CHECKPOINT CYLINDER  @V304235 01054000
+         MVC   CKSSTART(4),0(R1) SAVE CHECKPOINT CYLINDERS     @V304235 01055000
+         ST    R6,SAVREG      SAVE RETURN ADDRESS OVER CALL    @V304235 01056000
+         LH    R1,SYSIPLDV    ADDRESS OF IPL DEVICE            @V304235 01057000
+         CALL  DMKSCNRU       LOCATE RDEVBLOK                  @V304235 01058000
+         L     R6,SAVREG      RESTORE RETURN ADDRESS           @V304235 01059000
+         USING RDEVBLOK,R8                                     @V304235 01060000
+         MVC   CODSLOT(1),RDEVCODE+1 MOVE IN DEVICE CODE       @V304235 01061000
+         MVC   CKPTDVCD(1),RDEVCODE+1   SAVE IT                @VM02131 01062000
+         LA    R15,57         ASSUME IT IS A 3330              @V304235 01063000
+         CLI   RDEVTYPE,TYP3330 IS IT ?                        @V304235 01064000
+         BE    CSLOT0         XFER IF SO                       @V304235 01065000
+         LA    R15,120        ASSUME IT IS A 3350              @V304498 01066000
+         CLI   RDEVTYPE,TYP3350 IS IT ?                        @V304498 01067000
+         BE    CSLOT0         XFER IF SO                       @V304498 01068000
+         LA    R15,32         ASSUME IT IS A 2314              @V304235 01069000
+         CLI   RDEVTYPE,TYP2314 IS IT ?                        @V304235 01070000
+         BE    CSLOT0         XFER IF SO                       @V304235 01071000
+         LA    R15,24         THEN IT IS A 2305 OR 3340        @V304235 01072000
+CSLOT0   ST    R15,PAGPCYL    PAGES PER CYL FOR IPL DEVICE     @V304235 01073000
+         LH    R1,CKSEND      ENDING CHECKPOINT CYLINDER       @V304235 01074000
+         SH    R1,CKSSTART    STARTING CYLINDER                @V304235 01075000
+         LA    R1,1(,R1)      NUMBER OF CHECKPOINT CYLS        @V304235 01076000
+         MR    R14,R1         NUMBER OF PAGES OF CHECKPOINT    @V304235 01077000
+         ST    R15,MAXPAG     SAVE IT                          @V304235 01078000
+         MH    R15,SLOTPPAG+2 GET MAXIMUM NUM OF SLOTS         @V304235 01079000
+         C     R15,MAXSLOTS   GT PERMISSABLE MAX ?             @V304235 01080000
+         BNL   CSLOT1         IF SO, WE ALREADY HAVE MAX VALUE @V304235 01081000
+         ST    R15,MAXSLOTS   SAVE NEW MAX SLOT VALUE          @V304235 01082000
+         L     R15,MAXSLOTS   GET MAXIMUM NUM OF SLOTS         @V304235 01083000
+         SR    R14,R14        CALC 90% VALUE                   @V304235 01084000
+         D     R14,F10        .                                @V304235 01085000
+         L     R14,MAXSLOTS   ..                               @V304235 01086000
+         SR    R14,R15        ...                              @V304235 01087000
+         STH   R14,SLOT90P    ....                             @V304235 01088000
+         S     R14,F24        VALUE WE MUST REACH BEFORE       @V304235 01089000
+         STH   R14,SLOT90R    RE-ISSUING 90% MSG               @V304235 01090000
+CSLOT1   L     R2,=A(DMKSYSCN) @ OF SLOT MAP USAGE COUNT       @V304235 01091000
+         XC    0(2,R2),0(R2)  ZERO IT OUT TO BE SURE           @V304235 01092000
+         DROP  R8                                              @V304235 01093000
+         SR    R10,R10        STARTING PAGE NUMBER - 1         @VM02131 01094000
+         ICM   R10,B'1100',CKSSTART STARTING CYLINDER          @VM02131 01095000
+         SPACE                                                          01096000
+CKSINITM EQU   *                                               @VM02131 01097000
+         L     R1,DMKCKSMP    GET MAP                          @V304235 01098000
+         TRANS 2,1,OPT=(BRING,DEFER,LOCK,SYSTEM)               @V304235 01099000
+         ST    R2,RADDMAP     SAVE ITS REAL ADDRESS            @V304235 01100000
+         BR    R6             RETURN TO CALLER                 @V304235 01101000
+         EJECT                                                          01102000
+*********************************************************************** 01103000
+*                                                                       01104000
+* NEXTCYL -                                                             01105000
+*        THIS ROUTINE UPDATES THE 'CCPD' TO THE NEXT LOGICAL            01106000
+*        CHECKPOINT RECORD.                                             01107000
+*                                                                       01108000
+*        INPUT - R10=CCPP                                               01109000
+*                CC = CURRENT CYLINDER NUMBER                           01110000
+*                PP = CURRENT PAGE NUMBER                               01111000
+*                                                                       01112000
+*        OUTPUT - R10 -> NEXT LOGICAL RECORD                            01113000
+*                 LOCATIONS CYLSLOT & PAGSLOT UPDATED                   01114000
+*                                                                       01115000
+*        EXIT CONDITIONS -                                              01116000
+*                          R6+4 - NEXT RECORD VALID                     01117000
+*                          R6+0 - NEXT RECORD INVALID                   01118000
+*                                 (OUT OF RANGE OF CHECKPOINT CYL)      01119000
+*                                                                       01120000
+*********************************************************************** 01121000
+         SPACE                                                          01122000
+NEXTCYL  DS    0H                                              @VM02131 01123000
+NEXTCYL0 AL    R10,F1         NEXT PAGE                        @VM02131 01124000
+         CLM   R10,B'0011',PAGPCYL+2 FINISHED THIS CYLINDER?   @VM02131 01125000
+         BNH   NEXTCYL1       XFER IF NOT                      @VM02131 01126000
+         SRL   R10,16         CYL NUM IN LOW ORDER             @VM02131 01127000
+         LA    R10,1(,R10)    GO TO NEXT CYL                   @VM02131 01128000
+         CH    R10,CKSEND     ARE WE PAST THE LAST CYL?        @VM02131 01129000
+         BHR   R6             EXIT IF SO                       @VM02131 01130000
+         SLL   R10,16         GET IT BACK IN POSITION          @VM02131 01131000
+         B     NEXTCYL0       START LOOP AGAIN                 @VM02131 01132000
+         SPACE                                                          01133000
+NEXTCYL1 EQU   *                                               @VM02131 01134000
+         STC   R10,PAGSLOT    GET THE PAGE IN CORE             @VM02131 01135000
+         STCM  R10,B'1100',CYLSLOT GET CYLINDER NUMBER         @VM02131 01136000
+         B     4(R6)          RETURN                           @VM02131 01137000
+         EJECT                                                          01138000
+*********************************************************************** 01139000
+*                                                                       01140000
+* ALOCIT -                                                              01141000
+*        THIS SUBROUTINE SETS UP THE ALLOCATION BLOCKS FOR ALL          01142000
+*        SPOOL FILE DASD BUFFERS.                                       01143000
+*        INPUT -                                                        01144000
+*              GPR1 = CCPD FOR THE PAGE TO BE ALLOCATED                 01145000
+*        OUTPUT -                                                       01146000
+*              THE GIVEN PAGE HAS ITS ALLOCATION BLOCKS SET UP          01147000
+*        NOTES -                                                        01148000
+*              REGISTERS 0, 8, 14 AND 15 ARE USED BY THIS ROUTINE       01149000
+*              AS IS SAVEWRK1.                                          01150000
+*********************************************************************** 01151000
+ALOCIT   LA    R8,X'FF'       MASK TO STRIP ALL BUT DEVICE CODE@V304298 01152000
+         NR    R8,R1          DEVICE CODE IN REG 8             @V304298 01153000
+         ST    R1,SAVEWRK1    SAVE IT FOR LATER                @VA07295 01153050
+         L     R1,=A(DMKSYSOC) GET NUMBER OF OWNED DEVICES     @VA07295 01153150
+         CL    R8,0(R1)       WITHIN RANGE ?                   @VA07295 01153250
+         BNL   MSG916E        NO,BAD DEVICE CODE               @VA07295 01153350
+         SLL   R8,3           DEVICE CODE TIMES 8              @V304298 01154000
+         A     R8,=A(DMKSYSOW) POINT TO OWNED LIST ENTRY       @V304298 01155000
+         LA    R0,OWNDVSER-OWNDLIST(,R8) POINT TO VOLID        @V304298 01156000
+         LH    R8,OWNDRDEV-OWNDLIST(,R8) POINT TO RDEVBLOK     @V304298 01157000
+         LTR   R8,R8          IS THE VOLUME MOUNTED ?          @V304298 01158000
+         BM    MSG912W        ERROR IF NOT                     @V305435 01159000
+         SLL   R8,3           CONVERT TO BYTE INDEX            @V304298 01160000
+         A     R8,ARIODV      REALLY POINT TO IT               @V304298 01161000
+*                                  WE NOW HAVE THE RDEVBLOK             01162000
+         L     R1,SAVEWRK1    RESTORE R1                       @VA07295 01163050
+         USING RDEVBLOK,R8                                     @V304298 01164000
+         TM    RDEVFLAG,RDEVPREF PAGING ONLY VOLUME ?          @VA07295 01164050
+         BO    MSG916E        YES,MUST BE BAD DEVICE CODE      @VA07295 01164150
+         USING RECBLOK,R14                                     @V304298 01165000
+         L     R14,RDEVRECS   GET THE RECBLOK CHAIN            @V304298 01166000
+LOOPREC  LTR   R14,R14        IS THERE ANOTHER RECBLOK ?       @V304298 01167000
+         BZ    NEWCYL         MUST ALLOCATE ANOTHER CYL NOW    @V304298 01168000
+         CLM   R1,B'1100',RECCYL IS IT FOR THIS CYLINDER ?     @V304298 01169000
+         BE    ALOCPAG        GO ALLOCATE THE PAGE             @V304298 01170000
+         L     R14,RECPNT     GET NEXT RECBLOK                 @V304298 01171000
+         B     LOOPREC        SEE IF THIS IS THE ONE           @V304298 01172000
+         DROP  R14                                             @V304298 01173000
+         SPACE 3                                                        01174000
+* IF WE GET HERE, THEN A NEW RECBLOK MUST BE CREATED FOR A              01175000
+*        NEWLY ALLOCATED CYLINDER, GPR 8 HAS THE RDEVBLOK               01176000
+* RDEVALLN HAS ADDR OF ALLOCATION RECD CREATED BY DMKCPI                01177000
+*        +----+--+--+--+--+--+--+--+--+                                 01178000
+*        |CYLS|00|01|02|03|04|- |- |FF|                                 01179000
+*        +----+--+--+--+--+--+--+--+--+                                 01180000
+         SPACE                                                          01181000
+NEWCYL   LA    R0,RDEVSER     POINT TO VOLID                   @VM03200 01182000
+         L     R15,RDEVALLN   POINTER TO ALLOCATION RECORD     @VM03200 01183000
+         LTR   R15,R15        ANY ALLOCATION DATA ?            @V304298 01184000
+         BZ    MSG912W        PROBABLY NOT MOUNTED             @V305435 01185000
+         SRL   R1,16          SHIFT CYL NUM TO LOW ORDER       @V304298 01186000
+         CH    R1,0(R15)      CYL NUMBER VALID ( < MAXCYL) ?   @VA08528 01186100
+         BH    MSG916E        NO, BAD CYLINDER NUMBER          @VA08528 01186200
+         LA    R14,2(R1,R15)  POINT TO CORRECT CYLINDER BYTE   @V304298 01187000
+         CLI   0(R14),0       IS IS ALREADY ALLOCATED ?        @V304298 01188000
+         BE    TMPALLOC       NO, MARK TEMP IN USE             @VM00019 01189000
+         CLI   0(R14),TEMP    IS IT ALREADY ALLOCATED?         @VM00019 01189100
+         BNE   MSG903E        NO GOOD IF ALREADY ALLOCATED     @VM00019 01189200
+TMPALLOC MVI   0(R14),ALLOC   MARK AS TEMP ALLOCATED           @VM00019 01189300
+         SPACE 2                                                        01191000
+* BUILD A RECBLOK FOR THE NEWLY ALLOCATED CYLINDER                      01192000
+         LA    R0,RECSIZE     LENGTH OF RECBLOK                @V304298 01193000
+         CALL  DMKFREE        GET STORAGE                      @V304298 01194000
+         USING RECBLOK,R1     TEMPORARILY                      @V304298 01195000
+         ST    R8,RECPNT      SAVE R8 TEMPORARILY              @V304298 01196000
+         MVC   RECCYL,SAVEWRK1 MOVE IN THE CYL NUMBER          @V304298 01197000
+         MVI   RECUSED,X'00'  NO PAGES IN USE YET              @V304298 01198000
+         LA    R15,57         ASSUME A 3330                    @V304298 01199000
+         CLI   RDEVTYPE,TYP3330 IS IT ?                        @V304298 01200000
+         BE    NEWRECB        XFER IF SO                       @V304298 01201000
+         LA    R15,120        ASSUME A 3350                    @V304498 01202000
+         CLI   RDEVTYPE,TYP3350 IS IT A 3350 ?                 @V304498 01203000
+         BE    NEWRECB        XFER IF SO                       @V304498 01204000
+         LA    R15,32         ASSUME A 2314                    @V304298 01205000
+         CLI   RDEVTYPE,TYP2314 IS IT ?                        @V304298 01206000
+         BE    NEWRECB        XFER IF SO                       @V304298 01207000
+         LA    R15,24         THEN IT IS A 2305 OR 3340        @V304298 01208000
+NEWRECB  DS    0H                                              @V304298 01209000
+         STC   R15,RECMAX     MAX NUMBER OF PAGES              @V304298 01210000
+         CLI   RDEVTYPE,TYP3350 3350 DEVICE (120 PAGES/CYL) ?  @V304498 01211000
+         LR    R8,R15         SAVE NUMBER OF PAGES             @V304498 01212000
+         LM    R14,R15,FFS    SET UP BIT MAP                   @V304498 01213000
+         BNE   NOT3350        TEST ON ABOVE COMPARE FOR (3350) @V304498 01214000
+         LA    R8,56          INITIALIZE FOR REMAINDER(120-64) @V304498 01215000
+         SRDL  R14,0(R8)      INSERT ONE ZERO PER AVAIL. PAGE  @V304498 01216000
+         STM   R14,R15,RECMAP+8-RECBLOK(R1) AND SET UP BIT MAP @V304498 01217000
+         MVI   RECMAP-RECBLOK(R1),X'00' INITIALIZE RECBLOK     @V304498 01218000
+         MVC   RECMAP+1-RECBLOK(7,R1),RECMAP-RECBLOK(R1)       @V304498 01219000
+         B     MAPFIN         CHECK FOR CYLINDER 0             @V304498 01220000
+NOT3350  EQU   *              OTHER THAN 3350                  @V304498 01221000
+         STM   R14,R15,RECMAP+8-RECBLOK(R1) INITIALIZE RECBLOK @V304498 01222000
+         LM    R14,R15,FFS    ONE BITS IN THE REGS             @V304298 01223000
+         SRDL  R14,0(R8)      ONE ZERO PER AVAILABLE PAGE      @V304298 01224000
+         STM   R14,R15,RECMAP SET UP BIT MAP                   @V304298 01225000
+MAPFIN   EQU   *                                               @V304498 01226000
+         L     R8,RECPNT      RESTORE REG 8                    @V304298 01227000
+         L     R14,=A(DMKPGTTU) INCREMENT TOTAL CYLS IN USE    @V304298 01228000
+         L     R15,0(,R14)    GET IT                           @V304298 01229000
+         LA    R15,1(R15)     INCREMENT IT                     @V304298 01230000
+         ST    R15,0(,R14)    STORE IT                         @V304298 01231000
+         SPACE 2                                                        01232000
+* NOW CHAIN THE RECBLOK INTO THE RDEVRECS CHAIN                         01233000
+         DROP  R1                                              @V304298 01234000
+         USING RECBLOK,R14    BACK TO NORMAL                   @V304298 01235000
+         LR    R14,R1         SAVE RECBLOK ADDRESS             @V304298 01236000
+         SR    R1,R1          CLEAR IT                         @V304298 01237000
+         CH    R1,RECCYL      ALLOCATING ON CYL 0 ?            @V304298 01238000
+         BNE   CHAINIT        NO --WE'RE ALL SET THEN          @V304298 01239000
+         IC    R1,RECMAX      GET NUMBER OF RECORDS PER TRACK  @V304498 01240000
+         CLI   RDEVTYPE,TYP3350 IS DEVICE A 3350 ?             @V304498 01241000
+         BNE   OTHERDEV       NO -                             @V304498 01242000
+         MVI   RECMAP,B'11110000' MARK PAGES AS ALLOCATED      @V304498 01243000
+         SL    R1,F4          ADJUST THE RECORD COUNT          @V304498 01244000
+         B     SAVETOT        SAVE NEW RECORD COUNT            @V304498 01245000
+OTHERDEV MVI   RECMAP,B'11100000' MARK FIRST 3 PAGES ALLOCATED @V304498 01246000
+         SL    R1,F3          ADJUST THE RECORD COUNT          @V304498 01247000
+SAVETOT  STC   R1,RECMAX      STORE THE NEW COUNT              @V304498 01248000
+         SPACE 2                                                        01249000
+* CHAIN THIS RECBLOK INTO THE RDEVRECS CHAIN IN PROPER ORDER.           01250000
+* THIS ORDER IS BASED ON DISTANCE OF CYLINDER FROM                      01251000
+*    CENTER OF DISK.                                                    01252000
+CHAINIT  L     R1,RDEVALLN    GET ALOCBLOK                     @V304298 01253000
+         LH    R0,0(,R1)      NUMBER OF CYLINDERS              @V304298 01254000
+         SRL   R0,1           GET MIDDLE CYLINDER              @V304298 01255000
+         STH   R0,MIDCYL      SAVE IT                          @V304298 01256000
+         SH    R0,RECCYL      GET CURRENT DISPLACEMENT         @V304298 01257000
+         LPR   R0,R0          MAKE IT POSITIVE                 @V304298 01258000
+         STH   R0,CURDISP     SAVE IT                          @V304298 01259000
+         LA    R1,RDEVRECS    PREVIOUS RECBLOK                 @V304298 01260000
+         L     R15,RDEVRECS   POINT TO FIRST RECBLOK           @V304298 01261000
+         B     LOOPIT6        MAKE THE TEST                    @V304298 01262000
+LOOPIT5  LH    R0,RECCYL-RECBLOK(,R15) GET DISP OF THIS RECBLOK@V304298 01263000
+         SH    R0,MIDCYL      SUBTRACT MIDDLE CYLINDER         @V304298 01264000
+         LPR   R0,R0          MAKE IT POSITIVE                 @V304298 01265000
+         CH    R0,CURDISP     IS IT BIGGER THAN OURS ?         @V304298 01266000
+         BH    CHAINT         IF SO, GO CHAIN IT               @V304298 01267000
+         LR    R1,R15         NEW PREVIOUS RECBLOK             @V304298 01268000
+         L     R15,RECPNT-RECBLOK(,R15) NEXT RECBLOK ON CHAIN  @V304298 01269000
+LOOPIT6  LTR   R15,R15        ARE WE AT THE END YET ?          @V304298 01270000
+         BNZ   LOOPIT5        XFER IF NOT                      @V304298 01271000
+         SPACE                                                          01272000
+CHAINT   ST    R15,RECPNT     WE POINT TO NEXT RECBLOK         @V304298 01273000
+         ST    R14,RECPNT-RECBLOK(,R1) PREVIOUS POINTS TO US   @V304298 01274000
+         L     R1,SAVEWRK1    RESTORE CCPD TO REG 1            @V304298 01275000
+         SPACE 4                                                        01276000
+* NOW WE ALLOCATE THE PAGE ON THE GIVEN CYLINDER                        01277000
+* AT THIS POINT GPR 14 POINTS TO THE RECBLOK IN QUESTION                01278000
+* IN ADDITION, REGISTER 1 HAS THE CCPD TO BE ALLOCATED                  01279000
+ALOCPAG  DS    0H                                              @V304298 01280000
+         SR    R15,R15        CLEAR WORKL REGISTER             @V304298 01281000
+         IC    R15,RECUSED    GET NUMB OF RECDS IN USE         @V304298 01282000
+         CLC   RECUSED(1),RECMAX ARE WE AT MAXIMUM OR ABOVE    @V304298 01283000
+*                             IT ?                                      01284000
+         BNL   MSG916E        SOMETHING  WRONG IF SO           @V304298 01285000
+         LA    R15,1(,R15)    INCREMENT RECS IN USE            @V304298 01286000
+         STC   R15,RECUSED    SAVE IT                          @V304298 01287000
+         SPACE 2                                                        01288000
+* GET THE PAGE NUMBER ISOLATED                                          01289000
+         SRL   R1,8           PAGE IN LOW ORDER OF R1          @V304298 01290000
+         N     R1,F255        GET RID OF CYLINDER              @V304298 01291000
+         BCTR  R1,0           PAGE NUMBER RELATIVE TO ZERO     @V304298 01292000
+         LR    R0,R1          INTO REG 0 FOR SHIFTING          @V304298 01293000
+         SRDL  R0,3           DIVIDE BY 8                      @V304298 01294000
+         SRL   R1,29          GET REMAINDER                    @V304298 01295000
+         IC    R1,ALLOCTBL(R1) GET BIT MASK TO ALLOCATE        @V304298 01296000
+         LA    R15,RECMAP     START OF PAGE MAP                @V304298 01297000
+         ALR   R15,R0         POINT TO BYTE CONTAINING BIT     @V304298 01298000
+         EX    R1,TEST        ALREADY ALLOCATED ?              @V304298 01299000
+         BNZ   MSG916E        SOMETHING WRONG IF SO            @V304298 01300000
+         EX    R1,ALLOCATE    ALLOCATE THE PAGE                @V304298 01301000
+         L     R1,SAVEWRK1    RESTORE REGISTER 1               @V304298 01302000
+         BR    R6             RETURN WITH PAGE ALLOCATED       @V304298 01303000
+         EJECT                                                          01304000
+*                                                                       01305000
+* ERROR MESSAGES AND WAIT STATES                                        01306000
+*                                                                       01307000
+         SPACE 2                                                        01308000
+MSG400I  EQU   *              CHECKPOINT AREA IS FULL          @VM03037 01309000
+         MVI   DMKCKSSW,CKPTSTOP STOP CHECKPOINTING            @VA08189 01309500
+         LA    R2,400         ERROR CODE ....                  @V304235 01310000
+         LA    R1,CKPTTXT     @ VARIABLE TEXT                  @V304235 01311000
+         LA    R0,CKPTMSGL    LENGTH OF VARIABLE TEXT          @V304235 01312000
+         BAL   R15,PUTMSGI    DISPLAY ERROR MESSAGE            @VM03037 01313000
+* NOW INVALIDATE THE CHECKPOINT CYLINDER                                01314000
+         SPACE                                                          01315000
+STOP1    MVI   DMKCKSSW,CKPTSTOP   STOP CHECKPOINTING          @VM02131 01316000
+         MVC   CYLSLOT(2),CKSSTART FIRST CYLINDER              @V304235 01317000
+         MVI   PAGSLOT,X'01'  FIRST PAGE                       @V304235 01318000
+         BAL   R6,GETSLOT     BRING IT INTO CORE               @V304235 01319000
+         L     R4,RADDSLOT    ADDRESSIBILITY                   @V304235 01320000
+         MVC   0(4,R4),ZEROES INVALIDATE IT                    @V304235 01321000
+         BAL   R6,PUTSLOT     WRITE IT BACK TO DASD            @V304235 01322000
+         B     MSG919E                                         @V304235 01323000
+         SPACE                                                          01324000
+MSG401I  EQU   *              CHECKPOINT SPACE 90 % FULL       @V304235 01325000
+         LA    R2,401         ERROR CODE                       @V304235 01326000
+         LA    R1,CKPTTXT     VARIABLE PORTION OF TEXT         @V304235 01327000
+         LA    R0,CKPTMSGL    LENGTH OF VARIABLE PORTION       @V304235 01328000
+         BAL   R15,PUTMSGI    DISPLAY MSG ...                  @V304235 01329000
+         OI    DMKCKSSW,MSG90ISU  IND 90% MSG ISSUED           @VM02131 01330000
+         BR    R6             RETURN TO CALLER                 @V304235 01331000
+         SPACE                                                          01332000
+MSG903E  EQU   *              ALLOC ON NON-TEMP CYLINDER       @V304235 01333000
+         LA    R2,903         ERROR CODE                       @V304235 01334000
+         XC    SAVEWRK7(L'SAVEWRK7*3),SAVEWRK7    MSG AREA     @VM03200 01335000
+         LR    R15,R0         ADDRESS OF VOLID                 @VM03200 01336000
+         MVC   SAVEWRK7(L'RDEVSER),RDEVSER-RDEVSER(R15)  VOLID @VM03200 01337000
+         CALL  DMKCVTBD       CONVERT CYL. NUMBER TO DECIMAL   @VM03200 01338000
+         STCM  R1,7,SAVEWRK9  SAVE CYLINDER NUMBER             @VM03200 01339000
+         LA    R1,SAVEWRK7    ADDRESS OF ERROR MESSAGE         @VM03200 01340000
+         LA    R0,L'SAVEWRK7*3     AND ITS LENGTH              @VM03200 01341000
+         BAL   R15,PUTMSGW    DISPLAY MSG                      @V304235 01342000
+         B     CNSWAIT                                         @V304235 01343000
+         SPACE                                                          01344000
+MSG912W  EQU   *              VOLUME NOT MOUNTED FOR ALLOC     @V304235 01345000
+         LA    R2,912         ERROR CODE                       @V304235 01346000
+         XC    SAVEWRK7(L'SAVEWRK7*2),SAVEWRK7  CLEAR MSG AREA @V304298 01347000
+         LR    R15,R0         ADDRESS OF VOLID                 @VM03200 01348000
+         MVC   SAVEWRK7(L'RDEVSER),RDEVSER-RDEVSER(R15) SV VOLI@V304298 01349000
+         LA    R1,SAVEWRK7    ADDRESS OF VARIABLE DATA         @VM03200 01350000
+         LA    R0,L'RDEVSER   LENGTH OF MESSAGE                @VM03200 01351000
+         BAL   R15,PUTMSGW    DISPLAY MSG                      @V304235 01352000
+         B     CNSWAIT                                         @V304235 01353000
+         EJECT                                                          01354000
+         SPACE                                                          01355000
+MSG915E  EQU   *              PERM I/O ERROR ON CKPT CYL       @V304235 01356000
+         BAL   R6,PUTSLOT0    FREE UP VM SPACE AND CCPD        @VM02131 01357000
+         LA    R2,915         ERROR CODE                       @V304235 01358000
+         SR    R1,R1                                           @V304235 01359000
+         BAL   R15,PUTMSGE                                     @V304235 01360000
+         LA    R1,CKSLOCK     ADDRESS OF ROUTINE LOCK          @V304235 01361000
+         CALL  DMKLOCKT       IS THE LOCK ON ?                 @V304235 01362000
+         BZ    STOP2          WE ARE RECOVERING IF NOT         @V304235 01363000
+         CLI   DMKCKSSW,CKPTSTOP   TRYING TO INVALIDATE CKPT   @VM02131 01364000
+         BE    MSG919E        CYL ?, IF SO, JUST SEND MESSAGE  @VM02131 01365000
+         B     STOP1          ELSE, INVALIDATE CKPT CYL FIRST  @VM02131 01366000
+STOP2    TM    PARM2,CKPT     IS IT 'CKPT' OPTION ?            @VM02131 01367000
+         BO    CNSWAIT        NO - LOAD DISABLE WAIT STATE PSW @VM03268 01368000
+* WE ARE ONLY CALLED FROM GETSLOT AND PUTSLOT                           01369000
+* SET CC^=0 AND RETURN VIA GPR 6                                        01370000
+         CLI   PAGSLOT,X'01'  ERROR OCCURRING ON FIRST PAGE ?  @VM02131 01371000
+         BNE   CKSWM1         NO ..., CONTINUE WITH "FORCE"    @VM02131 01372000
+         CLC   CYLSLOT(2),CKSSTART  WAS IT RECORD 1 ??         @VM02131 01373000
+         BNE   CKSWM1         NO ..., CONTINUE WITH "FORCE"    @VM02131 01374000
+         B     CNSWAIT        ELSE, END IT ALL .............   @VM02131 01375000
+         SPACE                                                          01376000
+MSG916E  EQU   *              ERROR ALLOCATING A FILE          @V304235 01377000
+         LA    R2,916         ERROR CODE                       @V304235 01378000
+         SR    R1,R1                                           @V304235 01379000
+         BAL   R15,PUTMSGE    DISPLAY MSG                      @V304235 01380000
+         MVI   DMKCKSSW,CKPTSTOP  STOP CHECKPOINTING           @V304235 01381000
+         TM    PARM2,FORCE    IS IT A FORCE ?                  @V304235 01382000
+         BO    CKSWM6A1       DELETE THE FILE IF SO            @V304235 01383000
+         B     CNSWAIT        OTHERWISE, LOAD DISABLE PSW      @V303250 01384000
+         SPACE                                                          01385000
+MSG917E  EQU   *              CHECKPOINT CYL INVALID           @V304235 01386000
+         LA    R2,917         ERROR CODE                       @V304235 01387000
+         SR    R1,R1                                           @V304235 01388000
+         BAL   R15,PUTMSGE    DISPLAY MSG                      @V304235 01389000
+         B     CNSWAIT                                         @V304235 01390000
+         SPACE                                                          01391000
+MSG919E  EQU   *              CHECKPOINT TERMINATED            @V304235 01392000
+         LA    R2,919         ERROR CODE                       @V304235 01393000
+         SR    R1,R1                                           @V304235 01394000
+         BAL   R15,PUTMSGE    DISPLAY MSG                      @V304235 01395000
+         B     CKSEXIT        EXIT TO CALLER                   @V304235 01396000
+         SPACE                                                          01397000
+CNSWAIT  EQU   *                                               @V304235 01398000
+         CALL  DMKQCNSY       WAIT FOR OUPUT TO COMPLETE       @V304235 01399000
+         LPSW  PSW00E         DISABLE WAIT STATE               @VM03268 01400000
+         EJECT                                                          01401000
+PUTMSGE  O     R2,MSGTYPE     SET PARMS FOR 'E' TYPE MSG       @V304235 01402000
+         B     PUTMSG                                          @V304235 01403000
+PUTMSGW  O     R2,MSGTYPW     SET PARMS FOR 'W' TYPE MSG       @V304235 01404000
+         B     PUTMSG                                          @V304235 01405000
+PUTMSGI  O     R2,MSGTYPI     SET PARMS FOR 'I' TYPE MSG       @V304235 01406000
+         SPACE                                                          01407000
+PUTMSG   ICM   R0,B'1110',DMKCKS+3 MODULE ID                   @V304235 01408000
+         ST    R15,SAVREG15   SAVE RETURN @                    @V304235 01409000
+         CALL  DMKERMSG                                        @V304235 01410000
+         L     R15,SAVREG15   RESTORE RETURN @                 @V304235 01411000
+         BR    R15            RETURN                           @V304235 01412000
+         SPACE                                                          01413000
+PSW00E   DS    0D                                              @V304298 01414000
+         DC    X'000A00000000000E' WAIT STATE CODE E           @V304298 01415000
+         EJECT                                                          01416000
+         COPY  SAVE                                            @V304298 01417000
+DMKCKS   CSECT ,                                               @V304298 01418000
+         EJECT                                                          01419000
+*********************************************************************** 01420000
+*                                                                       01421000
+* CONSTANTS AND WORK AREAS                                              01422000
+*                                                                       01423000
+*********************************************************************** 01424000
+         SPACE                                                          01425000
+RADDMAP  EQU   SAVEWRK2       REAL ADDR OF MAP BUFFER          @V304298 01426000
+PARM1    EQU   SAVER2+2       PARMS PASSED BY CALLER           @V304235 01427000
+PARM2    EQU   SAVER2+3       PARMS PASSED BY CALLER           @V304235 01428000
+         SPACE 1                                                        01429000
+*        ADDITIONAL BITS DEFINED IN 'PARM2'                             01430000
+FORCE    EQU   X'40'          'FORCE' A CHECKPOINT/RESTART     @V304235 01431000
+CKPT     EQU   X'20'          RESTART FROM CHECKPOINT CYLINDER @V304235 01432000
+WARMAUTO EQU   X'10'          AUTOMATIC WARM START RECOVERY    @V304235 01433000
+SHUTDOWN EQU   X'08'          SHUTDOWN THE SYSTEM              @V304235 01434000
+DRAIN    EQU   X'04'          'DRAIN' THE SPOOLING DEVICES     @V304235 01435000
+WARM     EQU   X'02'          'WARM' GIVEN FROM IPL'D FROM     @V304235 01436000
+*                             OPERATOR                                  01437000
+COLD     EQU   X'01'          CLEAR THE WARM/CHECKPOINT        @V304235 01438000
+*                             CYLINDERS                                 01439000
+TEMP     EQU   X'08'          TEMP SPACE                       @VM00019 01439100
+ALLOC    EQU   X'80'          ALLOCATE TEMPORARILY             @VM00019 01439200
+         SPACE 1                                                        01440000
+         SPACE                                                          01441000
+CCPDSLOT EQU   SAVEWRK3       SLOT DASD ADDRESS                @V304298 01442000
+CYLSLOT  EQU   SAVEWRK3       CHECKPOINT CYLINDER NUMBER       @V304298 01443000
+PAGSLOT  EQU   SAVEWRK3+2     PAGE NUMBER OF SLOT              @V304298 01444000
+CODSLOT  EQU   SAVEWRK3+3     DEVICE CODE FOR SLOT             @V304298 01445000
+VPAGSLOT EQU   SAVEWRK4       VIRT ADDR OF SLOT BUFFER         @V304298 01446000
+RADDSLOT EQU   SAVEWRK5       REAL ADDR OF SLOT BUFFER         @V304298 01447000
+CCPDBUFF EQU   SAVEWRK6       BUFFER DASD ADDRESS              @V304298 01448000
+CYLBUFF  EQU   SAVEWRK6       CHECKPOINT CYLINDER NUMBER       @V304298 01449000
+PAGBUFF  EQU   SAVEWRK6+2     PAGE NUMBER FOR BUFFER           @V304298 01450000
+CODBUFF  EQU   SAVEWRK6+3     DEVICE CODE FOR BUFFER           @V304298 01451000
+VPAGBUFF EQU   SAVEWRK7       VIRT ADDR OF BUFFER              @V304298 01452000
+RADDBUFF EQU   SAVEWRK8       READ ADDR OF BUFFER              @V304298 01453000
+SAVREG   EQU   SAVEWRK8       TEMP REG SAVE AREA FOR FINDSLOT  @V304235 01454000
+TOPSLOT  EQU   SAVEWRK9       LOCATION OF DELIMITER            @V304298 01455000
+         SPACE 1                                                        01456000
+         DS    0H                                              @VM02131 01457000
+MAPFREE  DS    0XL2           MAP ENTRY HAS NOT BEEN ALLOCATED @VM02131 01458000
+SLOTFREE DC    X'FFFFFFFF'    DASD SLOT ENTRY NOT ALLOCATED    @VM02131 01459000
+SLOTDEV  DC    X'EEEEEEEE'    DASD SLOT CONTAINS REAL DEVICE   @VM02131 01460000
+MAPSHQ   DS    0XL2           MAP USED FOR SPOOL HOLD QUEUE    @VM02131 01461000
+*                             INFO.                                     01462000
+SLOTSHQ  DC    X'AAAAAAAA'    DASD SLOT CONTAINS SPOOL HOLD    @VM02131 01463000
+*                             QUEUE BLOK                                01464000
+MAPEND   DC    X'FEFE'        LAST MAP ENTRY ALLOCATED (END    @VM02131 01465000
+*                             OF LIST)                                  01466000
+         EJECT                                                          01467000
+CKPTSTOP EQU   X'FF'          TERMINATE RECORDING OF           @V304235 01468000
+CKPTTXT  DC    C'CHECKPOINT'  VARIABLE PORTION OF MSG 400 & 401@V304235 01469000
+CKPTMSGL EQU   *-CKPTTXT                                       @V304235 01470000
+         DS    0F                                              @V304235 01471000
+MSGTYPE  DC    X'B8C50000'    - E TYPE MSG PARM FOR DMKERM     @V304235 01472000
+MSGTYPW  DC    X'B8E60000'    - W TYPE MSG PARM FOR DMKERM     @V304235 01473000
+MSGTYPI  DC    X'B8C90000'    - I TYPE MSG PARM FOR DMKERM     @V304235 01474000
+SAVREG15 DS    F              - REG SAVE AREA FOR PUTMSG       @V304235 01475000
+*                               CHECKPOINT RECORDS                      01476000
+MSG90ISU EQU   X'F0'          90% FULL MSG ISSUED FLAG         @V304235 01477000
+         SPACE                                                          01478000
+DMKCKSMP DC    A(0)           VADDR OF CKPNT CYL MAP           @V304298 01479000
+CKSSTART DC    H'0'           STARTING CHECKPOINT CYLINDER     @V304298 01480000
+CKSEND   DC    H'0'           ENDING CHECKPOINT CYLINDER       @V304298 01481000
+PAGPCYL  DC    F'0'           PAGES PER CYL FOR IPL DEVICE     @V304298 01482000
+SLOTPPAG DC    F'36'          SFBLOKS PER PAGE                 @V304298 01483000
+MAXPAG   DC    F'57'          MAXIMUM PAGES FOR SLOTS          @V304298 01484000
+MAXSLOTS DC    F'2048'        MAX SFBLOKS THAT CAN BE STORED   @V304298 01485000
+ENTRYSIZ DC    H'104'         SFBSIZE*8 (SFBLOK IN BYTES)      @V60B9BA 01486000
+CYLNO    DC    H'202'         CHECKPOINT CYLINDER NUMBER       @V304298 01487000
+CKSLOCK  DC    CL8'<SPLCHK>'  LOCK FOR THIS ROUTINE            @V304298 01488000
+MAXFILE  DC    F'9900'        - MAX SPOOL FILE ID NUMBER       @V304235 01489000
+SLOT90P  DC    AL2(2048-(2048/10))  90% OF MAX NUMBER OF SLOTS @V304235 01490000
+SLOT90R  DC    AL2(2048-(2048/10)-24)  90% MSG GRACE VALUE ..  @V304235 01491000
+*              THE ABOVE FIGURE IS THE NUMBER OF SLOTS THAT             01492000
+*              MUST BE REACHED AFTER A 90% FULL CONDITION IS            01493000
+*              REACHED BEFORE WE WILL AGAIN ISSUE DMKCKS401I.           01494000
+*              THIS SHOULD PREVENT THE OPERATOR FROM BEING              01495000
+*              INUNDATED WITH MESSAGES WHILE SPOOL FILE                 01496000
+*              ACTIVITY IS OCCURING AROUND THE 90% MARK.                01497000
+PREVBUFF DS    F              CCPD OF PREVIOUS VALID DASD      @V304298 01498000
+*                                  BUFFER FOR OPEN SPOOL FILE           01499000
+HOLDR14  DS    F              TEMP SAVE FOR REGS 14 & 15       @V304298 01500000
+HOLDR15  DS    F              ACROSS CALL TO ALOCIT FOR DUMP   @V304298 01501000
+SPOOLID  DC    H'0'           MAINTAIN HIGHEST ID HERE         @V304298 01502000
+MIDCYL   DS    H              SAVE THE MIDDLE CYLINDER FOR     @V304298 01503000
+*                             ALOCIT                                    01504000
+CURDISP  DS    H              SAVE CURR. DISPL. FOR ALOCIT     @V304298 01505000
+         EJECT                                                          01506000
+         SPACE 4                                                        01507000
+ALLOCTBL EQU   *              BIT MAP WHOSE ENTRIES ARE LOCATED@V304298 01508000
+*                                  BY INDEXING FROM THE REMAINDER AFTER 01509000
+*                                  GETTING THE BYTE DISPLACEMENT INTO   01510000
+*                                  ALOCMAP FOR THE CYLINDER TO BE       01511000
+*                                  ALLOCATED                            01512000
+         DC    X'8040201008040201'                             @V304298 01513000
+         SPACE                                                          01514000
+TEST     TM    0(R15),0       EXECUTED TO TEST IF PAGE         @V304298 01515000
+*                                  HAS BEEN ALLOCATED PREMATURELY       01516000
+         SPACE                                                          01517000
+ALLOCATE OI    0(R15),0       EXECUTED TO MARK A PAGE          @V304298 01518000
+*                                  AS ALLOCATED                         01519000
+         SPACE 5                                                        01520000
+         ENTRY DMKCKSSW                                        @VM02131 01521000
+DMKCKSSW DC    X'00'          SWITCH FOR CHECKPOINTING         @VM02131 01522000
+CKPTDVCD DC    X'00'          DEVICE CODE FOR CHECKPOINT CYL   @VM02131 01523000
+         EJECT                                                          01524000
+         SPACE 1                                                        01525000
+         LTORG                                                 @VM03038 01526000
+         EJECT                                                          01527000
+         SPACE 3                                                        01528000
+         PSA                                                   @V304298 01529000
+         COPY  SPOOL                                           @V304298 01530000
+         COPY  NPRTBL                                          @V60B9BA 01530100
+         COPY  VMBLOK                                          @V304298 01531000
+         COPY  EQU                                             @V304298 01532000
+         COPY  RBLOKS                                          @V304298 01533000
+         COPY  ALLOC                                           @V304298 01534000
+         COPY  DEVTYPES                                        @V304298 01535000
+         END                                                            01536000

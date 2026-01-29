@@ -1,0 +1,1520 @@
+FRE      TITLE 'DMKFRE     (CP)        VM/370 - RELEASE 6'              00001000
+         ISEQ  73,80          VALIDATE SEQUENCING OF SOURCE    @VA00881 00002000
+*                                                                       00003000
+*.                                                                      00004000
+* MODULE NAME -                                                         00005000
+*                                                                       00006000
+*        DMKFRE                                                         00007000
+*                                                                       00008000
+* CONTENTS -                                                            00009000
+*                                                                       00010000
+*        DMKFREE - GET A SUBPOOL OR OTHER BLOCK FROM FREE STORAGE       00011000
+*        DMKFRERC - GET A SUBPOOL OR OTHER BLOCK FROM FREE STORAGE      00012000
+*                   AND RETURN A CC=1 TO THE CALLER IF THE REQUEST      00013000
+*                   CANNOT BE SATISFIED.                                00014000
+*        DMKFRET - RETURN A SUBPOOL OR OTHER BLOCK TO FREE STORAGE      00015000
+*        DMKFRETR - RETURN A BLOCK TO FREE STORAGE (IGNORING SUBPOOLS)  00016000
+*        DMKFRERS - RETURN ALL SUBPOOLS TO FREE STORAGE CHAIN           00017000
+         EJECT                                                          00018000
+* SUBROUTINE NAME -                                                     00019000
+*                                                                       00020000
+*        DMKFREE                                                        00021000
+*                                                                       00022000
+* FUNCTION -                                                            00023000
+*                                                                       00024000
+*        TO PROVIDE THE CALLER WITH A FREE STORAGE BLOCK, EITHER        00025000
+*        FROM A SUBPOOL, FOR SMALL-SIZE BLOCKS, OR                      00026000
+*        FROM A CHAINED LIST, FOR LARGER BLOCKS.                        00027000
+*                                                                       00028000
+* ATTRIBUTES -                                                          00029000
+*                                                                       00030000
+*        SERIALLY REUSABLE, RESIDENT, CALLED VIA BALR                   00031000
+*                                                                       00032000
+* ENTRY POINT -                                                         00033000
+*                                                                       00034000
+*        DMKFREE/DMKFRERC                                               00035000
+*                                                                       00036000
+* ENTRY CONDITIONS -                                                    00037000
+*                                                                       00038000
+*        GPR  0 = NUMBER OF DOUBLE WORDS REQUESTED                      00039000
+*        GPR 14 = RETURN ADDRESS                                        00040000
+*        GPR 15 = ADDRESS OF DMKFREE                                    00041000
+*                                                                       00042000
+* EXIT CONDITIONS -                                                     00043000
+*                                                                       00044000
+*        DMKFREE                                                        00045000
+*                                                                       00046000
+*        GPR  0 = UNCHANGED (= NUMBER OF DOUBLE WORDS REQUESTED)        00047000
+*        GPR  1 = ADDRESS OF FIRST DOUBLE-WORD OF BLOCK SUPPLIED        00048000
+*        ALL OTHER GPR'S UNCHANGED                                      00049000
+*                                                                       00050000
+*        DMKFRERC IF FREE STORAGE REQUEST COULD NOT BE SATISFIED.       00051000
+*                                                                       00052000
+*        GPR  0 = UNCHANGED (= NUMBER OF DOUBLE WORDS REQUESTED)        00053000
+*        GPR  1 = X'00FFFFFF'                                           00054000
+*        ALL OTHER GPR'S UNCHANGED                                      00055000
+*                                                                       00056000
+* CALLS TO OTHER ROUTINES -                                             00057000
+*                                                                       00058000
+*        DMKPTRFR - CALLED TO OBTAIN A PAGE FROM DYNAMIC PAGING AREA    00059000
+*                   IF IT IS NECESSARY TO CALL DMKPTRFR TO OBTAIN A     00060000
+*                   PAGE FROM THE DYNAMIC PAGING AREA AND DMKFRE WAS    00061000
+*                   ENTERED AT ENTRY POINT DMKFRERC, DMKPTRFR WILL      00062000
+*                   BE CALLED WITH 'PARM = 2' TO INDICATE THAT IF       00063000
+*                   A PAGE CANNOT BE OBTAINED, A CC=1 SHOULD BE         00064000
+*                   RETURNED TO DMKFRE INSTEAD OF ABENDING VM/370       00065000
+*                   WITH A PTR07.  DMKFRE WILL THEN RETURN THE SAME     00066000
+*                   CONDITION CODE TO THE CALLER SO THAT AN APPROPRIATE 00067000
+*                   ERROR MESSAGE CAN BE ISSUED.                        00068000
+*                                                                       00069000
+* EXTERNAL REFERENCES -                                                 00070000
+*                                                                       00071000
+*        DMKDSPNP - NUMBER OF PAGES AVAILABLE FOR PAGING USE            00072000
+*                                                                       00073000
+* TABLES / WORK AREAS -                                                 00074000
+*                                                                       00075000
+*        FREESAVE (16 WORDS) USED TO SAVE REGISTERS                     00076000
+*        FREEWORK (UP TO 12 WORDS) USED FOR SCRATCH STORAGE             00077000
+         EJECT                                                          00078000
+* REGISTER USAGE -                                                      00079000
+*                                                                       00080000
+*        GPR 0 - 10 = WORK REGISTERS                                    00081000
+*        GPR 11 IS NOT USED                                             00082000
+*        GPR 12 = MODULE BASE REGISTER                                  00083000
+*        GPR 13 - 15 = WORK REGISTERS                                   00084000
+*                                                                       00085000
+* NOTES -                                                               00086000
+*                                                                       00087000
+*        BLOCK SIZES OF 30 DOUBLE WORDS OR LESS ARE GROUPED INTO TEN    00088000
+*        SUBPOOL SIZES, OF 3, 6, ..., 30 DOUBLE WORDS (MULTIPLES OF 3)  00089000
+*        AND ARE HANDLED BY LIFO (PUSH DOWN STACK) LOGIC.  POINTERS     00090000
+*        AT "SUBTABLE" POINT TO THE VARIOUS AVAILABLE SUBPOOLS.         00091000
+*                                                                       00092000
+*        BLOCK SIZES OF GREATER THAN 30 DOUBLE WORDS ARE STRUNG OFF     00093000
+*        A CHAINED LIST.  "DMKFRELS" POINTS TO THE FIRST BLOCK IN THE   00094000
+*        LIST, AND "FREENUM" CONTAINS THE NUMBER OF BLOCKS IN THE LIST. 00095000
+*                                                                       00096000
+* OPERATION -                                                           00097000
+*                                                                       00098000
+*        1.  THE NUMBER OF DOUBLE WORDS REQUESTED IS CHECKED.  IF A     00099000
+*        ZERO OR NEGATIVE VALUE IS FOUND (INDICATING A SERIOUS CODING   00100000
+*        ERROR), AN ABEND OCCURS VIA SVC 0.  OTHERWISE, PROCEEDS TO     00101000
+*        STEP 2 FOR SUBPOOL SIZES (30 DOUBLE WORDS OR LESS),            00102000
+*        OR TO STEP 3 FOR LARGER SIZES (> 30 DOUBLE WORDS).             00103000
+*                                                                       00104000
+*        2.  THE APPROPRIATE SUBPOOL FOR THE REQUESTED SIZE IS          00105000
+*        CHECKED TO SEE IF THERE IS AT LEAST ONE BLOCK AVAILABLE.       00106000
+*                                                                       00107000
+*        IF ONE IS AVAILABLE, THE FIRST ONE (POINTED TO BY "SUBTABLE")  00108000
+*        IS REMOVED FROM THE SUBPOOL TO BE RETURNED TO THE CALLER,      00109000
+*        AND THE POINTER AT "SUBTABLE" IS CHANGED TO POINT TO THE       00110000
+*        NEXT AVAILABLE SUBPOOL BLOCK OF THE SAME SIZE (IF ANY).        00111000
+         EJECT                                                          00112000
+* OPERATION (CONTINUED) -                                               00113000
+*                                                                       00114000
+*        2.  (CONTINUED) - NO SUBPOOL AVAILABLE:                        00115000
+*                                                                       00116000
+*        IF THERE IS NO SUITABLE BLOCK FOR THE SUBPOOL SIZE REQUESTED,  00117000
+*        THEN THE CHAINED LIST OF FREE STORAGE IS SEARCHED FOR A BLOCK  00118000
+*        OF EQUAL OR LARGER SIZE.  THE FIRST BLOCK OF LARGER OR EQUAL   00119000
+*        SIZE IS USED TO SATISFY THE CALL (AN EQUAL-SIZE BLOCK TAKING   00120000
+*        PRIORITY), EXCEPT THAT EQUAL OR LARGER BLOCKS PREVIOUSLY       00121000
+*        OBTAINED FROM THE DYNAMIC PAGING AREA ARE AVOIDED IF AT ALL    00122000
+*        POSSIBLE.  IF AN EQUAL BLOCK IS FOUND, IT IS DETACHED FROM     00123000
+*        THE CHAIN AND RETURNED TO THE CALLER.  IF A LARGER ONE MUST    00124000
+*        BE USED, THE LOW-NUMBERED END IS SPLIT OFF AND RETURNED TO     00125000
+*        THE CALLER.  IF NO EQUAL OR LARGER BLOCK IS FOUND, THEN        00126000
+*        A CHECK IS MADE TO SEE IF ANY LARGER SUBPOOL BLOCK (STARTING   00127000
+*        WITH THE LARGEST SIZE OF 30 DOUBLE WORDS AND WORKING DOWNWARD) 00128000
+*        CAN BE SPLIT UP INTO THE SIZE REQUESTED AND ANOTHER SUBPOOL    00129000
+*        SIZE.  IF ONE IS FOUND, THE LARGER BLOCK IS DETACHED FROM ITS  00130000
+*        SUBPOOL AND SPLIT.  THE REQUESTED BLOCK IS RETURNED TO THE     00131000
+*        CALLER, AND THE REMAINING BLOCK IS ATTACHED TO THE APPROPRIATE 00132000
+*        SUBPOOL AT "SUBTABLE".  IF THIS EFFORT FAILS, THEN             00133000
+*        DMKPTRFR IS CALLED TO OBTAIN ANOTHER PAGE FROM THE             00134000
+*        DYNAMIC PAGING AREA (WHICH IS MERGED INTO THE CHAIN            00135000
+*        OF FREE STORAGE), AND STEP 2 IS THEN REPEATED                  00136000
+*        (FROM THE BEGINNING) TO OBTAIN THE NEEDED BLOCK.               00137000
+*                                                                       00138000
+*        3.  CALL TO DMKFREE FOR A LARGE BLOCK (> 30 DOUBLE WORDS):     00139000
+*                                                                       00140000
+*        WHEN DMKFREE IS CALLED FOR A LARGE BLOCK, THE CHAINED LIST OF  00141000
+*        FREE STORAGE IS SEARCHED FOR A BLOCK OF EQUAL OR LARGER SIZE.  00142000
+*        IF AN EQUAL SIZE BLOCK IS FOUND, IT IS DETACHED FROM THE CHAIN 00143000
+*        AND GIVEN TO THE CALLER, UNLESS IF FALLS WITHIN THE DYNAMIC    00144000
+*        PAGING AREA;  IN THIS CASE, ITS ADDRESS IS REMEMBERED FOR      00145000
+*        LATER USE IF NECESSARY, AND THE SCAN IS RESUMED FOR AN         00146000
+*        EQUAL OR LARGER BLOCK NOT WITHIN THE DYNAMIC PAGING AREA.      00147000
+*        UPON COMPLETION OF THE SCAN, IF AT LEAST ONE LARGER BLOCK WAS  00148000
+*        FOUND, IF IT FELL WITHIN THE DYNAMIC PAGING AREA AND AN EQUAL  00149000
+*        BLOCK WAS ALSO FOUND THEREIN, THE EQUAL BLOCK IS USED.  OTHER- 00150000
+*        WISE, THE DESIRED BLOCK SIZE IS SPLIT OFF THE HIGH NUMBERED    00151000
+*        END OF THE LAST LARGER BLOCK FOUND, AND GIVEN TO THE CALLER.   00152000
+*        IF NO EQUAL OR LARGER BLOCK IS FOUND, THEN DMKPTRFR IS CALLED  00153000
+*        TO OBTAIN ANOTHER PAGE FROM THE DYNAMIC PAGING AREA (WHICH     00154000
+*        IS MERGED INTO THE CHAIN OF FREE STORAGE), AND STEP 3 IS       00155000
+*        THEN REPEATED TO OBTAIN THE NEEDED BLOCK.                      00156000
+*.                                                                      00157000
+         EJECT                                                          00158000
+         MACRO                                                          00159000
+&LABEL   INCR  &COUNT                                                   00160000
+&LABEL   LA    R14,1                                                    00161000
+         AL    R14,&COUNT                                               00162000
+         ST    R14,&COUNT                                               00163000
+         MEND                                                           00164000
+*                                                                       00165000
+         MACRO                                                          00166000
+         DECR  &COUNT                                                   00167000
+         L     R14,&COUNT                                               00168000
+         BCTR  R14,0                                                    00169000
+         ST    R14,&COUNT                                               00170000
+         MEND                                                           00171000
+         EJECT                                                          00172000
+         COPY  OPTIONS                                                  00173000
+         COPY  LOCAL                                                    00174000
+DMKFRE   CSECT                                                          00175000
+         ENTRY DMKFREE        OBTAIN A SUBPOOL OR REGULAR BLOCK         00176000
+         ENTRY DMKFRET        RETURN A SUBPOOL OR REGULAR BLOCK         00177000
+         ENTRY DMKFRETO       TOTAL FREE STORAGE IN DBL WORDS  @V408246 00178000
+         ENTRY DMKFRETR       RETURN A REGULAR BLOCK (IGNORE SUBPOOLS)  00179000
+*                                                                       00180000
+         ENTRY DMKFRELG       EXTERNAL-NAME FOR "LRGSTSIZ"              00181000
+         ENTRY DMKFRELS       START OF REGULAR FREE-STORAGE CHAIN       00182000
+         ENTRY DMKFRELO       SET TO END OF LOW-CORE AREA               00183000
+         ENTRY DMKFREHI       SET TO BEGINNING OF HIGH-CORE AREA        00184000
+         ENTRY DMKFRENP       NAME FOR "NPAGFREE" & "NPAGFRET" @VA00881 00185000
+         ENTRY DMKFRESV       SAVE-AREA FOR USE WHEN CALLING DMKPTRFR   00186000
+         ENTRY DMKFREST       FOR REFERENCE FOR CP ASSIST USE  @V386198 00187000
+         ENTRY DMKFRETL       ALSO FOR USE BY THE CP ASSIST    @V386198 00188000
+         ENTRY DMKFREAP       BACK POCKET FOR AP MODE EXTEND   @V407594 00189000
+*                                                                       00190000
+         EXTRN DMKPTRFR       CALLED WHEN ANOTHER PAGE IS NEEDED        00191000
+         EXTRN DMKPTRFT       CALLED TO RETURN PAGE(S) TO CP            00192000
+         EXTRN DMKCPE         END OF CP NUCLEUS                         00193000
+         EXTRN DMKSYSRM       SIZE OF REAL MACHINE                      00194000
+         EXTRN DMKDSPNP       NUMBER OF PAGES AVAILABLE FOR PAGING USE  00195000
+         EXTRN DMKQCNFT,DMKVCNFT                               @VA05235 00196000
+         EXTRN DMKSTKLF       STACK CPEXBLOK LIFO ENTRY        @V407594 00197000
+         AIF    (NOT &AP).DSPRU3                                        00198000
+         EXTRN DMKDSPRU       UNLOCKED ENTRY TO DISPATCHER     @V407594 00199000
+.DSPRU3  ANOP                                                           00200000
+         AIF   (NOT &VIRREAL).NOVR1                                     00201000
+         EXTRN DMKSLC                                                   00202000
+.NOVR1   ANOP                                                           00203000
+*                                                                       00204000
+         USING PSA,R0         FOR ALL ENTRANCES                         00205000
+*                                                                       00206000
+*********************************************************************** 00207000
+*                                                                       00208000
+*        SUBPOOL BLOCKS APPEAR AS FOLLOWS ---                           00209000
+*                                                                       00210000
+*        DS    1F            POINTER TO NEXT SUBPOOL BLOCK OF SAME SIZE 00211000
+*                                                                       00212000
+*        EACH GROUP OF SUBPOOL BLOCKS OF THE SAME SIZE IS               00213000
+*        STRUNG OFF AN INITIAL POINTER (SEE 'SUBTABLE')                 00214000
+*                                                                       00215000
+*********************************************************************** 00216000
+*                                                                       00217000
+*********************************************************************** 00218000
+*                                                                     * 00219000
+*        ALL OTHER FREE STORAGE BLOCKS APPEAR AS FOLLOWS ---            00220000
+*                                                                     * 00221000
+*        DS    1F             POINTER TO NEXT FREE STORAGE BLOCK      * 00222000
+*        DS    1F             SIZE (IN BYTES) OF THIS BLOCK.          * 00223000
+*                                                                     * 00224000
+*        ALL BLOCKS ARE STRUNG OFF DMKFRELS IN ORDER OF ASCENDING     * 00225000
+*        CORE ADDRESSES.                                              * 00226000
+*                                                                     * 00227000
+*********************************************************************** 00228000
+*                                                                       00229000
+PNTR     EQU   0              POINTER TO NEXT BLOCK.                    00230000
+SIZE     EQU   4              SIZE OF THIS BLOCK.                       00231000
+         EJECT                                                          00232000
+*********************************************************************** 00233000
+*                                                                     * 00234000
+*             "FREE" IS CALLED AS FOLLOWS ---                         * 00235000
+*                                                                     * 00236000
+*        LA    0,NDBLWRDS     NUMBER OF DOUBLE WORDS DESIRED.         * 00237000
+*        CALL  DMKFREE        ..                                      * 00238000
+*                                                                     * 00239000
+*********************************************************************** 00240000
+*.                                                                      00241000
+*********************************************************************** 00242000
+*                                                                       00243000
+*                                                                       00244000
+*        CP ASSIST INSTRUCTION "FREE" - OBTAIN SUBPOOL SIZE FREE SPACE  00245000
+*                                                                       00246000
+*                                                                       00247000
+*        OPERANDS:                                                      00248000
+*           1 = ADDRESS OF 'SUBTABLE'                                   00249000
+*           2 = ADDRESS OF ONE LESS THAN 'BYTBL'                        00250000
+*                                                                       00251000
+*        REGISTER INPUT:                                                00252000
+*           GPR  0 = A SIGNED 32 BIT INTEGER SPECIFYING THE NUMBER OF   00253000
+*                    DOUBLEWORDS OF FREE SPACE REQUESTED                00254000
+*           GPR 11 = ADDRESS OF THE REQUESTOR'S VMBLOK                  00255000
+*           GPR 14 = EXIT ADDRESS                                       00256000
+*                                                                       00257000
+*        SYSTEM DATA AREAS REFERENCED (BY MODULE):                      00258000
+*           DMKFRE - 'BYTBL' AND 'SUBTABLE'                             00259000
+*           DMKPSA - TRACING INFORMATION                                00260000
+*                                                                       00261000
+*                                                                       00262000
+*        EXITS:                                                         00263000
+*                                                                       00264000
+*        1. ADDRESS IN GPR 14 (NORMAL COMPLETION)                       00265000
+*                                                                       00266000
+*           REGISTER OUTPUT:                                            00267000
+*              GPR 1 = ADDRESS OF THE FREE SPACE OBTAINED               00268000
+*                                                                       00269000
+*        2. NEXT SEQUENTIAL INSTRUCTION (ABNORMAL COMPLETION)           00270000
+*                                                                       00271000
+*           NOTE: THIS EXIT IS FUNCTIONALLY EQUIVALENT TO A NO-OP.      00272000
+*                                                                       00273000
+*********************************************************************** 00274000
+*.                                                                      00275000
+         SPACE                                                          00276000
+         USING DMKFREE,R15    - UPON ENTRY ONLY...             @V3M4038 00277000
+DMKFREE  DS    0D             ENTER "FREE"                     @V3M4038 00278000
+         SPACE                                                          00279000
+         DS    0H             EXECUTE CP ASSIST "FREE"         @V3M4026 00280000
+         DC    X'E600',S(SUBTABLE,BYTBL-1)                  ***@V386198 00281000
+         SPACE                                                          00282000
+         STM   R0,R15,FREESAVE   - SAVE REGISTERS              %V3M4038 00283000
+         LR    R12,R15        ADDRESSABILITY IN R12, PLEASE    %V3M4038 00284000
+         DROP  R15            ESTABLISH NORMAL ADDRESSABILITY  %V3M4038 00285000
+         USING DMKFREE,R12    - FOR ALL ENTRIES                %V3M4038 00286000
+         SPACE                                                          00287000
+DMKFREEB DS    0H                                              %VA07369 00288000
+         AIF   (NOT &AP).NOAP1                                 **AIF*** 00289000
+         BAL   R14,LOCKFRE    LOCK DMKFRE                      %VA07369 00290000
+.NOAP1   ANOP                                                  **ANOP** 00291000
+         LTR   R2,R0          NO. DBL WORDS REQUESTED          %V407594 00292000
+         BNP   ERROR6         ERROR IF NOT PLUS AND NONZERO.   %V3M4038 00293000
+         LM    R7,R9,ADCONFRE INITIALIZE R7-R9 FOR 'FREE' USE  %V3M4038 00294000
+         SPACE                                                          00295000
+CHEKSIZE CL    R2,MAXSIZE     IS SIZE WITHIN SUBPOOL RANGE ?   %V3M4038 00296000
+         BHR   R8             NO, USE REGULAR FREE/FRET LOGIC  %V3M4038 00297000
+         IC    R7,BYTBL-1(R2) ELSE, GET SUBPOOL SIZE VALUE     %V3M4038 00298000
+         BR    R9             AND GO TO 'FREESUB' OR 'FRETSUB' %V3M4038 00299000
+         SPACE 2                                                        00300000
+         ENTRY DMKFRERC                                        @V407466 00301000
+DMKFRERC STM   R0,R15,FREESAVE ENTER - SAVE REGISTERS          @V407466 00302000
+         L     R12,AFREE      COMMON ADDRESSABILITY NEEDED     @V407466 00303000
+         USING DMKFRE,R12     ...                              @V407466 00304000
+         B     DMKFREEB       GO TO COMMON FREE STORAGE LOGIC  @V407466 00305000
+FREESUB  DS    0H             SIZE IS IN SUBPOOL TABLE RANGE   %V3M4038 00306000
+         L     R1,SUBTABLE(R7)   LOAD POINTER INTO R1,         %V3M4038 00307000
+         LTR   R1,R1          ANYTHING AVAILABLE ?             %V3M4038 00308000
+         BZ    FREE02         NO, MUST GET SUBPOOL-SIZE BLOCK. %V3M4038 00309000
+         L     R14,PNTR(,R1)  PATCH POINTER TO NEW SUBTABLE    %V3M4038 00310000
+         ST    R14,SUBTABLE(R7)   ...                          %V3M4038 00311000
+         ST    R1,GPR1        STORE FOR RETURNING R1 TO CALLER %V3M4038 00312000
+         SPACE                                                          00313000
+FREE20   DS    0H             EXIT HERE FROM FREE.             %V3M4038 00314000
+         AIF   (NOT &TRACE(9)).TR1                             %V3M4038 00315000
+         TM    TRACFLG1,TRAC67      TRACING ACTIVE?            %V3M4038 00316000
+         BZ    NOFREETR       BRANCH IF NOT                    %V3M4038 00317000
+         TRACE CODE=TRCFREE,R15,R14,R1  OBTAIN TRACE TBL SLOT  @V407594 00318000
+         STCM  R11,B'0111',1(R15)  VMBLOK OF CALLER            @V407594 00319000
+         L     R14,FREER0     SAVE GPR0                        %V3M4038 00320000
+         ST    R14,4(,R15)    ...                              %V3M4038 00321000
+         L     R14,FREER1     SAVE GPR1                        %V3M4038 00322000
+         ST    R14,8(,R15)    ...                              %V3M4038 00323000
+         L     R14,FREER14    SAVE GPR14                       %V3M4038 00324000
+         ST    R14,12(,R15)   ...                              %V3M4038 00325000
+NOFREETR EQU   *                                               %V3M4038 00326000
+.TR1     ANOP                                                  %V3M4038 00327000
+         AIF   (NOT &AP).NOAP2                                 **AIF*** 00328000
+         BAL   R14,RELFRE     RELEASE DMKFRE LOCK              %V407594 00329000
+.NOAP2   ANOP                                                  **ANOP** 00330000
+         CLC   FREER15+1(3),AFRERC+1  ENTERED AT DMKFRERC      %V407594 00331000
+         BNE   EXIT           NO, NORMAL EXIT                  %V4M0157 00332000
+         CLI   FREER1,X'FF'   CALL TO PAGE FREE FAILED?        @V407466 00333000
+         BNE   EXIT2          NO, EXIT NORMALLY - CC=0         @V407466 00334000
+         LCR   R7,R7          PLUS TO MINUS - CC=1             @V407466 00335000
+EXIT     LM    R0,R15,FREESAVE RESTORE REGISTERS               %V407466 00336000
+         BR    R14            RETURN                           %V407466 00337000
+EXIT2    CLI   F0,X'00'       SET CC=0 FOR NORMAL EXIT         @V407466 00338000
+         B     EXIT           EXIT WITH CC=0 TO CALLER         @V407466 00339000
+         EJECT                                                          00340000
+FRETSUB  DS    0H             SIZE IS IN SUBPOOL TABLE RANGE   %V3M4038 00341000
+         CL    R1,DMKFREHI    ARE WE IN HIGH-CORE FREE AREA ?  %V3M4038 00342000
+         BNL   FRET19         YES - GO RETURN BLOCK TO CHAIN.  %V3M4038 00343000
+         CL    R1,DMKFRELO    OR IN THE LOWER-CORE FREE AREA ?          00344000
+         BNL   FRET21         NOT < DMKFRELO, RETURN TO THE CHAIN.      00345000
+         L     R15,SUBSIZES(R7) BEGINNING OF BLOCK < DMKFRELO,          00346000
+         SLL   R15,3          COMPUTE THE END OF THE BLOCK              00347000
+         ALR   R15,R1         ...                                       00348000
+         CL    R15,DMKFRELO   DOES THAT OVERLAP DMKFRELO ?              00349000
+         AIF   (&VIRREAL).TRC6B                                @VA00881 00350000
+         BNH   FRET19         NOPE - WE'RE OK.                          00351000
+         AGO   .TRC6C                                          @VA00881 00352000
+.TRC6B   BH    FRET21         YES - TOO BAD (IN DYNAMIC PAGING AREA)    00353000
+         CL    R1,=A(DMKSLC)  BEWARE OF BLOCK IN UNLOCKED V=R  @VA00881 00354000
+*                             AREA                                      00355000
+         BNL   FRET19         IF NOT BELOW "DMKSLC", IT'S OK.  @VA00881 00356000
+.TRC6C   ANOP            SUBPOOL-SIZE BLOCK IS IN DYNAMIC PAGING AREA:  00357000
+FRET21   L     R2,SUBSIZES(R7) SIZE (IN DOUBLE WORDS) MUST BE  @VA00881 00358000
+*                             IN R2                                     00359000
+         INCR  SBFRTREG       BUMP COUNT OF HOW MANY TIMES OCCURRED     00360000
+         B     FRET01         GO USE REGULAR FRET LOGIC.       @V3M4038 00361000
+*                                                                       00362000
+FRET19   DS    0H             OK TO RETURN CHUNK TO SUBPOOL:   %V3M4038 00363000
+         L     R14,SUBTABLE(R7) GET PNTR (MAY = 0) FROM TABLE  %V3M4038 00364000
+         CLR   R1,R14         FRET'D BLOCK MATCH 1ST ON CHAIN? %V3M4038 00365000
+         BE    ERROR8         IF YES, A CODING ERROR BY CALLER %V3M4038 00366000
+         CL    R1,0(,R14)     FRET'D BLOCK MATCH 2ND ON CHAIN? %V3M4038 00367000
+*                             (HARMLESS COMPARE IF R14 = 0)             00368000
+         BE    ERROR9         IF YES, ALSO A CODING ERROR      %V3M4038 00369000
+         SPACE                                                          00370000
+FRET19OK ST    R14,PNTR(,R1)  PUT OLD POINTER IN FRET'D BLOCK, %V3M4038 00371000
+         ST    R1,SUBTABLE(R7) POINTER TO US REPLACES OLD PNTR %V3M4038 00372000
+         SPACE                                                          00373000
+FRET20   DS    0H             EXIT HERE FROM FRET.             %V3M4038 00374000
+         AIF   (NOT &AP).NOAP3                                 **AIF*** 00375000
+         BAL   R14,RELFRE     RELEASE DMKFRE LOCK              %V4M0198 00376000
+.NOAP3   ANOP                                                  **ANOP** 00377000
+         LM    R0,R15,FREESAVE   RESTORE REGISTERS             %V3M4038 00378000
+         BR    R14                                             %V3M4038 00379000
+         SPACE 2                                                        00380000
+ERROR8   ABEND 8              FRET'D BLOCK MATCHED 1ST SUBPOOL BLOCK    00381000
+         SPACE 2                                                        00382000
+ERROR9   LTR   R14,R14        CHECK "SECOND SUBPOOL BLOCK" ...          00383000
+         BZ    FRET19OK       IF NONEXISTENT, IT'S ALL OK.              00384000
+         ABEND 9              FRET'D BLOCK MATCHED 2ND SUBPOOL BLOCK    00385000
+         EJECT                                                          00386000
+*   "REGULAR" FREE LOGIC ENTERED AT "FREE01"                            00387000
+*        GET A BLOCK FROM HIGH-NUMBERED END OF LAST LARGER BLOCK        00388000
+*        (UNLESS LUCKY ENOUGH TO FIND EXACT MATCH)                      00389000
+*                                                                       00390000
+FREE01   DS    0H             HERE IF BLOCK > LARGEST SUBPOOL SIZE:     00391000
+         CL    R2,LRGSTSIZ    NEW VALUE OF "LARGEST SIZE" ?    @VA01089 00392000
+         BNH   *+8            NO                               @VA01089 00393000
+         ST    R2,LRGSTSIZ    STORE LARGEST SIZE REQUESTED     @VA01089 00394000
+         LA    R7,FREE16    SET R7 TO CALL PAGE-FREE IF RUN OUT OF ROOM 00395000
+         LA    R3,FREE07      SET R3 SWITCH TO GET NON-SUBPOOL SIZES    00396000
+         LA    R4,FREE09      AND R4-SWITCH TO GO TO 'FREE09'           00397000
+         B     FREE03         GO CONVERT DBL-WORDS TO BYTES.            00398000
+*                                                                       00399000
+*                                                                       00400000
+*   "SUBPOOL" FREE LOGIC ENTERED AT "FREE02"                            00401000
+*        (IF A "SUBPOOL SIZE", BUT NO BLOCK IS AVAILABLE IN SUBPOOL)    00402000
+*                                                                       00403000
+*        GET A BLOCK FROM LOW-NUMBERED END OF FIRST LARGER BLOCK        00404000
+*        (UNLESS LUCKY ENOUGH TO FIND AN EXACT MATCH SOMEPLACE)         00405000
+*                                                                       00406000
+         CNOP  4,8       DBL-WORD-ALIGN 'FREE05'               @V3M4038 00407000
+*                                                                       00408000
+FREE02   L     R2,SUBSIZES(R7) SIZE (IN DOUBLE WORDS) MUST BE IN R2     00409000
+         LM    R3,R4,ADCON3   NEEDED ADCONS INTO R3-R4 NOW:    @VA00881 00410000
+*                             R3 = A(FREE10)                            00411000
+*                             R4 = A(FREE06A)                           00412000
+         ST    R7,JSAVE7      REMEMBER R7 INDEXER,             @VA00881 00413000
+         LA    R7,TRYSPLIT    SET R7 SWITCH TO TRY CHKSPLIT    @VA00881 00414000
+*                             LATER IF CAN'T GET A BLOCK FROM THE CHAIN 00415000
+*                                                                       00416000
+FREE03   SLL   R2,3           DOUBLE-WORDS TO BYTES, PLEASE             00417000
+         L     R15,DMKFRELO   COMPUTE DMKFRELO MINUS LENGTH OF BLOCK    00418000
+         SR    R15,R2         AND                                       00419000
+         ST    R15,FREELOWM   STORE FOR USE IN MAIN LOOP CALCULATIONS   00420000
+FREE04   L     R0,FREENUM     FREENUM INTO R0,                          00421000
+         LTR   R10,R0         (ALSO IN R10), ANYTHING AVAILABLE ?       00422000
+         BCR   8,R7   <BZ>    IF NOT, TRY SPLITTING A LARGER   @VA00881 00423000
+*                             SUBPOOL, OR CALL PAGE-FREE                00424000
+         LA    R5,DMKFRELS    START AT BEGINNING OF CHAIN,              00425000
+         SR    R8,R8          R8 = 0 MEANS NO BLOCK FOUND YET           00426000
+         SR    R9,R9          R9 ALSO = 0 (FOR SUBPOOL LOGIC)           00427000
+         SLR   R13,R13        R13=0: EQUAL-SIZE-BLOCK NOT      @VA00881 00428000
+*                             FOUND (YET)                               00429000
+         LA    R6,FREE05      FOR BCTR FOR LOOP,                        00430000
+*                                                                       00431000
+FREE05   LR    R1,R5          SAVE OLD POINTER,                         00432000
+         L     R5,PNTR(,R5)   GET NEW POINTER,                          00433000
+         CL    R2,SIZE(,R5)   CHECK DESIRED SIZE AGAINST THAT AVAILABLE 00434000
+         BCR   13,R3          BNH FREE07 OR FREE10 IF BIG ENOUGH        00435000
+FREE05A  BCTR  R10,R6         NOT DONE YET, ITERATE LOOP TO    @VA00881 00436000
+*                             FREE05.                                   00437000
+*                                                                       00438000
+         LTR   R8,R8          HOPEFULLY WE FOUND A BIGGER ONE ?         00439000
+         BNZ   FREE05C        YES - GOOD SHOW.                 @VA00881 00440000
+         LTR   R1,R13         NO - MAYBE AN EQUAL-SIZE BLOCK,  @VA00881 00441000
+*                             THEN ?                                    00442000
+         BCR   8,R7   <BZ>    IF NOT, TRY SPLITTING A LARGER   @VA00881 00443000
+*                             SUBPOOL, OR CALL PAGE-FREE                00444000
+FREE05B  L     R5,PNTR(,R1)   EQUAL-BLOCK FOUND, GET POINTER   @VA00881 00445000
+*                             THERETO                                   00446000
+         B     FREE06C        AND GO CHECK WHICH SIZE WE ARE   @VA00881 00447000
+*                             HANDLING.                                 00448000
+*                                                                       00449000
+FREE05C  CL    R3,ADCON3      LARGER BLOCK FOUND, CHECK        @VA00881 00450000
+*                             R3-SWITCH,                                00451000
+         BE    FREE10C        TRF IF IT'S A SUBPOOL,                    00452000
+         B     FREE08         OR IF A REGULAR SIZE OTHERWISE.           00453000
+         SPACE                                                          00454000
+FREQUAL  CL    R5,DMKFREHI    IS BLOCK AT DMKFREHI OR ABOVE ?  @VA00881 00455000
+         BNL   FREE06C        YES - GREAT.                     @VA00881 00456000
+         LR    R13,R1         NO, WE MUST REMEMBER PREVIOUS    @VA00881 00457000
+*                             BLOCK ADDR                                00458000
+         CL    R5,FREELOWM    IS IT IN DYNAMIC PAGING AREA ?   @VA00881 00459000
+         BH    FREE05A        YES - KEEP CHECKING FOR A        @VA00881 00460000
+*                             BETTER ONE.                               00461000
+         AIF   (NOT &VIRREAL).J0                               @VA00881 00462000
+         CL    R5,=A(DMKSLC)  BEWARE OF BLOCK IN UNLOCKED V=R  @VA00881 00463000
+*                             AREA                                      00464000
+         BL    FREE05A        IF BELOW "DMKSLC" TRY FOR A      @VA00881 00465000
+*                             BETTER ONE                                00466000
+.J0      ANOP              EQUAL-SIZE BLOCK NOT IN DYNAMIC PAGING AREA: 00467000
+FREE06C  CL    R3,ADCON3      I FORGET NOW - WHICH SIZE ARE    @VA00881 00468000
+*                             WE HANDLING                               00469000
+         BNE   FREE06         NOT A SUBPOOL - GO TO FREE06.    @VA00881 00470000
+*                             SUBPOOL - CONTINUE TO FREE06B ...         00471000
+FREE06B  ST    R5,GPR1        STORE FOR RETURNING R1 TO CALLER          00472000
+*                                                                       00473000
+FREE06   DS    0H             EXACT-SIZE BLOCK FOUND FOR "OTHER" SIZE   00474000
+FREE062  L     R14,PNTR(,R5)  PATCH POINTERS IN THE CHAIN               00475000
+         ST    R14,PNTR(,R1)  ...                                       00476000
+         BCTR  R0,0           DECREMENT FREENUM (STILL IN R0) BY 1      00477000
+         ST    R0,FREENUM     AND STORE.                                00478000
+         LA    R6,FREE09A     SET R6 "SWITCH" TO CONTINUE      @VA01089 00479000
+*                             AFTER CODE AT "FREE09"                    00480000
+         BR    R4             CONTINUE TO FREE06A OR BRANCH TO FREE09.  00481000
+*                                                                       00482000
+FREE06A  AR    R5,R2          IF IT IS A SUBPOOL SIZE, COMPUTE END OF   00483000
+         B     FREE10A        BLOCK, AND JOIN CODE BELOW.               00484000
+*                                                                       00485000
+*              IF R2 = "ANOTHER SIZE", AND A LARGER (OR EQUAL) FOUND .. 00486000
+FREE07   BE    FREQUAL        TRY TO USE IF AN EXACT MATCH.    @V3M4038 00487000
+         LR    R8,R5          IF NOT, REMEMBER WHERE IT WAS,            00488000
+         BCTR  R10,R6         ITERATE LOOP AT FREE05.                   00489000
+*                                                                       00490000
+*              CONTINUE TO 'FREE08' IF DROPS THRU LOOP ...              00491000
+*                                                                       00492000
+*              GET A CHUNK FROM HIGH-END OF LAST LARGER BLOCK FOUND...  00493000
+FREE08   L     R9,SIZE(,R8)   SIZE OF LAST LARGER BLOCK,                00494000
+         LA    R5,0(R8,R9)    END OF LAST LARGER BLOCK INTO R5,         00495000
+         LA    R6,FREE20      SET R6 "SWITCH" TO GO TO EXIT    @VA01089 00496000
+         CL    R8,DMKFREHI    IS BLOCK AT OR ABOVE DMKFREHI ?  @V3M4038 00497000
+         BNL   FREE08B        YES - GOOD SHOW - USE IT.        @VA00881 00498000
+         CL    R5,DMKFRELO    COMPARE END OF BLOCK VS. DMKFRELO@VA00881 00499000
+         AIF   (&VIRREAL).J2B                                  @VA00881 00500000
+         BNH   FREE08B        OK - GOOD SHOW (IF UNLIKELY) -   @VA00881 00501000
+*                             USE IT.                                   00502000
+         AGO   .J2C                                            @VA00881 00503000
+.J2B     BH    FREE08A        IF > DMKFRELO IT'S IN DYNAMIC PAGING AREA 00504000
+         CL    R8,=A(DMKSLC)  BEWARE OF BLOCK IN UNLOCKED V=R  @VA00881 00505000
+*                             AREA                                      00506000
+         BNL   FREE08B        IF NOT BELOW "DMKSLC", IT'S OK.  @VA00881 00507000
+.J2C     ANOP                 LARGER BLOCK WAS IN DYNAMIC PAGING AREA:  00508000
+FREE08A  LTR   R1,R13         DID WE HAVE AN EQUAL-SIZE BLOCK ?@VA00881 00509000
+         BNZ   FREE05B        YES - WE MIGHT AS WELL USE IT.   @VA00881 00510000
+         LA    R6,FREE09A     SET R6 "SWITCH" TO CONTINUE      @VA01089 00511000
+FREE08B  SR    R9,R2          COMPUTE NEW SIZE OF BLOCK,       @VA00881 00512000
+         ST    R9,SIZE(,R8)   STORE BACK WHERE IT WAS,                  00513000
+         SR    R5,R2          ADDRESS OF BLOCK WE'RE SPLITTING OFF ->R5 00514000
+FREE09   ST    R5,GPR1        STORE R5 FOR RETURNING R1 TO CALLER,      00515000
+         LR    R7,R2          REMEMBER BYTE COUNT OF BLOCK     @VA01089 00516000
+         BR    R6             EITHER "B FREE20" OR CONTINUE:   @VA01089 00517000
+         SPACE                                                          00518000
+* CONTINUE IF A "LARGE" BLOCK GIVEN OUT FROM THE DYNAMIC PAGING AREA:   00519000
+FREE09A  CL    R7,F4096       WAS BYTE COUNT > 4096 ?          @VA01089 00520000
+         BNH   FREE20         NO - GO DIRECTLY TO FREE20.      @VA01089 00521000
+         SPACE                                                          00522000
+* IF LARGE BLOCK (> 4096 BYTES) WAS GIVEN OUT FROM DYNAMIC PAGING AREA, 00523000
+* SCAN THE CHAIN TO SEE IF THERE ARE ANY EXTRA BLOCKS IN THERE WHICH    00524000
+* SHOULD BE RETURNED FOR PAGING VIA DMKPTRFT:                           00525000
+         LA    R10,FREE20     SET EXIT VECTOR FOR DMKFREE ...  @VA05235 00526000
+FREE09B  L     R0,FREENUM     FREENUM INTO R0                  @VA01089 00527000
+         LTR   R4,R0          (ALSO IN R4); IS FREENUM = 0 ?   @VA01089 00528000
+         BZR   R10            YES - FORGET IT - GO EXIT.       @VA05235 00529000
+         L     R9,F4096       LET R9 = SIZE OF ONE PAGE        @VA01089 00530000
+         LA    R1,DMKFRELS    START AT BEGINNING OF CHAIN      @VA01089 00531000
+         SPACE                                                          00532000
+* LOOP TO "SCAN" FREE STORAGE CHAIN FOR LIKELY CULPRITS                 00533000
+FREE09C  LR    R3,R1          REMEMBER PREVIOUS BLOCK          @VA01089 00534000
+         L     R1,PNTR(,R1)   GET NEW POINTER                  @VA01089 00535000
+         CL    R9,SIZE(,R1)   CHECK SIZE OF BLOCK              @VA01089 00536000
+         BNH   FREE09E        BRANCH IF WE FOUND A BIG ONE     @VA01089 00537000
+FREE09D  BCT   R4,FREE09C     ITERATE LOOP                     @VA01089 00538000
+         BR    R10            AND EXIT WHEN ALL THRU           @VA05235 00539000
+         SPACE                                                          00540000
+* WE FOUND A LARGE BLOCK - CHECK IT OUT FURTHER:                        00541000
+FREE09E  CL    R1,DMKFREHI    ARE WE IN DYNAMIC PAGING AREA ?  @VA01089 00542000
+         BNLR  R10            IF > DMKFREHI (OR =) WE'RE ALL   @VA05235 00543000
+*                             DONE                                      00544000
+         CL    R1,DMKFRELO    (CHECK FOR LOWER FREE AREA ALSO) @VA01089 00545000
+         BNL   FREE09F        BRANCH IF DEFINITELY IN THERE    @VA01089 00546000
+         AIF   (&VIRREAL).J3B                                  @VA01705 00547000
+         B     FREE09D        OK IF BELOW DPA                  @VA01705 00548000
+         AGO   .J3C                                            @VA01705 00549000
+.J3B ANOP                                                               00550000
+         CL    R1,=A(DMKSLC)  IF < DMKFRELO, LOOK FOR BLOCK    @VA01089 00551000
+*                             IN V=R AREA                               00552000
+         BNL   FREE09D        OK IF NOT LOW                    @VA01089 00553000
+.J3C ANOP                                                               00554000
+FREE09F  LA    R5,4095(,R1)   ROUND UP TO BEG. NEXT PAGE       @VA01089 00555000
+         N     R5,XPAGNUM     ...                              @VA01089 00556000
+         LR    R8,R5          LET'S HAVE THAT IN R8,           @VA01089 00557000
+         SR    R8,R1          MINUS BEGINNING OF OUR BLOCK     @VA01089 00558000
+         L     R7,SIZE(,R1)   SIZE OUR BLOCK INTO R7,          @VA01089 00559000
+         SR    R7,R8          MINUS FRONT OF US                @VA01089 00560000
+         SR    R6,R6          NOW HOW MUCH CAN WE GIVE BACK ?  @VA01089 00561000
+         DR    R6,R9          ONE OR MORE PAGES WE HOPE ?      @VA01089 00562000
+         LTR   R2,R7          CHECK QUOTIENT (& PLACE IN R2)   @VA01089 00563000
+         BNP   FREE09D        IF NOT > 0, FORGET THE WHOLE     @VA01089 00564000
+*                             THING.                                    00565000
+         ST    R10,SAVE910    SAVE R10 ACROSS THIS BAL ...     @VA05235 00566000
+         BAL   R10,FRET22J    IF OK, RETURN THE BLOCK VIA      @VA01089 00567000
+*                             DMKPTRFT                                  00568000
+         L     R10,SAVE910    RECOVER R10 (EXIT VECTOR)        @VA05235 00569000
+         INCR  NUMEXBLK       BUMP COUNT OF OCCURRENCES        @VA01089 00570000
+         B     FREE09B        THEN CHECK THE CHAIN AGAIN.      @VA01089 00571000
+*                                                                       00572000
+*              IF R2 = A SUBPOOL SIZE AND LARGER (OR EQUAL) FOUND ...   00573000
+FREE10   BE    FREQUAL        TRY TO USE IF AN EXACT MATCH.    @V3M4038 00574000
+         LTR   R9,R9          IF NOT, DO WE ALREADY HAVE A "GOOD" ONE ? 00575000
+         BP    FREE10D        TRF IF YES (KEEP IT).                     00576000
+         LR    R8,R5          IF NOT, REMEMBER "THIS ONE" IN R8,        00577000
+         LR    R14,R1         AND REMEMBER PREVIOUS BLOCK IN R14,       00578000
+         CL    R8,DMKFREHI    ARE WE IN HIGH-CORE FREE AREA ?           00579000
+         BNL   FREE10E        TRF IF YES (GOOD SHOW).                   00580000
+         CL    R8,FREELOWM    OR IS IT ABOVE DMKFRELO ?                 00581000
+         BH    FREE10D        YES - DON'T USE IT JUST YET.              00582000
+         AIF   (NOT &VIRREAL).J3A                              @VA00881 00583000
+         CL    R8,=A(DMKSLC)  BEWARE OF BLOCK IN UNLOCKED V=R  @VA00881 00584000
+*                             AREA                                      00585000
+         BL    FREE10D        IF < DMKSLC, DON'T USE IT JUST   @VA00881 00586000
+*                             YET.                                      00587000
+.J3A     ANOP                                                           00588000
+FREE10E  LR    R9,R5          IF OK, REMEMBER ADDRESS OF GOOD BLOCK     00589000
+FREE10D  BCTR  R10,R6         ITERATE LOOP AT 'FREE05' HOPING FOR = BLK 00590000
+*                                                                       00591000
+FREE10C  DS    0H             SUBPOOL SIZE; WE HAVE AT LEAST ONE BLOCK: 00592000
+         LTR   R5,R9          DID WE HAVE A "GOOD" BLOCK ?     @V3M4038 00593000
+         BP    FREE10B        TRF IF YES (GOOD SHOW).                   00594000
+         LTR   R1,R13         IF NOT, DID WE HAVE AN           @VA00881 00595000
+*                             EQUAL-SIZE BLOCK ?                        00596000
+         BNZ   FREE05B        YES - WE MIGHT AS WELL USE IT.   @VA00881 00597000
+         LR    R5,R8          IF NOT, WE'LL JUST HAVE TO USE "R8" BLOCK 00598000
+FREE10B  ST    R5,GPR1        STORE FOR RETURNING R1 TO CALLER          00599000
+         LM    R6,R7,PNTR(R5) OBTAIN POINTER & SIZE OF BLOCK,           00600000
+         AR    R5,R2          OBTAIN NEW BEGINNING OF BLOCK,            00601000
+         ST    R5,PNTR(,R14)  STORE AS POINTER IN PREVIOUS BLOCK,       00602000
+         SR    R7,R2          DECREMENT SIZE BY BLOCK TAKEN OFF,        00603000
+         STM   R6,R7,PNTR(R5) STORE POINTER & NEW SIZE IN NEW BLOCK     00604000
+FREE10A  DS    0H             SUBPOOL SIZE BLOCK WAS FOUND SOMEWHERE:   00605000
+         B     FREE20         GO EXIT FROM FREE.                        00606000
+         SPACE 2                                                        00607000
+* SUBPOOL SIZE BLOCK - COULN'T FIND A BLOCK IN THE CHAIN:               00608000
+TRYSPLIT L     R7,JSAVE7      RECOVER R7 INDEXER               @VA00881 00609000
+         L     R2,SUBSIZES(R7) NEED COUNT (IN DBL WORDS) IN R2 @VA00881 00610000
+         LM    R5,R6,ADCON5   SET R5 AND R6 AS NEEDED          @VA00881 00611000
+         SLR   R1,R1          AND R1 MUST = 0                  @VA00881 00612000
+         INCR  SPLITATT       COUNT HOW MANY ATTEMPTS WE MAKE  @VA00881 00613000
+FREE02A  CL    R1,SUBTABLE(R5) LOOK AT <NEXT-TO> LAST SUBPOOL  @VA00881 00614000
+         BNE   CHKSPLIT       IF NON-EMPTY WE'RE IN BUSINESS.  @VA00881 00615000
+         BXH   R5,R6,FREE02A  ITERATE R5 DOWN TO OURS (IN R7)  @VA00881 00616000
+*                             NO LUCK - CONTINUE:                       00617000
+FREE16   DS    0H          NOT ENOUGH ROOM LEFT, WE MUST CALL PAGE-FREE 00618000
+         AIF   (NOT &AP).NOAP7                                 **AIF*** 00619000
+*                                                                       00620000
+*        IF AP MODE WE CAN ONLY CALL DMKPTRFR WITH GLOBAL      @V407594 00621000
+*        SUPERVISOR LOCK                                       @V407594 00622000
+         TM    APSTAT1,APUOPER  RUNNING AS AP                  @V407594 00623000
+         BZ    CALLPTR        NO, PROCEED                      @V407594 00624000
+         L     R14,=V(DMKLOKSY)  ADDRESS SUPERVISOR LOCK       @V407594 00625000
+         CLC   2(2,R14),LPUADDR  DO WE HOLD LOCK               @V407594 00626000
+         BE    CALLPTR        YES, CALL DMKPTRFR               @V407594 00627000
+         BAL   R14,LOCKSYS    TRY FOR SUPERVISOR LOCK          @V407594 00628000
+         BNZ   DEFERPTR       COULD NOT GET LOCK               @V407594 00629000
+*                                                              @V407594 00630000
+CALLPTR  DS    0H                                              @V407594 00631000
+         SR    R3,R3          INDICATES CPFRELK NOT SET        @V407594 00632000
+CALLPTR2 DS    0H                                              @V407594 00633000
+.NOAP7   ANOP                                                  **ANOP** 00634000
+         INCR  NPAGFREE       COUNT HOW MANY TIMES PAGE-FREE IS CALLED  00635000
+         L     R15,=A(DMKDSPNP)    REF. NO. OF PAGEABLE PAGES  @V3M4038 00636000
+         L     R14,PREFIXA    LOAD PREFIX VALUE                @V407594 00637000
+         TS    XTNDLOCK-PSA(R14)  TEST & SET 'EXTEND LOCK'     @V407594 00638000
+         BNZ   ERROR10        IF SET ("EXTEND WHILE EXTENDING") DIE NOW 00639000
+*                             (BEFORE OLD BALRSAVE/FREESAVE COVERED UP) 00640000
+         DECR  0(,R15)        OK - DECREMENT "DMKDSPNP" BY 1            00641000
+         MVC   EXTNDSAV(32*4),BALRSAVE  SAVE BALRSAVE & FREESAVE        00642000
+         STCTL C2,C2,TEMPSAVE GET CURRENT EXTENDED IO MASKS             00643000
+         NI    TEMPSAVE,X'7F' DISABLE CHANNEL ZERO                      00644000
+         LCTL  C2,C2,TEMPSAVE WHILE WE ARE EXTENDING                    00645000
+         L     R13,DMKFRESV   LET R13 POINT TO OUR SPECIAL SAVE-AREA    00646000
+CLEARSAV XC    0(SAVESIZE*8,R13),0(R13)  CLEAR THE ENTIRE SAVE-AREA     00647000
+         AIF   (NOT &AP).NOAP8                                 **AIF*** 00648000
+         BAL   R14,RELFRE     RELEASE DMKFRE LOCK              @V407594 00649000
+.NOAP8   ANOP                                                  **ANOP** 00650000
+         SVC   16             GIVE IT TO DMKPSA FOR THE DMKPTRFR CALL   00651000
+         ICM   R4,B'0011',LPUADDR  SAVE CURRENT PROCESSOR ADDR @V407594 00652000
+         CLC   FREER15+1(3),AFRERC+1  ENTERED AT DMKFRERC      @V407594 00653000
+         BE    PARM2          CALL TO DMKPTR WITH RETURN CODE  @V4M0157 00654000
+*                                                                       00655000
+         CALL  DMKPTRFR,PARM=1  CALL "PAGE FREE" TO GET ANOTHER PAGE    00656000
+*                         NOTE:  DMKPTRFR HAS CALLED DMKFRETR TO MERGE  00657000
+         AIF   (NOT &AP).NOAP9                                 **AIF*** 00658000
+*                                                              @V407594 00659000
+*        IF WE FORCED EXTEND TO REFILL DMKFREAP, NOW WE MUST   @V407594 00660000
+*        CLEAR CPFRELK - (COULD NOT HAPPEN FOR DMKFRERC ENTRY) @V407594 00661000
+*                                                                       00662000
+         LTR   R3,R3          SHOULD WE CLEAR CPFRELK          @V407594 00663000
+         BZ    COMMON         NO                               @V407594 00664000
+         L     R14,PREFIXA    ACCESS ABSOLUTE PSA              @V407594 00665000
+         MVI   CPFRELK-PSA(R14),0  CLEAR CPFRELK               @V407594 00666000
+         MVI   FRLKPROC-PSA(R14),0  & PROCESSOR ADDRESS        @V407594 00667000
+         SIGNAL WAKEUP,CONTROL=PARALLEL  TELL OTHER PROCESSOR  @V407594 00668000
+*                                                              @V407594 00669000
+.NOAP9   ANOP                                                  **ANOP** 00670000
+COMMON   DS    0H                                              @V407594 00671000
+         BAL   R5,RESTORE     RESTORE SAVE AREAS & EXTEND LOCK @V407466 00672000
+         LM    R0,R15,FREESAVE RESTORE REGISTERS               @V407466 00673000
+         BR    R15            GO SEARCH AGAIN                  @V407466 00674000
+*                                THE BLOCK INTO THE FREE-STORAGE CHAIN. 00675000
+*                                                                       00676000
+RESTORE  SVC   20             GET SAVE AREA BACK AGAIN         @V407466 00677000
+         ST    R13,DMKFRESV   AND PUT IT AWAY FOR FUTURE USE            00678000
+         AIF   (NOT &AP).NOAP10                                **AIF*** 00679000
+         CLM   R4,B'0011',LPUADDR  STILL ON SAME PROCESSOR     @V407594 00680000
+         BE    RESTORE2       YES                              @V407594 00681000
+*        WE HAVE MOVED FROM MAIN PROCESSOR TO ATTACHED PROC'R  @V407594 00682000
+*        WE MUST TRANSFER EXECUTION BACK TO AP NOW             @V407594 00683000
+         LA    R0,CPEXSIZE    GET A CPEXBLOK                   @V407594 00684000
+         CALL  DMKFREE        WE DO NOT HOLD FREE STORAGE LOCK @V407594 00685000
+         USING CPEXBLOK,R1                                     @V407594 00686000
+         STM   R0,R15,CPEXR0  SAVE ALL REGS                    @V407594 00687000
+         MVC   CPEXPROC,LPUADDRX  STACK FOR OTHER PROCESSOR    @V407594 00688000
+         LA    R14,RESTORE3   EXECUTION ADDRESS                @V407594 00689000
+         ST    R14,CPEXADD    TO CPEXBLOK                      @V407594 00690000
+         CALL  DMKSTKLF       STACK BLOCK LIFO                 @V407594 00691000
+         L     R14,PREFIXA    ACCESS ABSOLUTE PSA              @V407594 00692000
+         TS    CPFRESW-PSA(R14)  SET CPFRESW                   @V407594 00693000
+         BNZ   ERROR15        BAD NEWS IF ALREADY SET          @V4M0241 00694000
+         INCR  EXTSWTCH       COUNT USE OF CPFRESW             @V407594 00695000
+         STCTL C2,C2,TEMPSAVE                                  @V407594 00696000
+         OI    TEMPSAVE,X'80'  REENABLE CHANNEL ZERO           @V407594 00697000
+         LCTL  C2,C2,TEMPSAVE                                  @V407594 00698000
+          L    R14,PREFIXA   ACCESS ABSOLUTE PSA               @V4M0123 00699000
+         MVI   XTNDLOCK-PSA(R14),0  CLEAR EXTEND LOCK          @V407594 00700000
+*        DISPATCHER ON AP WILL NOW SEE THAT CPFRESW IS SET     @V407594 00701000
+         C     R11,ASYSVM     IS THIS THE SYSTEM ??            @VA07866 00702000
+         BE    NORELVM        YES, NO NEED TO RELEASE HIM      @VA07866 00703000
+         C     R11,LASTUSER   THIS USER ALSO LAST USER ??      @VA07866 00704000
+         BE    NORELVM        YES, HE'S O.K. TOO               @VA07866 00705000
+         LR    R1,R11         POINT TO THIS USER IN R1         @VA07866 00706000
+         L     R11,ASYSVM     INSURE DMKDSP DOESN'T RELEASE TOO@VA07866 00707000
+         LOCK  RELEASE,TYPE=VMBLOK UNLOCK VMBLOK, NO SAVREG    @VA07866 00708000
+NORELVM  EQU   *                                               @VA07866 00709000
+         LOCK  RELEASE,TYPE=SYS  CLEAR SUPERVISOR LOCK         @V407594 00710000
+         GOTO  DMKDSPRU       UNLOCKED ENTRY TO DMKDSP         @V407594 00711000
+         SPACE 1                                               @V407594 00712000
+RESTORE2 DS    0H                                              @V407594 00713000
+.NOAP10  ANOP                                                  **ANOP** 00714000
+         L     R14,PREFIXA    LOAD PREFIX VALUE                @V407594 00715000
+         MVI   XTNDLOCK-PSA(R14),00  CLEAR EXTEND LOCK         @V407594 00716000
+RESTORE3 DS    0H             HERE ON AP VIA CPEXBLOK          @V407594 00717000
+         MVC   BALRSAVE(32*4),EXTNDSAV  RESTORE BALRSAVE & FREESAVE     00718000
+         TM    APSTAT1,PROCIO  IS THIS MAIN PROCESSOR          @V407594 00719000
+         BZR   R5             NO, LEAVE ALL CHANNELS DISABLED  @V407594 00720000
+         STCTL C2,C2,TEMPSAVE GET EXTENDED IO MASKS                     00721000
+         OI    TEMPSAVE,X'80' RE-ENABLE FOR CHANNEL ZERO                00722000
+         LCTL  C2,C2,TEMPSAVE AFTER EXTEND IS COMPLETE                  00723000
+         BR    R5             RETURN TO MAINLINE               @V407466 00724000
+*                                                                       00725000
+PARM2    CALL  DMKPTRFR,PARM=2 CALL PAGE FREE WITH RETURN CODE @V407466 00726000
+         BZ    COMMON                                          @V407466 00727000
+         BAL   R5,RESTORE     CC=1, RESTORE SAVE AREAS         @V407466 00728000
+         AIF   (NOT &AP).NOAP16                                **AIF*** 00729000
+         BAL   R14,LOCKFRE    LOCK DMKFRE                      @V407594 00730000
+.NOAP16  ANOP                                                  **ANOP** 00731000
+         L     R1,FFS         X'FFFFFFFF' TO R1                @V407466 00732000
+         ST    R1,FREER1      RETURN FF'S IN R1 IF NO STORAGE  @V407466 00733000
+         L     R7,FREER0      RESTORE REGISTERS                @V407466 00734000
+         SLL   R7,3           SIZE OF BLOCK IN BYTES           @V407466 00735000
+         B     FREE09A        RETURN PAGES OBTAINED FROM DMKPTR@V407466 00736000
+         SPACE 3                                               @V407594 00737000
+         AIF   (NOT &AP).NOAP11                                **AIF*** 00738000
+DEFERPTR DS    0H             MUST EXTEND FREE STORAGE BUT     @V407594 00739000
+*                             CANNOT OBTAIN SUPERVISOR LOCK    @V407594 00740000
+         L     R14,PREFIXA    ACCESS ABSOLUTE PSA              @V407594 00741000
+         TS    CPFRELK-PSA(R14)  SET CPFRELK                   @V407594 00742000
+         BNZ   ERROR12        ABEND IF ALREADY SET             @V407594 00743000
+         MVC   FRLKPROC-PSA(1,R14),LPUADDR+1  PROCESSOR ID     @V407594 00744000
+*        NOW TRY AGAIN TO OBTAIN SUPERVISOR LOCK               @V407594 00745000
+*        IF SUCCESSFUL, RESET CPFRELK & CALL DMKPTRFR          @V407594 00746000
+         BAL   R14,LOCKSYS    TRY AGAIN FOR LOCK               @V407594 00747000
+         BNZ   DEFER2         COULD NOT OBTAIN LOCK            @V407594 00748000
+         L     R14,PREFIXA    ACCESS ABSOLUTE PSA              @V407594 00749000
+         MVI   CPFRELK-PSA(R14),0  CLEAR CPFRELK               @V407594 00750000
+         MVI   FRLKPROC-PSA(R14),0  & PROCESSOR ID             @V407594 00751000
+         SIGNAL WAKEUP,CONTROL=PARALLEL  JUST IN CASE OTHER    @V407594 00752000
+*                             PROCESSOR SAW CPFRELK WAS ON     @V407594 00753000
+         B     CALLPTR        GO EXTEND FREE STORAGE           @V407594 00754000
+         SPACE 1                                               @V407594 00755000
+DEFER2   DS    0H             HERE TO SUSPEND DMKFREE CALL     @V407594 00756000
+         SR    R2,R2                                           @V407594 00757000
+         ICM   R2,B'0111',DMKFREAP+1  ADDRESS OF BACK POCKET   @V407594 00758000
+         BZ    ERROR14        ERROR IF NOT THERE               @V407594 00759000
+         XC    DMKFREAP+1(R3),DMKFREAP+1 ZERO POINTER          @VA07936 00760000
+         MVC   0(32*4,R2),BALRSAVE  SAVE BALRSAVE + FREESAVE   @V407594 00761000
+         LA    R1,18*8(R2)    SUBPOOL BOUNDARY FOR CPEXBLOK    @V407594 00762000
+         STM   R0,R15,CPEXR0  SAVE ALL REGS (R2=SAVE AREA PTR) @V407594 00763000
+         LA    R15,FREEDEFD   LOAD EXECUTION ADDRESS           @V407594 00764000
+         ST    R15,CPEXADD    & STORE IN CPEXBLOK              @V407594 00765000
+         MVC   CPEXPROC,LPUADDR    FOR THIS PROCESSOR ONLY     @V407594 00766000
+         CALL  DMKSTKLF       AND STACK LIFO                   @V407594 00767000
+         INCR  EXTDEFER       COUNT USE OF CPFRELK             @V407594 00768000
+         BAL   R14,RELFRE     CLEAR FREE STORAGE LOCK          @V407594 00769000
+         GOTO  DMKDSPRU       EXIT TO UNLOCKED DISPATCHER ENTRY@V407594 00770000
+         SPACE 2                                               @V407594 00771000
+FREEDEFD DS    0H             HERE TO RESUME DEFERRED FREE CALL@V407594 00772000
+*        WE ARE ON ORIGINAL PROCESSOR, WITH GLOBAL SUPERVISOR  @V407594 00773000
+*        LOCK, BUT NOT FREE STORAGE LOCK                       @V407594 00774000
+         MVC   BALRSAVE(16*4),0(R2)  RESTORE BALRSAVE          @V407594 00775000
+         MVC   APSAVE(16*4),16*4(R2)  SAVE ORIGINAL FREESAVE   @V407594 00776000
+         LA    R0,32*4/8          FRET 32 WORD SAVE AREA       @V407594 00777000
+         LR    R1,R2          SAVE AREA ADDRESS TO R1          @V407594 00778000
+         CALL  DMKFRET                                         @V407594 00779000
+         MVC   FREESAVE(16*4),APSAVE RESTORE ORIGINAL FREESAVE @V407594 00780000
+         ICM   R15,B'0111',DMKFREAP+1 WAS BACK POCKET REFILLED @V407594 00781000
+         BZ    DEFD01         NO- CALL DMKPTRFR TO REFILL IT   @V407594 00782000
+         L     R15,PREFIXA    BACK POCKET WAS REFILLED         @V407594 00783000
+         MVI   CPFRELK-PSA(R15),0  CLEAR CPFRELK               @V407594 00784000
+         MVI   FRLKPROC-PSA(R15),0  AND PROCESSOR ADDRESS      @V407594 00785000
+         SIGNAL WAKEUP,CONTROL=PARALLEL  WAKE UP OTHER PROC'R  @V407594 00786000
+         LM    R0,R15,FREESAVE     RESTORE CALLER'S REGISTERS  @V407594 00787000
+         BR    R15            REENTER DMKFREE AT TOP           @V407594 00788000
+         SPACE 1                                               @V407594 00789000
+DEFD01   DS    0H             MUST FORCE EXTEND TO REFILL      @V407594 00790000
+*                             DMKFREAP- ONLY PTR CAN DO THIS   @V407594 00791000
+         BAL   R14,LOCKFRE    GET FREE STORAGE LOCK            @V407594 00792000
+         LA    R3,1           FLAG TO CLEAR CPFRELK            @V407594 00793000
+         B     CALLPTR2       EXTEND FREE STORAGE              @V407594 00794000
+.NOAP11  ANOP                                                  **ANOP** 00795000
+         SPACE 1                                               @V407594 00796000
+         EJECT                                                          00797000
+*  UNSATISFIED SUBPOOL CALL WITH THE FOLLOWING CONDITIONS:              00798000
+*        R2 = SIZE IN DOUBLE WORDS OF SUBPOOL WE WANT TO FILL           00799000
+*        R5 INDEXES A LARGER NON-EMPTY SUBPOOL                          00800000
+*        R7 INDEXES THE EMPTY SUBPOOL WE WANT TO FILL                   00801000
+*                                                                       00802000
+CHKSPLIT L     R8,SUBTABLE(R5)     POINT TO THE LARGER SUPBOOL BLOCK    00803000
+         L     R9,SUBSIZES(R5)     GET SIZE OF LARGER SUBPOOL           00804000
+         SR    R9,R2               MINUS OUR SIZE = SIZE OF ANOTHER     00805000
+         IC    R9,BYTBL-1(R9)      OBTAIN INDEX TO THAT SUBPOOL         00806000
+         L     R14,PNTR(,R8)       SET POINTER TO NEW SUBTABLE @V3M4038 00807000
+         ST    R14,SUBTABLE(R5)    ...                                  00808000
+         ST    R8,GPR1             STORE FOR RETURNING R1 TO CALLER,    00809000
+         SLL   R2,3                GET NO. OF BYTES IN OUR BLOCK        00810000
+         AR    R2,R8               PLUS OUR BEGINNING = OUR END         00811000
+         L     R14,SUBTABLE(R9)    GET OLD POINTER FROM "OTHER" BLOCK,  00812000
+         ST    R2,SUBTABLE(R9)     STORE POINTER TO THE OTHER SUBTABLE  00813000
+         ST    R14,PNTR(,R2)       STORE 0 OR POINTER IN THE FIRST WORD 00814000
+         INCR  SPLITCNT       BUMP COUNT OF HOW MANY TIMES WE DID IT    00815000
+         B     FREE20              GO EXIT FROM FREE.                   00816000
+         AIF   (NOT &AP).NOAP12                                **AIF*** 00817000
+         SPACE 3                                               @V407594 00818000
+LOCKFRE  LOCK  OBTAIN,TYPE=FREE,SPIN=YES,SAVE LOCK FREE STORAGE@V407594 00819000
+         BR    R14            RETURN TO CALLER                 @V407594 00820000
+         SPACE 1                                               @V407594 00821000
+RELFRE   LOCK  RELEASE,TYPE=FREE,SAVE  UNLOCK FREE STORAGE     @V407594 00822000
+         BR    R14            RETURN TO CALLER                 @V407594 00823000
+         SPACE 1                                               @V407594 00824000
+LOCKSYS  LOCK  OBTAIN,TYPE=SYS,SPIN=NO,SAVE                    @V407594 00825000
+         BR    R14            RETURN WITH CC INTACT            @V407594 00826000
+.NOAP12  ANOP                                                  **ANOP** 00827000
+         SPACE                                                          00828000
+         DROP  R12                                                      00829000
+         EJECT                                                          00830000
+*.                                                                      00831000
+* SUBROUTINE NAME -                                                     00832000
+*                                                                       00833000
+*        DMKFRERS - RETURN ALL SUBPOOLS TO FREE STORAGE CHAIN           00834000
+*                                                                       00835000
+* FUNCTION -                                                            00836000
+*                                                                       00837000
+*        TO RETURN ALL AVAILABLE SUBPOOL BLOCKS                         00838000
+*        TO THE FREE STORAGE CHAIN.                                     00839000
+*                                                                       00840000
+* ATTRIBUTES -                                                          00841000
+*                                                                       00842000
+*        SERIALLY REUSABLE, RESIDENT, CALLED VIA BALR                   00843000
+*                                                                       00844000
+* ENTRY POINT -                                                         00845000
+*                                                                       00846000
+*        DMKFRERS                                                       00847000
+*                                                                       00848000
+* ENTRY CONDITIONS -                                                    00849000
+*                                                                       00850000
+*        NONE                                                           00851000
+*                                                                       00852000
+* EXIT CONDITIONS -                                                     00853000
+*                                                                       00854000
+*        ALL GPR'S UNCHANGED                                            00855000
+*                                                                       00856000
+* CALLS TO OTHER ROUTINES -                                             00857000
+*                                                                       00858000
+*        INVOKES INTERNAL CODE IN DMKFREE TO RETURN                     00859000
+*        SUBPOOLS TO FREE STORAGE CHAIN.                                00860000
+*                                                                       00861000
+* EXTERNAL REFERENCES -                                                 00862000
+*                                                                       00863000
+*        NONE                                                           00864000
+*                                                                       00865000
+* TABLES / WORK AREAS                                                   00866000
+*                                                                       00867000
+*        FREESAVE (16 WORDS USED TO SAVE REGISTERS)                     00868000
+*                                                                       00869000
+* REGISTER USAGE -                                                      00870000
+*                                                                       00871000
+*        GPR 12 = ADDRESSABILITY                                        00872000
+*        GPR 13 = LINKING REGISTER TO CODE IN DMKFREE WHICH             00873000
+*                 RETURNS SUBPOOLS TO FREE STORAGE CHAIN                00874000
+*                                                                       00875000
+*        GPR 11 IS NOT USED                                             00876000
+*                                                                       00877000
+*        OTHER REGISTERS = WORK REGISTERS                               00878000
+*                                                                       00879000
+* NOTES -                                                               00880000
+*                                                                       00881000
+*        CALLED (FOR EXAMPLE) FROM DMKUSOFF AFTER ALL                   00882000
+*        BLOCKS FOR A VIRTUAL MACHINE HAVE BEEN DMKFRET'D.              00883000
+         EJECT                                                          00884000
+* OPERATION -                                                           00885000
+*                                                                       00886000
+*        1. SAVES REGISTERS (IN FREESAVE), SETS COMMON ADDRESSABILITY.  00887000
+*                                                                       00888000
+*        2. INVOKES COMMON CODE IN DMKFREE TO RETURN ALL SUBPOOL        00889000
+*           BLOCKS TO THE FREE STORAGE CHAIN.                           00890000
+*                                                                       00891000
+*        3. RESTORES REGISTERS AND RETURNS TO CALLER.                   00892000
+*.                                                                      00893000
+         SPACE 2                                                        00894000
+         ENTRY DMKFRERS                                        @VA00881 00895000
+DMKFRERS STM   R0,R15,FREESAVE ENTER - SAVE REGISTERS          @VA00881 00896000
+         L     R12,AFREE      COMMON ADDRSSABILITY NEEDED      @VA00881 00897000
+         USING DMKFRE,R12     ...                              @VA00881 00898000
+         AIF   (NOT &AP).NOAP4                                 **AIF*** 00899000
+         BAL   R14,LOCKFRE    LOCK DMKFRE                      @V407594 00900000
+.NOAP4   ANOP                                                  **ANOP** 00901000
+         INCR  SUBRETN        COUNT HOW MANY TIMES WE DO THIS  @VA00881 00902000
+* NOW RETURN THE VARIOUS SUBPOOL(S) TO THE FREE STORAGE CHAIN:          00903000
+         LA    R9,SUBSIZES    LET R9 POINT TO FIRST SIZE       @VA00881 00904000
+FREE12   L     R1,DISPSUBT(,R9) GET A SUBPOOL POINTER          @VA00881 00905000
+         LTR   R1,R1          ANYTHING THERE ?                 @VA00881 00906000
+         BZ    FREE15         BZ IF NOT.                       @VA00881 00907000
+FREE13   L     R10,PNTR(,R1)  SAVE NEXT POINTER (IF ANY) IN    @VA00881 00908000
+*                             R10,                                      00909000
+         L     R2,0(,R9)      SIZE INTO R2 AS NEEDED,          @VA00881 00910000
+         STM   R9,R10,SAVE910 SAVE R9 AND R10                  @VA00881 00911000
+         BAL   R10,FRET05     CALL MAIN FRET LOGIC TO GIVE IT  @VA00881 00912000
+*                             BACK                                      00913000
+         LM    R9,R10,SAVE910 RESTORE R9 AND R10               @VA00881 00914000
+         INCR  SUBRETAC       COUNT HOW MANY SUBPOOLS          @VA00881 00915000
+*                             ACTUALLY RETURNED                         00916000
+         LTR   R1,R10         ANYTHING LEFT IN THIS SUBPOOL ?  @VA00881 00917000
+         BNZ   FREE13         BNZ IF YES, KEEP GIVING 'EM BACK.@VA00881 00918000
+         ST    R1,DISPSUBT(,R9) CLEAR ORIGINAL POINTER WHEN    @VA00881 00919000
+*                             THRU                                      00920000
+FREE15   LA    R6,4           SET UP R6 & R7 FOR BXLE,         @VA00881 00921000
+         LA    R7,ENDSIZES-4  ...                              @VA00881 00922000
+         BXLE  R9,R6,FREE12   ITERATE THE MAIN LOOP.           @VA00881 00923000
+         BAL   R10,FREE09B    ALSO, GIVE BACK ANY LARGE BLOCKS @VA05235 00924000
+*                             ALL THRU ...                              00925000
+         AIF   (NOT &AP).NOAP5                                 **AIF*** 00926000
+         BAL   R14,RELFRE     RELEASE DMKFRE LOCK              @V407594 00927000
+.NOAP5   ANOP                                                  **ANOP** 00928000
+         LM    R0,R15,FREESAVE RESTORE REGISTERS,              @VA00881 00929000
+         BR    R14            AND EXIT TO CALLER.              @VA00881 00930000
+         EJECT                                                          00931000
+*.                                                                      00932000
+* SUBROUTINE NAME -                                                     00933000
+*                                                                       00934000
+*        DMKFRET                                                        00935000
+*                                                                       00936000
+* FUNCTION -                                                            00937000
+*                                                                       00938000
+*        TO RETURN A BLOCK SPECIFIED BY THE CALLER EITHER TO            00939000
+*        THE APPROPRIATE SUBPOOL BLOCK OF FREE STORAGE,                 00940000
+*        OR TO THE CHAINED LIST OF FREE STORAGE.                        00941000
+*                                                                       00942000
+* ATTRIBUTES -                                                          00943000
+*                                                                       00944000
+*        SERIALLY REUSABLE, RESIDENT, CALLED VIA BALR                   00945000
+*                                                                       00946000
+* ENTRY POINTS -                                                        00947000
+*                                                                       00948000
+*        DMKFRET - RETURN A SUBPOOL OR OTHER BLOCK TO FREE STORAGE      00949000
+*        DMKFRETR - RETURN A BLOCK TO THE CHAINED LIST OF FREE STORAGE  00950000
+*                   (IGNORING SUBPOOLS)                                 00951000
+*                                                                       00952000
+* ENTRY CONDITIONS -                                                    00953000
+*                                                                       00954000
+*        GPR  0 = NUMBER OF DOUBLE WORDS TO BE RETURNED                 00955000
+*        GPR  1 = ADDRESS OF FIRST DOUBLE-WORD OF BLOCK TO BE RETURNED  00956000
+*        GPR 14 = RETURN ADDRESS                                        00957000
+*        GPR 15 = ADDRESS OF DMKFRET OR DMKFRETR                        00958000
+*                                                                       00959000
+* EXIT CONDITIONS -                                                     00960000
+*                                                                       00961000
+*        ALL GPR'S UNCHANGED                                            00962000
+*                                                                       00963000
+* CALLS TO OTHER ROUTINES -                                             00964000
+*                                                                       00965000
+*        DMKPTRFT - CALLED TO RETURN PAGE(S) TO DYNAMIC PAGING AREA     00966000
+*                                                                       00967000
+* EXTERNAL REFERENCES -                                                 00968000
+*                                                                       00969000
+*        DMKCPE   - END OF CP NUCLEUS                                   00970000
+*        DMKSYSRM - SIZE OF REAL MACHINE                                00971000
+*        DMKDSPNP - NUMBER OF PAGES AVAILABLE FOR PAGING USE            00972000
+* |      DMKQCNFT - ADDRESS OF PARTICULAR DMKFRET CALL IN DMKQCN        00973000
+* |      DMKVCNFT - ADDRESS OF PARTICULAR DMKFRET CALL IN DMKVCN        00974000
+*                                                                       00975000
+* TABLES / WORK AREAS -                                                 00976000
+*                                                                       00977000
+*        FREESAVE (16 WORDS) USED TO SAVE REGISTERS                     00978000
+*        FREEWORK (UP TO 12 WORDS) USED FOR SCRATCH STORAGE             00979000
+         EJECT                                                          00980000
+* REGISTER USAGE -                                                      00981000
+*                                                                       00982000
+*        GPR 0 - 10 = WORK REGISTERS                                    00983000
+*        GPR 11 IS NOT USED                                             00984000
+*        GPR 12 = MODULE BASE REGISTER                                  00985000
+*        GPR 13 - 15 = WORK REGISTERS                                   00986000
+*                                                                       00987000
+* NOTES -                                                               00988000
+*                                                                       00989000
+*        DMKFRETR IS CALLED BY DMKCPINT OR DMKPTRFR TO MERGE AVAILABLE  00990000
+*        BLOCKS OF CORE INTO THE FREE STORAGE CHAIN, REGARDLESS OF      00991000
+*        THEIR SIZE.  OTHER PROGRAMS CALL DMKFRET TO RETURN BLOCKS      00992000
+*        PREVIOUSLY OBTAINED FROM DMKFREE, OF EITHER SMALL (SUBPOOL)    00993000
+*        OR LARGE SIZE, WHEN THEY ARE NO LONGER NEEDED.                 00994000
+*                                                                       00995000
+* OPERATION -                                                           00996000
+*                                                                       00997000
+*        1.  THE NUMBER OF DOUBLE WORDS TO BE RETURNED IS CHECKED.  IF  00998000
+*        A ZERO OR NEGATIVE VALUE IS FOUND (INDICATING A SERIOUS CODING 00999000
+*        ERROR), AN ABEND OCCURS VIA SVC 0.  OTHERWISE, DMKFRET         01000000
+*        PROCEEDS TO STEP 2 FOR SUBPOOL SIZES, OR TO STEP 3 FOR         01001000
+*        LARGER SIZES.  DMKFRETR PROCEEDS DIRECTLY TO STEP 3.           01002000
+*                                                                       01003000
+*        2.  DMKFRET OF SUBPOOL SIZES:                                  01004000
+*                                                                       01005000
+*        THE SUBPOOL SIZE BLOCK IS ATTACHED TO THE APPROPRIATE          01006000
+*        SUBPOOL ON A LIFO (PUSH DOWN STACK) BASIS, WITH THE            01007000
+*        POINTER AT "SUBTABLE" BEING CORRECTED TO POINT TO              01008000
+*        THE BLOCK JUST RETURNED.  IF, HOWEVER, THE BLOCK BEING         01009000
+*        RETURNED IS WITHIN THE DYNAMIC PAGING AREA, IT IS RETURNED     01010000
+*        TO THE FREE STORAGE CHAIN INSTEAD, VIA STEP 3.                 01011000
+*                                                                       01012000
+*        3.  DMKFRET OR DMKFRETR OF BLOCK TO FREE STORAGE CHAIN:        01013000
+*                                                                       01014000
+*        A BLOCK OF LARGER THAN 30 DOUBLE WORDS, OR ONE RETURNED        01015000
+*        BY DMKFRETR, OR A SUBPOOL-SIZE BLOCK WITHIN THE DYNAMIC        01016000
+*        PAGING AREA, IS MERGED APPROPRIATELY INTO THE CHAIN OF         01017000
+*        FREE STORAGE POINTED TO BY "DMKFRELS".  THEN, UNLESS           01018000
+*        DMKFRETR WAS INVOKED (OR DMKPTRFR WAS THE CALLER),             01019000
+*        A CHECK IS MADE TO SEE IF THE AREA RETURNED (AFTER ALL         01020000
+*        MERGING HAS BEEN DONE) IS AT LEAST A WHOLE PAGE WITHIN         01021000
+*        THE DYNAMIC PAGING AREA.  IF SO, IT IS RETURNED VIA            01022000
+* |      DMKPTRFT TO THE DYNAMIC PAGING AREA, UNLESS IT WAS RETURNED    01023000
+* |      BY A SPECIFIC PROGRAM (E.G. DMKQCNFT OR DMKVCNFT) KNOWN TO USE 01024000
+* |      "LARGE" BLOCKS FREQUENTLY FOR VERY SHORT PERIODS OF TIME.      01025000
+* |      IN THIS CASE, DMKPTRFR IS PURPOSELY NOT CALLED, TO AVOID       01026000
+* |      CONTINUAL "EXTENDING AND DIS-EXTENDING" OVER VERY SHORT        01027000
+* |      TIME INTERVALS.                                                01028000
+*                                                                       01029000
+*        (THE LOGIC AS DESCRIBED ABOVE ALLOWS THE NUMBER OF PAGES       01030000
+*        ALLOTTED FOR FREE STORAGE TO "BREATHE" AS NECESSARY,           01031000
+*        EXPANDING VIA CALLS TO DMKPTRFR WHEN EXTRA PAGES ARE           01032000
+*        REQUIRED, AND CONTRACTING VIA DMKPTRFT WHEN SUCH PAGES         01033000
+*        HAVE ALL BEEN RETURNED VIA DMKFRET AND ARE NO LONGER           01034000
+*        NEEDED.)                                                       01035000
+*.                                                                      01036000
+         EJECT                                                          01037000
+*********************************************************************** 01038000
+*                                                                     * 01039000
+*              "FRET" IS CALLED AS FOLLOWS ---                        * 01040000
+*                                                                     * 01041000
+*        LA    0,NDBLWRDS     SIZE OF BLOCK RETURNED IN DOUBLE WORDS. * 01042000
+*        LA    1,BLOCK        ADDRESS OF BEGINNING OF BLOCK.          * 01043000
+*        CALL  DMKFRET        ..                                      * 01044000
+*                                                                     * 01045000
+*              "FRETR" HAS SAME R0 AND R1 ENTRY REQUIREMENTS.         * 01046000
+*                                                                     * 01047000
+*********************************************************************** 01048000
+*.                                                                      01049000
+*********************************************************************** 01050000
+*                                                                       01051000
+*                                                                       01052000
+*        CP ASSIST INSTRUCTION "FRET" - RETURN SUBPOOL SIZE FREE SPACE  01053000
+*                                                                       01054000
+*                                                                       01055000
+*        OPERANDS:                                                      01056000
+*           1 = ADDRESS OF 'SUBTABLE'                                   01057000
+*           2 = ADDRESS OF 'DMKFRETL'                                   01058000
+*                                                                       01059000
+*        REGISTER INPUT:                                                01060000
+*           GPR  0 = A SIGNED 32 BIT INTEGER SPECIFYING THE NUMBER OF   01061000
+*                    DOUBLEWORDS OF FREE SPACE BEING RETURNED           01062000
+*           GPR  1 = THE ADDRESS OF THE FREE SPACE BEING RELEASED       01063000
+*           GPR 11 = ADDRESS OF THE REQUESTOR'S VMBLOK                  01064000
+*           GPR 14 = EXIT ADDRESS (USED UPON NORMAL COMPLETION)         01065000
+*                                                                       01066000
+*        SYSTEM DATA AREAS REFERENCED (BY MODULE):                      01067000
+*           DMKFRE - 'BYTBL' AND 'SUBTABLE'                             01068000
+*           DMKPSA - TRACING INFORMATION                                01069000
+*           DMKSYS - 'CORTABLE'                                         01070000
+*                                                                       01071000
+*                                                                       01072000
+*        EXITS:                                                         01073000
+*                                                                       01074000
+*        1. ADDRESS IN GPR 14 (NORMAL COMPLETION)                       01075000
+*                                                                       01076000
+*           REGISTER OUTPUT: NONE CHANGED BY THIS INSTRUCTION           01077000
+*                                                                       01078000
+*        2. NEXT SEQUENTIAL INSTRUCTION (ABNORMAL COMPLETION)           01079000
+*                                                                       01080000
+*           NOTE: THIS EXIT IS FUNCTIONALLY EQUIVALENT TO A NO-OP.      01081000
+*                                                                       01082000
+*********************************************************************** 01083000
+*.                                                                      01084000
+         SPACE                                                          01085000
+         USING DMKFRETR,R15        (BRIEFLY)                            01086000
+DMKFRETR STM   R0,R15,FREESAVE     ENTER "FRETR" - SAVE REGISTERS       01087000
+         L     R10,TOTWORDS                                    @V408246 01088000
+         AR    R10,R0         INCREMENT TOTAL DBL WRDS         @V408246 01089000
+*                             ALLOCATED                                 01090000
+         ST    R10,TOTWORDS                                    @V408246 01091000
+         LA    R10,FRET01     SET R10 TO GO TO 'FRET01'                 01092000
+         B     FRET00         JOIN FORCES BELOW.                        01093000
+         EJECT                                                          01094000
+         USING DMKFRET,R15         (BRIEFLY)                            01095000
+DMKFRET  DS    0D             ENTER "FRET"                     @V386198 01096000
+         SPACE                                                          01097000
+         DS    0H             EXECUTE CP ASSIST "FRET"         %V3M4038 01098000
+         DC    X'E601',S(SUBTABLE,DMKFRETL)                 ***%V3M4038 01099000
+         SPACE                                                          01100000
+         STM   R0,R15,FREESAVE       - SAVE REGISTERS          %V3M4038 01101000
+         LM    R7,R10,ADCONFRT  INITIALIZE R7-R10 FOR FRET USE %V3M4038 01102000
+FRET00   L     R12,AFREE      CHANGE ADDRESSABILITY BACK       %V3M4038 01103000
+         DROP  R15            TO STANDARD BASE REGISTER, R12   %V3M4038 01104000
+         USING DMKFRE,R12     ...                              %V3M4038 01105000
+         AIF   (NOT &AP).NOAP6                                 **AIF*** 01106000
+         LOCK  OBTAIN,TYPE=FREE,SPIN=YES,SAVE  LOCK DMKFRE     %V407594 01107000
+.NOAP6   ANOP                                                  **ANOP** 01108000
+         AIF   (NOT &TRACE(9)).TR2                             %V3M4038 01109000
+         TM    TRACFLG1,TRAC67      TRACING ACTIVE?            %V3M4038 01110000
+         BZ    NOFRETTR       BRANCH IF NOT                    %V3M4038 01111000
+         TRACE CODE=TRCFRET,R15,R2,R3   OBTAIN TRACE TBL SLOT  %V407594 01112000
+         STCM  R11,B'0111',1(R15)  VMBLOK OF CALLER            %V407594 01113000
+         ST    R0,4(,R15)     SAVE GPR0                        %V3M4038 01114000
+         ST    R1,8(,R15)     SAVE GPR1                        %V3M4038 01115000
+         ST    R14,12(,R15)    SAVE GPR14                      %V3M4038 01116000
+NOFRETTR EQU   *                                               %V3M4038 01117000
+.TR2     ANOP                                                  %V3M4038 01118000
+         LA    R1,0(,R1)      STRIP HIGH-ORDER BYTE FROM R1    %V3M4038 01119000
+         LR    R2,R1          ADDRESS OF BLOCK INTO R2         %V3M4038 01120000
+         N     R2,XPAGNUM     GET PAGE NUMBER                  %V3M4038 01121000
+         SRL   R2,8           DIVIDED BY 256                   %V3M4038 01122000
+         A     R2,ACORETBL    POINT TO CORETABLE ENTRY         %V3M4038 01123000
+         USING CORTABLE,R2    ...                              %V3M4038 01124000
+         CLC   CORFPNT,FREE   PAGE FLAGGED CORRECTLY ?         %V3M4038 01125000
+         BE    R1OK           YES - OK.                        %V3M4038 01126000
+         DROP  R2             ...                              @V3M4038 01127000
+         CL    R1,=A(DMKCPE)  LOCATION WITHIN CP NUCLEUS ?     @V3M4038 01128000
+         BL    ERROR5         YES - ISSUE ABEND 5              @V3M4038 01129000
+         CL    R1,DMKFRELO    CHECK R1 - IN LOW-CORE AREA ?             01130000
+         BL    R1OK           OK.                                       01131000
+         SPACE                                                          01132000
+         L     R15,=A(DMKSYSRM)   GET REAL MACHINE SIZE        @V386198 01133000
+         CL    R1,0(,R15)     ADDRESS WITHIN REAL STORAGE ?    @V386198 01134000
+         BNL   ERROR7         NO - ISSUE ABEND 7               @V386198 01135000
+         ABEND 11             ELSE ADDRESSING USER PAGING AREA @V386198 01136000
+         SPACE                                                          01137000
+R1OK     EQU   *              R1 SEEMS REASONABLE, CONTINUE:   %V3M4038 01138000
+         LTR   R2,R0          SIZE BEING RETURNED INTO R2,     %V3M4038 01139000
+         BPR   R10            OK, GO TO 'CHEKSIZE' OR 'FRET01' %V3M4038 01140000
+         B     ERROR1         ERROR 1 IF R0 = 0 (OR < 0).               01141000
+         EJECT                                                          01142000
+*        CONTINUE HERE IF NOT SUBPOOL SIZE, FOR FRET:                   01143000
+         SPACE                                                          01144000
+         CNOP  6,8            DBL-WORD-ALIGN 'FRET04'          @V3M4038 01145000
+FRET01   SR    R10,R10        R10=0 MEANS INVOKED BY 'FRET' OR 'FRETR'  01146000
+*                                                                       01147000
+FRET05   SLL   R2,3           CHANGE DOUBLE-WORDS TO BYTES              01148000
+*                                                                       01149000
+*              REGISTERS AT ENTRY...                                    01150000
+*        R1 HOLDS ADDRESS OF BLOCK BEING RETURNED ('THIS BLOCK')        01151000
+*        R2 HOLDS SIZE (IN BYTES) OF BLOCK BEING RETURNED               01152000
+*        R10 = 0 IF INVOKED BY 'FRET' OR 'FRETR'                        01153000
+*                       OR                                              01154000
+*        R10 = RETURN REGISTER IF INVOKED BY 'FREE'.                    01155000
+*                                                                       01156000
+         L     R0,FREENUM     FREENUM --> R0,                           01157000
+         LTR   R4,R0          (ALSO IN R4),  IS FREENUM = 0 ?           01158000
+         BZ    FRET18         IF YES, THIS BLOCK WILL BE THE ONLY ONE.  01159000
+         LA    R6,DMKFRELS    START AT BEGINNING OF CHAIN,              01160000
+         LA    R5,FRET04      SET R5 FOR LOOP AT FRET04,                01161000
+         SR    R3,R3          CLEAR "OLD POINTER"                       01162000
+*                                                                       01163000
+FRET04   LR    R9,R3          REMEMBER OLD VALUE OF OLD POINTER,        01164000
+         LR    R3,R6          SAVE OLD POINTER,                         01165000
+         L     R6,PNTR(,R6)   GET NEW POINTER,                          01166000
+         CLR   R1,R6          CHECK THIS BLOCK AGAINST NEW POINTER      01167000
+         BNH   FRET06         BNH IF R1 < R6  (OR =)                    01168000
+         BCTR  R4,R5          IF NOT, ITERATE SCAN-LOOP 'FREENUM' TIMES 01169000
+         LR    R9,R3          REMEMBER "OLD R3" IN R9 FOR LATER,        01170000
+         LR    R3,R6          IF DROPS THRU LOOP, ADVANCE R3 TO POINT   01171000
+         SR    R6,R6          TO LAST BLOCK IN CHAIN, AND CLEAR R6,     01172000
+*                             NOTE: PNTR FOR OUR BLOCK IS SET AT FRET10 01173000
+         L     R5,=A(DMKSYSRM)     GET SIZE OF REAL MACHINE             01174000
+         LA    R4,0(R1,R2)    COMPUTE END OF THIS BLOCK                 01175000
+         CL    R4,0(,R5)      WITHIN OUR MACHINE ?                      01176000
+         BNH   FRET08         IF YES, PROCEED AS USUAL.                 01177000
+         B     ERROR7         "DIE" IF EXCEEDS REAL MACHINE SIZE.       01178000
+*                                                                       01179000
+*     R3 = ADDRESS OF PRECEDING BLOCK, R6 = ADDRESS OF SUCCEEDING BLOCK 01180000
+FRET06   BE    ERROR2         ERROR IF EQUAL, OTHERWISE THIS BLOCK OK   01181000
+         LM    R7,R8,PNTR(R6) GET POINTER & SIZE FROM SUCCEEDING BLOCK  01182000
+*                                                                       01183000
+FRET08   DS    0H             NOTE - FREENUM IS STILL IN R0,            01184000
+         LM    R4,R5,PNTR(R3) GET POINTER & SIZE FROM PRECEDING BLOCK   01185000
+         STM   R3,R8,SAVE38   SAVE ALL OLD INFO IN CASE OVERLAP ERROR   01186000
+         ST    R2,SIZE(,R1)   STORE SIZE IN OUR OWN (THIS) BLOCK        01187000
+         LTR   R14,R5         CHECK IF SIZE OF PRECEDING BLOCK = 0      01188000
+         BZ    FRET10         (POSSIBLE IF R1 IS AT DMKFRELS)           01189000
+         AR    R14,R3         COMPUTE END OF PREVIOUS BLOCK             01190000
+         CLR   R14,R1         DOES PREVIOUS BLOCK ABUT OUR BLOCK ?      01191000
+         BL    FRET10         BL IF NOT,                                01192000
+         BH    ERROR3         ERROR 3 IF IT OVERLAPS                    01193000
+         AR    R2,R5          MERGE SIZES OF PREVIOUS AND THIS BLOCK,   01194000
+         ST    R2,SIZE(,R3)   STORE AS NEW SIZE OF PREVIOUS BLOCK,      01195000
+         LR    R1,R3          R1 NOW = POINTER TO MERGED BLOCK.         01196000
+         LTR   R6,R6          IS THERE A SUCCEEDING BLOCK ?             01197000
+         BNZ   FRET12         BNZ IF YES, CHECK FOR MERGE THERE TOO.    01198000
+         B     FRET15        IF NONE, WE'RE ALL DONE (FREENUM OK AS IS) 01199000
+*                                                                       01200000
+FRET10   ST    R4,PNTR(,R1)   PUT OLD POINTER INTO OUR BLOCK,           01201000
+         ST    R1,PNTR(,R3)   POINTER TO OUR BLOCK REPLACES OLD POINTER 01202000
+         AL    R0,F1          ADD 1 TO FREENUM,                         01203000
+         LTR   R6,R6          IS THERE A SUCCEEDING BLOCK ?             01204000
+         BZ    FRET14         BZ IF NOT, GO STORE UPDATED FREENUM.      01205000
+*                                                                       01206000
+FRET12   LA    R14,0(R1,R2)   COMPUTE END OF OUR BLOCK,                 01207000
+         CLR   R14,R6         DO WE ABUT SUCCEEDING BLOCK ?             01208000
+         BL    FRET14         BL IF NOT, GO STORE UPDATED FREENUM.      01209000
+         BH    ERROR4         ERROR IF OVERLAP                          01210000
+         AR    R8,R2          IF YES, MERGE SIZES,                      01211000
+         STM   R7,R8,PNTR(R1) STORE CORRECT POINTER & SIZE IN OUR BLOCK 01212000
+         LR    R2,R8          (KEEP SIZE IN R2 CURRENT)                 01213000
+         BCTR  R0,0           DECREMENT FREENUM BY 1                    01214000
+*                                                                       01215000
+FRET14   ST    R0,FREENUM     STORE UPDATED FREENUM.                    01216000
+*                                                                       01217000
+FRET15   LTR   R10,R10        INVOKED BY 'FREE' OR 'FRET' ?             01218000
+         BCR   7,R10          'BNZ' IF INVOKED BY 'FREE' - GO RETURN.   01219000
+         CL    R2,F4096       IS SIZE OF CHUNK A PAGE OR MORE ?         01220000
+         BL    FRET20         TRF IF NOT, GO EXIT FROM FRET             01221000
+         LA    R10,FRET20     R10 = A(FRET20) FOR MANY REFERENCES BELOW 01222000
+         LA    R14,DMKFRETR   WAS THIS A DMKFRETR CALL ?                01223000
+         CL    R14,FREER15    ...                                       01224000
+         BCR   8,R10        TRF IF YES (VIA DMKFRETR) - DON'T GIVE BACK 01225000
+         CL    R1,DMKFREHI    ARE WE IN DYNAMIC PAGING AREA ?           01226000
+         BCR   11,R10         'BNL FRET20' IF NOT.                      01227000
+         CL    R1,DMKFRELO    (CHECK FOR LOWER FREE AREA ALSO)          01228000
+         AIF   (&VIRREAL).J9                                   @VA00881 01229000
+         BCR   4,R10          'BL FRET20' IF IN THERE                   01230000
+         AGO   .J9A                                            @VA00881 01231000
+.J9      BNL   FRET15A        TO FRET15A IF IN DYNAMIC PAGING AREA.     01232000
+         CL    R1,=A(DMKSLC)  IF < DMKFRELO, LOOK FOR BLOCK    @VA00881 01233000
+*                             IN V=R AREA                               01234000
+         BCR   11,R10         'BNL FRET20' IF NOT IN DYNAMIC   @VA00881 01235000
+*                             PAGING AREA                               01236000
+.J9A     ANOP             BEGINNING OF BLOCK IS IN DYNAMIC PAGING AREA: 01237000
+FRET15A  L     R14,PREFIXA    LOAD PREFIX VALUE                @V407594 01238000
+         CLI   XTNDLOCK-PSA(R14),00  IS SYSTEM EXTENDING       @V047594 01239000
+*                             RIGHT NOW ?                               01240000
+         BCR   7,R10       'BNE FRET20' IF YES - DON'T CALL "PAGE-FRET" 01241000
+         CLR   R3,R1          IS A "PREVIOUS BLOCK" AVAILABLE ?         01242000
+         BL    FRET22         TRF IF YES (NO PROBLEM)                   01243000
+         LTR   R3,R9          IF NOT (WE DID A MERGE), DO WE HAVE AN    01244000
+         BCR   8,R10          "OLD R3" ?   (OUT OF LUCK IF NOT).        01245000
+FRET22   LA    R5,4095(,R1)   ROUND UP TO BEG. NEXT PAGE                01246000
+         N     R5,XPAGNUM     ...                                       01247000
+         LR    R8,R5          LET'S HAVE THAT IN R8,                    01248000
+         SR    R8,R1          MINUS BEGINNING OF OUR BLOCK              01249000
+         LR    R7,R2          SIZE OUR BLOCK INTO R7,                   01250000
+         SR    R7,R8          MINUS FRONT OF US                         01251000
+         SR    R6,R6          NOW HOW MUCH CAN WE GIVE BACK ?           01252000
+         D     R6,F4096       ONE OR MORE PAGES WE HOPE ?               01253000
+         LTR   R2,R7          CHECK QUOTIENT (& PLACE IN R2)            01254000
+         BCR   13,R10         BNP IF NOT > 0, FORGET THE WHOLE THING.   01255000
+* CHECK FOR KNOWN CASES OF OFTEN-USED BLOCKS OF VERY SHORT DURATION:    01256000
+         L     R14,FREER14    GET ADDRESS OF CALLER,           @VA05235 01257000
+         LA    R14,0(,R14)    (WITHOUT HIGH-ORDER BYTE)        @VA05235 01258000
+         L     R15,PREFIXA    LOAD PREFIX VALUE                @V407594 01259000
+         CL    R14,SAMEFRET-PSA(,R15)  SAME GUY AS LAST TIME?  @V407594 01260000
+         ST    R14,SAMEFRET-PSA(,R15) SAVE FREER14 (CC INTACT) @V407594 01261000
+         BNE   FRET22A        IF A NEW GUY - GIVE IT BACK      @VA05235 01262000
+         CL    R2,F1          JUST ONE PAGE (PER R2 COUNT) ?   @VA05235 01263000
+         BH    FRET22A        IF MORE THAN ONE, GIVE THEM BACK @VA05235 01264000
+* CHECK FOR THE SAME CALLER CONTINUALLY OBTAINING & RETURNING STORAGE:  01265000
+         CL    R14,=A(DMKQCNFT) IS HE A "KNOWN CULPRIT" ?      @VA05235 01266000
+         BER   R10            "BE FRET20" IF YES (GO EXIT).    @VA05235 01267000
+         CL    R14,=A(DMKVCNFT) OR ANOTHER "KNOWN CULPRIT" ?   @VA05235 01268000
+         BER   R10            "BE FRET20" IF YES (GO EXIT).    @VA05235 01269000
+FRET22A  BAL   R10,FRET22J    GIVE BACK THE KNOWN LARGE BLOCK  @VA05235 01270000
+         BAL   R10,FREE09B    GIVE BACK ANY OTHER LARGE BLOCKS @VA05235 01271000
+         B     FRET20         THEN GO EXIT.                    @VA05235 01272000
+         SPACE                                                          01273000
+FRET22J  EQU   *              BAL HERE (R10) TO CLEAN UP FREE  @VA05235 01274000
+*                             STORAGE CHAIN:                            01275000
+         LR    R9,R5          REMEMBER IN R9 ADD. OF AREA TO PAGE-FRET  01276000
+         L     R4,PNTR(,R1)   GET POINTER IN OUR BLOCK,                 01277000
+         SLL   R2,12          MAKE R2 INTO BYTES PLEASE,                01278000
+         AR    R2,R5          END-OF-AREA INTO R2 (NEEDED)              01279000
+         LTR   R8,R8          IS THERE STUFF BELOW WHERE WE RETURNED ?  01280000
+         BP    FRET26         TRF IF YES.                               01281000
+         LTR   R6,R6          IF NOT, IS THERE STUFF AFTER THEM ?       01282000
+         BP    FRET24         TRF IF YES.                               01283000
+         ST    R4,PNTR(,R3)   REPLACE POINTER TO US WITH NEW ONE,       01284000
+         BCTR  R0,0           DECREMENT FREENUM (A WHOLE BLOCK GONE)    01285000
+         ST    R0,FREENUM     ...                                       01286000
+*                                                                       01287000
+FRET23   DS    0H             R9 POINTS TO 1ST PAGE TO BE RETURNED,     01288000
+         LR    R0,R7          NO. OF CONSEC. PAGE(S) INTO R0,           01289000
+         SR    R2,R2          CLEAR R2 (FOR USE SHORTLY)                01290000
+*                                                                       01291000
+         A     R7,NPAGFRET    BUMP COUNT OF CALLS TO "PAGE-FRET"        01292000
+         ST    R7,NPAGFRET    (BY PAGE-COUNT IN R7/R0), AND STORE       01293000
+         L     R15,=A(DMKDSPNP)    REFERENCE NUMBER OF PAGEABLE PAGES   01294000
+         L     R14,0(,R15)    GET SAME                                  01295000
+         ALR   R14,R0         ADD THE NUMBER WE'LL BE GIVING BACK,      01296000
+         ST    R14,0(,R15)    AND REPLACE                               01297000
+         LR    R14,R0                                          @V408246 01298000
+         SLL   R14,9          PAGESX512 = DOUBLE WORDS         @V408246 01299000
+         L     R15,TOTWORDS                                    @V408246 01300000
+         SR    R15,R14        DEC. TOTWORDS                    @V408246 01301000
+         ST    R15,TOTWORDS   AND SAVE...                      @V408246 01302000
+         MVC   EXTNDSAV(16*4),BALRSAVE  SAVE BALRSAVE (FREESAVE IS OK)  01303000
+*                                                                       01304000
+         LR    R7,R9          FORM CORE-TABLE ADDRESS                   01305000
+         SRL   R7,8           ...                                       01306000
+         A     R7,ACORETBL    ...                                       01307000
+         USING CORTABLE,R7                                              01308000
+FRET23A  ST    R2,CORPGPNT    CLEAR PAGE POINTER                        01309000
+         CALL  DMKPTRFT       "PAGE FRET" RETURNS IT TO THE SYSTEM      01310000
+         LA    R7,16(,R7)     BUMP R7 TO NEXT PAGE (IF ANY)             01311000
+         BCT   R0,FRET23A     AND ITERATE IF MORE THAN ONE PAGE.        01312000
+         DROP  R7                                                       01313000
+*                                                                       01314000
+         MVC   BALRSAVE(16*4),EXTNDSAV  RESTORE BALRSAVE                01315000
+*                                                                       01316000
+         BR    R10            NOW GO EXIT FROM FRET (WE'RE DONE).       01317000
+*                                                                       01318000
+FRET24   ST    R2,PNTR(,R3)   NEW POINTER TO REMAINING AREA,            01319000
+FRET25   LR    R5,R4          PUT OUR POINTER WITH OUR NEW SIZE,        01320000
+         STM   R5,R6,PNTR(R2)   STORE POINTER & SIZE IN REMAINING AREA, 01321000
+         B     FRET23         GO CALL "PAGE FRET" AND THEN EXIT.        01322000
+*                                                                       01323000
+FRET26   ST    R8,SIZE(,R1)   STORE REDUCED SIZE OF OUR BLOCK,          01324000
+         LTR   R6,R6          IS THERE STUFF AFTER RETURNED PAGES ?     01325000
+         BZ    FRET23         TRF IT NOT - GO FINISH UP.                01326000
+         AL    R0,F1          IF YES, BUMP FREENUM UP BY 1              01327000
+         ST    R0,FREENUM     FOR REMAINING BLOCK,                      01328000
+         ST    R2,PNTR(,R1)   STORE POINTER TO NEW BLOCK,               01329000
+         B     FRET25         GO STORE POINTER & SIZE IN NEW BLOCK.     01330000
+*                                                                       01331000
+*        IF FREENUM = 0, THIS BLOCK WILL BE THE ONE AND ONLY BLOCK...   01332000
+FRET18   ST    R1,DMKFRELS    DMKFRELS MUST POINT TO OUR BLOCK,         01333000
+         ST    R0,PNTR(,R1)   STORE POINTER OF ZERO                     01334000
+         ST    R2,SIZE(,R1)   AND STORE SIZE IN BYTES                   01335000
+         LA    R0,1           1 INTO R0,                                01336000
+         ST    R0,FREENUM     STORE FREENUM OF 1                        01337000
+         L     R14,=A(DMKSYSRM)    GET SIZE OF REAL MACHINE             01338000
+         ALR   R2,R1          COMPUTE END OF BLOCK                      01339000
+         CL    R2,0(,R14)     WITHIN OUR MACHINE ?                      01340000
+         BH    ERROR7         "DIE" IF EXCEEDS REAL MACHINE SIZE        01341000
+FRET16   LTR   R10,R10        INVOKED BY 'FREE' OR 'FRET' ?             01342000
+         BZ    FRET20         TRF IF FRET (MOST LIKELY).                01343000
+         BR    R10            OTHERWISE RETURN TO FREE.                 01344000
+         SPACE 3                                                        01345000
+TOTWORDS DC    F'0'           TOT NO. OF DBWRDS ALLOC. FOR     @V408246 01346000
+*                             FREE STORAGE                              01347000
+DMKFRETO EQU   TOTWORDS       ENTRY FOR TOTAL DBL WORDS        @V408246 01348000
+         EJECT                                                          01349000
+*   CONSTANTS, TABLES, AND ADDRESS CONSTANTS ...                        01350000
+         SPACE 2                                                        01351000
+*  THE FOLLOWING 42-BYTE DATA LIST MUST BE KEPT CONTIGUOUS AND IN ORDER 01352000
+* BECAUSE IT IS USED BY THE CP ASSIST INSTRUCTIONS "FREE" AND "FRET".   01353000
+* NOTE: THE LIST INCLUDES THE TABLE 'BYTBL'.                            01354000
+         SPACE                                                          01355000
+DMKFRETL DS    0F                                              @V386198 01356000
+         DC    V(DMKSYSCS)    +0 ADDR OF THE SYSTEM CORE TABLE @V386198 01357000
+FREE     DC    C'FREE'        +4 CORE TABLE FLAG(ON FREE PGS.) @V386198 01358000
+DMKFREHI DC    A(0)           +8 LOWEST VAL. OF FIXED FREE PGS @V3M4026 01359000
+*                               (FILLED IN BY DMKCPI)          @V386198 01360000
+         SPACE                                                          01361000
+*        TABLE TO CONVERT SMALL-SIZE REQUESTS TO SUBPOOL SIZES          01362000
+*              INDEXER        SIZE IN DOUBLE WORDS                      01363000
+BYTBL    DC    3AL1(S3-Z)     1-3 -------> 3                            01364000
+         DC    3AL1(S6-Z)     4-6 -------> 6                            01365000
+         DC    3AL1(S9-Z)     7-9 -------> 9                            01366000
+         DC    3AL1(S12-Z)    10-12 -----> 12                           01367000
+         DC    3AL1(S15-Z)    13-15 -----> 15                           01368000
+         DC    3AL1(S18-Z)    16-18 -----> 18                           01369000
+         DC    3AL1(S21-Z)    19-21 -----> 21                           01370000
+         DC    3AL1(S24-Z)    22-24 -----> 24                           01371000
+         DC    3AL1(S27-Z)    25-27 -----> 27                           01372000
+         DC    3AL1(S30-Z)    28-30 -----> 30                           01373000
+*                                                                       01374000
+         SPACE                                                          01375000
+AFRERC   DC    V(DMKFRERC)    ENTRY FOR CONDITIONAL FREE CALLS @V407594 01376000
+         SPACE 1                                               @V407594 01377000
+DMKFREAP DC    A(0)           BACK POCKET FOR AP MODE EXTEND   @V407594 01378000
+         ORG   DMKFREAP                                        @V407594 01379000
+         DC    AL1(FREAPLNG)  LENGTH OF BACK POCKET            @V407594 01380000
+         DC    XL3'0'         ADDRESS- FILLED BY DMKCPI        @V407594 01381000
+FREAPLNG EQU   30             SUBPOOL SIZES FOR 32 WORD SAVE   @V407594 01382000
+*                             PLUS A CPEXBLOK                  @V407594 01383000
+         AIF   (NOT &AP).NOAP13                                **AIF*** 01384000
+         SPACE 1                                               @V407594 01385000
+APSAVE   DS    16F            SAVE AREA FOR AP EXTEND LOGIC    @V407594 01386000
+*        CPFRELK CONTROLS ACCESS TO APSAVE                     @V407594 01387000
+.NOAP13  ANOP                                                  **ANOP** 01388000
+         SPACE                                                          01389000
+SUBSIZES DS    0F             SUBPOOL SIZES ...                         01390000
+Z        EQU   SUBSIZES       (FOR USE BY "BYTBL" TABLE)                01391000
+*              SIZE                                                     01392000
+S3       DC    F'3'                                                     01393000
+S6       DC    F'6'                                                     01394000
+S9       DC    F'9'                                                     01395000
+S12      DC    F'12'                                                    01396000
+S15      DC    F'15'                                                    01397000
+S18      DC    F'18'                                                    01398000
+S21      DC    F'21'                                                    01399000
+S24      DC    F'24'                                                    01400000
+S27      DC    F'27'                                                    01401000
+S30      DC    F'30'                                                    01402000
+ENDSIZES EQU   *              (MUST FOLLOW LAST SUBPOOL SIZE)           01403000
+*                                                                       01404000
+MAXSIZE  EQU   ENDSIZES-4     MAXIMUM SIZE USED IN SUBPOOL     @VA05395 01405000
+*                                                                       01406000
+ADCONFRE DS    0F             ADCONS USED BY "FREE" ENTRY:              01407000
+         DC    F'0'                --> R7                               01408000
+         DC    A(FREE01)           --> R8                               01409000
+         DC    A(FREESUB)          --> R9                               01410000
+*                                                                       01411000
+         DS    0D   ADCONS USED FOR AN UNSATISFIED "FREE" SUBPOOL CALL: 01412000
+ADCON3   DC    A(FREE10)           --> R3                               01413000
+         DC    A(FREE06A)          --> R4                               01414000
+ADCON5   DC    A(MAXSIZE-SUBSIZES) --> R5                      @VA00881 01415000
+         DC    F'-4'               --> R6                               01416000
+         EJECT                                                          01417000
+         DS    0D             ADCONS USED BY "FRET" ENTRY:              01418000
+ADCONFRT DC    F'0'           --> R7                                    01419000
+         DC    A(FRET01)      --> R8                           @V3M4038 01420000
+         DC    A(FRETSUB)     --> R9                                    01421000
+         DC    A(CHEKSIZE)    --> R10                                   01422000
+         LTORG                                                          01423000
+         EJECT                                                          01424000
+*********************************************************************** 01425000
+*                                                                       01426000
+*              ERROR HANDLERS                                         * 01427000
+*                                                                       01428000
+*********************************************************************** 01429000
+         SPACE 2                                                        01430000
+ERROR1   ABEND 1     ERROR IF R0 = 0 (OR < 0) AT INPUT TO FRET...       01431000
+         SPACE 2                                                        01432000
+ERROR2   ABEND 2    ERROR IF BLOCK BEING RETURNED MATCHES PRESENT ONE   01433000
+         SPACE 2                                                        01434000
+ERROR3   ABEND 3     ERROR IF LOWER-NUMBERED BLOCK OVERLAPS THIS ONE    01435000
+         SPACE 2                                                        01436000
+ERROR4   ABEND 4     ERROR IF THIS ONE OVERLAPS HIGHER-NUMBERED BLOCK   01437000
+         SPACE 2                                                        01438000
+ERROR5   ABEND 5              ERROR IF R1 = 0 AT INPUT TO FRET...       01439000
+         SPACE 2                                                        01440000
+ERROR6   ABEND 6     ERROR IF R0 = 0 (OR < 0) AT INPUT TO FREE...       01441000
+         SPACE 2                                                        01442000
+ERROR7   ABEND 7   ERROR OF END OF AREA BEING FRET'D > REAL MACH. SIZE: 01443000
+         SPACE 2                                                        01444000
+ERROR10  ABEND 10   EXTEND WHILE EXTENDING - FREELOCK SET (BY DMKPTRFR) 01445000
+         AIF   (NOT &AP).NOAP14                                **AIF*** 01446000
+         SPACE 1                                               @V407594 01447000
+ERROR12  ABEND 12   RECURSIVE USE OF CPFREELK                  @V407594 01448000
+         SPACE 1                                               @V407594 01449000
+ERROR15  ABEND 15             RECURSIVE USE OF CPFRESW         @V4M0241 01450000
+         SPACE 1                                               @V407594 01451000
+ERROR14  ABEND 14             DMKFREAP NOT AVAILABLE TO DEFER  @V407594 01452000
+.NOAP14  ANOP                                                  **ANOP** 01453000
+         EJECT                                                          01454000
+*   POINTERS, COUNTERS, & FILLED-IN ADDRESSES ...                       01455000
+*                                                                       01456000
+*        NOTE:  --> MEANS "BECOMES"                                     01457000
+*                                                                       01458000
+DMKFRELS DC    D'0'    "FREELIST" = START OF REGULAR FREE STORAGE CHAIN 01459000
+*                                                                       01460000
+FREENUM  DC    F'0'           --> COUNT OF BLOCKS IN FREE STORAGE CHAIN 01461000
+*                                                                       01462000
+DMKFRELO DC    A(X'FFFFFF')   --> END OF FREE AREA IN LOWER CORE        01463000
+*                                                                       01464000
+SUBTABLE DC    10F'0'         --> TABLE OF SUBPOOL POINTERS    @V386198 01465000
+DISPSUBT EQU   SUBTABLE-SUBSIZES   (DISP. OF 'SUBTABLE' FROM 'SUBSIZES) 01466000
+DMKFREST EQU   SUBTABLE       (FOR EXTERNAL REFERENCES)        @V386198 01467000
+SPLITATT DC    F'0'       --> NO. TIMES "TRYSPLIT" ATTEMPTED   @VA00881 01468000
+SPLITCNT DC    F'0'     --> NO. TIMES A SUBPOOL SPLIT INTO SMALLER ONES 01469000
+SBFRTREG DC    F'0'     --> NO. OF SUBFRET CALLS REQUIRING REGULAR FRET 01470000
+* KEEP THE FOLLOWING TWO IN ORDER:                                      01471000
+NPAGFREE DC    F'0'     --> NO. OF TIMES "PAGE FREE" CALLED    @VA00881 01472000
+NPAGFRET DC    F'0'     --> NO. OF TIMES "PAGE FRET" CALLED             01473000
+DMKFRENP EQU   NPAGFREE       NAME FOR "NPAGFREE" & "NPAGFRET" @VA00881 01474000
+*                                                                       01475000
+         AIF   (NOT &AP).NOAP15                                **AIF*** 01476000
+*                                                              @V407594 01477000
+EXTDEFER DC    F'0'           NO. OF TIMES CPFRELK SET         @V407594 01478000
+EXTSWTCH DC    F'0'           NO. OF TIMES CPFRESW SET         @V407594 01479000
+*                                                              @V407594 01480000
+.NOAP15  ANOP                                                  **ANOP** 01481000
+SUBRETN  DC    F'0'         --> HOW MANY TIMES SUBPOOLS WERE RETURNED.  01482000
+SUBRETAC DC    F'0'         --> NO. OF SUBPOOLS ACTUALLY RETURNED       01483000
+*  BACK-POCKET SAVE AREA TO ENSURE DMKFRE CAN CALL DMKPTRFR             01484000
+DMKFRESV DC    F'0'           TO ALLOW FREE STORAGE TO BE      @VM08952 01485000
+*                             EXTENDED                                  01486000
+EXTNDSAV DC    32F'0'         BALRSAVE-FREESAVE SAVED FOR DMKPTRFR,     01487000
+*                             AND BALRSAVE SAVED FOR DMKPTRFT.          01488000
+*                                                                       01489000
+*              OTHER STATISTICAL QUANTITIES OF INTEREST ...             01490000
+*                                                                       01491000
+LRGSTSIZ DC    F'0'           --> LARGEST SIZE (IN DBL WORDS) REQUESTED 01492000
+DMKFRELG EQU   LRGSTSIZ       EXTERNAL-NAME FOR "LRGSTSIZ"              01493000
+NUMEXBLK DC    F'0'           --> NO. OF TIMES AN EXTRA BLOCK  @V3M4038 01494000
+*                             IN CHAIN GIVEN BACK VIA DMKPTRFT.         01495000
+         EJECT                                                          01496000
+         COPY  EQU                                                      01497000
+         PSA                                                            01498000
+         SPACE 2                                                        01499000
+*                                                                       01500000
+* OTHER SCRATCH-STORAGE (JUST USED TEMPORARILY):                        01501000
+         SPACE                                                          01502000
+         ORG   FREEWORK                                                 01503000
+SAVE38   DS    6F      R3-R8 SAVED BY FRET, TO RECOVER IF OVERLAP ERROR 01504000
+*                                                                       01505000
+SAVE910  DS    2F         R9-R10 SAVED BY FREE WHEN RETURNING SUBPOOLS  01506000
+*                                                                       01507000
+JSAVE7   DS    1F             R7 INDEXER SAVED HERE AS NEEDED  @VA00881 01508000
+*                                                                       01509000
+FREELOWM DS    1F             SET TO DMKFRELO MINUS LENGTH NEEDED BLOCK 01510000
+*                                                                       01511000
+SAMEFRET DC    A(0)           CALLER OF BLOCK INVOKING DMKPTRFT@VA05235 01512000
+*        SAMEFRET IS IN ABSOLUTE PSA                           @V407594 01513000
+         SPACE                                                          01514000
+GPR1     EQU   FREER1         R1 RETURNED BY DMKFREE                    01515000
+         EJECT                                                          01516000
+         COPY  CORE                                                     01517000
+         COPY  VMBLOK                                          @VA07866 01518000
+         COPY  SAVE                                                     01519000
+         END                                                            01520000

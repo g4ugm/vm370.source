@@ -1,0 +1,1840 @@
+XCP      TITLE 'DMSXCP     (CMS)       VM/370 - RELEASE 6'              00001000
+         SPACE 2                                                        00002000
+*.                                                                      00003000
+* MODULE NAME                                                           00004000
+*                                                                       00005000
+*        DMSXCP  ( EXCP ROUTINE )                                       00006000
+*                                                                       00007000
+* FUNCTION                                                              00008000
+*                                                                       00009000
+*        PROVIDE THE FACILITY TO SIMULATE THE DOS/VS                    00010000
+*        EXCP (SVC 0) UNDER THE CMS/DOS ENVIRONMENT.                    00011000
+*        EXCP (EXECUTE CHANNEL PROGRAM) REQUESTS THE                    00012000
+*        INITIATION OF AN I/O OPERATION TO A SPECIFIC                   00013000
+*        LOGICAL UNIT.                                                  00014000
+*                                                                       00015000
+* ATTRIBUTES                                                            00016000
+*                                                                       00017000
+*        CMSDOS SEGMENT RESIDENT MODULE                                 00018000
+*        REENTRANT                                                      00019000
+*                                                                       00020000
+* ENTRY POINTS                                                          00021000
+*                                                                       00022000
+*        DMSXCP                                                         00023000
+*                                                                       00024000
+* ENTRY CONDITIONS                                                      00025000
+*                                                                       00026000
+*        THIS ROUTINE IS CALLED BY DMSDOS VIA BALR R14,R15              00027000
+*                                                                       00028000
+*        R14 =  RETURN ADDRESS                                          00029000
+*        R15 =  ENTRY  POINT                                            00030000
+*        R11 =  EXCP WORK AREA ADDRESS                                  00031000
+*        R1  =  CCB (COMMAND CONTROL BLOCK) POINTER                     00032000
+*                                                                       00033000
+*        DS    XL2                       RESIDUAL COUNT                 00034000
+*        DS    XL1                       COMMUNICATIONS BYTE 1          00035000
+*        DS    XL1                       COMMUNICATIONS BYTE 2          00036000
+*        DS    XL1                       CSW STATUS BYTE 1              00037000
+*        DS    XL1                       CSW STATUS BYTE 2              00038000
+*        DS    XL2                       SYMBOLIC (LOGICAL) UNIT        00039000
+*        DS    XL4                       CCW ADDRESS                    00040000
+*        DS    XL4                       CCW ADDRESS IN CSW OR          00041000
+*                                        DOSCB POINTER IF I/O TO DISK   00042000
+*                                                                       00043000
+* EXIT CONDITIONS                                                       00044000
+*                                                                       00045000
+*        RETURN TO CALLER WITH RETURN CODE IN R15                       00046000
+*                                                                       00047000
+*        RETURN CODES  AND  MESSAGES:                                   00048000
+*                                                                       00049000
+*             36 - SPECIFIED TAPE IS FILE PROTECTED                     00050000
+*            100 - SPECIFIED DEVICE IS NOT ATTACHED                     00051000
+*            100 - INPUT|OUTPUT ERROR ON SYSXXX                         00052000
+*            100 - ERROR READING CMS FILE FROM DISK                     00053000
+*            100 - ERROR WRITING CMS FILE TO DISK                       00054000
+*            100 - UNEXPECTED ERROR ON SYSXXX                           00055000
+*                                                                       00056000
+* CALLS TO OTHER ROUTINES                                               00057000
+*                                                                       00058000
+*        DMSFRE, DMSPIO, DMSCIO, DMSCRD, DMSCWR                         00059000
+*        DMSBRD, DMSBWR, DMSFNS, DMKGIO, DMSERR                         00060000
+*                                                                       00061000
+* EXTERNAL REFERENCES                                                   00062000
+*                                                                       00063000
+*        NUCON, BGCOM, ADT, CMSAVE, MAPPUB                              00064000
+*                                                                       00065000
+* TABLES/WORK AREAS                                                     00066000
+*                                                                       00067000
+*        DMSCCB, IOCCW                                                  00068000
+*        CNCODES, CDCODES, SDCODES                                      00069000
+*                                                                       00070000
+* NOTES                                                                 00071000
+*                                                                       00072000
+*        SUPPORT CODE FOR DMSXCP ROUTINE  = @V305001                    00073000
+*        EXCEPT FOR THE 'IKQLAB HANDLER' SECTION.                       00074000
+*        SUPPORT CODE FOR IKQLAB SECTION  = @V305132                    00075000
+*                                                                       00076000
+* REGISTER USAGE                                                        00077000
+*                                                                       00078000
+*        R0    NUCON ADDRESSABILITY & FREE/FERT REGISTER                00079000
+*        R1    WORK & FREE/FRET REGISTER                                00080000
+*        R2    CCB POINTER                                              00081000
+*        R3    CURRENT CCW POINTER                                      00082000
+*        R4    WORK & INTERNAL LINKAGE                                  00083000
+*        R5    WORK                                                     00084000
+*        R6    WORK                                                     00085000
+*        R7    WORK & INTERNAL LINKAGE                                  00086000
+*        R8    WORK                                                     00087000
+*        R9    WORK & INTERNAL LINKAGE                                  00088000
+*        R10   IOCCW (PLIST WORK) POINTER                               00089000
+*        R11   DOSCB POINTER                                            00090000
+*        R12   DMSXCP ADDRESSABILITY                                    00091000
+*        R13   DMSXCP ADDRESSABILITY                                    00092000
+*        R14   EXTERNAL LINKAGE & RETURN REGISTER                       00093000
+*        R15   ADDRESS OF EXTERNAL LINKAGE & RETURN CODE                00094000
+*                                                                       00095000
+* OPERATION                                                             00096000
+*                                                                       00097000
+*        1. SET UP NECESSARY ADDRESSABILITIES AND SAVE                  00098000
+*           SOME REGISTERS IN THE EXCP WORK AREA. CHECK                 00099000
+*           IF THE SPECIFIED CCW ADDRESS IN THE CCB IS                  00100000
+*           NOT ZERO.                                                   00101000
+*                                                                       00102000
+*        2. DETERMINE IF THE SPECIFIED LOGICAL UNIT IN                  00103000
+*           THE CCB IS ASSIGNED. IF IT IS ASSIGNED, USE                 00104000
+*           THE PUB DEVICE TYPE TO INDEX AND BRANCH TO                  00105000
+*           THE ONE INTERNAL ROUTINE THAT WILL PROCESS                  00106000
+*           THAT SPECIFIC DEVICE. IF THE LOGICAL UNIT IS                00107000
+*           ASSIGNED TO IGNORE, ANOTHER ROUTINE IS GIVEN                00108000
+*           CONTROL.                                                    00109000
+*                                                                       00110000
+*        3. LOGICAL UNIT ASSIGNED TO 'IGNORE'.                          00111000
+*                                                                       00112000
+*           VERIFY THAT ALL THE CCW'S SPECIFIED ARE VALID.              00113000
+*           SEARCH THROUGH CCW CHAIN LOOKING FOR ANY READS.             00114000
+*           IF NO READ CCW IS FOUND, THE CCB IS POSTED WITH             00115000
+*           THE NORMAL C.E. + D.E. . IF A READ CCW IS FOUND,            00116000
+*           ASIDE FROM THE NORMAL C.E. + D.E., THE CCB IS               00117000
+*           POSTED FOR EOF.                                             00118000
+*                                                                       00119000
+*        4. LOGICAL UNIT ASSIGNED TO 'PRINTER'.                         00120000
+*                                                                       00121000
+*           A 4 DOUBLE WORD WORK AREA IS ACQUIRED FROM FREE             00122000
+*           STORAGE TO BUILD THE DMSPIOSI PLIST. THE PLIST IS           00123000
+*           INITIALIZED WITH THE COMMAND NAME AND THE BUFDATA           00124000
+*           POINTER. THE FIRST USER CCW IS MOVED TO 'BUFDATA',          00125000
+*           AND A NO-OP CCW IS MOVED AFTER IT. IF THE CCW IS            00126000
+*           CHAINED, AN INTERNAL FLAG IS SET TO REMEBER THERE           00127000
+*           ARE MORE CCW'S TO EXECUTE. IF CCW IS NOT CHAINED,           00128000
+*           IT IS CHAINED TO THE NO-OP CCW. AN SVC 202 IS MADE          00129000
+*           TO DMSPIOSI TO EXECUTE THIS CCW. UPON RETURN, IF            00130000
+*           THERE ARE MORE CCWS, THE OPERATION IS REPEATED AS           00131000
+*           BEFORE. OTHERWISE, THE CCB IS POSTED ACCORDINGLY.           00132000
+*                                                                       00133000
+*        5. LOGICAL UNIT ASSIGNED TO 'READER' OR 'PUNCH'.               00134000
+*                                                                       00135000
+*           CHECK IF CCW CODE IS VALID. TURN STACKER SELECT             00136000
+*           AND DATA MODE BITS OFF (IF ON) AND PASS CCW CODE            00137000
+*           THROUGH TABLE OF SUPPORTED CCWS. ONCE A MATCH IS            00138000
+*           FOUND (WILL MATCH ON READ, WRITE, OR NO-OP), THE            00139000
+*           PLIST FOR DMSCIO IS BUILT, AND AN SVC 202 IS MADE           00140000
+*           TO CARDRD  OR  CARDPH (READ OR WRITE) TO PERFORM            00141000
+*           THE I/O OPERATION. UPON RETURN (OR IF THE CCW IS            00142000
+*           TO BE NO-OPED), IF THE CCW IS CHAINED, THE OPERA-           00143000
+*           TION IS REPEATED AS BEFORE. OTHERWISE, THE CCB IS           00144000
+*           POSTED ACCORDINGLY.                                         00145000
+*                                                                       00146000
+*        6. LOGICAL UNIT ASSIGNED TO 'TERMINAL'.                        00147000
+*                                                                       00148000
+*           CHECK IF CCW CODE IS VALID BY PASSING CCW THROUGH           00149000
+*           A TABLE OF SUPPORTED CCWS. ONCE A MATCH IS FOUND            00150000
+*           (WILL MATCH ON READ, WRITE, OR NO-OP), THE PLIST            00151000
+*           FOR DMSCRD OR DMSCWR IS BUILT. IF READING, A 160            00152000
+*           BYTE BUFFER IS ACQUIRED FROM FREE STORAGE TO HOLD           00153000
+*           THE INPUT LINE. AN SVC 202 IS ISSUED TO CONREAD OR          00154000
+*           TYPLIN TO PERFORM THE I/O OPERATION. UPON RETURN,           00155000
+*           IF THE CCW IS CHAINED, THE OPERATION IS REPEATED            00156000
+*           AS BEFORE. OTHERWISE, THE CCB IS POSTED ACCORDINGLY.        00157000
+*           IF A READ WAS ISSUED, THE NUMBER OF BYTES SPECIFIED         00158000
+*           IN THE CCW ARE MOVED TO THE USER'S BUFFER. THEN THE         00159000
+*           ACQUIRED FREE STORAGE AREA IS FREED.                        00160000
+*                                                                       00161000
+*        7. LOGICAL UNIT ASSIGNED TO 'TAPE'.                            00162000
+*                                                                       00163000
+*           THE VIRTUAL DEVICE ADDRESS IS DECODED INTO A HEX            00164000
+*           ( EBCDIC ) REPRESENTATION FOR ANY POSSIBLE ERROR            00165000
+*           MESSAGE SUBSTITUTION.                                       00166000
+*           TWO DUMMY CCWS (MODESET AND TIC) ARE MOVED TO THE           00167000
+*           EXCP WORK AREA. A TEST IS MADE TO DETERMINE IF THE          00168000
+*           PUB CONTAINS A MODE SET VALUE. IF NOT, THE DEFAULT          00169000
+*           VALUE X'B3' IS USED. THE USER CCW CHAIN ADDRESS IS          00170000
+*           STORED INTO THE ADDRESS PORTION OF THE TIC CCW AND          00171000
+*           A CALL IS MADE TO DIAGNOSE THE CCW CHAIN TO CP.             00172000
+*           RETURN IS ONLY MADE IF AN I/O ERROR IS RETURNED BY          00173000
+*           CP (EXCLUDING UNIT EXCEPTION OR INCORRECT LENGTH).          00174000
+*           IF AN I/O ERROR OCCURED, THE SENSE BYTES ARE TESTED         00175000
+*           TO DIFFERENTIATE BETWEEN FILE PROTECTED TAPE OR I/O         00176000
+*           ERROR. OTHERWISE, THE CCW IS POSTED ACCORDINGLY.            00177000
+*                                                                       00178000
+*        8. LOGICAL UNIT ASSIGNED TO 'DISK'.                            00179000
+*                                                                       00180000
+*           FIRST A CHECK IS MADE TO DETERMINE IF I/O IS TO CMS         00181000
+*           FORMATTED DISK, OR TO O/S OR DOS FORMATTED DISK. IF         00182000
+*           THE I/O IS TO A CMS FORMATTED DISK, THE CCW IS CHECKED      00183000
+*           FOR VALIDITY. IF THE CCW IS 'TIC', THE NEXT CCW IN THE      00184000
+*           CHAIN IS PROCESSED. IF THE CCW IS VALID AND NOT 'TIC',      00185000
+*           THE CCW IS PASSED THROUGH THE TABLE OF SUPPORTED CCW        00186000
+*           CODES. ONCE A MATCH IS FOUND, CONTROL WILL PASS TO THE      00187000
+*           ROUTINE TO PROCESS THAT CCW CODE. SUPPORTED CCW CODES       00188000
+*           UNDER CMS/DOS ARE: READ DATA, WRITE DATA, SEARCH ID,        00189000
+*           WRITE COUNT KEY & DATA, READ COUNT KEY & DATA, READ KEY     00190000
+*           AND DATA, AND READ COUNT. ALL OTHER VALID CCWS ARE NO-      00191000
+*           OPED. ONCE THE CCW HAS BEEN PROCESSED SUCCESSFULLY, A       00192000
+*           CHECK IS MADE TO DETERMINE IF THE CCW IS CHAINED. IF        00193000
+*           SO, THE NEXT CCW IS PROCESSED AS BEFORE, OTHERWISE, THE     00194000
+*           CCB IS POSTED ACCORDINGLY.                                  00195000
+*                                                                       00196000
+*           IF THE DISK IS NOT A CMS FORMATTED DISK, A CHECK IS         00197000
+*           MADE TO DETERMINE IF THE DISK IS O/S OR DOS FORMATTED.      00198000
+*           THE CCW CHAIN IS THEN PASSED THROUGH A TEST TO FIND OUT     00199000
+*           IF THERE ARE ANY WRITE CCWS. IF A WRITE CCW IS FOUND,       00200000
+*           THE DISK IS CHECKED FOR WRITE MODE. IF THE DISK IS R/O      00201000
+*           THE CHANNEL PROGRAM IS NOT EXECUTED. NOW, THE CHANNEL       00202000
+*           PROGRAM IS DIAGNOSED TO CP FOR EXECUTION. UPON RETURN       00203000
+*           FROM THE CP DIAGNOSE, THE CCB IS POSTED ACCORDINGLY.        00204000
+*.                                                                      00205000
+         EJECT                                                          00206000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 00207000
+*                                                                     * 00208000
+*        INITALIZATION... SAVE SOME REGISTERS IN EXCP WORK AREA.      * 00209000
+*        CHECK IF CHANNEL PROGRAMS SUPPLIED WITH CCB.                 * 00210000
+*                                                                     * 00211000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 00212000
+         PUNCH 'SPB'                                          @VA06270 00213000
+         SPACE 2                                                        00214000
+DMSXCP   CSECT                                                 @V305001 00215000
+         USING NUCON,R0       ADDRESSABILITY                   @V305001 00216000
+         USING IOCCW,R10      ...                              @V305001 00217000
+         USING DOSSECT,R11    ...                              @V305001 00218000
+         USING DMSXCP,R12     ...                              @V305001 00219000
+         STM   R12,R1,DOSSAVE SAVE SOME REGISTERS              @V305001 00220000
+         LR    R12,R15        ESTABLISH BASE                   @V305001 00221000
+         LA    R13,2048(,R12)  GET 2ND PAGE OF ADDRESSABILITY  @V305001 00222000
+         LA    R13,2048(,R13)  ...                             @V305001 00223000
+         USING DMSXCP+4096,R13 ...                             @V305001 00224000
+         LR    R2,R1          SAVE CCB POINTER                 @V305001 00225000
+         USING DMSCCB,R2      REFERENCE "CCB" DSECT            @V305001 00226000
+         ICM   R3,7,CCBCCW    GET CCW ADDRESS FROM CCB         @V305001 00227000
+         BZ    NOCCWA         IF NONE, ERROR                   @V305001 00228000
+         EJECT                                                          00229000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 00230000
+*                                                                     * 00231000
+*        DETERMINE IF UNIT IS ASSIGNED. IF UNIT ASSIGNED,             * 00232000
+*        USE THE PUB DEVTYPE TO BRANCH TO CORRESPONDING               * 00233000
+*        I/O ROUTINE.                                                 * 00234000
+*                                                                     * 00235000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 00236000
+         SPACE 2                                                        00237000
+         BAL   R4,GETPUB      GET DEVICE PUB ADDR              @V305001 00238000
+         USING PUBADR,R5                                       @V305001 00239000
+         SR    R1,R1          CLEAR                            @V305001 00240000
+         IC    R1,PUBDEVT     GET PUB DEVICE TYPE              @V305001 00241000
+         SRL   R1,4           ...                              @V305001 00242000
+         CH    R1,=H'6'       EXCEEDS MAX ALLOWED ?            @V305001 00243000
+         BH    UNSUPP         YES, ERROR                       @V305001 00244000
+         SLL   R1,2           ...                              @V305001 00245000
+         B     IORTN(R1)      BRANCH TO CORRECT RTNE           @V305001 00246000
+         DROP  R5                                              @V305001 00247000
+         SPACE 1                                                        00248000
+IORTN    B     IOCON          CONSOLE                          @V305001 00249000
+         B     IORDR          READER                           @V305001 00250000
+         B     IOPCH          PUNCH                            @V305001 00251000
+         B     UNSUPP         ERROR                            @V305001 00252000
+         B     IOPRT          PRINTER                          @V305001 00253000
+         B     IOTAP          TAPE                             @V305001 00254000
+         B     IODSK          DISK                             @V305001 00255000
+         EJECT                                                          00256000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 00257000
+*                                                                     * 00258000
+*        I/O ROUTINE TO PROCESS UNIT ASSIGNED TO IGNORE.              * 00259000
+*                                                                     * 00260000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 00261000
+         SPACE 2                                                        00262000
+IODUM    SR    R5,R5          ...                              @V305001 00263000
+DUMLOOP  TM    0(R3),VALCCW   VALID CCW CODE?                  @V305066 00264000
+         BZ    INVCCW         NO, ERROR                        @V305001 00265000
+         TM    0(R3),CONTROL  CONTROL CCW                      @V305066 00266000
+         BO    DUMNXT         YES, GET NEXT CCW                @V305001 00267000
+         BM    DUMRW          POSSIBLE READ/WRITE              @V305001 00268000
+         TM    0(R3),RDBKCCW  READ BACK CCW ?                  @V305066 00269000
+         BO    DUMRD          YES, BRANCH                      @V305001 00270000
+         TM    0(R3),TICCCW      TIC CCW ?                     @V305066 00271000
+         BZ    DUMTIC         YES, BRANCH                      @V305001 00272000
+DUMNXT   TM    4(R3),CC       CCW CHAINED ?                    @V305001 00273000
+         BZ    DUMEND         NO, GET OUT                      @V305001 00274000
+DUMNXT2  LR    R6,R3          SAVE THIS CCW ADDRESS            @V305001 00275000
+         LA    R3,8(,R3)      GET  NEXT CCW ADDRESS            @V305001 00276000
+         B     DUMLOOP        GO PROCESS THIS ONE              @V305001 00277000
+         SPACE                                                          00278000
+DUMTIC   TM    0(R6),STATMOD  WAS LAST CCW A STATUS MODIFIER?  @V305066 00279000
+         BZ    DUMTIC2        NO, USE TIC ADDRESS TO CONTINUE  @V305001 00280000
+         TM    0(R6),STATMOD2 STILL LOOKS LIKE STATUS MODIFIER @V305066 00281000
+         BZ    DUMTIC2        NO, GO USE TIC ADDRESS           @V305001 00282000
+         B     DUMNXT2        ASSUME STATUS MODIFIER BEFORE TIC@V305001 00283000
+DUMTIC2  L     R3,0(,R3)      GET TIC TRANSFER TO ADDRESS      @V305001 00284000
+         LA    R3,0(,R3)      CLEAR HI ORDER BYTE (CCW CODE)   @V305001 00285000
+         B     DUMLOOP        CONTINUE SEARCH FOR READ CCW     @V305001 00286000
+         SPACE 1                                                        00287000
+DUMRW    TM    0(R3),WRITECCW IS CCW FOR WRITE?                @V305066 00288000
+         BO    DUMNXT         YES, BRANCH                      @V305001 00289000
+DUMRD    LA    R5,READSW      SET READ SWITCH                  @V305066 00290000
+         B     DUMNXT         GO GET NEXT CCW                  @V305001 00291000
+         SPACE 1                                                        00292000
+DUMEND   XC    CCBCNT(2),CCBCNT CLEAR RESIDUAL COUNT           @V305001 00293000
+         NC    CCBERMAP(4),=X'1F050000' TURN OFF PIOCS BITS    @V305001 00294000
+         OC    CCBERMAP(4),=X'80000C00' INIT CCB WITH GOOD I/O @V305001 00295000
+         LTR   R5,R5          WERE WE READING ?                @V305001 00296000
+         BZ    EXCPEND        NO, ALL DONE                     @V305001 00297000
+         LH    R4,6(,R3)      GET DATA COUNT FROM CCW          @V305001 00298000
+         STH   R4,CCBCNT      SAVE RESIDUAL COUNT              @V305001 00299000
+         OI    CCBCOM1,CCBEOF        SET BYTE 2 CCB FOR EOF    @V305001 00300000
+         OI    CCBCOM2,CCBEOC+CCBVER SET BYTE 3 CCB FOR EOF    @V305001 00301000
+         OI    CCBCSW1,CCBUE         SET BYTE 1 CSW FOR EOF    @V305001 00302000
+         B     EXCPEND        ALL DONE                         @V305001 00303000
+         EJECT                                                          00304000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 00305000
+*                                                                     * 00306000
+*        I/O ROUTINE TO PROCESS UNIT ASSIGNED TO PRINTER.             * 00307000
+*                                                                     * 00308000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 00309000
+         SPACE 2                                                        00310000
+IOPRT    EQU   *                                               @V305001 00311000
+         LA    R0,DWS4        GET NO. DOUBLE WORDS             @V305066 00312000
+         DMSFREE DWORDS=(0),TYPE=NUCLEUS,TYPCALL=BALR          @V305001 00313000
+         ST    R1,DOSOP+8     SAVE WORK IN DOS                 @V305001 00314000
+         XC    0(16,R1),0(R1) ZERO OUT FIRST 16 BYTES          @V305001 00315000
+         LA    R10,16(,R1)    POINT TO BUFDATA                 @V305001 00316000
+         MVC   DOSOP(8),PIOSI SET COMMAND NAME                 @V305001 00317000
+         OI    DOSFLAGS,EIGHT   IF UC/UE IND. BREAK CCW CHAIN  @V305066 00318000
+PRNEXT   MVC   IOCCW(8),0(R3) MOVE CCW TO BUFDATA              @V305001 00319000
+         MVC   IOCCW+8(8),NOOP     MOVE NO-OP CCW TOO          @V305001 00320000
+         LA    R5,CHAINON     SET CHAIN SWITCH ON              @V305066 00321000
+         TM    4(R10),CC      IS CCW CHAINED ?                 @V305001 00322000
+         BO    PRCALL         YES, JUST CALL PIO               @V305001 00323000
+         OI    4(R10),CC      TURN CHAIN BIT ON                @V305001 00324000
+         SR    R5,R5          SET CHAIN SWITCH OFF             @V305001 00325000
+PRCALL   LA    R1,DOSOP       GET ADDR PLIST                   @V305001 00326000
+         SVC   202            CALL DMSPIOSI                    @V305001 00327000
+         DC    AL4(PRERR)     ERROR EXIT                       @V305001 00328000
+         LTR   R5,R5          WAS CCW CHAINED ?                @V305001 00329000
+         BZ    PREXIT         NO, EXIT                         @V305001 00330000
+         LA    R3,8(,R3)      BUMP TO NEXT CCW                 @V305001 00331000
+         B     PRNEXT         PROCESS NEXT ONE                 @V305001 00332000
+         SPACE 1                                                        00333000
+PREXIT   LA    R0,DWS4        GET NO. OF DOUBLE WORDS          @V305066 00334000
+         L     R1,DOSOP+8     GET WORK ADDRESS                 @V305001 00335000
+         DMSFRET DWORDS=(0),LOC=(1),TYPCALL=BALR               @V305001 00336000
+         NI    DOSFLAGS,F7      TURN OFF PRINTER INDICATOR     @V305066 00337000
+         B     IODONE2        ALL DONE                         @V305001 00338000
+         EJECT                                                          00339000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 00340000
+*                                                                     * 00341000
+*        PROCESS I/O ERRORS TO PRINTER. ONLY ERRORS RETURNED          * 00342000
+*        TO USER ARE CHANNEL 9/12 SENSED CONDITIONS.                  * 00343000
+*                                                                     * 00344000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 00345000
+         SPACE 2                                                        00346000
+PRERR    NC    CCBERMAP(4),=X'1F050000' TURN OFF PIOCS BITS    @V305001 00347000
+         OC    CCBERMAP(4),=X'80000C00' INIT CCB WITH GOOD I/O @V305001 00348000
+         NI    DOSFLAGS,F7      TURN OFF PRINTER INDICATOR     @V305066 00349000
+         LH    R3,CSW+6       GET RESIDUAL COUNT FROM CSW      @V305001 00350000
+         STH   R3,CCBCNT      SAVE IN CCB                      @V305001 00351000
+         LR    R3,R15         SAVE RETURN CODE                 @V305001 00352000
+         LA    R0,DWS4        NO. DWORDS TO FREE               @V305066 00353000
+         L     R1,DOSOP+8     AREA ADDR TO FREE                @V305001 00354000
+         DMSFRET DWORDS=(0),LOC=(1),TYPCALL=BALR               @V305001 00355000
+         CH    R3,=H'100'     DEVICE NOT ATTACHED ?            @V305001 00356000
+         BE    CANCEL         YES, ERROR                       @V305001 00357000
+         CH    R3,=H'2'       CHANNEL 12 SENSED ?              @V305001 00358000
+         BE    PRCH12         YES, GO POST IT                  @V305001 00359000
+         LR    R15,R3         ERROR CODE TO R15                @V305001 00360000
+         BL    OUTERR         NO, ERROR                        @V305001 00361000
+         CH    R3,=H'3'       CHANNEL 9 SENSED ?               @V305001 00362000
+         BH    OUTERR         NO, ERROR                        @V305001 00363000
+PRCH9    OI    CCBCOM2,CCBVER  POST CHANNEL 9 IN CCB           @V305001 00364000
+         B     EXCPEND        GET OUT                          @V305001 00365000
+PRCH12   OI    CCBCSW1,CCBUE  POST CHANNEL 12 IN CCB           @V305001 00366000
+         B     EXCPEND        GET OUT                          @V305001 00367000
+         EJECT                                                          00368000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 00369000
+*                                                                     * 00370000
+*        I/O ROUTINE TO PROCESS UNIT ASSIGNED TO CARD.                * 00371000
+*        NO STACKER SELECT OR COLUMN BINARY IS ALLOWED.               * 00372000
+*                                                                     * 00373000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 00374000
+         SPACE 2                                                        00375000
+IORDR    EQU   *                                               @V305001 00376000
+IOPCH    EQU   *                                               @V305001 00377000
+         LA    R10,DOSOP+8    GET IOCCW ADDRESS                @V305001 00378000
+CDNEXT   MVC   IOCCW(8),0(R3) MOVE CCW TO WORK                 @V305001 00379000
+         TM    IOCCW,READCCW  IS CCW CODE FOR READ?            @V305066 00380000
+         BO    CDCCOK         YES, GOOD SO FAR                 @V305001 00381000
+         NI    IOCCW,255-STACKOFF  TURN STACKER OFF            @V305066 00382000
+CDCCOK   NI    IOCCW,255-DATAOFF   TURN DATA MODE OFF          @V305066 00383000
+         LA    R4,CDCODES     GET CCW CODES LIST               @V305001 00384000
+         LA    R5,ENDCDC      GET NUMBER CODES IN LIST         @V305001 00385000
+         B     IOSRCH         FIND PROPER ROUTINE              @V305001 00386000
+         SPACE 1                                                        00387000
+CDREAD   LA    R4,CARDRD      GET COMMAND NAME                 @V305001 00388000
+         B     CDCOMM         GO TO COMMON CODE                @V305001 00389000
+CDPUNCH  LA    R4,CARDPH      GET COMMAND NAME                 @V305001 00390000
+CDCOMM   MVC   DOSOP(8),0(R4) MOVE COMMAND NAME                @V305001 00391000
+         MVC   IOLEN1(2),IOLEN2    MOVE DATA LENGTH            @V305001 00392000
+         MVI   IOSW,OFF       ....                             @V305066 00393000
+         LA    R1,DOSOP       GET PLIST ADDRESS                @V305001 00394000
+         SVC   202            GO TO CARDRD OR CARDPH           @V305001 00395000
+         DC    AL4(CDERR)     ERROR EXIT                       @V305001 00396000
+CDEXIT   TM    4(R3),CC       CCW CHAINED ?                    @V305001 00397000
+         BZ    CDDONE         NO, SET RESIDUAL COUNT           @V305001 00398000
+         LA    R3,8(,R3)      BUMP TO NEXT CCW                 @V305001 00399000
+         B     CDNEXT         GO PROCESS IT                    @V305001 00400000
+         SPACE 1                                                        00401000
+CDDONE   CLC   DOSOP(8),CARDRD     WHERE WE DOING READS ?      @V305001 00402000
+         BNE   IODONE2        NO, SET RESIDUAL COUNT TO ZERO   @V305001 00403000
+         LH    R4,IOLEN1      GET USER DATA LENGTH             @V305001 00404000
+         LH    R5,IOLEN2      GET NUMBER BYTES READ            @V305001 00405000
+         SR    R4,R5          COMPUTE RESIDUAL COUNT           @V305001 00406000
+         BP    CDCOUNT        BRANCH IF POSITIVE               @V305001 00407000
+         SR    R4,R4          NEGATIVE - ZERO COUNT            @V305001 00408000
+CDCOUNT  STH   R4,CCBCNT      SAVE COUNT IN CCB                @V305001 00409000
+         B     IODONE         ALL DONE                         @V305001 00410000
+         EJECT                                                          00411000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 00412000
+*                                                                     * 00413000
+*        PROCESS I/O ERRORS TO CARD. ONLY ERRORS RETURNED             * 00414000
+*        TO USER ARE INCORRECT LENGTH OR END-OF-FILE.                 * 00415000
+*                                                                     * 00416000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 00417000
+         SPACE 2                                                        00418000
+CDERR    NC    CCBERMAP(4),=X'1F050000' TURN OFF PIOCS BITS    @V305001 00419000
+         OC    CCBERMAP(4),=X'80000C00' INIT CCB WITH GOOD I/O @V305001 00420000
+         CH    R15,=H'100'    DEVICE NOT ATTACHED ?            @V305001 00421000
+         BE    CANCEL         YES, ERROR                       @V305001 00422000
+         CH    R15,=H'3'      UNKNOWN ERROR ?                  @V305001 00423000
+         BE    INERR          YES, BRANCH                      @V305001 00424000
+         BL    CDEOF          MUST BE END-OF-FILE              @V305001 00425000
+         OI    CCBCSW2,CCBILEN       SET INCORRECT LENGTH      @V305001 00426000
+         XC    CCBCNT(2),CCBCNT      CLEAR RESIDUAL COUNT      @V305001 00427000
+         B     EXCPEND               GET OUT                   @V305001 00428000
+CDEOF    OI    CCBCOM1,CCBEOF        SET BYTE 2 CCB FOR EOF    @V305001 00429000
+         OI    CCBCOM2,CCBEOC+CCBVER SET BYTE 3 CCB FOR EOF    @V305001 00430000
+         OI    CCBCSW1,CCBUE         SET BYTE 1 CSW FOR EOF    @V305001 00431000
+         LH    R4,IOLEN1      GET DATA COUNT                   @V305001 00432000
+         STH   R4,CCBCNT      SAVE AS RESIDUAL COUNT           @V305001 00433000
+         B     EXCPEND        GET OUT                          @V305001 00434000
+         EJECT                                                          00435000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 00436000
+*                                                                     * 00437000
+*        I/O ROUTINE TO PROCESS UNIT ASSIGNED TO CONSOLE.             * 00438000
+*                                                                     * 00439000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 00440000
+         SPACE 2                                                        00441000
+IOCON    EQU   *                                               @V305001 00442000
+         LA    R10,DOSOP+8    GET IOCCW ADDRESS                @V305001 00443000
+         LA    R6,UPCASE      SET UP DEFAULT UPCASE            @V305066 00444000
+         USING PUBADR,R5                                       @V305001 00445000
+         TM    PUBTAPM1,LOWCHK     USER WANTS LOWER CASE?      @V305066 00446000
+         BZ    CNNEXT         NO, USE DEFAULT UPPER CASE       @V305001 00447000
+         LA    R6,LOWCASE     SET UP LOWCASE FLAG              @V305066 00448000
+         DROP  R5                                              @V305001 00449000
+CNNEXT   MVC   IOCCW(8),0(R3) MOVE CCW TO WORK                 @V305001 00450000
+         LA    R4,CNCODES     GET CCW CODES LIST               @V305001 00451000
+         LA    R5,ENDCNC      GET NUMBER CODES IN LIST         @V305001 00452000
+         B     IOSRCH         FIND PROPER ROUTINE              @V305001 00453000
+         SPACE 1                                                        00454000
+CNREAD   LA    R4,CONRD       GET COMMAND NAME                 @V305001 00455000
+         STC   R6,IOLEN1      SET UPPER/LOWER CASE             @V305001 00456000
+         LA    R0,DWS20       GET BUFFER                       @V305066 00457000
+         DMSFREE DWORDS=(0),TYPCALL=BALR                       @V305001 00458000
+         STCM  R1,MASK7,IOBUF SAVE BUFFER ADDR                 @V305066 00459000
+         B     CNCOMM         GO TO COMMON CODE                @V305001 00460000
+CNWRITE1 MVI   IOLEN1+1,CARRRET SET CARRIAGE RETURN            @V305066 00461000
+         B     CNWRITE        GO TO COMMON WRITE CODE          @V305001 00462000
+CNWRITE2 MVI   IOLEN1+1,NOCARRET   SET NO CARR RETURN          @V305066 00463000
+CNWRITE  LA    R4,CONWR       GET COMMAND NAME                 @V305001 00464000
+         MVI   IOLEN1,B       SET CODE                         @V305066 00465000
+         EJECT                                                          00466000
+CNCOMM   MVC   DOSOP(8),0(R4) MOVE COMMAND TO PLIST            @V305001 00467000
+         MVI   IOSW,ON        JUST A FLAG                      @V305066 00468000
+         LA    R1,DOSOP       GET PLIST ADDRESS                @V305001 00469000
+         SVC   202            GO TO CONSOLE I/O                @V305001 00470000
+         CLC   DOSOP(8),CONRD DOING READS ?                    @V305001 00471000
+         BNE   CNEXIT         NO, CHECK NEXT CCW               @V305001 00472000
+         TM    4(R3),SKIP            SKIP BIT ON IN CCW?       @VA08352 00473000
+*                                    IE. NO TRANSFER OF DATA            00474000
+         BO    CNEXIT                IF NOTDATA THEN DON'T MVC @VA08352 00475000
+         LH    R4,6(,R3)      GET DATA LENGTH                  @V305001 00476000
+         CLC   IOLEN1+2,=H'0' ANYTHING READ ?                  @V305001 00477000
+         BE    CNEOF          NO, SET UP FOR EOF...            @V305001 00478000
+         LR    R5,R4          SAVE LENGTH                      @VA05628 00479000
+         SH    R5,IOLEN2      DETERMINE RESIDUAL COUNT         @VA05628 00480000
+         STH   R5,CCBCNT      STORE IT IN CCB                  @VA05628 00481000
+         BCTR  R4,R0          LENGTH LESS ONE FOR MVC          @V305066 00482000
+         ICM   R5,MASK7,1(R3) GET USER'S BUFFER ADDR           @V305066 00483000
+         ICM   R1,MASK7,IOBUF GET OUR BUFFER ADDR              @V305066 00484000
+         EX    R4,CNMOVE      MOVE FROM OURS TO HIS            @V305001 00485000
+         LA    R0,DWS20       GET BUFFER LENGTH                @V305066 00486000
+         DMSFRET DWORDS=(0),LOC=(1),TYPCALL=BALR               @V305001 00487000
+         TM    4(R3),CC       IS CCW CHAINED ?                 @VA05628 00488000
+         BZ    IODONE         NO, GET OUT !                    @VA05628 00489000
+CNEXIT   TM    4(R3),CC       CCW CHAINED ?                    @V305001 00490000
+         BZ    IODONE2        NO, GET OUT                      @V305001 00491000
+         LA    R3,8(,R3)      GET NEXT CCW                     @V305001 00492000
+         B     CNNEXT         GO PROCESS IT                    @V305001 00493000
+         SPACE 1                                                        00494000
+CNEOF    OI    CCBCOM2,CCBEOC+CCBVER    SET BYTE 3 CCB FOR EOF @V305001 00495000
+         OI    CCBCSW1,CCBUE            SET BYTE 1 CSW FOR EOF @V305001 00496000
+         STH   R4,CCBCNT      SAVE RESIDUAL COUNT              @V305001 00497000
+         B     EXCPEND        GET OUT                          @V305001 00498000
+         SPACE 1                                                        00499000
+CNMOVE   MVC   0(0,R5),0(R1)  MVC EXECUTED                     @V305001 00500000
+         EJECT                                                          00501000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 00502000
+*                                                                     * 00503000
+*        I/O ROUTINE TO PROCESS UNIT ASSIGNED TO TAPE.                * 00504000
+*                                                                     * 00505000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 00506000
+         SPACE 2                                                        00507000
+IOTAP    EQU   *                                               @V305001 00508000
+         LR    R10,R11             GET IOCCW ADDRESS           @V305001 00509000
+         USING PUBADR,R5           PUB ADDRESSABILITY          @V305001 00510000
+         XC    DOSDSMD(8),DOSDSMD  ZERO WORK                   @V305001 00511000
+         LH    R4,PUBCUU           GET UNIT ADDRESS            @V305001 00512000
+         SLL   R4,4                1/2 BYTE TO LEFT            @V305001 00513000
+         ST    R4,DOSDSMD+4        SAVE IN WORK                @V305001 00514000
+         OI    DOSDSMD+7,H0C       DUMMY A SIGN                @V305066 00515000
+         UNPK  DOSTAPID(4),DOSDSMD+4(4) UNPACK UNIT ADDRESS    @V305001 00516000
+         OI    DOSTAPID+3,ZONE     ZONE IT AND ALL DONE        @V305066 00517000
+         MVC   IOCCW(16),MDSET     MOVE DUMMY CCWS TO WORKAREA @V305001 00518000
+         CLI   PUBTAPM1,USERMODE   USER SPECIFIED MODE?        @V305066 00519000
+         BE    IOTAP2              NO, BRANCH AROUND           @V305001 00520000
+         MVC   IOSW,PUBTAPM1       SET USER TAPE MODE SET      @V305001 00521000
+         DROP  R5                                              @V305001 00522000
+IOTAP2   STCM  R3,MASK7,IOCCW+9    PT. TIC TO USER'S CCW CHAIN @V305066 00523000
+         BAL   R9,CHKWRCCW    CHECK IF ANY WRITE CCW ON CHAIN  @V305001 00524000
+         LR    R1,R10         GET CHANNEL PROG. ADDRESS        @V305001 00525000
+         LA    R6,TAPE        ERROR MSG SUBSTITUTION           @V305001 00526000
+         BAL   R9,DIAGCON     GO DIAGNOSE THE I/O              @V305001 00527000
+         SPACE 2                                                        00528000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 00529000
+*                                                                     * 00530000
+*        THE ONLY I/O ERROR RETURNED TO USER IS END-OF-FILE           * 00531000
+*        OR INCORRECT LENGTH.                                         * 00532000
+*        ALL OTHER I/O ERRORS WILL BE CONSIDERED TERMINAL.            * 00533000
+*                                                                     * 00534000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 00535000
+         SPACE 2                                                        00536000
+         TM    DOSSENSE+1,FILEPROT TAPE FILE PROTECTED?        @V305066 00537000
+         BO    ERR43E         YES, GIVE ERROR MSG              @V305001 00538000
+         LA    R15,THREE      ERROR MSG SUBSTITUTION           @V305066 00539000
+         B     ERR411S        PERM I/O ERROR THEN              @V305066 00540000
+         EJECT                                                          00541000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 00542000
+*                                                                     * 00543000
+*        I/O ROUTINE TO PROCESS UNIT ASSIGNED TO DISK.                * 00544000
+*                                                                     * 00545000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 00546000
+         SPACE 2                                                        00547000
+IODSK    LR    R10,R11        SAVE WORK AREA POINTER           @V305001 00548000
+         ICM   R11,MASK7,CCBCSW    GET POSSIBLE DOSCB ADDRESS  @V305066 00549000
+         BZ    CHKDSK         NO DOSCB, CHECK DASD             @V305001 00550000
+         CLC   DOSCBID,=CL4'DLBL'  IS THIS GOOD DLBL ?         @V305001 00551000
+         BNE   CHKDSK         NO, LOOKS LIKE NOT-CMS DISK      @V305001 00552000
+         CLI   DOSDEV,DOSDSK  CHECK SOME MORE IN DOSCB         @V305001 00553000
+         BNE   CHKDSK         SHOULD BE EQUAL FOR DOSCB        @V305001 00554000
+         MVC   INDEX(24,R11),INDEX(R10) MVE SAVD REGS->NEW AREA@V305001 00555000
+         SR    R4,R4          CLEAR..                          @V305001 00556000
+         C     R4,DOSOSFST    IS I/O TO NON-CMS DISK ?         @V305001 00557000
+         BNE   CHKDSK2        BRANCH IF NOT CMS DISK           @V305001 00558000
+         LA    R10,DOSBUFF    GET IOCCW ADDRESS                @V305001 00559000
+         USING PUBADR,R5                                       @V305001 00560000
+         SPACE                                                          00561000
+*        INDEX IS USED TO PICKUP PROPER TRK/CYL FOR THE SPECIFIED       00562000
+*        DASD DEVICE. CON2314 WILL BE INDEX 0, ETC.                     00563000
+         SPACE                                                          00564000
+         SR    R8,R8          SET INDEX TO 0                   @V305001 00565000
+         CLI   PUBDEVT,T2314  2314 DASD ?                      @V305001 00566000
+         BE    SDNEXT         YES, BRANCH                      @V305001 00567000
+         LA    R8,INDEX2      SET INDEX TO 2                   @V305066 00568000
+         CLI   PUBDEVT,T3330  3330 DASD ?                      @V305001 00569000
+         BE    SDNEXT         YES, BRANCH                      @V305001 00570000
+         CLI   PUBDEVT,T333B  3330-11 DASD ?                   @V505098 00571000
+         BE    SDNEXT         YES, BRANCH                      @V505098 00572000
+         LA    R8,INDEX4      SET INDEX TO 4                   @V305066 00573000
+         TM    PUBDEVT,T3340         IS IT 3340 (69 OR 6A)     @VA08259 00574000
+         BO    SDNEXT                IF YES BR, IF NOT TST NXT @VA08259 00575000
+         LA    R8,INDEX6      SET INDEX TO 6                   @V505098 00576000
+         DROP  R5                                              @V305001 00577000
+SDNEXT   MVC   IOCCW(8),0(R3) MOVE CCW TO WORK                 @V305001 00578000
+         TM    IOCCW,VALCCW   VALID CCW CODE?                  @V305066 00579000
+         BZ    INVCCW         NO, ERROR                        @V305001 00580000
+         TM    IOCCW,TICCCW   IS IT TIC CCW ?                  @V305066 00581000
+         BZ    SDEXIT2        YES, BRANCH                      @V305001 00582000
+         LA    R4,SDCODES     GET CCW CODES LIST               @V305001 00583000
+         LA    R5,ENDSDC      GET NUMBER CODES IN LIST         @V305001 00584000
+         B     IOSRCH         FIND PROPER ROUTINE              @V305001 00585000
+         EJECT                                                          00586000
+SDREAD   LA    R4,RDBUF       GET COMMAND NAME                 @V305001 00587000
+         TM    4(R3),SKIP     SKIP FLAG ON ?                   @V305001 00588000
+         BO    SDEXIT         YES, DON'T BOTHER THEN..         @V305001 00589000
+         B     SDCOMM         GO TO COMMON CODE                @V305001 00590000
+SDWRITE  LA    R4,WRBUF       GET COMMAND NAME                 @V305001 00591000
+         CLC   CCBSYMU,=H'2'  WRITING TO SYSPCH ?              @V305001 00592000
+         BNE   SDCOMM         NO, CONTINUE AS NORMAL           @V305001 00593000
+         LA    R9,EIGHTY1     PREPARE TO CHECK IF WRITING 81   @V305066 00594000
+         CH    R9,DOSBYTE+2   WRITING 81 BYTES?                @V305001 00595000
+         BNE   SDCOMM         NO, MUST NOT BE TEXT DECK        @V305001 00596000
+         BCTR  R9,R0          DECREMENT TO 80                  @V305066 00597000
+         STH   R9,DOSBYTE+2   STORE NEW LENGTH IN PLIST        @V305001 00598000
+         L     R9,DOSBUFF     ADDRESS I/O BUFFER               @V305001 00599000
+         LA    R9,1(,R9)      POINT TO 2ND POSITION IN BUFFER  @V305001 00600000
+         STCM  R9,7,DOSBUFF+1 STORE NEW ADDRESS IN PLIST       @V305001 00601000
+SDCOMM   LA    R1,DOSOP       GET PLIST ADDRESS                @V305001 00602000
+         CLC   DOSOP(8),0(R4) DOING SAME OPER AS BEFORE ?      @V305001 00603000
+         BE    SDCOMM2        YES, DO NOT FINIS                @V305001 00604000
+         L     R15,AFINIS     GET DMSFNS ADDRESS               @V305001 00605000
+         BALR  R14,R15        FINIS THIS FILE                  @V305001 00606000
+SDCOMM2  MVC   DOSOP(8),0(R4) MOVE COMMAND NAME                @V305001 00607000
+         XC    DOSBYTE(2),DOSBYTE  CLEAR 1ST HALF LENGTH       @V305001 00608000
+         MVI   DOSBUFF,OFF    CLEAR 1ST BYTE BUFF ADD          @V305066 00609000
+         MVC   DOSCOUT(2),=H'1'    SET ITEM COUNT TO 1         @V305001 00610000
+         CLC   DOSITEM,=H'1'  ITEM LESS THAN ONE ?             @V305001 00611000
+         BNL   SDCOMM3        NO, BRANCH                       @V305001 00612000
+         MVC   DOSITEM,=H'1'  SET ITEM NUMBER TO 1             @V305001 00613000
+SDCOMM3  LA    R1,DOSOP       GET PLIST ADDRESS                @V305001 00614000
+         L     R15,ARDBUF     GET RDBUF ADDRESS                @V305001 00615000
+         CLC   DOSOP,RDBUF    DOING READS ?                    @V305001 00616000
+         BE    SDCOMM4        YES, BRANCH AROUND               @V305001 00617000
+         L     R15,AWRBUF     GET WRBUF ADDRESS                @V305001 00618000
+SDCOMM4  BALR  R14,R15        GO DO I/O                        @V305001 00619000
+         BNZ   SDERR          BRANCH IF ERRORS ...             @V305001 00620000
+SDEXIT   TM    4(R3),CC       CCW CHAINED ?                    @V305001 00621000
+         BZ    SDDONE         NO, CHECK RESIDUAL COUNT         @V305001 00622000
+SDEXIT2  LA    R3,8(,R3)      BUMP TO NEXT CCW                 @V305001 00623000
+         B     SDNEXT         GO PROCESS IT                    @V305001 00624000
+         EJECT                                                          00625000
+SDDONE   CLI   20(R2),DTFSD   IS THIS SD DTF?                  @VM03081 00626000
+         BNE   SDDONE2             NO, JUST EXIT               @V305001 00627000
+         TM    21(R2),SDWORK  IS THIS DTFSD WORKFILE?          @VM03081 00628000
+         BNO   SDDONE1                                         @V305066 00629000
+         XC    30(2,R2),30(R2)     ZERO TRACK CAPACITY         @V305001 00630000
+         L     R14,DOSSAVE+4       RECOVER R13 AT INPUT        @V305001 00631000
+         USING SSAVE,R14           REFERENCE SAVE AREA BRIEFLY @V305001 00632000
+         CLC   EGPR5(4),=F'19069'  TRACK CAPACITY JUNK ?       @V505098 00633000
+         BH    SDDONE2             NO, BRANCH                  @V305001 00634000
+         XC    EGPR5(4),EGPR5      ZERO TRACK CAPACITY         @V305001 00635000
+         DROP  R14                                             @V305001 00636000
+SDDONE2  CLC   DOSOP(8),RDBUF WHERE WE DOING READS ?           @V305001 00637000
+         BE    SDRDBUF        YES, COMPUTE RESIDUAL COUNT      @V305066 00638000
+         CLI   20(R2),DTFSD   IS THIS DTFSD?                   @VM03081 00639000
+         BNE   IODONE2        NO                               @VM03081 00640000
+         TM    21(R2),SDWORK  SD WORKFILE ?                    @VM03081 00641000
+         BO    IODONE2        YES                              @VM03081 00642000
+         TM    21(R2),BLOCK   BLOCKED DTFSD FILE?              @VM03081 00643000
+         BNO   IODONE2        NO, SKIP NEXT INST               @VM03081 00644000
+         XC    154(2,R2),154(R2)   ZERO TRK CAP FOR TRUNCS     @V305066 00645000
+         B     IODONE2        BR TO SET RESIDUAL COUNT         @V305066 00646000
+SDRDBUF  EQU   *                                               @VA06022 00647000
+*              ELIMINATE WLR ON VAR RECORDS                             00648000
+         CLC   DOSFORM(L'VAR),VAR FIXED FILE?                  @VA06022 00649000
+         BNE   SDRDBUF1       YES CONTINUE NORMALLY            @VA06022 00650000
+         TM    100(2),FIXED   FIXED                            @VA06022 00651000
+         BZ    SDNORES            NO, NO LENGTH CHECK          @VA08357 00652000
+SDRDBUF1 EQU   *                                               @VA06022 00653000
+         L     R4,DOSBYTE     GET USERS DATA LENGTH            @VA06022 00654000
+         L     R5,DOSREAD     GET NUMBER BYTES READ            @V305001 00655000
+         SR    R4,R5          COMPUTE RESIDUAL COUNT           @V305001 00656000
+         BP    SDCOUNT        BRANCH IF COUNT POSITIVE         @V305001 00657000
+SDNORES  EQU   *                                               @VA06022 00658000
+         SR    R4,R4          SET COUNT TO ZERO                @V305001 00659000
+         STH   R4,CCBCNT          STORE COUNT IN CCB           @VA05550 00660000
+         B     IODONE             AND FINISH UP                @VA05550 00661000
+SDCOUNT  STH   R4,CCBCNT      SAVE COUNT IN CCB                @V305001 00662000
+         OI    CCBCSW2,CCBILEN    INDICATE INCORRECT LENGTH    @VA05550 00663000
+         NC    CCBERMAP(4),NOPIOCS   TURN OFF PIOS BITS        @VA05550 00664000
+         B     IODONE3            AND FINISH UP                @VA05550 00665000
+SDDONE1  CLI   104(R2),CPSD   DTFCP CONVERTED TO DTFSD?        @VA04510 00666000
+         BE    SDDONE2        YES, SKIP DTF MODIFICATION       @VA04510 00667000
+*              FIX DTF CORE OVERLAY ON VAR READ                         00668000
+         TM    21(R2),INP     INPUT FILE?                      @VA06022 00669000
+         BO    SDDONE2        YES - NO MODIFICATION            @VA06022 00670000
+         TM    100(R2),FIXED  FIXED LENGTH RECORDS?            @VA04411 00671000
+         BO    SDDONE2        YES, NO DTF MODIFICATION         @V305066 00672000
+         TM    100(R2),UNDEF  UNDEFINED OUTPUT?                @V305066 00673000
+         BZ    SDDONE3        NO, NO DTF MODIFICATION          @V305066 00674000
+         MVC   160(2,R2),82(R2)    MOVE TRK CAP TO DTF FIELD   @V305066 00675000
+         B     SDDONE2                                         @V305066 00676000
+SDDONE3  EQU   *                                               @VA06022 00677000
+         XC    164(2,R2),164(R2)  CLEAR TRACK CAP ON VARBLK OP @V305066 00678000
+         B     SDDONE2        CONTINUE  . . .                  @V305066 00679000
+         EJECT                                                          00680000
+SDSRCHID L     R4,0(R3)       GET CCHHR ADDRESS                @V305001 00681000
+         LA    R4,0(,R4)      ...                              @V305001 00682000
+         LH    R5,0(,R4)      LOAD CC INTO R5                  @V305001 00683000
+         MH    R5,CON2314(R8) COMPUTE RELATIVE TRACK           @V305001 00684000
+         AH    R5,2(,R4)      ADD HH TO RELATIVE TRACK         @V305001 00685000
+         SR    R6,R6          ...                              @V305001 00686000
+         IC    R6,4(,R4)      GET R NUMBER                     @V305001 00687000
+         AR    R5,R6          ADD RECORD NUMBER                @V305001 00688000
+         STH   R5,DOSITEM     SAVE AS NEW DOSITEM              @V305001 00689000
+         B     SDEXIT                                          @V305001 00690000
+         SPACE 1                                                        00691000
+SDWRCKD  LH    R4,DOSITEM     GET ITEM NO. (FROM LAST SEARCH)  @V305001 00692000
+         LA    R4,1(,R4)      UP BY ONE                        @V305001 00693000
+         STH   R4,DOSITEM     SAVE NEW ITEM NUMBER             @V305001 00694000
+         L     R4,DOSBUFF     GET BUFFER ADDRESS               @V305001 00695000
+         SR    R1,R1          ZERO CONSTANT                    @V305001 00696000
+         CH    R1,6(,R4)      IS DATA LENGTH ZERO ?            @V305001 00697000
+         BE    SDEXIT         YES, TRY NEXT CCW                @V305001 00698000
+         LA    R4,8(,R4)      BYPASS COUNT FIELD               @V305001 00699000
+         ST    R4,DOSBUFF     SAVE NEW BUFFER ADDRESS          @V305001 00700000
+         LH    R4,DOSBYTE+2   GET DATA LENGTH                  @V305001 00701000
+         SH    R4,=H'8'       LESS COUNT LENGTH                @V305001 00702000
+         STH   R4,DOSBYTE+2   SAVE NEW DATA LENGTH             @V305001 00703000
+         BNZ   SDWRITE        IF MORE DATA, GO TO WRITE        @V305001 00704000
+         TM    4(R3),CD       IS CCW DATA CHAINED ?            @V305001 00705000
+         BZ    SDEXIT         NO, THEN TRY NEXT CCW            @V305001 00706000
+         LA    R3,8(,R3)      POINT TO NEXT CCW                @V305001 00707000
+         MVC   IOCCW(8),0(R3) MOVE NEW CCW TO WORK             @V305001 00708000
+         B     SDWRITE        GO PERFORM DATA WRITE            @V305001 00709000
+         SPACE 1                                                        00710000
+SDRDCKD  BAL   R7,SDRDCNT1    GO READ COUNT FIRST              @V305001 00711000
+         TM    4(R3),CD       IS CCW DATA CHAINED ?            @V305001 00712000
+         BO    SDRDKD         YES, GO READ FROM NEXT CCW       @V305001 00713000
+         LH    R4,6(,R3)      GET CCW DATA LENGTH              @V305001 00714000
+         SH    R4,=H'8'       LESS COUNT LENGTH                @V305001 00715000
+         STH   R4,DOSBYTE+2   SAVE NEW DATA LENGTH             @V305001 00716000
+         BZ    SDEXIT         IF DATA LENGTH 0, EXIT           @V305001 00717000
+         LR    R4,R6          GET CCW BUFFER ADDRESS           @V305001 00718000
+         LA    R4,8(,R4)      BUMP PAST COUNT READ             @V305001 00719000
+         ST    R4,DOSBUFF     SAVE NEW BUFFER ADDRESS          @V305001 00720000
+         B     SDREAD         GO READ KEY & DATA               @V305001 00721000
+SDRDKD   LA    R3,8(,R3)      BUMP TO NEXT CCW                 @V305001 00722000
+         MVC   IOCCW(8),0(R3) MOVE NEW CCW TO WORK             @V305001 00723000
+         B     SDREAD         GO READ KEY & DATA               @V305001 00724000
+         EJECT                                                          00725000
+SDRDCNT  LA    R7,SDEXIT      SET RETURN ADDRESS               @V305001 00726000
+         OI    0(R3),MT           INSURE MULTI TRACK OPERATION @VA05969 00727000
+*                              (PROTECTS AGAINST LOST RECORDS) @VA05969 00728000
+SDRDCNT1 TM    4(R3),SKIP     SKIP FLAG ON ?                   @V305001 00729000
+         BO    SDEXIT         YES, DON'T BOTHER                @V305001 00730000
+         LH    R4,DOSITEM     GET ITEM NUMBER                  @V305001 00731000
+         LA    R4,1(,R4)      POINT TO NEXT ITEM               @V305001 00732000
+         STH   R4,DOSITEM     SAVE IN PLIST                    @V305001 00733000
+*              ELIMINATE DROP VAR RECORDS ON READ                       00734000
+         CLC   DOSOP,RDBUF    READ ?                           @VA06022 00735000
+         BNE   SDRDCNT4       NO - CONTINUE NORMALLY           @VA06022 00736000
+         CLC   DOSDSTYP(THREE),SYS   IS IT A SYSTEM WORK FILE  @VA07764 00737000
+         BE    SDRDCNT5      YES - GO GET MAX RECLEN OR EOF    @VA07764 00738000
+         TM    100(2),FIXED   VARIABLE TYPE RECORD?            @VA06022 00739000
+         BO    SDRDCNT4       NO - CONTINUE NORMALLY           @VA06022 00740000
+         TM    100(2),UNDEF   VARIABLE FILE?                   @VA06022 00741000
+         BZ    SDRDCNT4       NO - HANDLE NORMALLY             @VA06022 00742000
+         CLC   DOSFORM(L'VAR),VAR VARIABLE FILE?               @VA06022 00743000
+         BNE   SDRDCNT4       NO - GO UPDATE                   @VA06022 00744000
+         TM    21(2),SDWORKF  WORK FILE?                       @VA06022 00745000
+         BO    SDRDCNT4       YES - HANDLE NORMALLY            @VA06022 00746000
+         NI    73(2),255-2    RESET NEXT HEAD FLAG             @VA06022 00747000
+SDRDCNT4 EQU   *                                               @VA06022 00748000
+         LA    R1,DOSOP       POINT TO FILE'S FILEID           @V305001 00749000
+         L     R15,AFINIS     GET FINIS ADDRESS                @V305001 00750000
+         BALR  R14,R15        TEMP. CLOSE THIS FILE            @V305001 00751000
+         L     R15,VCFSTLKP   GET FST LOOKUP ROUTINE ADDR.     @VM03093 00752000
+         BALR  R14,R15        GO FIND FST...                   @V305001 00753000
+         BNZ   SDRDCNT3       NOT FOUND OR ERROR..BRANCH       @V305001 00754000
+         L     R1,32(,R1)     GET MAX ITEM LENGTH              @V305001 00755000
+         ST    R1,DOSBYTE     SAVE IN PLIST AS LENGTH          @V305001 00756000
+         MVC   DOSOP(8),RDBUF PREPARE TO READ ITEM             @V305001 00757000
+         LA    R1,7(,R1)      PREPARE TO ROUND                 @V305001 00758000
+         SRL   R1,3           TO DOUBLE WORD                   @V305001 00759000
+         LR    R0,R1          NOW MOVE IT TO R0..              @V305001 00760000
+         DMSFREE DWORDS=(0),TYPCALL=BALR                       @V305001 00761000
+         ST    R1,DOSBUFF     AND SAVE BUFFER ADDR IN PLIST    @V305001 00762000
+         XC    DOSBYTE(2),DOSBYTE  MAKE SURE LENGTH OK         @V305001 00763000
+         MVI   DOSBUFF,OFF    AND BUFFER IS LEGAL              @V305066 00764000
+         MVC   DOSCOUT(2),=H'1'    SET ITEM COUNT TO 1         @V305001 00765000
+         LA    R1,DOSOP       GET PLIST ADDRESS                @V305001 00766000
+         L     R15,ARDBUF     GET RDBUF ADDRESS                @V305001 00767000
+         BALR  R14,R15        GO READ ...                      @V305001 00768000
+         LR    R5,R15         SAVE RET CODE TEMPORARILY        @V305001 00769000
+         L     R1,DOSBYTE     GET BUFFER LENGTH                @V305001 00770000
+         LA    R1,7(,R1)      PREPARE TO ROUND                 @V305001 00771000
+         SRL   R1,3           TO DOUBLE WORD BOUNDARY          @V305001 00772000
+         LR    R0,R1          MOVE TO REG. 0                   @V305001 00773000
+         L     R1,DOSBUFF     GET FREE AREA LOCATION           @V305001 00774000
+         DMSFRET DWORDS=(0),LOC=(1),TYPCALL=BALR               @V305001 00775000
+         LTR   R15,R5         RESTORE RETURN CODE              @V305001 00776000
+         BZ    SDRDCNT2       IF ZERO, BRANCH                  @V305001 00777000
+         CH    R15,=H'8'      INCORRECT LENGTH ?               @V305001 00778000
+         BE    SDRDCNT2       YES, BRANCH                      @V305001 00779000
+         CH    R15,=H'12'     END-OF-FILE ?                    @V305001 00780000
+         BNE   ERR104S        NO, GIVE ERROR MSG               @V305001 00781000
+SDRDCNT3 XC    DOSREAD(4),DOSREAD  ZERO BYTES READ IF HERE..   @V305001 00782000
+         EJECT                                                          00783000
+SDRDCNT2 LH    R6,CON2314(R8) GET DEVICE CONSTANT              @V305001 00784000
+         LR    R5,R4          SET UP FOR DIVIDE                @V305001 00785000
+         BCTR  R5,R0          ITEM NO. - 1 TO ACCOUNT FOR R1   @V305066 00786000
+         SR    R4,R4          ...                              @V305001 00787000
+         DR    R4,R6          COMPUTE CYL & TRK NOS.           @V305001 00788000
+         L     R6,0(,R3)      POINT TO USER'S BUFFER           @V305001 00789000
+         LA    R6,0(,R6)      ...                              @V305001 00790000
+         STH   R4,2(,R6)      SUPPLY TRACK NUMBER              @V305001 00791000
+         STH   R5,0(,R6)      SUPPLY CYLINDER NUMBER           @V305001 00792000
+         MVI   4(R6),REC1     AND RECORD NUMBER TO 1           @V305066 00793000
+         L     R4,DOSREAD     GET NUMBER BYTES READ            @V305001 00794000
+         STCM  R4,MASK7,5(R6) SUPPLY KL &DL                    @V305066 00795000
+         BR    R7             ALL DONE                         @V305001 00796000
+         SPACE                                                          00797000
+SDRDCNT5 DS    0H                                              @VA07764 00798000
+         LR    R5,R4         LOAD RECORD NUMBER PLUS ONE       @VA07764 00799000
+         BCTR  R5,R0         RECORD NUMBER TO BE PROCESSED     @VA07764 00800000
+         STH   R5,DOSITEM    SAVE IN PLIST                     @VA07764 00801000
+         LA    R1,DOSOP      ADDR OF PLIST FOR FST FILE LKUP   @VA07764 00802000
+         L     R15,ASTATE    PREPARE TO CALL STATE             @VA07764 00803000
+         BALR  R14,R15       DOES FILE EXIST                   @VA07764 00804000
+         BNZ   SDRDCNT3      NO - ZERO OUT BYTES READ          @VA07764 00805000
+         L     R5,DOSBUFF    GET ADDRESS OF I/O BUFFER         @VA07764 00806000
+         USING FSTSECT,R5    ADDRESS FST                       @VA07764 00807000
+         CH    R4,FSTIC      HAVE WE READ LAST RECORD          @VA07764 00808000
+         BH    SDRDCNT3      YES - ZERO OUT BYTES READ         @VA07764 00809000
+         MVC   DOSREAD,FSTIL NUMBER OF BYTES TO BE READ        @VA07764 00810000
+         B     SDRDCNT2      COMPUTE CYL/TRACK AND EXIT        @VA07764 00811000
+         EJECT                                                          00812000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 00813000
+*                                                                     * 00814000
+*        THE ONLY I/O ERRORS RETURNED TO THE USER IS END-OF-FILE      * 00815000
+*        OR INCORRECT LENGTH. ALL OTHER I/O ERRORS WILL BE CON-       * 00816000
+*        SIDERED TERMINAL.                                            * 00817000
+*                                                                     * 00818000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 00819000
+         SPACE 2                                                        00820000
+SDERR    NC    CCBERMAP(4),=X'1F050000' TURN OFF PIOCS BITS    @V305001 00821000
+         OC    CCBERMAP(4),=X'80000C00' INIT CCB WITH GOOD I/O @V305001 00822000
+         CLC   DOSOP(8),WRBUF DOING WRITES ?                   @V305001 00823000
+         BE    ERR105S        YES, GIVE ERROR MSG              @V305001 00824000
+         CH    R15,=H'12'     WAS IT END-OF-FILE ?             @V305001 00825000
+         BE    SDEOF          YES, BRANCH                      @V305001 00826000
+         CH    R15,=H'8'      WAS IT INCORRECT LENGTH ?        @V305001 00827000
+         BNE   ERR104S        NO, GIVE ERROR MSG               @V305001 00828000
+         TM    4(R3),SILI     SUPP. I.L. SPECIFIED ?           @V305001 00829000
+         BO    SDEXIT         YES, IGNORE ERROR THEN..         @V305001 00830000
+         OI    CCBCSW2,CCBILEN  SET IL FLAG IN CCB             @V305001 00831000
+         L     R4,DOSBYTE     GET USER DATA LENGTH             @V305001 00832000
+         L     R5,DOSREAD     GET NUMBER BYTES READ            @V305001 00833000
+         SR    R4,R5          COMPUTE RESIDUAL COUNT           @V305001 00834000
+         B     SDERR2         GO BELOW....                     @V305001 00835000
+SDEOF    OI    CCBCOM1,CCBEOF        SET BYTE 2 CCB FOR EOF    @V305001 00836000
+         OI    CCBCOM2,CCBEOC+CCBVER SET BYTE 3 CCB FOR EOF    @V305001 00837000
+         OI    CCBCSW1,CCBUE         SET BYTE 1 CSW FOR EOF    @V305001 00838000
+         L     R4,DOSBYTE     GET USER DATA LENGTH             @V305001 00839000
+SDERR2   STH   R4,CCBCNT      SAVE RESIDUAL COUNT IN CCB       @V305001 00840000
+         B     EXCPEND        GET OUT                          @V305001 00841000
+         EJECT                                                          00842000
+         USING PUBADR,R5                                       @V305001 00843000
+         USING ALTWORK,R10                                     @V305001 00844000
+CHKDSK   LR    R11,R10        GET DMSXCP WORK IN R11           @V305001 00845000
+CHKDSK2  LA    R1,PUBDSKM     POINT TO DISK MODE IN PUB        @V305001 00846000
+         SH    R1,=H'24'      PREPARE ADTLKP PLIST             @V305001 00847000
+         L     R15,VCADTLKP   GET ADTLKP ADDRESS               @VM03093 00848000
+         BALR  R14,R15        GO FIND ADT                      @V305001 00849000
+         BC    2,NOADT        NO ADT FOUND, ERROR              @V305001 00850000
+         USING ADTSECT,R1                                      @V305001 00851000
+         TM    ADTFLG2,ADTFROS+ADTFDOS  DOS OR O/S DISK ?      @V305001 00852000
+         BZ    NOTDOSOS       NO, I DON'T KNOW WHAT'S HAPP'NG  @V305001 00853000
+         LA    R9,CHKEND      INITIALIZE FOR LOOP EXIT         @V305001 00854000
+CHKWRCCW SR    R4,R4          CLEAR...                         @V305001 00855000
+CHKLUP   TM    0(R3),VALCCW   LET'S LOOK AT CCW'S              @V305066 00856000
+         BZ    INVCCW         IF INVALID CCW, ERROR            @V305001 00857000
+         TM    0(R3),TICCCW   IS IT TIC CCW?                   @V305066 00858000
+         BZ    CHKTIC         YES, BRANCH TO GET NEXT ADDRESS  @V305001 00859000
+         TM    0(R3),CONTROL  CHECK FOR CONTROL/READ/WRITE     @V305066 00860000
+         BZ    CHKNXT         BRANCH IF NONE OF ABOVE          @V305001 00861000
+         BO    CHKNXT         BRANCH FOR CONTROL               @V305001 00862000
+CHKWRT   TM    0(R3),WRITECCW IS IT WRITE CCW?                 @V305066 00863000
+         BZ    CHKNXT         NO, BRANCH                       @V305001 00864000
+         TM    0(R3),CCWE0    IS IT WRITE CCW?                 @V305066 00865000
+         BNZ   CHKNXT         NO, BRANCH                       @V305001 00866000
+         LA    R4,WRITEFLG    SET WRITE FLAG                   @V305066 00867000
+CHKNXT   TM    4(R3),CC       CCW CHAINED ?                    @V305001 00868000
+         BZR   R9             NO, ALL DONE WITH CHECK          @V305001 00869000
+CHKNXT2  LR    R6,R3          SAVE THIS CCW ADDRESS            @V305001 00870000
+         LA    R3,8(,R3)      BUMP TO NEXT CCW IN CHAIN        @V305001 00871000
+         B     CHKLUP         KEEP CHECKING                    @V305001 00872000
+         SPACE                                                          00873000
+CHKTIC   TM    0(R6),STATMOD  WAS LAST CCW A STATUS MODIFIER?  @V305066 00874000
+         BZ    CHKTIC2        NO, USE ADDR OF TIC TO CONTINUE  @V305001 00875000
+         TM    0(R6),STATMOD2 STILL LOOKS LIKE STATUS MODIFIER @V305066 00876000
+         BZ    CHKTIC2        NO, USE ADDRESS IN TIC CCW       @V305001 00877000
+         B     CHKNXT2        ASSUME STATUS MODIFIER BEFORE TIC@V305001 00878000
+CHKTIC2  L     R3,0(,R3)      GET TIC TRANSFER TO ADDRESS      @V305001 00879000
+         LA    R3,0(,R3)      CLEAR HI ORDER BYTE (CCW CODE)   @V305001 00880000
+         B     CHKLUP         CONTINUE SEARCH FOR R/W CCW      @V305001 00881000
+         SPACE                                                          00882000
+CHKEND   LTR   R4,R4          ATTEMPTING TO WRITE ?            @V305001 00883000
+         BZ    DIAGCP         NO, THEN CHANNEL PGMS OK         @V305001 00884000
+         TM    ADTFLG3,ADTFRW IS DISK ACCESSED FOR WRITES ?    @V305001 00885000
+         BZ    NOTRW          NO, THEN WON'T LET WRITE         @V305001 00886000
+         DROP  R1                                              @V305001 00887000
+         EJECT                                                          00888000
+DIAGCP   DS    0H             LET 'CP' DO THE I/O:             @V305001 00889000
+         LA    R6,DISK        GET 'DISK' MSG SUBSTITUTION      @V305001 00890000
+         LA    R9,DIAGCON1    GET RETURN FROM DIAGNOSE         @V305001 00891000
+         L     R14,DOSSAVE+4  RECOVER "R13 AT INPUT"           @V305001 00892000
+         USING SSAVE,R14      AND REF. THE SAVE AREA BRIEFLY   @V305001 00893000
+         L     R15,CALLER     GET ADDR OF 'CALLER'(LIKE OLDPSW)@V305001 00894000
+         CL    R15,ADIKQLAB   IS HE PERCHANCE 'IKQLAB' ?       @V305001 00895000
+         BL    DIAGIO         NO - FORGET IT - CONTINUE.       @V305001 00896000
+         CL    R15,NDIKQLAB   LOOKS PROMISING - CHECK FURTHER: @V305001 00897000
+         BL    IKQLAB         YES - MUST HANDLE SPECIALLY.     @V305001 00898000
+         DROP  R14            NO - CONTINUE:                   @V305001 00899000
+DIAGIO   ICM   R1,MASK7,CCBCCW     GET CHANNEL PGMS            @V305066 00900000
+DIAGCON  LH    R0,PUBCUU      GET VIRTUAL DEVICE ADDRESS       @V305001 00901000
+         XC    CSW,CSW        ZERO OUT CSW                     @V305001 00902000
+         DC    X'83010020'    DIAGNOSE I/O TO CP               @V305001 00903000
+         LM    R7,R8,CSW      GET CSW TO REGS. 7 AND 8         @V305001 00904000
+         BZ    IODONE2        GOOD I/O, EXIT                   @V305001 00905000
+         BM    ERR113S        DEVICE NOT ATTACHED EXIT         @V305001 00906000
+         BP    DIAGCON3       CHECK EOF (UNIT EXCEPTION)       @V305001 00907000
+         STH   R1,DOSSENSE    SAVE STATUS INFORMATION          @V305001 00908000
+         BR    R9             RETURN TO CALLER                 @V305001 00909000
+         SPACE 1                                                        00910000
+DIAGCON1 TM    DOSSENSE,F5    ONLY TRACK OR DATA CHECK ALLOWED @V305066 00911000
+         BNZ   IOERR          NO, ERROR                        @V305001 00912000
+         TM    DOSSENSE+1,HEX17    ANYMORE NOT ALLOWED         @V305066 00913000
+         BNZ   IOERR          YES, ERROR                       @V305001 00914000
+         TM    DOSSENSE,TRACK TRACK CONDITION?                 @V305066 00915000
+         BO    ALTRACK        YES, HANDLE ALTERNATE TRACK      @V305001 00916000
+DIAGCON2 NC    CCBERMAP(4),=X'1F050000' TURN OFF PIOCS BITS    @V305001 00917000
+         OC    CCBERMAP(4),=X'80000C00' INIT CCB WITH GOOD I/O @V305001 00918000
+         STCM  R8,MASK12,CCBCSW1   CSW STATUS TO CCB           @V305066 00919000
+         STH   R8,CCBCNT      SAVE RESIDUAL COUNT              @V305001 00920000
+         OC    CCBCOM2(1),DOSSENSE+1  SET TRANSMISION OF SENSE @V305001 00921000
+         STCM  R7,MASK7,CCBCSW     CSW ADDRESS IN CSW TO CCB   @V305066 00922000
+         TM    DOSSENSE,DATACHK    ANY DATA CHECK?             @V305066 00923000
+         BZ    EXCPEND        NO, GET OUT                      @V305001 00924000
+         OI    CCBCOM2,CCBDC  POST DATA CHECK IN CCB           @V305001 00925000
+         B     EXCPEND        GET OUT                          @V305001 00926000
+         SPACE 1                                                        00927000
+DIAGCON3 NC    CCBERMAP(4),=X'1F050000' TURN OFF PIOCS BITS    @V305001 00928000
+         OC    CCBERMAP(4),=X'80000C00' INIT CCB WITH GOOD I/O @V305001 00929000
+         CH    R15,=H'2'      IS ERROR UNIT EXCEPTION ?        @V305001 00930000
+         BE    DIAGCON4       YES, PROCESS AS EOF              @V305001 00931000
+         OI    CCBCSW2,CCBILEN        SET BYTE 2 CSW FOR I.L.  @V305001 00932000
+         B     DIAGCON6               CONTINUE BELOW..         @V305001 00933000
+DIAGCON4 LTR   R4,R4                  WERE ANY WRITES DONE ?   @V305001 00934000
+         BNZ   DIAGCON5               YES, DO NOT SET CCBEOF   @V305001 00935000
+         CLC   CCBSYMU,IPTLUB IS UNIT EXCEPTION ON SYSIPT ?    @VM03090 00936000
+         BE    IODONE2        YES, DON'T REFLECT ERROR IN CCB  @VM03090 00937000
+         OI    CCBCOM1,CCBEOF         SET BYTE 2 CCB FOR EOF   @V305001 00938000
+DIAGCON5 OI    CCBCOM2,CCBEOC+CCBVER  SET BYTE 3 CCB FOR EOF   @V305001 00939000
+         OI    CCBCSW1,CCBUE          SET BYTE 1 CSW FOR EOF   @V305001 00940000
+DIAGCON6 STCM  R7,MASK7,CCBCSW     CCW ADDRESS IN CSW TO CCB   @V305066 00941000
+         STH   R8,CCBCNT      SAVE RESIDUAL COUNT IN CCB       @V305001 00942000
+         B     EXCPEND        GET OUT                          @V305001 00943000
+         EJECT                                                          00944000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 00945000
+*                                                                     * 00946000
+*        ALTERNATE TRACK ROUTINE. SWITCHES FROM PRIME TRACK           * 00947000
+*        TO ALTERNATE TRACK AND FROM ALTERNATE TO PRIME.              * 00948000
+*                                                                     * 00949000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 00950000
+         SPACE 2                                                        00951000
+ALTRACK  MVC   EDCCW0(ALTWLEN),ALTCCWS  INITIALIZE WORK AREA   @V305001 00952000
+         LA    R1,EDNH        GET SEEK BBCCHHR AREA            @V305001 00953000
+         STCM  R1,7,EDCCW0+1  INITIALIZE CCW0 BUFFER           @V305001 00954000
+         LA    R1,EDHA        GET HOME ADDRESS AREA            @V305001 00955000
+         STCM  R1,7,EDCCW1+1  INITIALIZE CCW1 BUFFER           @V305001 00956000
+         STCM  R1,7,EDCCW6+1  INITIALIZE CCW6 BUFFER           @V305001 00957000
+         LA    R1,EDR0        GET RECORD ZERO AREA             @V305001 00958000
+         STCM  R1,7,EDCCW2+1  INITIALIZE CCW2 BUFFER           @V305001 00959000
+         STCM  R1,7,EDCCW4+1  INITIALIZE CCW4 BUFFER           @V305001 00960000
+         LA    R1,EDSA        GET SEEK RECORD ZERO AREA        @V305001 00961000
+         STCM  R1,7,EDCCW3+1  INITIALIZE CCW3 BUFFER           @V305001 00962000
+         LA    R1,EDCCW4      GET TIC TO CCW4 ADDRESS          @V305001 00963000
+         STCM  R1,7,EDCCW5+1  INITIALIZE CCW5 BUFFER           @V305001 00964000
+         SH    R7,=H'8'       POINT TO CCW IN ERROR            @V305001 00965000
+         STCM  R7,7,EDCCW7+1  SET TIC TO CCW IN ERROR          @V305001 00966000
+         ICM   R3,7,CCBCCW    GET CCW CHAIN START              @V305001 00967000
+ALTLUP   TM    0(R3),TICCCW   IS IT TIC CCW?                   @V305066 00968000
+         BZ    ALTTIC         YES, BRANCH TO GET NEXT ADDRESS  @V305001 00969000
+         TM    0(R3),CONTROL  CHECK FOR CONTROL/READ/WRITE     @V305066 00970000
+         BZ    ALTNXT         BRANCH IF NONE OF ABOVE          @V305001 00971000
+         BM    ALTNXT         BRANCH IF POSSIBLE WRITE         @V305001 00972000
+         TM    0(R3),HF0      LOOKS LIKE CONTROL CCW?          @V305066 00973000
+         BNZ   ALTNXT         NO, BRANCH                       @V305001 00974000
+         TM    0(R3),H0C    LAST TEST FOR CONTROL              @V305066 00975000
+         BZ    ALTNXT         NO, BRANCH (IT IS NO-OP)         @V305001 00976000
+         CLM   R3,7,EDCCW7+1  IS CONTROL BEFORE CCW IN ERROR ? @V305001 00977000
+         BNL   ALTEND         NO, STOP HERE (FOUND ALREADY)    @V305001 00978000
+         ICM   R8,7,1(R3)     GET CONTROL BBCCHH ADDRESS       @V305001 00979000
+         LH    R1,2(,R8)      LOAD CC PORTION OF ADDRESS       @V305001 00980000
+         STH   R1,EDNH+2      SAVE CC PORTION IN OUR AREA      @V305001 00981000
+         LH    R1,4(,R8)      LOAD HH PORTION OF ADDRESS       @V305001 00982000
+         LA    R1,1(,R1)      UP HEAD BY ONE                   @V305001 00983000
+         STH   R1,EDNH+4      AND SAVE THE NEW HH PORTION      @V305001 00984000
+ALTNXT   TM    4(R3),CC       CCW CHAINED ?                    @V305001 00985000
+         BZ    ALTEND         NO, ALL DONE WITH CHECK          @V305001 00986000
+ALTNXT2  LR    R6,R3          GET ADDRESS CURRENT CCW          @V305001 00987000
+         LA    R3,8(,R3)      BUMP TO NEXT CCW                 @V305001 00988000
+         B     ALTLUP         KEEP CHECKING                    @V305001 00989000
+         EJECT                                                          00990000
+ALTTIC   TM    0(R6),STATMOD  WAS LAST CCW A STATUS MODIFIER?  @V305066 00991000
+         BZ    ALTTIC2        NO, USE TIC ADDRESS TO CONTINUE  @V305001 00992000
+         TM    0(R6),STATMOD2 STILL LOOKS LIKE STATUS MODIFIER?@V305066 00993000
+         BZ    ALTTIC2        NO, USE TIC ADDRESS THEN         @V305001 00994000
+         B     ALTNXT2        ASSUME STATUS MODIFIER BEFORE TIC@V305001 00995000
+ALTTIC2  L     R3,0(,R3)      GET TIC TRANSFER TO ADDRESS      @V305001 00996000
+         LA    R3,0(,R3)      CLEAR HI ORDER BYTE (CCW CODE)   @V305001 00997000
+         B     ALTLUP         CONTINUE SEARCH FOR CONTROL      @V305001 00998000
+         SPACE                                                          00999000
+ALTEND   LH    R0,PUBCUU      GET VIRTUAL DEVICE ADDRESS       @V305001 01000000
+         LH    R0,PUBCUU      GET VIRTUAL DEVICE ADDRESS       @V305001 01001000
+         LA    R1,EDCCW1      GET READ HOME ADDR & REC 0 CHAIN @V305001 01002000
+         TM    0(R7),MT       IS CCW IN ERROR MT CCW ?         @V305001 01003000
+         BZ    ALTIO          NO MULTIPLE TRACK, BRANCH        @V305001 01004000
+         LA    R1,EDCCW0      GET SEEK CHANNEL PROGRAM         @V305001 01005000
+ALTIO    XC    CSW,CSW        ZERO OUT CSW                     @V305001 01006000
+         DC    X'83010020'    DIAGNOSE I/O TO CP               @V305001 01007000
+         TM    EDHA,ALT       IS IT ALTERNATE TRACK?           @V305066 01008000
+         BZ    EXITC          NO, DEFECTIVE TRACK THEN         @V305001 01009000
+         CLI   PUBDEVT,T3350  IS IT A 3350 ?                   @V505098 01010000
+         BNE   CONTINUE       NO, CONTINUE WITH ORGINAL LOGIC  @V505098 01011000
+         CLI   EDR0+3,HEAD30  IS HEAD LARGER THAN 30 CYLINDERS @V505098 01012000
+         BNL   CYLEND         YES, CYLINDER END THEN           @V505098 01013000
+         B     NOT3340        CAN'T BE A 3340                  @V505098 01014000
+CONTINUE CLI   EDR0+3,HEAD19  IS HEAD LARGER THAN 19 ?         @V505098 01015000
+         BNL   CYLEND         YES, CYLINDER END THEN           @V305001 01016000
+         TM    PUBDEVT,T3340  IS IT A 3340 ?                   @V305001 01017000
+         BNO   NOT3340        NO, THEN BRANCH                  @V305001 01018000
+         CLI   EDR0+3,HEAD11  IS HEAD LARGER THAN 11?          @V305066 01019000
+         BNL   CYLEND         YES, CYLINDER END THEN           @V305001 01020000
+NOT3340  LH    R1,EDR0+2      GET ADDRESS OF DEFECTIVE TRACK   @V305001 01021000
+         LA    R1,1(,R1)      PLUS ONE                         @V305001 01022000
+         STH   R1,EDR0+2      FOR NEW SEEK ADDRESS             @V305001 01023000
+EXITC    LA    R1,EDCCW3      GET NEW CCW CHAIN                @V305001 01024000
+         B     DIAGCON        AND REISSUE THE I/O              @V305001 01025000
+         SPACE 1                                                        01026000
+CYLEND   OI    CCBCOM2,ENDCYL SET UP CYLINDER END              @V305066 01027000
+         OC    CCBCOM2,DOSSENSE+1  POST TRACK OVERRUN OR EOC   @V305001 01028000
+         B     EXCPEND        GET OUT NOW..                    @V305001 01029000
+         DROP  R5,R10                                          @V305001 01030000
+         USING IOCCW,R10                                       @V305001 01031000
+         SPACE 1                                                        01032000
+ALTCCWS  CCW   SEEK,0,CC,SIX  SEEK TO NEW HEAD                 @V305066 01033000
+         CCW   RDHOME,0,CC+SILI,FIVE    READ HOME ADDRESS      @V305066 01034000
+         CCW   RDREC0,0,SILI,FOUR  READ RECORD ZERO            @V305066 01035000
+         SPACE 1                                                        01036000
+         CCW   SEEK,0,CC,SIX  SEEK TO HOME ADDRESS             @V305066 01037000
+         CCW   SHHA,0,CC+SILI,FOUR SEARCH HOME ADDRESS EQUAL   @V305066 01038000
+         CCW   TIC,0,0,0           TIC TO SEARCH               @V305001 01039000
+         CCW   RDHOME,0,CC+SKIP,FIVE    READ HOME ADDRESS      @V305066 01040000
+         CCW   TIC,0,0,0           TIC TO USER CCW CHAIN       @V305001 01041000
+         SPACE 1                                                        01042000
+ALTBUFS  DC    3H'0'               SEEK TO NEW HEAD BBCCHHR    @V305001 01043000
+         DC    3H'0'               READ HOME ADDRESS AREA      @V305001 01044000
+         DC    1H'0'               BBCCHHR TO SEEK HOME ADDR   @V305001 01045000
+         DC    2H'0'               READ RECORD ZERO AREA       @V305001 01046000
+         SPACE 1                                                        01047000
+ALTWLEN  EQU   (*-ALTCCWS)         LENGTH OF WORK AREA         @V305001 01048000
+         EJECT                                                          01049000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 01050000
+*                                                                     * 01051000
+*        IKQLAB HANDLER.  PERFORMS SIMULATION OF I/O UTILIZING        * 01052000
+*        DATA AVAILABLE IN DOSCB BLOCK(S) FROM 'DLBL' CALLS BY USER.  * 01053000
+*                                                                     * 01054000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 01055000
+         SPACE                                                          01056000
+* NOTE:  "SUPPORT CODE" FOR THIS SECTION = @V305132                     01057000
+         SPACE                                                          01058000
+         USING DMSCCB,R2      REMINDER:  STILL IN EFFECT       @V305001 01059000
+         SPACE                                                          01060000
+* NOTE:  R0, R1, R4, R5, R6, R7, R8, R14 AND R15 OK FOR WORK REGISTERS  01061000
+         SPACE                                                          01062000
+IKQLAB   SR    R4,R4          HNDL 'EXCP' ISSUED BY 'IKQLAB'PRG@V305001 01063000
+         ICM   R4,7,CCBCCW    POINT TO CCW-STRING              @V305001 01064000
+         SR    R7,R7          CLEAR FOR ICM USE                @V305001 01065000
+         SR    R8,R8          ...                              @V305001 01066000
+         LA    R14,CON5       5 INTO R14 TO CK READ COUNT CCW  @V305066 01067000
+         LA    R15,16(,R2)    POINT TO CCB + 16                @V305001 01068000
+         CR    R4,R15         DOES CCW-STRING START AT CCB+16? @V305001 01069000
+         BNE   IKQXTENT       NO - MUST BE OF "SDCCWS" FORM.   @V305001 01070000
+         LR    R4,R2          YES - PURPOSELY SET R4=R2 (N.B.),@V305001 01071000
+*                             NOTE:  THIS MEANS "VSAM"                  01072000
+         USING LBLCCW,R4      AND REFERENCE "LBLCCW" CCW-STRING@V305001 01073000
+         LA    R15,CON512     LOOK FOR BYTE COUNT OF 512       @V305066 01074000
+         CH    R15,LBLCCW5+6  IS READ BYTE-COUNT "CORRECT" ?   @V305001 01075000
+         BNE   IKQLABNG       IF NOT, SOMEBODY GOOFED.         @V305001 01076000
+         CH    R14,LBLCCW6+6  & BYTE-CNT OF READ-CNT CCW = 05? @V305001 01077000
+         BNE   IKQLABNG       AN ERROR SOMEWHERE IF NOT.       @V305001 01078000
+         L     R5,LBLCCW3     PICK UP "SEARCH KEY EQUAL" CCW   @V305001 01079000
+         ICM   R7,7,LBLCCW5+1 GET ADDR OF 512-BYTE LABEL RCD,  @V305001 01080000
+         ICM   R8,7,LBLCCW6+1 AND ADDRESS OF 5-BYTE COUNT      @V305001 01081000
+         LR    R14,R7         ADDR OF 512-BYTE RECORD INTO R14 @V305001 01082000
+         SR    R1,R1          CLEAR R1; R0 IMMATERIAL; R15=512 @V305001 01083000
+         MVCL  R14,R0         CLEAR 512-BYTE LABEL RECORD      @V305001 01084000
+         XC    0(5,R8),0(R8)  ALSO CLEAR 5-BYTE COUNT          @V305001 01085000
+*                             REMEMBER:  R4 = R2.                       01086000
+         USING LABXTREC,R7    REFERENCE LABEL INFORMATION RCD  @V305001 01087000
+IKQLABJN LR    R14,R11        START WITH DOSCB GIVEN BY CALLER @V305001 01088000
+         USING DOSSECT,R14    ...                              @V305001 01089000
+         CLC   0(7,R5),DOSDD  DDNAME (E.G. AT 'X48') MATCH ?   @V305001 01090000
+         BE    DOSCBFND       YES - WE'RE "RIGHT THERE".       @V305001 01091000
+         LH    R0,DOSNUM      NO - HAVE TO DO IT THE HARD WAY. @V305001 01092000
+         LTR   R0,R0          WE SHOULD HAVE AT LEAST ONE      @V305001 01093000
+         BNP   IKQLABNF       'NOT FOUND' IF NO DOSCB BLOCKS   @V305001 01094000
+         L     R14,DOSFIRST   GET ADDRESS OF FIRST DOSCB BLOCK @V305001 01095000
+CHKDOSCB CLC   0(7,R5),DOSDD  DDNAME (E.G. AT 'X48') MATCH ?   @V305001 01096000
+         BE    DOSCBFND       YES - FOUND RIGHT DOSCB BLOCK.   @V305001 01097000
+         ICM   R14,MASK7,DOSNEXT+1 NO - GET ADDR OF NEXT BLOCK @V305001 01098000
+         BCT   R0,CHKDOSCB    & SEARCH ALL REMAINING DOSCB BLKS@V305001 01099000
+         DROP  R11,R14                                         @V305001 01100000
+         B     IKQLABNF       'NOT FOUND' IF NOT FOUND ANYWHERE@V305001 01101000
+DOSCBFND EQU   *              CORRECT DOSCB BLOCK FOUND:       @V305001 01102000
+         LR    R5,R14         REF. DOSCB VIA R5 FROM NOW ON    @V305001 01103000
+         USING DOSSECT,R5     ...                              @V305001 01104000
+* FILL IN APPROPRIATE DATA FROM DOSCB BLOCK (EXCEPT FOR EXTENT DATA):   01105000
+         MVC   XT001,DOSDD    DDNAME                           @V305001 01106000
+         MVI   XT053,ID1      FORMAT ID = NUMERIC 1            @V305066 01107000
+         MVI   XT060+1,VOLSEQ1    VOLUME SEQ NO. ALWAYS = X'00 @V305066 01108000
+         MVC   XT070(1),DOSTYPE   SET OPEN CODE TO 'A' OR 'S'  @V305066 01109000
+* SET XTUCNAM AND XTBUFSP TO SAME DEFAULT VALUES AS SET BY IKQOPN:      01110000
+         MVC   XTUCNAM,=CL8' '  BLANK VSAM USER CATALOG DDNAME @V305001 01111000
+         MVC   XTBUFSP,=F'-1'   SET BUFFER-SPACE TO -1 (X'FF'S)@V305001 01112000
+         CLI   DOSUCNAM,BINZERO WAS USER CATALOG DDNAME GIVEN? @V305066 01113000
+         BE    CHKBUFSP         NO - CHECK BUFFER-SPACE FIELD. @V305001 01114000
+         MVC   XTUCNAM,DOSUCNAM YES-STOR VSAM USER CATLG DDNAME@V305001 01115000
+CHKBUFSP ICM   R15,15,DOSBUFSP  GET SIZE OF VSAM I/O BUFFER(S) @V305001 01116000
+         BZ    *+8              IF EMPTY, LEAVE DEFAULT VALUE  @V305001 01117000
+         ST    R15,XTBUFSP      STORE SIZE OF VSAM I/O BUFFR(S)@V305001 01118000
+*                             OTHER FIELDS = 00 (AND ARE ALREADY CLEAR) 01119000
+         ICM   R6,15,DOSOSDSN  GET ADDR OF DATASET-NAME(IF ANY)@V305001 01120000
+         BZ    GETEXTTB        IF NONEXISTENT, FORGET IT.      @V305001 01121000
+         MVC   XT009(44),0(R6) STORE FILE-ID = DATA-SET-NAME   @V305001 01122000
+* NOW FILL IN APPROPRIATE EXTENT INFORMATION FROM DOSCB BLOCK:          01123000
+GETEXTTB SR    R0,R0          INITIALIZE TO ZERO.              @V305066 01124000
+         ICM   R6,15,DOSEXTTB GET DOS EXTENT BLOCK             @V305066 01125000
+         IC    R0,DOSEXTNO    (GET NUMBER DOS EXTENT ENTRIES)  @V305066 01126000
+         LA    R9,ELEVEN      (SET EXTENT BLOCK LENGTH)        @V305066 01127000
+         BNZ   EXTMULTB       IF IT EXISTS, BRANCH             @V305066 01128000
+         ICM   R6,15,DOSVOLTB GET DOS MULTI-VOL BLOCK          @V305066 01129000
+         IC    R0,DOSVOLNO    (GET NUMBER MULTI-VOL ENTRIES)   @V305066 01130000
+         LA    R9,THREE       (SET MULTI-VOL BLOCK LENGTH)     @V305066 01131000
+         BZ    GETMINDT       IF NEITHER, GET MINIMUM DATA.    @V305066 01132000
+EXTMULTB STC   R0,XT000       SAVE NUMBER OF EXTENT/MULT BLOCKS@V305066 01133000
+         CLR   R2,R4          ARE WE DOING 'VSAM' PROCESSING ? @V305066 01134000
+         BE    XTNTSET8       YES - PROCESS ALL RECORDS.       @V305001 01135000
+         SR    R15,R15        NO, ("SEQUENTIAL DISK" NON-VSAM) @V305001 01136000
+         IC    R15,DOSEXTCX   GET OLD "CURR.EXTENT" (MAY BE 0) @V305001 01137000
+         LA    R15,1(,R15)    ADD ONE,                         @V305001 01138000
+         STC   R15,DOSEXTCX   AND STORE UPDATED VALUE.         @V305001 01139000
+         CR    R15,R0         EXCEED TOTAL NUMBER OF EXTENTS?  @V305001 01140000
+         BH    XTNTNOMO       IF YES, NO "MO" EXTENTS LEFT.    @V305001 01141000
+XTNTSET8 LA    R8,XT084       PT. TO 1ST BLK OF EXTENT ENTRIES @V305001 01142000
+         USING XT084,R8       AND REFERENCE VIA R8             @V305001 01143000
+* NOTE:  CMS EXTENT BLOCK IS 11-BYTES EACH, IN THE FOLLOWING FORMAT:    01144000
+*                             BYTE 0:     DISK MODE LETTER              01145000
+*                             BYTES 1-2:  2-BYTE LUB                    01146000
+*                             BYTES 3-6:  STARTING TRACK NUMBER         01147000
+*                             BYTES 7-10: NUMBER OF TRACKS              01148000
+* LOOP TO PUT CMS EXTENT INFORMATION INTO THE DOS EXTENT RECORD:        01149000
+XTNTLOOP LR    R1,R6          PT. TO 1ST ENTRY IN DMS EXT. BLK @V305001 01150000
+         SH    R1,=H'24'      (-24) - LOOKING AT A MODE-LETTER @V305001 01151000
+         L     R15,VCADTLKP   FIND THE DISK IT'S ON            @VM03093 01152000
+         BALR  R14,R15        ...                              @V305001 01153000
+         BNZ   STRXT090       IF NOT FOUND, DON'T STORE VOLID  @V305001 01154000
+         USING ADTSECT,R1     REFERENCE ADT BRIEFLY            @V305001 01155000
+         MVC   XT084,ADTID    STORE VOLUME SERIAL NUMBER       @V305001 01156000
+         DROP  R1                                              @V305001 01157000
+STRXT090 MVI   XT090,EXTYP    STORE EXTENT TYPE AS FLAG X'01'  @V305066 01158000
+         SR    R1,R1          GET TOTAL NO. OF EXTENTS AGAIN   @V305001 01159000
+         IC    R1,XT000       ...                              @V305001 01160000
+         SR    R1,R0          MINUS NO. EXTENTS LEFT TO PROCESS@V305001 01161000
+         LA    R1,1(,R1)      PLUS 1 = NUMBER OF "THIS" EXTENT @V305001 01162000
+         CLR   R2,R4          ARE WE DOING "VSAM" PROCESSING ? @V305001 01163000
+         BE    XTNTSTC        YES - PROCESS ALL RECORDS.       @V305001 01164000
+         CLM   R1,MASK1,DOSEXTCX   IS THIS THE ONE WE WANT?    @V305066 01165000
+         BL    XTNTNEXT       NOPE - KEEP LOOKING TILL FIND IT @V305001 01166000
+XTNTSTC  STC   R1,XT091       STORE "EXTENT NUMBER"  (WHEW)    @V305001 01167000
+         MVC   XT100,1(R6)    NOW SAVE THE LUB ENTRY           @V305001 01168000
+         CH    R9,=H'3'       PROCESSING MULTI-VOL BLOCKS ?    @V305066 01169000
+         BE    XTNTNOEX       YES, BYPASS EXTENT INFORMATION   @V305066 01170000
+         LM    R14,R15,3(R6)  GET START TRACK NO. & NO. TRACKS @V305001 01171000
+         STH   R14,XT092      STORE EXTENT LOWER- AND          @V305001 01172000
+         STH   R15,XT094      THE LENGTH OF THE EXTENT         @V305001 01173000
+XTNTNOEX CLR   R2,R4          ARE WE DOSING 'VSAM' PROCESSING? @V305066 01174000
+         BNE   XTNTDONE       NO - WE'RE ALL DONE HERE.        @V305001 01175000
+         LA    R8,20(,R8)     ADV TO NEXT VOL. SERIAL NO. ETC. @V305001 01176000
+XTNTNEXT LA    R6,0(R9,R6)    AND ADVANCE TO NEXT BLOCK RECORD @V305066 01177000
+         BCT   R0,XTNTLOOP    & GET NEXT BLK OF EXTENT INFO    @V305001 01178000
+         DROP  R8             WHEN ALL EXTENTS PROCESSED ...   @V305001 01179000
+XTNTDONE MVC   XT054,XT084    FILE SERIAL NO. = 1ST VOL SER NO.@V305001 01180000
+         B     IODONE2        ALL FINISHED; SET SUCCESS & EXIT @V305001 01181000
+         SPACE                                                          01182000
+XTNTNOMO MVI   DOSEXTCX,OFF   CLEAR CURRENT EXTENT             @V305066 01183000
+         B     IKQLABNF       GO SET BITS = "NOT FOUND".       @V305001 01184000
+         SPACE                                                          01185000
+* NO EXTENT BLOCK - STORE MINIMUM AMOUNT OF DATA WE CAN GET ALONG WITH: 01186000
+GETMINDT MVC   XT100,DOSYSXXX STORE THE 2-BYTE "LUB",          @V305001 01187000
+         CLI   DOSDEV,DOSDUM  IS THIS DOSCB FOR A DUMMY FILE?  @V305066 01188000
+         BNE   CALLADTL       NO, MUST BE DISK THEN..          @V305066 01189000
+         MVC   XT084,=CL6'DUMMY'   SUPPLY A DUMMY LABEL,       @V305066 01190000
+         MVI   XT070,T        INDICATE TLBL,                   @V305066 01191000
+         B     XTNTDONE       AND WE ARE ALL DONE.             @V305066 01192000
+CALLADTL LA    R1,DOSDSMD-24  POINT TO MODE LETTER             @V305066 01193000
+         L     R15,VCADTLKP   FIND THE DISK IT'S ON            @VM03093 01194000
+         BALR  R14,R15        ...                              @V305001 01195000
+         BNZ   IODONE2        IF NOT THERE, DON'T STORE VOLID  @V305001 01196000
+         USING ADTSECT,R1     REFERENCE ADT BRIEFLY            @V305001 01197000
+         MVC   XT084,ADTID    STORE VOLUME SERIAL NUMBER       @V305001 01198000
+         DROP  R1                                              @V305001 01199000
+         MVI   XT000,EXT1     SHOW ONE EXTENT FOR VSAM         @V305066 01200000
+         CLI   XT070,SAM      SEQUENTIAL (SAM) FILE ?          @V305066 01201000
+         BNE   XTNTDONE       NO, WE'RE ALL DONE               @V305066 01202000
+         MVI   XT000,LASTEXT  X'40' = LAST EXTENT FOR THIS FILE@V305066 01203000
+         B     XTNTDONE       AND WE'RE ALMOST DONE.           @V305001 01204000
+         SPACE                                                          01205000
+         DROP  R5             THRU WITH DOSCB HERE.            @V305001 01206000
+         SPACE                                                          01207000
+IKQXTENT DS    0H             CCW-STRING IS OF "SDCCWS" FORM:  @V305001 01208000
+*                             NOTE:  R4 NOT EQUAL TO R2.                01209000
+*                             THIS MEANS "SEQUENTIAL DISK" (NON-VSAM)   01210000
+         USING CCWSD1,R4      REF. CCWSD1 AND FOLLOWING CCW'S: @V305001 01211000
+         LA    R15,HUNDRED4   LOOK FOR BYTE COUNT OF 104       @V305066 01212000
+         CH    R15,CCWSD8+6   IS READ BYTE-COUNT "CORRECT" ?   @V305001 01213000
+         BNE   IKQLABNG       IF NOT, SOMEBODY GOOFED.         @V305001 01214000
+         CH    R14,CCWSD9+6   BYTE-COUNT OF READ-COUNT CCW=05? @V305001 01215000
+         BNE   IKQLABNG       AN ERROR SOMEWHERE IF NOT.       @V305001 01216000
+         L     R5,CCWSD6      PICK UP "SEARCH KEY EQUAL" CCW   @V305001 01217000
+         ICM   R7,MASK7,CCWSD8+1 GET ADDR OF 104 BYTE EXT. RCD @V305066 01218000
+         ICM   R8,MASK7,CCWSD9+1   AND ADDRESS OF 5 BYTE COUNT @V305066 01219000
+         LR    R14,R7         ADDR OF 104-BYTE RECORD INTO R14 @V305001 01220000
+         SR    R1,R1          CLEAR R1; R0 IMMATL; R15 = 104   @V305001 01221000
+         MVCL  R14,R0         CLEAR 104-BYTE LABEL RECORD      @V305001 01222000
+         XC    0(5,R8),0(R8)  ALSO CLEAR 5-BYTE COUNT          @V305001 01223000
+*                             REMEMBER:  R4 IS NOT EQUAL TO R2          01224000
+         B     IKQLABJN       JOIN REGULAR PATH.               @V305001 01225000
+         SPACE                                                          01226000
+IKQLABNG EQU   *              CCW-STRING DOESN'T LOOK CORRECT: @V305001 01227000
+         SPACE                                                          01228000
+IKQLABNF NC    CCBERMAP(4),=X'1F050000' TURN OFF PIOCS BITS    @V305001 01229000
+         OC    CCBERMAP(4),=X'80000C00' SET CCBWAIT+(CE+DE)BITS@V305001 01230000
+         DROP  R4                                              @V305066 01231000
+         USING LBLCCW,R4                                       @V305066 01232000
+         TM    LBLCCW3,MT     IS THIS 'MULTI-TRACK' SEARCH ?   @V305066 01233000
+         BO    IKQMTON        YES, POST END-OF-CYLINDER THEN...@V305066 01234000
+         OI    CCBCOM2,CCBNOREC    SIGNAL 'NO-RECORD-FOUND'    @V305001 01235000
+         B     EXCPEND             AND GET OUT.                @V305001 01236000
+IKQMTON  OI    CCBCOM2,CCBEOC SIGNAL 'END-OF-CYLINDER'         @V305066 01237000
+         B     EXCPEND        AND GET OUT.                     @V305066 01238000
+         SPACE                                                          01239000
+         DROP  R4,R7          DROP LOCAL USAGE;                @V305001 01240000
+         USING DOSSECT,R11    RESTORE NORMAL DOSCB ADDR'BLITY  @V305001 01241000
+         EJECT                                                          01242000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 01243000
+*                                                                     * 01244000
+*        THIS ROUTINE SEARCHES PROPER COMMAND CODE TABLE AND          * 01245000
+*        GIVES CONTROL TO THE ROUTINE THAT WILL SIMULATE              * 01246000
+*        THAT I/O REQUEST.                                            * 01247000
+*                                                                     * 01248000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 01249000
+         SPACE 2                                                        01250000
+IOSRCH   CLC   IOCCW(1),0(R4) DO WE HAVE A MATCH ?             @V305001 01251000
+         BE    IOFND          YES, GO GET ROUTINE              @V305001 01252000
+         LA    R4,4(,R4)      BUMP TO NEXT CODE                @V305001 01253000
+         BCT   R5,IOSRCH      KEEP LOOKING                     @V305001 01254000
+         B     NOCCWC         ERROR IF HERE                    @V305001 01255000
+IOFND    L     R4,0(,R4)      GET ROUTINE ADDRESS              @V305001 01256000
+         BR    R4             GO TO IT                         @V305001 01257000
+         SPACE 2                                                        01258000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 01259000
+*                                                                     * 01260000
+*        ROUTINE TO CONVERT THE 2-BYTE LOGICAL UNIT IN THE            * 01261000
+*        CCB TO AN EBCDIC SYSXXX LITERAL.                             * 01262000
+*                                                                     * 01263000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 01264000
+         SPACE 2                                                        01265000
+CONVERT  SR    R5,R5          CLEAR                            @V305001 01266000
+         IC    R5,CCBSUNUM    GET UNIT NUMBER                  @V305001 01267000
+         TM    CCBSUCLS,PROG  IS IT PROGRAMMER UNIT?           @V305066 01268000
+         BO    CNVPROG        YES, BRANCH                      @V305001 01269000
+         SLL   R5,2           MULTIPLY BY 4                    @V305001 01270000
+         LA    R5,SYSTAB(R5)  INDEX TO CORRECT XXX             @V305001 01271000
+         MVC   DOSWORK+3(3),0(R5)      MOVE XXX TO AREA        @V305001 01272000
+CONVERT2 MVC   DOSWORK(3),=CL3'SYS'    MOVE THE SYS TO AREA    @V305001 01273000
+         BR    R4             RETURN TO CALLER                 @V305001 01274000
+CNVPROG  CVD   R5,DOSOSDSN    CONVERT UNIT NUMBER              @V305001 01275000
+         UNPK  DOSWORK(6),DOSOSDSN(8)  UNPACK TO AREA          @V305001 01276000
+         OI    DOSWORK+5,ZONE SET LAST ZONE                    @V305066 01277000
+         B     CONVERT2       GO TO MOVE SYS TO AREA           @V305001 01278000
+         EJECT                                                          01279000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 01280000
+*                                                                     * 01281000
+*        EXITS FROM DMSXCP.                                           * 01282000
+*                                                                     * 01283000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 01284000
+         SPACE 2                                                        01285000
+IODONE2  XC    CCBCNT(2),CCBCNT CLEAR RESIDUAL COUNT           @V305001 01286000
+IODONE   NC    CCBERMAP(4),=X'1F050000' TURN OFF PIOCS BITS    @V305001 01287000
+IODONE3  EQU   *                                               @VA05550 01288000
+         OC    CCBERMAP(4),=X'80000C00' INIT CCB WITH GOOD I/O @V305001 01289000
+EXCPEND  SR    R10,R10        ZERO RETURN CODE                 @V305001 01290000
+XCPOUT   LM    R12,R1,DOSSAVE RESTORE SAVED REGS               @V305001 01291000
+         LR    R15,R10        RETURN CODE TO R15               @V305001 01292000
+         BR    R14            RETURN TO DMSDOS                 @V305001 01293000
+         SPACE 2                                                        01294000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 01295000
+*                                                                     * 01296000
+*        THIS ROUTINE WILL FIND THE PROPER LUB FOR THE UNIT           * 01297000
+*        SPECIFIED IN THE CCB. IF THE LUB IS ASSIGNED TO              * 01298000
+*        IGNORE, LABEL IODUM GETS CONTROL. IF THE UNIT IS             * 01299000
+*        NOT ASSIGNED, AND ERROR MESSAGE IS ISSUED.                   * 01300000
+*        IF ASSIGNED, THE PROPER PUB IS FOUND, AND WE RETURN          * 01301000
+*        WITH THE ADDRESS OF THE PUB IN R5.                           * 01302000
+*                                                                     * 01303000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 01304000
+         SPACE 2                                                        01305000
+GETPUB   L     R1,ASYSREF     GET BGCOM ADDRESS                @V305001 01306000
+         USING BGCOM,R1       ...                              @V305001 01307000
+         SR    R5,R5          CLEAR                            @V305001 01308000
+         IC    R5,CCBSUNUM    GET LUB INDEX NO.                @V305001 01309000
+         TM    CCBSUCLS,PROG  IS IT PROGRAMMER?                @V305066 01310000
+         BNO   SYSTEM         NO, BRANCH                       @V305001 01311000
+         LH    R6,NICLPT      GET NICL POINTER                 @V305001 01312000
+         IC    R6,0(,R6)      GET NO. SYSTEM UNITS             @V305001 01313000
+         N     R6,=X'000000FF'     ISOLATE LAST BYTE           @V305001 01314000
+         AR    R5,R6          ADD NICL TO LUB INDEX            @V305001 01315000
+SYSTEM   AR    R5,R5          LUB INDEX * 2                    @V305001 01316000
+         AH    R5,LUBPT       INDEX TO CORRECT LUB             @V305001 01317000
+         TM    0(R5),FF       UNIT ASSIGNED?                   @V305066 01318000
+         BO    UNASSGN        NO, ERROR                        @V305001 01319000
+         TM    0(R5),FE       ASSIGNED TO IGNORE               @V305066 01320000
+         BO    IODUM          YES, GO PROCESS                  @V305001 01321000
+         LH    R5,0(,R5)      LUB ENTRY TO R5                  @V305001 01322000
+         SRL   R5,8           ISOLATE PUB POINTER              @V305001 01323000
+         SLL   R5,3           MULTIPLY BY 8                    @V305001 01324000
+         AH    R5,PUBPT       INDEX TO CORRECT PUB             @V305001 01325000
+         BR    R4             RETURN TO CALLER                 @V305001 01326000
+         DROP  R1                                              @V305001 01327000
+         EJECT                                                          01328000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 01329000
+*                                                                     * 01330000
+*        EQUATES AND CONSTANTS                                        * 01331000
+*                                                                     * 01332000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 01333000
+         SPACE 1                                                        01334000
+*                                                                       01335000
+*        IMPORTANT CCW FLAGS                                            01336000
+*                                                                       01337000
+CD       EQU   X'80'                                           @V305001 01338000
+CC       EQU   X'40'                                           @V305001 01339000
+SILI     EQU   X'20'                                           @V305001 01340000
+SKIP     EQU   X'10'                                           @V305001 01341000
+*                                                                       01342000
+         SPACE 2                                                        01343000
+*              ADDITIONAL EQUATES                                       01344000
+         SPACE 2                                                        01345000
+ELEVEN   EQU   11                                              @V305066 01346000
+THREE    EQU   3                                               @V305066 01347000
+T        EQU   C'T'                                            @V305066 01348000
+EXT1     EQU   X'01'                                           @V305066 01349000
+SAM      EQU   C'S'                                            @V305066 01350000
+LASTEXT  EQU   X'40'                                           @V305066 01351000
+VALCCW   EQU   X'0F'                                           @V305066 01352000
+CONTROL  EQU   X'03'                                           @V305066 01353000
+RDBKCCW  EQU   X'0C'                                           @V305066 01354000
+TICCCW   EQU   X'07'                                           @V305066 01355000
+STATMOD  EQU   X'60'                                           @V305066 01356000
+STATMOD2 EQU   X'01'                                           @V305066 01357000
+WRITECCW EQU   X'01'                                           @V305066 01358000
+READSW   EQU   1                                               @V305066 01359000
+DWS4     EQU   4                                               @V305066 01360000
+CHAINON  EQU   1                                               @V305066 01361000
+READCCW  EQU   X'C0'                                           @V305066 01362000
+STACKOFF EQU   X'C0'                                           @V305066 01363000
+DATAOFF  EQU   X'20'                                           @V305066 01364000
+OFF      EQU   X'00'                                           @V305066 01365000
+UPCASE   EQU   X'E4'                                           @V305066 01366000
+LOWCHK   EQU   X'08'                                           @V305066 01367000
+LOWCASE  EQU   X'E2'                                           @V305066 01368000
+DWS20    EQU   20                                              @V305066 01369000
+MASK7    EQU   B'0111'                                         @V305066 01370000
+CARRRET  EQU   X'00'                                           @V305066 01371000
+NOCARRET EQU   128                                             @V305066 01372000
+B        EQU   C'B'                                            @V305066 01373000
+ON       EQU   X'01'                                           @V305066 01374000
+H0C    EQU   X'0C'                                             @V305066 01375000
+ZONE     EQU   X'F0'                                           @V305066 01376000
+USERMODE EQU   X'00'                                           @V305066 01377000
+FILEPROT EQU   X'02'                                           @V305066 01378000
+INDEX2   EQU   2                  LOCATES TRK/CYL FOR 3330'S   @V505098 01379000
+INDEX4   EQU   4                  LOCATES TRK/CYL FOR 3340'S   @V505098 01380000
+INDEX6   EQU   6                  LOCATES TRK/CYL FOR 3350     @V505098 01381000
+EIGHTY1  EQU   81                                              @V305066 01382000
+FIXED    EQU   X'02'                                           @V305066 01383000
+UNDEF    EQU   X'04'                                           @V305066 01384000
+INP      EQU   X'02'                                           @V305066 01385000
+REC1     EQU   1                                               @V305066 01386000
+CCWE0    EQU   X'E0'                                           @V305066 01387000
+WRITEFLG EQU   1                                               @V305066 01388000
+F5       EQU   X'F5'                                           @V305066 01389000
+HEX17    EQU   X'17'                                           @V305066 01390000
+TRACK    EQU   X'02'                                           @V305066 01391000
+MASK12   EQU   B'1100'                                         @V305066 01392000
+DATACHK  EQU   X'08'                                           @V305066 01393000
+HF0      EQU   X'F0'                                           @V305066 01394000
+HEX0C    EQU   X'0C'                                           @V305066 01395000
+ALT      EQU   X'01'                                           @V305066 01396000
+HEAD30   EQU   30                                              @V505098 01397000
+HEAD19   EQU   19                                              @V305066 01398000
+HEAD11   EQU   11                                              @V305066 01399000
+ENDCYL   EQU   X'20'                                           @V305066 01400000
+SIX      EQU   6                                               @V305066 01401000
+FIVE     EQU   5                                               @V305066 01402000
+FOUR     EQU   4                                               @V305066 01403000
+CON5     EQU   5                                               @V305066 01404000
+CON512   EQU   512                                             @V305066 01405000
+ID1      EQU   C'1'                                            @V305066 01406000
+VOLSEQ1  EQU   X'01'                                           @V305066 01407000
+BINZERO  EQU   X'00'                                           @V305066 01408000
+EXTYP    EQU   X'01'                                           @V305066 01409000
+MASK1    EQU   B'0001'                                         @V305066 01410000
+HUNDRED4 EQU   104                                             @V305066 01411000
+PROG     EQU   X'01'                                           @V305066 01412000
+FF       EQU   X'FF'                                           @V305066 01413000
+FE       EQU   X'FE'                                           @V305066 01414000
+ONE      EQU   1                                               @V305066 01415000
+CON179   EQU   179                                             @V305066 01416000
+DTFSD    EQU   X'20'          DTFSD FILE                       @VM03081 01417000
+SDWORK   EQU   X'24'          DTFSD OPEN WORKFILE              @VM03081 01418000
+BLOCK    EQU   X'40'          BLOCKED FILE                     @VM03081 01419000
+CPSD     EQU   X'08'          DTFCP HAS TIC CCW IN DTF         @VA04510 01420000
+IPTLUB   DC    H'1'           LUB VALUE FOR SYSIPT             @VM03090 01421000
+SDWORKF  EQU   X'20'          SD WORK FILE BIT ONLY            @VA06022 01422000
+VAR      DC    C'V'           COMPARE CONSTANT FOR DOSFORM     @VA06022 01423000
+         EJECT                                                          01424000
+*                                                                       01425000
+*        TRACKS / CYLINDER FOR SUPPORTED DASD DEVICES                   01426000
+*                                                                       01427000
+CON2314  DC    H'20'          TRACKS/CYL                       @V305001 01428000
+CON3330  DC    H'19'          TRACKS/CYL (3330 & 3330-11)      @V505098 01429000
+CON3340  DC    H'12'          TRACKS/CYL                       @V305001 01430000
+CON3350  DC    H'30'          TRACKS/CYL                       @V505098 01431000
+*                                                                       01432000
+T2314    EQU   X'62'          2314 DASD TYPE                   @V305001 01433000
+T3330    EQU   X'63'          3330 DASD TYPE                   @V305001 01434000
+T3340    EQU   X'68'          3340 DASD TYPE                   @V305001 01435000
+T333B    EQU   X'65'          3330-11 DASD TYPE                @V505098 01436000
+T3350    EQU   X'67'          3350 DASD TYPE                   @V505098 01437000
+*                                                                       01438000
+EIGHT    EQU   X'08'          DOS PRINTER INDICATOR            @V305066 01439000
+F7       EQU   X'F7'          MASK TO CLEAR DOS PRT FLAG       @VM03055 01440000
+*                                                                       01441000
+NOPIOCS  DC    X'1F050040'   ALLOW INCORRECT LENGTH            @VA05550 01442000
+*                                                                       01443000
+*        COMMANDS AND FUNCTIONS FOR CMS PLISTS                          01444000
+*                                                                       01445000
+PIOSI    DC    CL8'DMSPIOSI'  COMMANDS                         @V305001 01446000
+CARDRD   DC    CL8'CARDRD'    COMMANDS                         @V305001 01447000
+CARDPH   DC    CL8'CARDPH'    COMMANDS                         @V305001 01448000
+CONRD    DC    CL8'CONREAD'   COMMANDS                         @V305001 01449000
+CONWR    DC    CL8'TYPLIN'    COMMANDS                         @V305001 01450000
+RDBUF    DC    CL8'RDBUF'     COMMANDS                         @V305001 01451000
+WRBUF    DC    CL8'WRBUF'     COMMANDS                         @V305001 01452000
+SYS      DC    CL8'SYS'      SYSTEM WORK FILE TYPE             @VA07764 01453000
+*                                                                       01454000
+*        ERROR MESSAGE CONSTANTS                                        01455000
+*                                                                       01456000
+TAPE     DC    CL8'TAPE'      ...                              @V305001 01457000
+DISK     DC    CL8'DISK'      ...                              @V305001 01458000
+INPUT    DC    CL8'INPUT'     ...                              @V305001 01459000
+OUTPUT   DC    CL8'OUTPUT'    ...                              @V305001 01460000
+READING  DC    CL8'READING'   ...                              @V305001 01461000
+WRITING  DC    CL8'WRITING'   ...                              @V305001 01462000
+         EJECT                                                          01463000
+*                                                                       01464000
+*        SYSXXX CONSTANTS FOR SYSTEM LOGICAL UNITS                      01465000
+*                                                                       01466000
+SYSTAB   DS    0H                                              @V305001 01467000
+         DC    CL4'RDR'       00                               @V305001 01468000
+         DC    CL4'IPT'       01                               @V305001 01469000
+         DC    CL4'PCH'       02                               @V305001 01470000
+         DC    CL4'LST'       03                               @V305001 01471000
+         DC    CL4'LOG'       04                               @V305001 01472000
+         DC    CL4'LNK'       05                               @V305001 01473000
+         DC    CL4'RES'       06                               @V305001 01474000
+         DC    CL4'SLB'       07                               @V305001 01475000
+         DC    CL4'RLB'       08                               @V305001 01476000
+         DC    CL4'USE'       09                               @V305001 01477000
+         DC    CL4'REC'       0A                               @V305001 01478000
+         DC    CL4'CLB'       0B                               @V305001 01479000
+         DC    CL4'VIS'       0C                               @V305001 01480000
+         DC    CL4'CAT'       0D                               @V305001 01481000
+         SPACE 2                                                        01482000
+*                                                                       01483000
+*        DUMMY CCWS                                                     01484000
+*                                                                       01485000
+NOOP     CCW   NOP,0,SILI,ONE NO-OP FOR DMSPIOSI CALL          @V305066 01486000
+MDSET    CCW   CON179,0,CC+SILI,ONE     DEFAULT MODE SET CCW   @V305066 01487000
+         CCW   TIC,0,0,0           TIC TO USER CCW CHAIN       @V305001 01488000
+         EJECT                                                          01489000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 01490000
+*                                                                     * 01491000
+*        CONSOLE CCW CODES                                            * 01492000
+*                                                                     * 01493000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 01494000
+         SPACE 2                                                        01495000
+CNCODES  DC    AL1(10),AL3(CNREAD)     - READ INQUIRY          @V305001 01496000
+         DC    AL1(2),AL3(CNREAD)      - READ READER 2         @V305001 01497000
+         DC    AL1(9),AL3(CNWRITE1)    - WRITE, AUTO CARR      @V305001 01498000
+         DC    AL1(1),AL3(CNWRITE2)    - WRITE, NO AUTO CARR   @V305001 01499000
+         DC    AL1(3),AL3(CNEXIT)      - NO-OP                 @V305001 01500000
+         DC    AL1(4),AL3(CNEXIT)      - SENSE                 @V305001 01501000
+         DC    AL1(11),AL3(CNEXIT)     - ALARM                 @V305001 01502000
+ENDCNC   EQU   (*-CNCODES)/4                                   @V305001 01503000
+         SPACE 2                                                        01504000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 01505000
+*                                                                     * 01506000
+*        CARD / PUNCH CCW CODES                                       * 01507000
+*                                                                     * 01508000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 01509000
+         SPACE 2                                                        01510000
+CDCODES  DC    AL1(2),AL3(CDREAD)      CARD - READ, FEED, SS   @V305001 01511000
+         DC    AL1(10),AL3(CDREAD)     CARD - READ, FEED, SS   @V305001 01512000
+         DC    AL1(4),AL3(CDEXIT)      CARD - SENSE            @V305001 01513000
+         DC    AL1(17),AL3(CDEXIT)     CARD - WRITE RCE        @V305001 01514000
+         DC    AL1(49),AL3(CDEXIT)     CARD - WRITE OMR        @V305001 01515000
+         DC    AL1(194),AL3(CDREAD)    CARD - READ             @V305001 01516000
+         DC    AL1(204),AL3(CDREAD)    CARD - READ             @V305001 01517000
+         DC    AL1(210),AL3(CDREAD)    CARD - READ, FEED       @V305001 01518000
+         DC    AL1(3),AL3(CDEXIT)      CARD - FEED, SS         @V305001 01519000
+         DC    AL1(11),AL3(CDEXIT)     CARD - FEED, SS         @V305001 01520000
+         DC    AL1(9),AL3(CDEXIT)      CARD - PNCH,FEED,SS,READ@V305001 01521000
+         DC    AL1(1),AL3(CDPUNCH)     CARD - PUNCH, FEED, SS  @V305001 01522000
+ENDCDC   EQU   (*-CDCODES)/4                                   @V305001 01523000
+         EJECT                                                          01524000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 01525000
+*                                                                     * 01526000
+*        DASD CCW CODES                                               * 01527000
+*                                                                     * 01528000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 01529000
+         SPACE 2                                                        01530000
+SDCODES  DC    AL1(3),AL3(SDEXIT)      - NO-OP                 @V305001 01531000
+         DC    AL1(7),AL3(SDEXIT)      - CNTRL SEEK            @V305001 01532000
+         DC    AL1(11),AL3(SDEXIT)     - CNTRL SEEK CYL        @V305001 01533000
+         DC    AL1(27),AL3(SDEXIT)     - CNTRL SEEK HEAD       @V305001 01534000
+         DC    AL1(31),AL3(SDEXIT)     - CNTRL SETFILEMASK     @V305001 01535000
+         DC    AL1(15),AL3(SDEXIT)     - CNTRL SPACE COUNT     @V305001 01536000
+         DC    AL1(8),AL3(SDEXIT)      - CNTRL TRANS CHANNEL   @V305001 01537000
+         DC    AL1(19),AL3(SDEXIT)     - CNTRL RECALIBRATE     @V305001 01538000
+         DC    AL1(23),AL3(SDEXIT)     - CNTRL RESTORE         @V305001 01539000
+         DC    AL1(43),AL3(SDEXIT)     - CNTRL ORIENT          @V305001 01540000
+         DC    AL1(35),AL3(SDEXIT)     - CNTRL SET SECTOR      @V305001 01541000
+         DC    AL1(39),AL3(SDEXIT)     - CNTRL VARY SENSING    @V305001 01542000
+         DC    AL1(83),AL3(SDEXIT)     - CNTRL DIAG LOAD       @V305001 01543000
+         DC    AL1(115),AL3(SDEXIT)    - CNTRL DIAG WRITE      @V305001 01544000
+         DC    AL1(4),AL3(SDEXIT)      - SENSE I/O             @V305001 01545000
+         DC    AL1(164),AL3(SDEXIT)    - SENSE READ R.B.L.     @V305001 01546000
+         DC    AL1(36),AL3(SDEXIT)     - SENSE READ B.L.       @V305001 01547000
+         DC    AL1(148),AL3(SDEXIT)    - SENSE DEV RELSE       @V305001 01548000
+         DC    AL1(180),AL3(SDEXIT)    - SENSE DEV RSRVE       @V305001 01549000
+         DC    AL1(68),AL3(SDEXIT)     - SENSE READ DIAG ST    @V305001 01550000
+         DC    AL1(148),AL3(SDEXIT)    - RELEASE DEVICE        @V305001 01551000
+         DC    AL1(180),AL3(SDEXIT)    - RESERVE DEVICE        @V305001 01552000
+         DC    AL1(57),AL3(SDEXIT)     - SRCH HOME ADDR EQ     @V305001 01553000
+         DC    AL1(185),AL3(SDEXIT)    - SRCH HOME ADDR EQ     @V305001 01554000
+         DC    AL1(49),AL3(SDSRCHID)   - SRCH ID EQ            @V305001 01555000
+         DC    AL1(177),AL3(SDSRCHID)  - SRCH ID EQ            @V305001 01556000
+         DC    AL1(81),AL3(SDSRCHID)   - SRCH ID HI            @V305001 01557000
+         DC    AL1(209),AL3(SDSRCHID)  - SRCH ID HI            @V305001 01558000
+         DC    AL1(131),AL3(SDSRCHID)  - SRCH ID EQ OR HI      @V305001 01559000
+         DC    AL1(241),AL3(SDSRCHID)  - SRCH ID EQ OR HI      @V305001 01560000
+         DC    AL1(41),AL3(SDEXIT)     - SRCH KEY EQ           @V305001 01561000
+         DC    AL1(169),AL3(SDEXIT)    - SRCH KEY EQ           @V305001 01562000
+         DC    AL1(73),AL3(SDEXIT)     - SRCH KEY HI           @V305001 01563000
+         DC    AL1(201),AL3(SDEXIT)    - SRCH KEY HI           @V305001 01564000
+         DC    AL1(105),AL3(SDEXIT)    - SRCH KEY EQ OR HI     @V305001 01565000
+         DC    AL1(233),AL3(SDEXIT)    - SRCH KEY EQ OR HI     @V305001 01566000
+         DC    AL1(45),AL3(SDEXIT)     - SRCH KEY & DATA EQ    @V305001 01567000
+         DC    AL1(173),AL3(SDEXIT)    - SRCH KEY & DATA EQ    @V305001 01568000
+         DC    AL1(77),AL3(SDEXIT)     - SRCH KEY & DATA HI    @V305001 01569000
+         DC    AL1(205),AL3(SDEXIT)    - SRCH KEY & DATA HI    @V305001 01570000
+         DC    AL1(109),AL3(SDEXIT)    - SRCH KEY & DATA EQ/HI @V305001 01571000
+         DC    AL1(237),AL3(SDEXIT)    - SRCH KEY & DATA EQ/HI @V305001 01572000
+         EJECT                                                          01573000
+         DC    AL1(37),AL3(SDEXIT)     - SCAN SRCH EQ          @V305001 01574000
+         DC    AL1(165),AL3(SDEXIT)    - SCAN SRCH EQ          @V305001 01575000
+         DC    AL1(69),AL3(SDEXIT)     - SCAN SRCH HI          @V305001 01576000
+         DC    AL1(197),AL3(SDEXIT)    - SCAN SRCH HI          @V305001 01577000
+         DC    AL1(101),AL3(SDEXIT)    - SCAN SRCH HI OR EQ    @V305001 01578000
+         DC    AL1(229),AL3(SDEXIT)    - SCAN SRCH HI OR EQ    @V305001 01579000
+         DC    AL1(53),AL3(SDEXIT)     - SCAN SET STAT MOD     @V305001 01580000
+         DC    AL1(181),AL3(SDEXIT)    - SCAN SET STAT MOD     @V305001 01581000
+         DC    AL1(117),AL3(SDEXIT)    - SCAN SET STAT MOD     @V305001 01582000
+         DC    AL1(245),AL3(SDEXIT)    - SCAN SET STAT MOD     @V305001 01583000
+         DC    AL1(85),AL3(SDEXIT)     - SCAN NO STAT MOD      @V305001 01584000
+         DC    AL1(213),AL3(SDEXIT)    - SCAN NO STAT MOD      @V305001 01585000
+         DC    AL1(26),AL3(SDEXIT)     - READ HOME ADDRESS     @V305001 01586000
+         DC    AL1(154),AL3(SDEXIT)    - READ HOME ADDRESS     @V305001 01587000
+         DC    AL1(18),AL3(SDRDCNT)    - READ COUNT            @V305001 01588000
+         DC    AL1(146),AL3(SDRDCNT)   - READ COUNT            @V305001 01589000
+         DC    AL1(22),AL3(SDEXIT)     - READ RECORD R0        @V305001 01590000
+         DC    AL1(150),AL3(SDEXIT)    - READ RECORD R0        @V305001 01591000
+         DC    AL1(6),AL3(SDREAD)      - READ DATA             @V305001 01592000
+         DC    AL1(134),AL3(SDREAD)    - READ DATA             @V305001 01593000
+         DC    AL1(14),AL3(SDREAD)     - READ KEY & DATA       @V305001 01594000
+         DC    AL1(142),AL3(SDREAD)    - READ KEY & DATA       @V305001 01595000
+         DC    AL1(30),AL3(SDRDCKD)    - READ COUNT, KEY & DATA@V305001 01596000
+         DC    AL1(158),AL3(SDRDCKD)   - READ COUNT, KEY & DATA@V305001 01597000
+         DC    AL1(2),AL3(SDEXIT)      - READ IPL              @V305001 01598000
+         DC    AL1(34),AL3(SDEXIT)     - READ SECTOR           @V305001 01599000
+         DC    AL1(25),AL3(SDEXIT)     - WRITE HOME ADDRESS    @V305001 01600000
+         DC    AL1(21),AL3(SDEXIT)     - WRITE RECORD R0       @V305001 01601000
+         DC    AL1(29),AL3(SDWRCKD)    - WRITE COUNT, KEY&DATA @V305001 01602000
+         DC    AL1(1),AL3(SDWRCKD)     - WRITE COUNT, KEY&DATA @V305001 01603000
+         DC    AL1(5),AL3(SDWRITE)     - WRITE DATA            @V305001 01604000
+         DC    AL1(13),AL3(SDWRITE)    - WRITE KEY & DATA      @V305001 01605000
+         DC    AL1(17),AL3(SDEXIT)     - WRITE ERASE           @V305001 01606000
+ENDSDC   EQU   (*-SDCODES)/4                                   @V305001 01607000
+         EJECT                                                          01608000
+         LTORG                                                 @V305001 01609000
+         EJECT                                                          01610000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 01611000
+*                                                                     * 01612000
+*        ERROR MESSAGES                                               * 01613000
+*                                                                     * 01614000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 01615000
+         SPACE 2                                                        01616000
+ERR43E   BAL   R4,GETPUB      GO FIND PUB FOR THIS UNIT        @V305001 01617000
+         USING PUBADR,R5                                       @V305001 01618000
+         LH    R7,PUBCUU      GET CUU FOR THIS UNIT            @V305001 01619000
+         DROP  R5                                              @V305001 01620000
+         DMSERR TEXT='TAPE (....) IS FILE PROTECTED',NUM=43,LET=E,     *01621000
+               SUB=(HEX,(R7))                                  @V305001 01622000
+         LA    R10,36         RETURN CODE                      @V305001 01623000
+         B     XCPOUT         CANCEL THE JOB                   @V305001 01624000
+         EJECT                                                          01625000
+         USING ADTSECT,R1                                      @VM03127 01626000
+NOTRW    LA    R6,ADTM                                         @VM03127 01627000
+         L     R7,ADTDTA                                       @VM03127 01628000
+         LH    R7,0(,R7)                                       @VM03127 01629000
+         DMSERR TEXT='OUTPUT DISK ''.. (...)'' IS READ/ONLY',  @VM03127*01630000
+               LET=E,NUM=37,SUB=(CHARA,((R6),1),HEX,(R7)),MF=(E,'SYS')  01631000
+         LA    R10,36                                          @VM03127 01632000
+         B     XCPOUT                                          @VM03127 01633000
+         DROP  R1                                              @VM03127 01634000
+         EJECT                                                          01635000
+ERR113S  LR    R15,R6         SAVE SUB. 1 FOR NOW...           @VM03055 01636000
+         BAL   R4,GETPUB      GO FIND PUB FOR THIS UNIT        @VM03055 01637000
+         LR    R6,R15         RESTORE SUB. 1 POINTER.          @VM03055 01638000
+         USING PUBADR,R5                                       @V305001 01639000
+         LH    R7,PUBCUU      GET CUU FOR THIS UNIT            @V305001 01640000
+         DROP  R5                                              @V305001 01641000
+         DMSERR TEXT='.... (....) NOT ATTACHED',NUM=113,LET=S, @V305001*01642000
+               MF=(E,'SYS'),SUB=(CHARA,(R6),HEX,(R7))          @V305001 01643000
+CANCEL   LA    R10,100        RETURN CODE                      @V305001 01644000
+         B     XCPOUT         CANCEL THE JOB                   @V305001 01645000
+         EJECT                                                          01646000
+ERR104S  LA    R8,READING     ERR MSG OPERATION                @V305001 01647000
+         LA    R9,104         ERR MSG NUMBER                   @V305001 01648000
+         B     ERRCOMM        GO TYPE MSG                      @V305001 01649000
+ERR105S  LA    R8,WRITING     ERR MSG OPERATION                @V305001 01650000
+         LA    R9,105         ERR MSG NUMBER                   @V305001 01651000
+ERRCOMM  LR    R6,R15         SAVE RDBUF/WRBUF RETURN CODE     @V305001 01652000
+         LA    R7,DOSDSNAM    POINT TO FILEID                  @V305001 01653000
+         DMSERR TEXT='ERROR ''..'' ........ FILE ''....................*01654000
+               '' ON DISK',NUM=(R9),LET=S,MF=(E,'SYS'),        @V305001*01655000
+               SUB=(DEC,(R6),CHARA,(R8),CHAR8A,(R7))           @V305001 01656000
+         B     CANCEL         CANCEL THE JOB                   @V305001 01657000
+         EJECT                                                          01658000
+IOERR    LA    R6,INPUT       MSG SUBSTITUTION                 @V305001 01659000
+         LTR   R4,R4          DOING READ ?                     @V305001 01660000
+         BZ    ERR411S        YES, BRANCH                      @V305066 01661000
+         B     OUTERR         IS WRITING THEN...               @V305001 01662000
+INERR    LA    R6,INPUT       MSG SUBSTITUTION                 @V305001 01663000
+         CLC   DOSOP(8),CARDRD     DOING CARDIO READ ?         @V305001 01664000
+         BE    ERR411S        YES, BRANCH                      @V305066 01665000
+OUTERR   LA    R6,OUTPUT      MSG SUBSTITUTION                 @V305001 01666000
+ERR411S  LR    R7,R15         CODE 'NN' TO R7                  @V305066 01667000
+         BAL   R4,CONVERT     GET SYSXXX LITERAL               @V305001 01668000
+         DMSERR TEXT='........ ERROR CODE ''..'' ON ''......''',       *01669000
+               NUM=411,LET=S,MF=(E,'SYS'),                     @V305066*01670000
+               SUB=(CHARA,(R6),DEC,(R7),CHARA,DOSWORK)         @V305001 01671000
+         B     CANCEL         CANCEL THE JOB                   @V305001 01672000
+         EJECT                                                          01673000
+NOCCWA   LA    R6,1           NN CODE                          @V305001 01674000
+         B     ERRMSG         TYPE MSG                         @V305001 01675000
+UNASSGN  LA    R6,2           NN CODE                          @V305001 01676000
+         L     R14,DOSSAVE+4  RECOVER 'R13' AT INPUT           @V305001 01677000
+         USING SSAVE,R14      AND REFERENCE SAVE AREA BRIEFLY  @V305001 01678000
+         L     R15,CALLER     GET ADDR OF 'CALLER' (AS OLDPSW) @V305001 01679000
+         CL    R15,ADIKQLAB   IS HE PERCHANCE 'IKQLAB' ?       @V305001 01680000
+         BL    ERRMSG         NO, ISSUE ERROR MSG THEN...      @V305001 01681000
+         CL    R15,NDIKQLAB   LOOKS PROMISING, CHECK FURTHER:  @V305001 01682000
+         BL    IKQLAB         YES, MUST HANDLE SPECIALLY.      @V305001 01683000
+         DROP  R14            NO, CONTINUE:                    @V305001 01684000
+         B     ERRMSG         TYPE MSG                         @V305001 01685000
+UNSUPP   LA    R6,3           NN CODE                          @V305001 01686000
+         B     ERRMSG         TYPE MSG                         @V305001 01687000
+INVCCW   LA    R6,4           NN CODE                          @V305001 01688000
+         B     ERRMSG         TYPE MSG                         @V305001 01689000
+NOADT    LA    R6,5           NN CODE                          @V305001 01690000
+         B     ERRMSG         TYPE MSG                         @V305001 01691000
+NOTUSED  LA    R6,6           (THIS CODE OPEN FOR FUTURE USE)  @VM03127 01692000
+         B     ERRMSG         TYPE MSG                         @V305001 01693000
+NOCCWC   LA    R6,7           NN CODE                          @V305001 01694000
+         B     ERRMSG         TYPE MSG                         @V305001 01695000
+NOTDOSOS LA    R6,8           NN CODE                          @V305001 01696000
+         SPACE 1                                                        01697000
+ERRMSG   BAL   R4,CONVERT     CONVERT 2 BYTE UNIT              @V305001 01698000
+         DMSERR TEXT='UNEXPECTED ERROR CODE ''..'' ON ''......''',     *01699000
+               NUM=161,LET=S,MF=(E,'SYS'),SUB=(DEC,(R6),CHARA,DOSWORK)  01700000
+         B     CANCEL         CANCEL THE JOB                   @V305001 01701000
+         EJECT                                                          01702000
+         LTORG                                                 @V305001 01703000
+         EJECT                                                          01704000
+         DMSCCB ,             DSECT TO MAP A CCB:              @V305001 01705000
+         EJECT                                                          01706000
+* FORM OF CHANNEL PROGRAMS USED BY 'IKQLAB':                            01707000
+         SPACE                                                          01708000
+LBLCCW   DSECT ,    CCW-STG TO FIND LABEL INFO RECORD BY KEY:  @V305001 01709000
+         DS    2D              CCB IMMED PRECEDES THE CCW-STG: @V305001 01710000
+LBLCCW1  CCW   SEEK,X40,CC+SILI,6      SEEK TO CYLDR AND HEAD  @V305001 01711000
+LBLCCW2  CCW   SHHA,X42,CC+SILI,4  SEARCH HOME ADDR F/MULT TRK @V305001 01712000
+LBLCCW3  CCW   SRCHK,X48,CC+SILI,8     SEARCH KEY EQUAL        @V305001 01713000
+LBLCCW4  CCW   TIC,*-8,CC+SILI,1       TIC BACK TO SCHKE       @V305001 01714000
+LBLCCW5  CCW   RDDT,*-*,CC+SILI,512  $ READ LABEL RECORD       @V305001 01715000
+LBLCCW6  CCW   RDCNT+MT,XA8,SILI,5   $ READ CNT OF NEXT RCD(MT)@V305001 01716000
+*                                                                       01717000
+X40      DS    8X                  SEEK ARGUMENT               @V305001 01718000
+X42      EQU   X40+2               SEARCH HOME ADDRESS ARGUMENT@V305001 01719000
+X48      DS    8X             SEARCH KEY EQUAL ARG = ACB NAME  @V305001 01720000
+         ORG   LBLCCW+X'A8'                                    @V305001 01721000
+XA8      DS    5X                  READ COUNT ARGUMENT         @V305001 01722000
+*                                                                       01723000
+SEEK     EQU   X'07'             $ FULL SEEK                   @V305001 01724000
+SHHA     EQU   X'39'             $ SEARCH HOME ADDRESS EQUAL   @V305001 01725000
+SRCHK    EQU   X'29'             $ SEARCH KEY EQUAL            @V305001 01726000
+TIC      EQU   X'08'             $ TIC                         @V305001 01727000
+RDDT     EQU   X'06'             $ READ DATA                   @V305001 01728000
+RDCNT    EQU   X'12'             $ READ COUNT                  @V305001 01729000
+RDHOME   EQU   X'1A'             $ READ HOME ADDRESS           @V305001 01730000
+RDREC0   EQU   X'16'             $ READ RECORD ZERO            @V305001 01731000
+MT       EQU   X'80'               MULTI-TRACK BIT IN CMND CODE@V305001 01732000
+         SPACE 2                                                        01733000
+SDCCWS   DSECT ,              CCW-STG TO READ IN AN EXTENT RCD:@V305001 01734000
+DB104    DS    104X       104-BYTE DATA-BUFFER PRECEDES CCW-STG@V305001 01735000
+CCWSD1   CCW   SEEK,*-*,CC+SILI,6  (X40)   SEEK TO CYL AND HEAD@V305001 01736000
+CCWSD2   CCW   SHHA,*-*,CC+SILI,4  (X42)   SEARCH HOME ADDRESS @V305001 01737000
+CCWSD3   CCW   TIC,*-8,CC+SILI,1           TIC BACK TO SHHA    @V305001 01738000
+CCWSD4   CCW   SIDE,*-*,CC+SILI,8  (X42)   SEARCH ID EQUAL     @V305001 01739000
+CCWSD5   CCW   TIC,*-8,CC+SILI,1   TIC BACK TO SEARCH ID EQUAL @V305001 01740000
+CCWSD6   CCW   SRCHK,*-*,CC+SILI,8 (X48)   SEARCH KEY EQUAL    @V305001 01741000
+CCWSD7   CCW   TIC,*-8,CC+SILI,1   TIC BACK TO SEARCH KEY EQUAL@V305001 01742000
+CCWSD8   CCW   RDDT,DB104,CC+SILI,104    $ READ EXTENT RECORD  @V305001 01743000
+CCWSD9   CCW   RDCNT+MT,*-*,SILI,5 (XA8) $ READ CNT OF NXT RCD @V305001 01744000
+         CCW   NOP,0,SILI,1                NO-OP               @V305001 01745000
+         CCW   NOP,0,SILI,1                NO-OP               @V305001 01746000
+*                                                                       01747000
+SIDE     EQU   X'31'                   SEARCH ID EQUAL         @V305001 01748000
+NOP      EQU   X'03'                   NO-OP COMMAND CODE      @V305001 01749000
+         SPACE                                                          01750000
+* '$' IS A REMINDER THAT DATA IS READ INTO CALLER'S STORAGE BY THIS CCW 01751000
+         EJECT                                                          01752000
+LABXTREC DSECT ,        CONTENTS OF LABEL INFO OR EXTENT RCD:  @V305001 01753000
+*        FIRST 84 BYTES:                                                01754000
+XT000    DS    XL1            DLBL EXTENT FLAG BYTE            @V305001 01755000
+XT001    DS    CL7            FILENAME                         @V305001 01756000
+XT008    DS    XL1            DAM/ISAM SWITCH                  @V305001 01757000
+XT009    DS    CL44           FILE ID                          @V305001 01758000
+XT053    DS    XL1            FORMAT ID                        @V305001 01759000
+XT054    DS    XL6            FILE SERIAL NUMBER               @V305001 01760000
+XT060    DS    XL2            VOLUME SEQUENCE NUMBER           @V305001 01761000
+XT062    DS    XL3            CREATION DATE  (4004 B.C. ?)     @V305001 01762000
+XT065    DS    XL3            EXPIRATION DATE                  @V305001 01763000
+XT068    DS    XL2            RESERVED                         @V305001 01764000
+XT070    DS    XL1            OPEN CODE                        @V305001 01765000
+XT071    DS    XL13           SYSTEM CODE                      @V305001 01766000
+         ORG   XT071          CONTENTS OF "SYSTEM CODE" FIELD: @V305001 01767000
+XTUCNAM  DS    CL8' '            USER CATALOG NAME             @V305001 01768000
+         DS    XL1               RESERVED                      @V305001 01769000
+XTBUFSP  DS    F'-1'             BUFFER SPACE                  @V305001 01770000
+*        NEXT 20 BYTES  (SEE NOTE BELOW):                               01771000
+XT084    DS    CL6            VOLUME SERIAL NUMBER             @V305001 01772000
+XT090    DS    XL1            EXTENT TYPE                      @V305001 01773000
+XT091    DS    XL1            EXTENT SEQUENCE NUMBER           @V305001 01774000
+XT092    DS    XL2            EXTENT LOWER LIMIT (REL TRACK)   @V305001 01775000
+XT094    DS    XL2            LENGTH OF THE EXTENT (NO. TRACKS)@V305001 01776000
+XT096    DS    XL4            EXTENT UPPER LIMIT               @V305001 01777000
+XT100    DS    XL2            LOGICAL (SYMBOLIC) UNIT ADDRESS  @V305001 01778000
+XT102    DS    XL1            2321 LOWER CELL                  @V305001 01779000
+XT103    DS    XL1            2321 UPPER CELL                  @V305001 01780000
+         SPACE                                                          01781000
+* NOTE:  FOR SAM FILES, A COMPLETE 104-BYTE BLOCK IS REPEATED FOR       01782000
+*        EACH NEW EXTENT.  FOR DAM, VSAM, AND ISAM FILES, ONLY THE      01783000
+*        FIELDS FROM THE VOLUME SERIAL NUMBER (XT084) THRU THE          01784000
+*        LOGICAL (SYMBOLIC) UNIT ADDRESS (XT100) ARE REPEATED.          01785000
+         EJECT                                                          01786000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 01787000
+*                                                                     * 01788000
+*        DSECT TO MAP A CCW                                           * 01789000
+*                                                                     * 01790000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 01791000
+         SPACE 2                                                        01792000
+IOCCW    DSECT                                                 @V305001 01793000
+IOSW     DS    X                                               @V305001 01794000
+IOBUF    DS    XL3                                             @V305001 01795000
+IOLEN1   DS    XL2                                             @V305001 01796000
+IOLEN2   DS    XL2                                             @V305001 01797000
+         SPACE 2                                                        01798000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 01799000
+*                                                                     * 01800000
+*        DSECT TO MAP A PUB ENTRY                                     * 01801000
+*                                                                     * 01802000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 01803000
+         SPACE 2                                                        01804000
+         MAPPUB                                                @V305001 01805000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 01806000
+*                                                                     * 01807000
+*        WORK AREA FOR ALTERNATE TRACK SUPPORT.                       * 01808000
+*        CONTAINS CCWS AND DATA AREAS TO READ                         * 01809000
+*        HOME ADDRESS AND RECORD ZERO.                                * 01810000
+*                                                                     * 01811000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 01812000
+         SPACE 2                                                        01813000
+ALTWORK  DSECT                                                 @V305001 01814000
+EDCCW0   CCW   SEEK,0,CC,6         SEEK TO NEW HEAD            @V305001 01815000
+EDCCW1   CCW   RDHOME,0,CC+SILI,5  READ HOME ADDRESS           @V305001 01816000
+EDCCW2   CCW   RDREC0,0,SILI,4     READ RECORD ZERO            @V305001 01817000
+         SPACE 1                                                        01818000
+EDCCW3   CCW   SEEK,0,CC,6         SEEK TO HOME ADDRESS        @V305001 01819000
+EDCCW4   CCW   SHHA,0,CC+SILI,4    SEARCH HOME ADDRESS EQUAL   @V305001 01820000
+EDCCW5   CCW   TIC,0,0,0           TIC TO SEARCH               @V305001 01821000
+EDCCW6   CCW   RDHOME,0,CC+SKIP,5  READ HOME ADDRESS           @V305001 01822000
+EDCCW7   CCW   TIC,0,0,0           TIC TO USER CCW CHAIN       @V305001 01823000
+         SPACE 1                                                        01824000
+EDNH     DC    3H'0'               SEEK TO NEW HEAD BBCCHHR    @V305001 01825000
+EDHA     DC    3H'0'               READ HOME ADDRESS AREA      @V305001 01826000
+EDSA     DC    1H'0'               BBCCHHR TO SEEK HOME ADDRESS@V305001 01827000
+EDR0     DC    2H'0'               READ RECORD ZERO AREA       @V305001 01828000
+         EJECT                                                          01829000
+         NUCON                                                 @V305001 01830000
+         DOSCB                                                 @V305001 01831000
+         BGCOM                                                 @V305001 01832000
+         ADT                                                   @V305001 01833000
+         FSTB                                                  @VA07764 01834000
+         CMSAVE                                                @V305001 01835000
+         REGEQU                                                @V305001 01836000
+DMSXCP   CSECT                                                 @V305001 01837000
+INDEX    EQU   (DOSSAVE-DOSINIT)                               @V305001 01838000
+         LTORG                                                 @V305001 01839000
+         END                                                            01840000

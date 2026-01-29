@@ -1,0 +1,1254 @@
+VAT      TITLE 'DMKVAT     (CP)        VM/370 - RELEASE 6'              00001000
+         ISEQ  73,80          VALIDATE SEQUENCING OF SYSIN              00002000
+         COPY  OPTIONS                                                  00003000
+         COPY  LOCAL                                                    00004000
+*.                                                                      00005000
+* MODULE NAME -                                                         00006000
+*                                                                       00007000
+*        DMKVAT                                                         00008000
+*                                                                       00009000
+* CONTENTS -                                                            00010000
+*                                                                       00011000
+*        DMKVATAB                                                       00012000
+*        DMKVATRN                                                       00013000
+*        DMKVATEX                                                       00014000
+*.                                                                      00015000
+DMKVAT   START                                                          00016000
+         USING PSA,0                                                    00017000
+         USING VMBLOK,R11                                               00018000
+         USING ECBLOK,R10                                               00019000
+         USING SAVEAREA,R13                                             00020000
+         SPACE 2                                                        00021000
+         ENTRY DMKVATAB,DMKVATMD,DMKVATBC                               00022000
+         ENTRY DMKVATRN,DMKVATLA                                        00023000
+         ENTRY DMKVATPX,DMKVATSX,DMKVATEX                               00024000
+         ENTRY DMKVATAT,DMKVATZP,DMKVATZS                               00024500
+         ENTRY DMKVATPF                                        @V2A3135 00025000
+         EXTRN DMKPRGSM,DMKPERIL                                        00026000
+         EXTRN DMKPTRPW                                        @VA08037 00026505
+         EXTRN DMKSTKDE                                        @V407593 00026510
+         AIF (NOT &AP).DSPRU4                                           00026515
+         EXTRN DMKDSPRU                                        @V407593 00026520
+         EXTRN DMKLOKSY                                        @V4M0178 00026525
+.DSPRU4  ANOP                                                           00026530
+         EXTRN DMKATSCF                                        @V60BC11 00026540
+         EJECT                                                          00027000
+*.                                                                      00028000
+* SUBROUTINE NAME -                                                     00029000
+*                                                                       00030000
+*        DMKVATAB                                                       00031000
+*                                                                       00032000
+* FUNCTION -                                                            00033000
+*                                                                       00034000
+*        TO ALLOCATE, INITIALIZE, AND MAINTAIN SHADOW SEGMENT           00035000
+*        AND PAGE TABLES FOR VIRTUAL RELOCATING MACHINES.               00036000
+*                                                                       00037000
+* ATTRIBUTES -                                                          00038000
+*                                                                       00039000
+*        REENTRANT, RESIDENT, DISABLED, CALLED VIA BALR                 00040000
+*                                                                       00041000
+* ENTRY POINTS -                                                        00042000
+*                                                                       00043000
+*        DMKVATAB - MAINTAIN VIRTUAL ADDRESS TRANSLATION TABLES         00044000
+*        DMKVATMD - ALLOCATE AND INITIALIZE SHADOW TABLES               00045000
+*        DMKVATBC - RETURN SHADOW TABLES TO FREE STORAGE                00046000
+*                                                                       00047000
+* ENTRY CONDITIONS -                                                    00048000
+*                                                                       00049000
+*        GPR 15 = ENTRY POINT ADDRESS                                   00050000
+*        GPR 14 = RETURN ADDRESS                                        00051000
+*        GPR 11 = VMBLOK ADDRESS                                        00052000
+*                                                                       00053000
+* EXIT CONDITIONS -                                                     00054000
+*                                                                       00055000
+*        ECBLOK, VMBLOK UPDATED                                         00056000
+*        GPRS 0-15 UNCHANGED                                            00057000
+*                                                                       00058000
+* CALLS TO OTHER ROUTINES -                                             00059000
+*                                                                       00060000
+*        DMKFREE - TO OBTAIN FREE STORAGE FOR SHADOW TABLES             00061000
+*        DMKFRET - TO RETURN SHADOW TABLES TO FREE STORAGE              00062000
+*        DMKPTRAN- TO BRING IN VIRTUAL STORAGE PAGES                    00063000
+*        DMKPTRPW                                                       00063550
+*        DMKATSCF - TO FORCE USER TO NONSHARED MODE                     00063600
+*                                                                       00064000
+* EXTERNAL REFERENCES -                                                 00065000
+*                                                                       00066000
+*        NONE                                                           00067000
+*                                                                       00068000
+* TABLES / WORK AREAS -                                                 00069000
+*                                                                       00070000
+*        VMBLOK, ECBLOK, BALRSAVE                                       00071000
+*                                                                       00072000
+         EJECT                                                          00073000
+* REGISTER USAGE -                                                      00074000
+*                                                                       00075000
+*        GPR 12 = BASE REGISTER                                         00076000
+*        GPR 11 = VMBLOK ADDRESSABILITY                                 00077000
+*        GPR 10 = ECBLOK ADDRESSABILITY                                 00078000
+*        GPR  9 = ARCHITECTURE CONTROL INDEX                            00079000
+*        GPR 0-8  ARE WORK REGISTERS                                    00080000
+*        GPRS 13-15 ARE EXTERNAL LINK REGISTERS                         00081000
+*                                                                       00082000
+* OPERATION -                                                           00083000
+*                                                                       00084000
+*        DMKVATAB IS ENTERED VIA BALR WHENEVER AN EXTENDED-             00085000
+*        CONTROL VIRTUAL MACHINE REQUIRES UPDATING OF THE               00086000
+*        SHADOW TABLES FOR ONE OF THE FOLLOWING REASONS:                00087000
+*                                                                       00088000
+*      A. FIRST ENTRANCE INTO TRANSLATE MODE -                          00089000
+*        SHADOW SEGMENT AND PAGE TABLES ARE OBTAINED VIA DMKFREE,       00090000
+*        ALL ENTRIES OF SHADOW TABLES ARE SET UNAVAILABLE.              00091000
+*                                                                       00092000
+*      B. RELOADING CONTROL REGISTER 1 (SEGMENT TABLE ORIGIN) -         00093000
+*        SHADOW SEGMENT TABLE EXAMINED TO DETERMINE IF IT IS STILL      00094000
+*        LARGE ENOUGH TO MAP THE VIRTUAL SEGMENT TABLE. IF NOT,         00095000
+*        A NEW SHADOW SEGTABLE IS ALLOCATED FROM FREE STORAGE,          00096000
+*        THE DATA FROM THE OLD SEGTABLE IS MOVED TO THE NEW ONE,        00097000
+*        AND THE OLD SHADOW SEGTABLE IS RETURNED TO FREE STORAGE.       00098000
+*        ALL SHADOW TABLE ENTRIES ARE MARKED UNAVAILABLE.               00099000
+*                                                                       00100000
+*      C. RELOADING CONTROL REGISTER 0 (ARCHITECTURE CONTROLS) -        00101000
+*        A CHECK IS MADE TO DETERMINE IF THE VIRTUAL MACHINE            00102000
+*        HAS ALTERED ITS PAGE OR SEGMENT SIZE. IF THERE IS NO           00103000
+*        CHANGE, THE CALL IS A NO-OP. IF THE PAGE AND/OR SEGMENT        00104000
+*        SIZE HAS CHANGED, ALL SHADOW TABLES ARE RETURNED TO            00105000
+*        FREE STORAGE VIA DMKFRET AND THE VMBLOK IS FLAGGED FOR         00106000
+*        RE-ALLOCATION OF NEW TABLES WHEN REQUIRED.                     00107000
+*                                                                       00108000
+*      D. USER'S PAGE HAS BEEN SWAPPED IN OR OUT -                      00109000
+*        SHADOW SEGMENT TABLE IS INVALIDATED.                           00110000
+*                                                                       00111000
+*      E. VIRTUAL MACHINE EXECUTED 'PTLB' - PURGE TRANSLATION           00112000
+*        LOOK-ASIDE BUFFER - PERFORMS STEP B.                           00113000
+*                                                                       00114000
+         EJECT                                                          00115000
+*        DMKVATMD IS ENTERED VIA BALR WHEN AN EXTENDED-CONTROL          00116000
+*        VIRTUAL MACHINE ENTERS TRANSLATE MODE FOR THE FIRST TIME,      00117000
+*        OR WHENEVER THE VIRTUAL MACHINE CHANGES THE PAGE OR            00118000
+*        SEGMENT SIZE (AS SPECIFIED IN VIRTUAL CONTROL REGISTER 0).     00119000
+*        SHADOW SEGMENT AND PAGE TABLES ARE ALLOCATED FROM FREE         00120000
+*        STORAGE VIA CALLS TO DMKFREE. THE SIZE OF THE                  00121000
+*        SHADOW TABLES ALLOCATED IS DETERMINED BY THE PARTICULAR        00122000
+*        COMBINATION OF PAGE AND SEGMENT SIZE USED BY THE VIRTUAL       00123000
+*        MACHINE, AND IS ESSENTIALLY A TRADE-OFF BETWEEN SPEED          00124000
+*        DEGRADATION OF THE VIRTUAL EXTENDED-CONTROL MACHINE AND        00125000
+*        THE REAL STORAGE SPACE CONSUMED BY THE TABLES.                 00126000
+*                                                                       00127000
+*        DMKVATBC IS ENTERED WHEN THE VIRTUAL MACHINE EITHER LEAVES     00128000
+*        EXTENDED-CONTROL MODE OR CHANGES THE PAGE OR SEGMENT SIZE      00129000
+*        AS SPECIFIED IN VIRTUAL CONTROL REGISTER ZERO.                 00130000
+*        IF THE USER IS IN PAGE WAIT WHEN DMKVATBC IS ENTERED,          00130200
+*        A CALL IS MADE TO DMKPGSPW TO QUEUE A CPEXBLOK OFF ANY         00130400
+*        ACTIVE PAGE I/O REQUEST BLOCK FOR THIS VMBLOK. RETURN          00130600
+*        IS MADE WHEN ALL PAGING AHS QUIESED. ALL THE                   00130800
+*        SHADOW PAGE, SEGMENT, AND COPY SEGMENT TABLES ARE RETURNED     00131000
+*        TO FREE STORAGE VIA CALLS TO DMKFRET AND THE VMBLOK IS         00132000
+*        MARKED TO INDICATE THAT SHADOW TABLES ARE NOT PRESENT.         00133000
+*.                                                                      00134000
+         EJECT                                                          00135000
+*---------------------------------------------------------------------* 00136000
+*    DMKVATAB  -  MAINTAIN SHADOW TABLES AND CONTROL REGISTERS        * 00137000
+*---------------------------------------------------------------------* 00138000
+DMKVATAB EQU   *                                               %V3M5012 00139000
+         USING *,R15                                           %V3M5012 00140000
+         STM   R0,R15,BALRSAVE                                 %V3M5012 00141000
+         L     R12,=A(DMKVAT) MODULE BASE ADDRESS              %V3M5012 00142000
+         DROP  R15                                             %V3M5012 00143000
+         USING DMKVAT,R12                                      %V3M5012 00144000
+         L     R10,VMECEXT    EXTENSION BLOCK ADDRESS          %V3M5012 00145000
+         SPACE 2                                                        00146000
+         AIF (NOT &AP).APCHK4                                           00146080
+         TM    APSTAT1,APUOPER     RUNNING AS AP               %V4M0178 00146100
+         BZ    VATABCA        NO                               %V4M0178 00146120
+         L     R2,=A(DMKLOKSY+2)  ADDRESS SUPERVISOR LOCK      @V4M0178 00146140
+         CLC   LPUADDR,0(R2)  DO WE HOLD SUPERVISOR LOCK       @V4M0178 00146160
+         BNE   VATABC1        NO- PROCESS CALL FROM DISPATCHER @V4M0178 00146180
+VATABCA  DS    0H             HERE WITH SUPERVISOR LOCK        %V4M0178 00146200
+.APCHK4   ANOP                                                          00146220
+         BAL   R6,CHKFORM     CHECK VALIDITY OF C-REG 0 VALUE  %V3M5012 00147000
+         BNZ   TORNADO        NO GOOD -- TREAT AS ARCH. CHANGE %V3M5012 00148000
+         TM    VMESTAT,VMNEWCR0    NEW VIRTUAL C-REG 0 ?       %V3M5012 00149000
+         BZ    VATABC1        NO - CHECK C-REG 1               %V3M5012 00150000
+         SLR   R9,R9                                                    00151000
+         IC    R9,EXTCR0+1    ARCHITECTURE CONTRL BYTE                  00152000
+         SH    R9,=AL2(X'40') BASE AT ZERO                              00153000
+         ALR   R9,R9          DOUBLE IT FOR TABLE INDEX                 00154000
+         TM    VMESTAT,VMSHADT     IF SHADOW TABLES ARE NOT PRESENT...  00155000
+         BO    VATARCH             ...WE WILL SET THE INDEX ANYWAY      00156000
+         STH   R9,EXTARCH     SET ARCHITECTURE CONTROL INDEX            00157000
+VATARCH  EQU   *         CHECK FOR CHANGE IN TRANSLATE ARCHITECTURE     00158000
+         CH    R9,EXTARCH     DOES IT MATCH CURRENT ARCHITECTURE?       00159000
+         BNE   TORNADO        NO -- GO THRASH ABOUT MADLY               00160000
+         L     R1,CPCREG0     BYTES 0,2,3 STANDARD             @VA06374 00161100
+         ICM   R1,B'0100',EXTCR0+1 VIRTUAL BYTE 1              @VA06374 00162100
+         ST    R1,EXTSHCR0    RUN VALUE OF CR0                 @VA06374 00163100
+         NI    EXTSHCR0+1,X'F8' SET UNASSIGNED BITS TO ZERO    @VA06374 00164100
+         B     VATCKC1                                         @VA01719 00166000
+VATABC1  EQU   *              CHECK FOR NEW SEG. TABLE ORIGIN  %V3M5012 00167000
+         LH    R9,EXTARCH     MAKE SURE WE HAVE CORRECT INDEX  %V3M5012 00168000
+         TM    VMESTAT,VMINVSEG    NEW C-REG 1?                %V3M5012 00169000
+         BZ    VATABPG        NO, CHECK FOR INVALID PAGE TABLE %V3M5012 00170000
+VATCKC1  EQU   *                                               @VA01719 00171000
+         L     R1,EXTCR1      PICK UP CURRENT C-REG 1 VALUE             00172000
+         CL    R1,EXTSTOLD    HAS THE VALUE CHANGED AT ALL ?            00173000
+         BE    VATABPG        NO -- NOTHING TO BE DONE                  00174000
+         ST    R1,EXTSTOLD    RESET OUR MEMORY OF PREVIOUS VALUE        00175000
+         BAL   R8,SHADOWS     RESET SHADOW SEGMENT TABLE                00176000
+         B     VACLEAN        GO CLEAN UP AND EXIT                      00177000
+         SPACE                                                          00178000
+VATABPG  EQU   *                                               %V3M5012 00179000
+         TM    VMESTAT,VMSHADT     ARE SHADOW TABLES PRESENT   %V3M5012 00180000
+         BZ    VACLEAN        NO - CLEAR BIT AND EXIT          %V3M5012 00181000
+         TM    VMESTAT,VMINVPAG+VMINVSEG  NEED TO INVALIDATE?  %V3M5012 00182000
+         BZ    VACLEAN        NO , EXIT TO USER.               %V3M5012 00183000
+         BAL   R8,ZAPSEGS    SET SHADOW SEGTABLE INVALID       %V3M5012 00184000
+         SPACE                                                          00185000
+VACLEAN  EQU   *              CLEAR INDICATOR BITS + EXIT      %V3M5012 00186000
+         NI    VMESTAT,255-(VMNEWCR0+VMINVSEG+VMINVPAG)        %V3M5012 00187000
+         LM    R0,R15,BALRSAVE     RESTORE REGISTERS AT ENTRY  %V3M5012 00188000
+         BR    R14                                             %V3M5012 00189000
+         EJECT                                                          00190000
+*---------------------------------------------------------------------* 00191000
+*        TORNADO  -  RELEASE ALL ACTIVE SHADOW TABLES, RE-ALLOCATE    * 00192000
+*                    ACCORDING TO A NEW TABLE FORMAT                  * 00193000
+*---------------------------------------------------------------------* 00194000
+TORNADO  EQU   *              ARRGH - HIS ARCHITECTURE CHANGED          00195000
+         TM    VMESTAT,VMSHADT     DO SHADOW TABLES EXIST ALREADY ?     00196000
+         BZ    VACLEAN             NO -- DON'T BOTHER TO CREATE ANY     00197000
+         NI    VMESTAT,X'FF'-(VMNEWCR0+VMINVSEG+VMINVPAG)               00198000
+         SVC   20             GET A SAVE AREA                           00199000
+         MVC   SAVEREGS(R12*4),BALRSAVE SAVE REGS 0-11                  00200000
+         L     R1,BALR12      CALLER'S BASE                             00201000
+         ST    R1,SAVER12     INTO NEW SAVE-AREA                        00202000
+         L     R1,BALR13                                                00203000
+         ST    R1,SAVER13                                               00204000
+         L     R1,BALR14      RETURN ADDRESS                            00205000
+         LA    R1,0(,R1)      SANS ILC/CC                               00206000
+         ST    R1,SAVERETN     NOW EVERYTHING IS SET FOR AN 'EXIT'      00207000
+         CALL  DMKVATBC       RELEASE ALL CURRENT SHADOW TABLES         00208000
+         CALL  DMKVATMD       ...AND GET ANOTHER SET                    00209000
+         EXIT  ,              RETURN TO CALLER                          00210000
+         SPACE 2                                                        00211000
+*---------------------------------------------------------------------* 00212000
+*        CHKFORM  -  EXAMINE VIRTUAL C-REG 0 FOR VALIDITY             * 00213000
+*---------------------------------------------------------------------* 00214000
+CHKFORM  EQU   *                                               %V3M5012 00214700
+         NI    VMESTAT,255-VMBADCR0     REMOVE ERROR BIT       %V3M5012 00215400
+         TM    EXTCR0+1,X'C0' PAGE-SIZE CONTROL BITS           %V3M5012 00216100
+         BNM   BADARCH        NOT '10' OR '01' - ERROR         %V3M5012 00216800
+         TM    EXTCR0+1,X'20' CHECK BIT 10 - MUST BE ZERO      %V3M5012 00217500
+         BO    BADARCH        ERROR IF SET TO ONE              %V3M5012 00218200
+         TM    EXTCR0+1,X'0F' SEGMENT SIZE, UNUSED BITS        %V3M5012 00218900
+         BCR   8,R6           ALL ZERO - O.K.                  %V3M5012 00219600
+BADARCH  EQU   *                                                        00221000
+         OI    VMESTAT,VMBADCR0    INVALID C-REG 0                      00222000
+         TM    *-1,255        SET NON-ZERO COND. CODE          @VA02142 00223000
+         BR    R6             RETURN                                    00224000
+         EJECT                                                          00225000
+*---------------------------------------------------------------------* 00226000
+*    DMKVATMD  -  ALLOCATE SHADOW TABLES, SET UP SHADOW C-REGS        * 00227000
+*---------------------------------------------------------------------* 00228000
+DMKVATMD EQU   *                                                        00229000
+         USING *,R15                                                    00230000
+         TM    VMESTAT,VMSHADT     ARE TABLES ALREADY PRESENT?          00231000
+         BCR   1,R14          YES - EXIT IMMEDIATELY                    00232000
+         STM   R0,R15,BALRSAVE SAVE CALLER'S REGISTERS         @V4M0233 00232010
+         L     R12,=A(DMKVAT) ESTABLISH ADDRESSIBILITY         @V4M0233 00232020
+         DROP  R15                                             @V4M0233 00232030
+         USING DMKVAT,R12                                      @V4M0233 00232040
+         TM    VMOSTAT,VMSHR  IS USER RUNNING SHR SEG?         @VA06156 00232100
+         BZ    NONSHR         NO, PROCESS NORMALLY             @VA07684 00232102
+         TM    VMPSW+1,EXTMODE IN EXTERNAL MODE ?              @VA07684 00232104
+         BZ    NONSHR         NO, CAN'T BE IN XLATE MODE.      @VA07684 00232106
+         TM    VMPSW,TRANMODE IN TRANSLATE MODE ?              @VA07684 00232108
+         BZ    NONSHR         NO, DON'T HAVE TO UNSHARE USER.  @VA07684 00232110
+         SVC   20             OBTAIN A SAVEAREA                @V4M0233 00232122
+         MVC   SAVEREGS(R12*4),BALRSAVE COPY CALLERS REGS 0-11 @V4M0233 00232124
+         L     R1,BALR12      GET CALLER'S R12                 @V4M0233 00232126
+         ST    R1,SAVER12     SAVE R12 IN SAVEAREA             @V4M0233 00232128
+         L     R1,BALR13      GET CALLER'S R13                 @V4M0233 00232130
+         ST    R1,SAVER13     SAVE R13 IN SAVEAREA             @V4M0233 00232132
+         L     R1,BALR14      GET RETURN ADDRESS               @V4M0233 00232134
+         LA    R1,0(,R1)      STRIP CC & ILC                   @V4M0233 00232136
+         ST    R1,SAVERETN    SAVE RETURN ADDRESS IN SAVEAREA  @V4M0233 00232138
+RECHECK  DS    0H                                              @V60BC11 00232139
+         SLR   R4,R4          CLEAR WORK REG                   @V4M0233 00232140
+         SR    R1,R1          CLEAR R1 FOR PAGE ZERO           @VA06156 00232160
+         IC    R4,VMSEG       GET SIZE OF SEGMENT TABLE        @VA06156 00232180
+         SLL   R4,4           TIMES 16                         @VA06156 00232200
+         LA    R4,16(R4)      PLUS 16 - MAX SEGTABLE ENTRIES   @VA06156 00232220
+         L     R5,VMSEG       GET SEGMENT TABLE                @VA06156 00232240
+LOOPSEG  EQU   *                                               @VA06156 00232260
+         L     R6,0(R5)       GET PAGTABLE                     @VA06156 00232280
+         C     R6,F1          IS THIS AN INVALID SEGMENT       @VA06156 00232300
+         BE    SKPCHG         NO SEGMENT - LOOK AT NEXT SEGMENT@VA06156 00232320
+         N     R6,CLRBITS     CLEAR FLAG BITS                  @V4M0233 00232340
+         SL    R6,F16         BACKUP TO HEADER                 @V60BC11 00232360
+         USING PAGTABLE,R6                                     @V60BC11 00232370
+         USING SWPTABLE,R3                                     @VA06156 00232380
+         L     R3,PAGSWP      GET ADDRESS OF SWPTABLE          @V60BC11 00232400
+         SL    R3,F8          BACK UP TO SWPTABLE PREFIX FOR   @VA06156 00232420
+*                             ADDRESSABILITY                            00232440
+         TM    SWPFLAG,SWPSHR IS SEGMENT SHARED?               @VA06156 00232460
+         BZ    SKPCHG         NO, CONTINUE LOOKING             @VA06156 00232480
+         LR    R1,R5          GET ADDRESS OF CURRENT STE       @V60BC11 00232510
+         L     R2,VMSEG       GET STE ORIGIN ADDRESS           @V60BC11 00232512
+         N     R2,CLRBITS     CLEAR UNWANTED BITS              @V60BC11 00232514
+         SR    R1,R2          GET SEGMENT NUMBER TIMES FOUR    @V60BC11 00232516
+         SRL   R1,2           GET SEGMENT NUMBER               @VMI0065 00232519
+         SLL   R1,16          FORM VIRTUAL ADDRESS             @V60BC11 00232520
+         TRANS 2,1,OPT=(BRING,DEFER) GET REAL ADDRESS          @V60BC11 00232522
+         CALL  DMKATSCF       FORCE USER TO NONSHARED MODE     @V60BC11 00232524
+         TM    VMOSTAT,VMSHR  STILL RUNNING SHARED SYSTEM      @V60BC11 00232526
+         BZ    NORMPROC       NO, CONTINUE NORMAL PROCESSING   @V60BC11 00232528
+         B     RECHECK        YES, CONTINUE FORCING NONSHARED  @V60BC11 00232530
+         DROP  R6                                              @V60BC11 00232532
+SKPCHG   EQU   *                                               @VA06156 00232540
+         LA    R5,4(R5)       POINT TO NEXT SEGMENT            @VA06156 00232560
+         A     R1,SEGSIZE     NEED A PAGE ADDRESS FOR TRANS    @VA06156 00232580
+         BCT   R4,LOOPSEG     GO, DO IT AGAIN                  @VA06156 00232600
+         DROP  R3                                              @VA06156 00232620
+         B     NORMPROC       CONTINUE WITH NORMAL PROCESSING  @V4M0233 00232625
+NONSHR   EQU   *                                               @VA06156 00232640
+         SLR   R13,R13        INDICATE NO SAVEAREA             @V4M0233 00235500
+NORMPROC DS    0H                                              @V4M0233 00235600
+         L     R10,VMECEXT    EXTENSION BLOCK ADDRESS                   00237000
+         SPACE 2                                                        00238000
+         BAL   R6,CHKFORM     CHECK VALIDITY OF VIRTUAL C-REGS          00239000
+         BNZ   MINIMUM        NO GOOD -- SETUP MINIMUM SHADOW SEGTABLE  00240000
+         SLR   R9,R9          COMPUTE ARCHITECTURE CONTROL INDEX        00241000
+         STH   R9,EXTSHLEN         (SET SHADOW SEGTABLE LENGTH ZERO)    00242000
+         IC    R9,EXTCR0+1    ARCHITECTURE CONTROL BYTE                 00243000
+         SH    R9,=AL2(X'40') BASED AT ZERO                             00244000
+         ALR   R9,R9          DOUBLE IT FOR TABLE INDEX                 00245000
+         STH   R9,EXTARCH     SAVE IN ECBLOK FOR VAT ROUTINES           00246000
+         L     R1,CPCREG0     BYTES 0,2,3 STANDARD             @VA06374 00247100
+         ICM   R1,B'0100',EXTCR0+1 VIRTUAL BYTE 1              @VA06374 00248100
+         ST    R1,EXTSHCR0    RUN VALUE OF CR0                 @VA06374 00249100
+         NI    EXTSHCR0+1,X'F8' SET UNASSIGNED BITS TO ZERO    @VA06374 00250100
+         BAL   R8,SHADOWS     SETUP SHADOW SEGTABLE, SHADOW C-REG 1     00252000
+         LTR   R13,R13        DO WE HAVE A SAVEAREA            @V4M0233 00253500
+         BZ    BALREXT        NO, EXIT VIA BALRSAVE            @V4M0233 00253600
+         B     MDEXIT         YES, EXIT VIA SVC                @V4M0233 00253700
+         SPACE 2                                                        00254000
+*---------------------------------------------------------------------* 00255000
+*        VIRTUAL C-REGS CONTAIN INVALID DATA - GET MINIMUM TABLES     * 00256000
+*---------------------------------------------------------------------* 00257000
+MINIMUM  EQU   *                                                        00258000
+         LA    R5,64(0)       MINIMUM SEGTABLE = 16 ENTRIES             00259000
+         STH   R5,EXTSHLEN    ...                                       00260000
+         BAL   R3,GETSHAD     GET SHADOW SEGTABLE              @V4M0233 00261100
+         ST    R1,EXTSHSEG    REAL START ADDRESS                        00262000
+         ST    R4,EXTSHCR1    SHADOW SEGTABLE ORIGIN, LENGTH CODE ZERO  00264000
+         L     R1,CPCREG0     STANDARD C-REG 0                          00265000
+         ST    R1,EXTSHCR0    ...                                       00266000
+         BAL   R8,ZAPSEGS    SET ENTIRE TABLE UNAVAILABLE               00267000
+         LA    R1,CODE80-ARCHTECT  SET STANDARD VM/370 FORMAT           00268000
+         STH   R1,EXTARCH          ...FOR CHANGE DETECTION LATER        00269000
+         LTR   R13,R13        DO WE HAVE A SAVEAREA            @V4M0233 00270100
+         BZ    BALREXT        NO, EXIT VIA BALRSAVE            @V4M0233 00270200
+MDEXIT   DS    0H                                              @V4M0233 00270300
+         EXIT                 YES, EXIT VIA SVC                @V4M0233 00270400
+         EJECT                                                          00271000
+*---------------------------------------------------------------------* 00272000
+*        SHADOWS  -  ALLOCATE OR INVALIDATE SHADOW SEGMENT TABLE      * 00273000
+*---------------------------------------------------------------------* 00274000
+SHADOWS  EQU   *                                                        00275000
+         SLR   R5,R5                                                    00276000
+         IC    R5,EXTCR1      GET VIRTUAL SEGTABLE LENGTH CODE          00277000
+         CH    R5,MAXSEGS(R9)      IS HIS VALUE REASONABLE ?            00278000
+         BNH   SEGLNOK             YES - USE IT AS IS                   00279000
+         LH    R5,MAXSEGS(R9) USE ONLY AS MUCH AS HE CAN REFERENCE      00280000
+SEGLNOK  EQU   *              SET SHADOW SEGTABLE LENGTH CODE           00281000
+         STC   R5,EXTSHCR1    ...                                       00282000
+         LA    R5,1(0,R5)     COMPUTE SEGTABLE LENGTH IN BYTES          00283000
+         SLL   R5,6(0)        ...                                       00284000
+         STH   R5,EXTVSEGS    SAVE IN ECBLOK BECAUSE IT'S CONVENIENT    00285000
+         CH    R5,EXTSHLEN    DO WE HAVE ENOUGH ROOM FOR HIS TABLE ?    00286000
+         BNH   ZAPSEGS        YES - JUST SET SHADOW SEGTABLE INVALID    00287000
+         BAL   R3,GETSHAD     GET NEW, LARGER SHADOW SEGTABLE  @V4M0233 00288100
+         L     R6,EXTSHCR1    OLD SEGTABLE ORIGIN                       00289000
+         LH    R7,EXTSHLEN    ...AND IT'S LENGTH                        00290000
+         ST    R4,EXTSHCR1    SET NEW SHADOW SEGTABLE ORIGIN            00291000
+         STH   R5,EXTSHLEN    ...AND ITS LENGTH                         00292000
+         STCM  R6,B'1000',EXTSHCR1      SAVE SHADOW SEGTABLE LENGTH     00293000
+         LR    R2,R1          ACTUAL START ADDRESS TO GR2               00294000
+         N     R7,XRIGHT16    FORCE POSITIVE, ZERO PAD, TEST VALUE      00295000
+         BZ    SHADNEW        SHADOW SEGTABLE DOES NOT YET EXIST        00296000
+         MVCL  R4,R6          MOVE OLD TABLE TO NEW + CLEAR OVERFLOW    00297000
+*                             R0 WAS LOADED WITH OLD LENGTH OF @V4M0247 00298100
+*                             SEGMENT TABLE IN GETSHAD         @V4M0247 00298110
+         L     R1,EXTSHSEG    OLD ACTUAL START ADDRESS                  00299000
+         CALL  DMKFRET        RELEASE OLD SHADOW SEGTABLE               00300000
+SHADNEW  EQU   *              SET NEW POINTERS TO LARGER SEGTABLE       00301000
+         ST    R2,EXTSHSEG    ACTUAL START ADDRESS FOR LATER 'FRET'     00302000
+         B     ZAPSEGS        GO INVALIDATE ENTIRE SHADOW TABLES        00304000
+         EJECT                                                          00305000
+*---------------------------------------------------------------------* 00306000
+*        GETSHAD  -  ALLOCATE NEW SHADOW SEGMENT TABLE                * 00307000
+*---------------------------------------------------------------------* 00308000
+GETSHAD  EQU   *                                                        00309000
+         LR    R1,R5         LENGTH OF SEGTABLE TO BE ALLOCATED@V4M0233 00310100
+         SRL   R1,3(0)        CONVERT TO DBL-WD COUNT          @V4M0233 00310200
+         LA    R1,8(,R1)      ALLOW FOR 64-BYTE BOUNDARY       @V4M0233 00310300
+         LR    R0,R1          LOAD SIZE FOR FREE               @V4M0233 00310400
+         LR    R7,R1          SAVE LENGTH                      @V4M0233 00310500
+         CALL  DMKFREE        GET SOME STORAGE                          00314000
+         LA    R4,63(0,R1)    ROUND UP...                               00315000
+         N     R4,=X'00FFFFC0'    ...TO 64-BYTE BOUNDARY                00316000
+         LR    R6,R1          REAL START ADDRESS                        00317000
+         LH    R0,EXTSEGLN    SAVE LENGTH OF OLD SHADOW SEGTAB @V4M0247 00317100
+         STH   R7,EXTSEGLN    FULL BLOCK LENGTH IN DOUBLE-WORDS@V4M0233 00318100
+         SLL   R7,3(0)        FULL LENGTH IN BYTES                      00319000
+         SLR   R15,R15          ZERO-LEN SOURCE, ZERO PAD               00320000
+         MVCL  R6,R14         CLEAR ENTIRE FIELD TO ZEROES              00321000
+         OI    VMESTAT,VMSHADT     SHADOW TABLES NOW EXIST              00322000
+         BR    R3             RETURN TO CALLER                 @V4M0233 00323100
+         SPACE 2                                                        00324000
+*---------------------------------------------------------------------* 00325000
+*        GETPAGT  -  ALLOCATE ONE SEGMENT OF SHADOW PAGE TABLES       * 00326000
+*---------------------------------------------------------------------* 00327000
+GETPAGT  EQU   *              ALLOCATE A SHADOW PAGE TABLE              00328000
+         LH    R0,PAGTLEN(R9) PAGE TABLE LENGTH IN BYTES                00329000
+         SRL   R0,3(0)        CVT TO DBL-WDS                            00330000
+         CALL  DMKFREE        GET STORAGE FOR SHADOW TABLE              00331000
+         ICM   R1,B'1000',EXTCOPY  USE VIRTUAL PAGE-TABLE LENGTH CODE   00332000
+         ST    R1,0(0,R6)    SET PAGE TABLE ADDR IN SHADOW SEGTABLE     00333000
+         BR    R3             ...AND RETURN                             00334000
+         EJECT                                                          00335000
+*---------------------------------------------------------------------* 00336000
+*    DMKVATBC  -  RETURN TO FREE STORAGE ALL ACTIVE SHADOW TABLES     * 00337000
+*---------------------------------------------------------------------* 00338000
+DMKVATBC EQU   *                                                        00339000
+         USING *,R15                                                    00340000
+         TM    VMESTAT,VMSHADT     ARE SHADOW TABLES PRESENT?           00341000
+         BCR   8,R14          NO - EXIT IMMEDIATELY                     00342000
+         STM   R0,R15,BALRSAVE     SAVE REGISTERS IN PSA                00343000
+         L     R12,=A(DMKVAT) MODULE BASE ADDRESS                       00344000
+         DROP  R15                                                      00345000
+         USING DMKVAT,R12                                               00346000
+         TM    VMRSTAT,VMPGWAIT IS USER IN PAGE WAIT?          @VA04369 00346500
+         BZ    PAGCOMP        NO - OK TO CONTINUE              @VA04369 00346600
+         CL    R11,ASYSVM     IS IT SYSTEM VMBLOK?             @VA04369 00346700
+         BE    PAGCOMP        YES - CONTINUE PROCESSING        @VA04369 00346800
+         LA    R0,8           GET AREA TO PRESERVE             @VA04369 00346900
+         CALL  DMKFREE        BALRSAVE OVER PTRPW CALL         @VA04369 00347000
+         MVC   0(64,R1),BALRSAVE SAVE IT                       @VA04369 00347100
+         CALL  DMKPTRPW                                        @VA08037 00347210
+         MVC   BALRSAVE(64),0(R1) RESTORE BALRSAVE             @VA04369 00347300
+         CALL  DMKFRET        RELEASE TEMP SAVE AREA           @VA04369 00347400
+PAGCOMP  L     R10,VMECEXT    EXTENSION BLOCK POINTER          @VA04369 00347500
+         SPACE 2                                                        00348000
+         LH    R7,EXTARCH     PICK UP ARCHITECTURE CONTROL INDEX        00349000
+         L     R9,EXTSHCR1    SHADOW SEGMENT TABLE ORIGIN               00350000
+         LH    R8,EXTSHLEN    ...LENGTH IN BYTES                        00351000
+         SRL   R8,2(0)        CONVERT TO COUNT OF ENTRIES               00352000
+PAGFRET  EQU   *              RELEASE SHADOW PAGE TABLES                00353000
+         L     R1,0(0,R9)     PICK UP SEGTABLE ENTRY                    00354000
+         N     R1,=X'00FFFFF8'    STRIP EAC, INVALID, LEN, KEY DATA     00355000
+         BZ    NXTFRET        INACTIVE ENTRY - GET NEXT                 00356000
+         LH    R0,PAGTLEN(R7) PICK UP PAGE TABLE LENGTH IN BYTES        00357000
+         SRL   R0,3(0)        CONVERT TO DOUBLE-WORDS FOR DMKFRET       00358000
+         CALL  DMKFRET        RELEASE ONE PAGE TABLE                    00359000
+NXTFRET  EQU   *              ADVANCE TO NEXT ENTRY                     00360000
+         LA    R9,4(0,R9)     NEXT SLOT IN SEGMENT TABLE                00361000
+         BCT   R8,PAGFRET     RELEASE ALL THE TABLES                    00362000
+         SPACE                                                          00363000
+         L     R1,EXTSHSEG    REAL START OF SHADOW SEGTABLE BLOCK       00364000
+         LH    R0,EXTSEGLN    ...AND ITS LENGTH IN DBL-WDS              00365000
+         CALL  DMKFRET        RELEASE SHADOW SEGTABLE                   00366000
+         SLR   R1,R1          ZERO OUT TABLE POINTERS                   00367000
+         ST    R1,EXTSHCR1    ...                                       00368000
+         ST    R1,EXTSHSEG    ...                                       00369000
+         STH   R1,EXTSHLEN    ...                                       00370000
+         STH   R1,EXTVSEGS    ...                                       00371000
+         ST    R1,EXTSTOLD                                              00372000
+         STH   R1,EXTSEGLN    ...                                       00373000
+         NI    VMESTAT,X'FF'-VMSHADT    SHADOW TABLES ARE GONE          00374000
+         B     BALREXT        RETURN TO CALLER                          00375000
+         EJECT                                                          00376000
+*---------------------------------------------------------------------* 00377000
+*        ZAPPAGE  -  INVALIDATE ONE SHADOW PAGE TABLE                 * 00378000
+*                  -------------------------------                    * 00379000
+*        GPR 9 = ARCHITECTURE CONTROL INDEX                           * 00379300
+*        GPR 6 = ADDRESS OF SEGMENT TABLE ENTRY FOR PAGE TABLE        * 00379600
+*---------------------------------------------------------------------* 00379900
+*.                                                                      00380200
+*********************************************************************** 00380500
+*                                                                       00380800
+*                                                                       00381100
+*        CP ASSIST INSTRUCTION "ZAPPAGE" - INVALIDATE SHADOW PAGE TABLE 00381400
+*                                                                       00381700
+*                                                                       00382000
+*        OPERANDS:                                                      00382300
+*           1 = ADDRESS OF 'ARCHTECT' (ARCHITECTURE CONTROLS TABLE)     00382600
+*           2 = VALUE OF 'EXTARCH' FROM ECBLOK (ARCHITECTURE INDEX)     00382900
+*                                                                       00383200
+*        REGISTER INPUT:                                                00383500
+*           GPR  6 = ADDRESS OF SEGMENT TABLE ENTRY FOR THE PAGE TABLE  00383800
+*           GPR 14 = EXIT ADDRESS                                       00384100
+*                                                                       00384400
+*        SYSTEM DATA AREAS REFERENCED (BY MODULE WHERE APPLICABLE):     00384700
+*           DMKVAT - 'ARCHTECT' TABLE                                   00385000
+*           SHADOW PAGE TABLE                                           00385300
+*                                                                       00385600
+*                                                                       00385900
+*        EXITS:                                                         00386200
+*                                                                       00386500
+*        1. ADDRESS IN GPR 14 (NORMAL COMPLETION)                       00386800
+*                                                                       00387100
+*           REGISTER OUTPUT: NONE CHANGED BY THIS INSTRUCTION           00387400
+*              NOTE: THE CONDITION CODE IS SET TO ZERO                  00387700
+*                                                                       00388000
+*        2. NEXT SEQUENTIAL INSTRUCTION (ABNORMAL COMPLETION)           00388300
+*                                                                       00388600
+*           NOTE: THIS EXIT IS FUNCTIONALLY EQUIVALENT TO A NO-OP.      00388900
+*                                                                       00389200
+*********************************************************************** 00389500
+*.                                                                      00389800
+ZAPPAGE  EQU   *                                               %V3M4038 00390100
+         SPACE                                                          00390400
+         DS    0H             EXECUTE CP ASSIST "ZAPPAGE"      %V3M4038 00390700
+DMKVATZP DC    X'E60B',S(ARCHTECT,0(R9))                    ***%V3M4038 00391000
+         SPACE                                                          00391300
+         L     R0,0(,R6)      GET PAGE TABLE ADDRESS           %V3M4038 00391600
+         N     R0,=X'00FFFFF8'   STRIP EAC, INVALID, LEN, KEY  %V3M4038 00391900
+         BCR   8,R14          INACTIVE ENTRY - RETURN          %V3M4038 00392200
+         NI    3(R6),X'FE'    MAKE SEGMENT TABLE ENTRY VALID   %V3M4038 00392500
+         SLR   R15,R15        ZERO LENGTH FOR 2ND OPR. OF MVCL %V3M4038 00392800
+         LA    R1,PINVBIT(R9) INVALID BIT FOR THIS FORMAT      %V3M4038 00393100
+         ICM   R15,B'1000',0(R1)   GET PADDING CHAR = INV. BIT %V3M4038 00393400
+         LH    R1,PAGTLEN(R9) PAGE TABLE LENGTH IN BYTES       %V3M4038 00393700
+         MVCL  R0,R14         SET ALL PAGE TABLE ENTRIES INV.  %V3M4038 00394000
+         BR    R14            ...AND RETURN TO CALLER          %V3M4038 00394300
+         EJECT                                                          00394600
+*---------------------------------------------------------------------* 00395000
+*        ZAPSEGS  -  INVALID ALL ENTRIES IN A SEGMENT TABLE           * 00396000
+*                  -------------------------------                    * 00397000
+*        GPR 6 = SEGMENT TABLE ORIGIN ADDRESS                         * 00397300
+*        GPR 5 = SEGMENT TABLE LENGTH IN BYTES                        * 00397600
+*---------------------------------------------------------------------* 00397900
+*.                                                                      00398200
+*********************************************************************** 00398500
+*                                                                       00398800
+*                                                                       00399100
+*        CP ASSIST INSTRUCTION "ZAPSEGS" - INVALIDATE SHADOW SEG. TABLE 00399400
+*                                                                       00399700
+*                                                                       00400000
+*        OPERANDS:                                                      00400300
+*           1 = ADDRESS OF 'ARCHTECT' (ARCHITECTURE CONTROLS TABLE)     00400600
+*           2 = ADDRESS OF 'EXTSHCR1' (SHADOW SEGMENT TABLE ORIGIN)     00400900
+*                                                                       00401200
+*        REGISTER INPUT:                                                00401500
+*           GPR 8 = EXIT ADDRESS                                        00401800
+*           GPR 9 = VALUE OF 'EXTARCH' FROM ECBLOK (ARCHITECTURE INDEX) 00402100
+*                                                                       00402400
+*        SYSTEM DATA AREAS REFERENCED (BY MODULE WHERE APPLICABLE):     00402700
+*           DMKPSA - 'APSTAT2'                                          00402800
+*           DMKVAT - 'ARCHTECT' TABLE                                   00403000
+*           ECBLOK, SHADOW PAGE TABLE, SHADOW SEGMENT TABLE             00403300
+*                                                                       00403600
+*                                                                       00403900
+*        EXITS:                                                         00404200
+*                                                                       00404500
+*        1. ADDRESS IN GPR 8 (NORMAL COMPLETION)                        00404800
+*                                                                       00405100
+*           REGISTER OUTPUT: NONE CHANGED BY THIS INSTRUCTION           00405400
+*                                                                       00405700
+*        2. NEXT SEQUENTIAL INSTRUCTION (ABNORMAL COMPLETION)           00406000
+*                                                                       00406300
+*           NOTE: THIS EXIT IS FUNCTIONALLY EQUIVALENT TO A NO-OP.      00406600
+*                                                                       00406900
+*********************************************************************** 00407200
+*.                                                                      00407500
+ZAPSEGS  EQU   *                                               %V3M4038 00407800
+         SPACE                                                          00408100
+         DS    0H             EXECUTE CP ASSIST "ZAPSEGS"      %V3M4038 00408400
+DMKVATZS DC    X'E60A',S(ARCHTECT,EXTSHCR1)                 ***%V3M4038 00408700
+         SPACE                                                          00409000
+         L     R6,EXTSHCR1     SHADOW SEGTABLE ORIGIN          %V3M4038 00409300
+         LH    R5,EXTSHLEN       ...LENGTH IN BYTES            %V3M4038 00409600
+         LA    R6,0(0,R6)     24 BITS ONLY, PLEASE             %V3M4038 00409900
+         BCTR  R5,0           DECREMENT COUNT...               %V3M4038 00410200
+         ALR   R5,R6          ...TO MAKE IT A LIMIT            %V3M4038 00410500
+         LA    R4,4(0,0)      INCREMENT                        %V3M4038 00410800
+ZAPSEG1  EQU   *              INVALIDATE ONE ENTRY             %V3M4038 00411100
+         OI    3(R6),X'01'    SET SEGMENT INVALID              %V3M4038 00411400
+         BAL   R14,ZAPPAGE    INVALIDATE PAGE TABLE IF THERE   %V3M4038 00411700
+         BXLE  R6,R4,ZAPSEG1  DO 'EM ALL                       %V3M4038 00412000
+         OI    APSTAT2,CPPTLBR  SET PTLB REQUIRED FOR THIS     %V407594 00412300
+         L     R15,PREFIXB    AND OTHER PROCESSOR              %V407594 00412320
+         OI    APSTAT2-PSA(R15),CPPTLBR  (IF THERE IS ANOTHER) %V407594 00412340
+         BR    R8             AND RETURN                       %V3M4038 00412600
+         SPACE 3                                                        00412900
+*---------------------------------------------------------------------* 00415000
+*        BALREXT  -  EXIT FROM ALL 'BALR' ENTRY POINTS                * 00416000
+*---------------------------------------------------------------------* 00417000
+BALREXT  EQU   *                                                        00418000
+         LM    R0,R15,BALRSAVE                                          00419000
+         BR    R14            RETURN TO CALLER                          00420000
+         EJECT                                                          00421000
+*.                                                                      00422000
+* SUBROUTINE NAME -                                                     00423000
+*                                                                       00424000
+*        DMKVATRN                                                       00425000
+*                                                                       00426000
+* FUNCTION -                                                            00427000
+*                                                                       00428000
+*        TO PROVIDE VIRTUAL-VIRTUAL TO REAL ADDRESS TRANSLATION.        00429000
+*                                                                       00430000
+* ATTRIBUTES -                                                          00431000
+*                                                                       00432000
+*        REENTRANT, RESIDENT, CALLED VIA SVC                            00433000
+*                                                                       00434000
+* ENTRY POINTS -                                                        00435000
+*                                                                       00436000
+*        DMKVATRN - VIRTUAL-VIRTUAL TO REAL ADDRESS                     00437000
+*        DMKVATLA - VIRTUAL-VIRTUAL TO VIRTUAL ADDRESS                  00438000
+*                                                                       00439000
+* ENTRY CONDITIONS -                                                    00440000
+*                                                                       00441000
+*        GPR 15 = ENTRY POINT ADDRESS                                   00442000
+*        GPR 14 = RETURN ADDRESS                                        00443000
+*        GPR 13 = ADDRESS OF STANDARD SAVE AREA                         00444000
+*        GPR 11 = VMBLOK ADDRESS                                        00445000
+*        GPR  3 = VIRTUAL-VIRTUAL ADDRESS REFERENCED                    00446000
+*                                                                       00447000
+* EXIT CONDITIONS -                                                     00448000
+*                                                                       00449000
+*        GPR 0 = 0  -  TRANSLATION SUCCESSFUL                           00450000
+*        GPR 2 = REAL ADDRESS CORRESPONDING TO VIRT-VIRT ADDR           00451000
+*    OR  GPR 0 < 0  -  REFLECT PAGING EXCEPTION TO USER                 00452000
+*        AND GPR 1  =  INTERRUPT CODE OF EXCEPTION                      00453000
+*        GPRS 3-15 UNCHANGED                                            00454000
+*                                                                       00455000
+* CALLS TO OTHER ROUTINES -                                             00456000
+*                                                                       00457000
+*        NONE                                                           00458000
+*                                                                       00459000
+* EXTERNAL REFERENCES -                                                 00460000
+*                                                                       00461000
+*        NONE                                                           00462000
+*                                                                       00463000
+* TABLES / WORK AREAS -                                                 00464000
+*                                                                       00465000
+*        VMBLOK, ECBLOK                                                 00466000
+*                                                                       00467000
+         EJECT                                                          00468000
+* REGISTER USAGE -                                                      00469000
+*                                                                       00470000
+*        GPR 12 = BASE REGISTER                                         00471000
+*        GPR 11 = VMBLOK ADDRESSABILITY                                 00472000
+*        GPR 10 = ECBLOK ADDRESSABILITY                                 00473000
+*        GPR  9 = ARCHITECTURE CONTROL VARIABLE INDEX                   00474000
+*        GPR  7 = VIRTUAL-VIRTUAL ADDRESS REFERENCED                    00475000
+*        GPRS 0-6 = WORK REGISTERS                                      00476000
+*        GPRS 13-15 = LINK AND SAVE AREA REGISTERS                      00477000
+*                                                                       00478000
+* OPERATION -                                                           00479000
+*                                                                       00480000
+*        THE VIRTUAL SEGMENT AND PAGE TABLES ARE REFERENCED TO          00481000
+*        DETERMINE IF A VIRTUAL PAGING OR TRANSLATION EXCEPTION         00482000
+*        SHOULD BE REFLECTED TO THE VIRTUAL MACHINE.                    00483000
+*        THE VIRTUAL SEGMENT TABLE IS REFERENCED TO DETERMINE IF THE    00484000
+*        VIRTUAL SEGMENT IS AVAILABLE. IF IT IS, THE VIRTUAL PAGE       00485000
+*        TABLES ARE REFERENCED VIA DMKPTRAN AND THE TRANSLATION         00486000
+*        IS PERFORMED.                                                  00487000
+*             IF ANY ERROR IN TRANSLATION TABLE FORMAT IS DETECTED      00488000
+*        DURING THE TRANSLATION PROCESS, STEPS ARE TAKEN TO FORCE       00489000
+*        A TRANSLATION SPECIFICATION EXCEPTION (PROGRAM INTERRUPT       00490000
+*        CODE X'12'), OR AN ADDRESSING EXCEPTION - CODE X'05'.          00491000
+*.                                                                      00492000
+         SPACE 2                                                        00493000
+         USING DMKVATLA,R12                                             00494000
+DMKVATLA DS    0D             TRANSLATE THIRD-LEVEL TO SECOND-LEVEL     00495000
+         SLR   R0,R0          SET RETURN CODE ZERO RIGHT AWAY           00496000
+         ENTER                                                          00497000
+         L     R12,=A(DMKVAT)      MODULE BASE ADDRESS                  00498000
+         USING DMKVAT,R12                                               00499000
+         SPACE                                                          00500000
+         BAL   R6,SETUPAT     SETUP FOR TRANSLATE PROCESSING            00501000
+         BAL   R6,CHKFORM     VALIDATE C-REG 0 VALUES                   00502000
+         BNZ   LRAEXCP        NO GOOD -- FORCE TRANS SPEC INTRPT        00503000
+         LR    R7,R3          THIRD-LEVEL ADDRESS TO GR7                00504000
+         SPACE                                                          00505000
+         L     R1,SEGMASK(R9) SEGMENT MASK FROM TABLE                   00506000
+         LH    R2,SEGSHFT(R9) SHIFT COUNT FOR JUSTIFY                   00507000
+         NR    R1,R7          EXTRACT SEGMENT NUMBER FROM ADDRESS       00508000
+         SRL   R1,0(R2)       SHIFT TO INDEX FORM                       00509000
+         CH    R1,EXTVSEGS    INDEX WITHIN TABLE LENGTH ?               00510000
+         LA    R1,0(R1,R8)         POINT TO ACTUAL ENTRY (VIRTUAL)      00511000
+         BNL   LRALNTH        OOPS...TABLE LENGTH VIOLATION             00512000
+         BAL   R3,TRANS21     ACCESS THE VIRTUAL SEGTABLE ENTRY         00513000
+         BC    2,LRADREX      OOPS...GENERATED AN INVALID ADDRESS       00514000
+         L     R3,=X'0F000006'     "MUST-BE-ZERO" BITS IN SEGTABLE      00515000
+         L     R4,0(0,R2)     PICK UP VIRTUAL SEGTABLE ENTRY VALUE      00516000
+         TM    3(R2),X'01'    IS THE SEGMENT AVAILABLE ?       @VA03696 00517000
+         BNZ   LRASEGM        NO..CC = 1 FOR LRA               @VA03696 00518000
+         NR    R3,R4          TEST FOR VALID ENTRY FORMAT               00519000
+         BNZ   LRAEXCP        NOPE -- FORCE TRANS SPEC INTRPT           00520000
+         N     R4,=X'00FFFFF8'     STRIP ASSORTED BITS FROM ADDRESS     00521000
+         L     R1,PAGEMSK(R9)      PAGE NUMBER MASK FROM TABLE          00522000
+         LH    R3,PAGSHFT(R9)      SHIFT COUNT FOR JUSTIFY              00523000
+         NR    R1,R7          EXTRACT PAGE NUMBER FROM ADDRESS          00524000
+         SRL   R1,0(R3)       CONVERT TO INDEX FORM                     00525000
+         SLR   R3,R3               SET TO CHECK LENGTH OF TABLE         00526000
+         IC    R3,0(0,R2)     PAGE-TABLE-LENGTH-CODE FROM SEGTABLE      00527000
+         SRL   R3,4(0)        ADJUST FROM MACHINE FORMAT                00528000
+         LA    R3,1(0,R3)     ...TO INDEX LIMIT IN BYTES                00529000
+         MH    R3,PAGINCR(R9) ...                                       00530000
+         CR    R1,R3          ENTRY WITHIN THE DEFINED TABLE ?          00531000
+         LA    R1,0(R1,R4)         POINT TO ACTUAL ENTRY                00532000
+         BNL   LRALNTH        NOPE - LENGTH VIOLATION                   00533000
+         BAL   R3,TRANS21     ACCESS THE PAGE-TABLE ENTRY ITSELF        00534000
+         BC    2,LRADREX      OOPS...GENERATED AN INVALID ADDRESS       00535000
+         LR    R3,R1          SAVE THE VIRTUAL ENTRY ADDRESS            00536000
+         LA    R15,LRAEXCP    ERROR RETURN FOR INVALID FORMAT           00537000
+         BAL   R14,CHEKPTE    VALIDATE AND EXTRACT ADDRESS FROM PTE     00538000
+         BNZ   LRAPAGE        PAGE NOT AVAILABLE - CC = 2               00539000
+         L     R1,SEGMASK(R9)      SETUP TO PROVIDE THE TRANSLATION     00540000
+         O     R1,PAGEMSK(R9)      ...                                  00541000
+         NR    R1,R7          GR1 = ADDRESS MINUS PAGE-DISPLACEMENT     00542000
+         XR    R7,R1          GR7 = PAGE-DISPLACEMENT ONLY              00543000
+         ALR   R7,R6          ADD PAGE BASE ADDRESS TO DISPLACEMENT     00544000
+         ST    R7,SAVER2      PASS RESULT BACK TO DMKPRVLG              00545000
+         EXIT  ,                                                        00546000
+         EJECT                                                          00547000
+         USING DMKVATRN,R12                                             00548000
+DMKVATRN DS    0D             TRANSLATE THIRD-LEVEL TO FIRST-LEVEL      00549000
+         SLR   R0,R0          SET RETURN CODE ZERO RIGHT AWAY           00550000
+         ENTER                                                          00551000
+         L     R12,=A(DMKVAT)      MODULE BASE ADDRESS                  00552000
+         USING DMKVAT,R12                                               00553000
+         SPACE                                                          00554000
+         BAL   R6,SETUPAT     SETUP FOR TRANSLATE PROCESSING            00555000
+         TM    VMESTAT,VMBADCR0    IS THE C-REG 0 VALUE VALID ?         00556000
+         BO    GIVE012             NO -- GIVE TRANS SPEC INTERRUPT      00557000
+         LR    R7,R3          THIRD-LEVEL ADDRESS TO GR7                00558000
+         SPACE                                                          00559000
+         L     R5,SEGMASK(R9) SEGMENT NUMBER MASK                       00560000
+         LH    R2,SEGSHFT(R9) SHIFT COUNT FOR JUSTIFY                   00561000
+         NR    R5,R7          EXTRACT SEGMENT NUMBER FROM ADDRESS       00562000
+         SRL   R5,0(R2)       JUSTIFY FOR USE AS TABLE INDEX            00563000
+         CH    R5,EXTVSEGS    IS THE ENTRY WITHIN THE TABLE ?           00564000
+         BNL   GIVE010        NO -- SEGMENT EXCEPTION                   00565000
+         LA    R1,0(R5,R8)    ADD INDEX TO TABLE BASE ADDRESS (VIRT)    00566000
+         BAL   R3,TRANS21     ACCESS THE VIRTUAL SEGTABLE ENTRY         00567000
+         BC    2,GIVE005      OOPS...GENERATED AN INVALID ADDRESS       00568000
+         L     R3,=X'0F000006'     "MUST-BE-ZERO" BITS IN SEGTABLE      00569000
+         L     R4,0(0,R2)     PICK UP VIRTUAL SEGTABLE ENTRY DATA       00570000
+         STCM  R4,B'1000',EXTCOPY  SAVE PAGE-TABLE LENGTH CODE          00571000
+         TM    3(R2),X'01'    SEGMENT AVAILABLE ?              @VA03696 00572000
+         BNZ   GIVE010        NO..REFLECT SEGMENT EXCEPTION... @VA03696 00573000
+         NR    R3,R4          TEST FOR VALID ENTRY FORMAT               00574000
+         BNZ   GIVE012        NO GOOD -- FORCE TRANS SPEC INTRPT        00575000
+         N     R4,=X'00FFFFF8'     STRIP ASSORTED BITS FROM ADDRESS     00576000
+         L     R6,PAGEMSK(R9)      PAGE NUMBER MASK FROM TABLE          00577000
+         LH    R3,PAGSHFT(R9)      SHIFT COUNT FOR JUSTIFY              00578000
+         NR    R6,R7          EXTRACT PAGE NUMBER FROM ADDRESS          00579000
+         SRL   R6,0(R3)       SHIFT FOR USE AS TABLE INDEX              00580000
+         SLR   R3,R3          SETUP TO CHECK FOR LENGTH VIOLATION       00581000
+         IC    R3,0(0,R2)     PAGE TABLE LENGTH CODE FROM SEGTABLE      00582000
+         SRL   R3,4(0)        ADJUST FROM MACHINE FORMAT                00583000
+         LA    R3,1(0,R3)     ...TO INDEX LIMIT IN BYTES                00584000
+         MH    R3,PAGINCR(R9) ...                                       00585000
+         CR    R6,R3          IS THE ENTRY WITHIN THE DEFINED TABLE ?   00586000
+         BNL   GIVE011        NO -- PAGE EXCEPTION                      00587000
+         LA    R1,0(R6,R4)    ADD INDEX TO PAGE TABLE BASE ADDRESS      00588000
+         BAL   R3,TRANS21     ACCESS THE PAGE TABLE ENTRY               00589000
+         BC    2,GIVE005      OOPS...GENERATED AN INVALID ADDRESS       00590000
+         LR    R4,R6          SAVE PAGE TABLE INDEX VALUE               00591000
+         LA    R15,GIVE012    ERROR RETURN FOR INVALID FORMAT           00592000
+         BAL   R14,CHEKPTE    VALIDATE AND EXTRACT ADDRESS FROM PTE     00593000
+         BNZ   GIVE011        PAGE EXCEPTION                            00594000
+         L     R1,SEGMASK(R9)      SETUP FOR ACTUAL TRANSLATION         00595000
+         O     R1,PAGEMSK(R9)      ...                                  00596000
+         NR    R1,R7          GR1 = ADDRESS MINUS PAGE DISPLACEMENT     00597000
+         XR    R7,R1          GR7 = PAGE DISPLACEMENT ALONE             00598000
+         LR    R1,R6          USE PAGE BASE ADDRESS FOR 'TRANS'         00599000
+         BAL   R3,TRANS21     GET VIRTUAL PAGE IN REAL STORAGE          00600000
+         BC    2,GIVE005      OOPS...GENERATED AN INVALID ADDRESS       00601000
+         ALR   R7,R2          ADD REAL PAGE BASE TO DISPLACEMENT        00602000
+         ST    R7,SAVER2      PASS RESULT BACK TO CALLER                00603000
+         BAL   R8,SHADSET     GO FILL IN SHADOW PAGE TABLE ENTRY        00604000
+         SPACE                                                          00605000
+TRNEXIT  EQU   *              RETURN TO CALLER                          00606000
+         EXIT                                                           00607000
+         SPACE 2                                                        00608000
+GIVE005  EQU   *              RETURN INTERRUPT INDICATOR X'005'         00609000
+         LA    R1,X'05'       ADDRESSING EXCEPTION                      00610000
+         B     GIVEINT                                                  00611000
+GIVE010  EQU   *              RETURN INTERRUPT INDICATOR X'010'         00612000
+         LA    R1,X'10'       SEGMENT-LEVEL EXCEPTION                   00613000
+         B     GIVEINT                                                  00614000
+GIVE011  EQU   *              RETURN INTERRUPT INDICATOR X'011'         00615000
+         LA    R1,X'11'       PAGE-LEVEL EXCEPTION                      00616000
+         B     GIVEINT                                                  00617000
+GIVE012  EQU   *              RETURN INTERRUPT INDICATOR X'012'         00618000
+         LA    R1,X'12'       TRANSLATION TABLES INVALID FORMAT         00619000
+GIVEINT  EQU   *              INDICATE EXCEPTION RETURN                 00620000
+         LA    R0,1(0)        FORCE R0 POSITIVE                         00621000
+         ST    R0,SAVER0      PASS BACK TO CALLER                       00622000
+         ST    R1,SAVER1      ...AS WELL AS R1 VALUE                    00623000
+         B     TRNEXIT        RETURN STUFF ALREADY IN R1                00624000
+         SPACE 2                                                        00625000
+LRAEXCP  LA    R6,X'12'       TRANSLATION SPECIFICATION EXCEPTION       00626000
+         B     FORCING             GO FORCE A VIRTUAL INTERRUPT         00627000
+LRADREX  LA    R6,X'05'       ADDRESSING EXCEPTION DURING TRANSLATION   00628000
+         SPACE                                                          00629000
+FORCING  L     R7,SAVER3      THIRD-LEVEL ADDRESS TO GR7                00630000
+         SVC   16             RELEASE CALLER'S SAVE AREA                00631000
+         B     VATEXCP        ...FORCE INTERRUPT THRU DMKPRGSM          00632000
+         SPACE                                                          00633000
+LRALNTH  ST    R1,SAVER2      PASS BACK ENTRY ADDRESS                   00634000
+         B     GIVE012        ...AND SHOW TABLE LENGTH VIOLATION        00635000
+LRASEGM  ST    R1,SAVER2      PASS BACK SEGTABLE ENTRY ADDRESS          00636000
+         B     GIVE010        ...AND SHOW SEGMENT UNAVAILABLE           00637000
+LRAPAGE  ST    R3,SAVER2      PASS BACK PAGE TABLE ENTRY ADDRESS        00638000
+         B     GIVE011        ...AND SHOW PAGE UNAVAILABLE              00639000
+         EJECT                                                          00640000
+*---------------------------------------------------------------------* 00641000
+*        SHADSET  -  FILL IN SHADOW TABLE ENTRY FOR NEW PAGE          * 00642000
+*---------------------------------------------------------------------* 00643000
+SHADSET  EQU   *                                                        00644000
+         L     R7,EXTSHCR1    SHADOW SEGTABLE ORIGIN REGISTER           00645000
+         N     R7,=X'00FFFFC0'     REDUCE TO ACTUAL ADDRESS             00646000
+         LA    R6,0(R5,R7)    POINT TO REFERENCED SEGTABLE ENTRY        00647000
+         TM    3(R6),X'01'    IS THE SEGMENT MARKED AVAILABLE ?         00648000
+         BO    SHADCHK        NO -- GO SEE IF WE NEED A PAGE TABLE      00649000
+SHADPAG  EQU   *              SET PAGE ADDRESS IN PAGE TABLE            00650000
+         L     R7,0(0,R6)     PICK UP ACTUAL ENTRY DATA                 00651000
+         LA    R7,0(R4,R7)    ADD PAGE TABLE INDEX TO PAGE TABLE BASE   00652000
+         SRL   R2,8(0)        ADJUST PAGE ADDRESS FOR PTE UPDATE        00653000
+         LH    R3,PTEINCR(R9) SIZE OF PAGE TABLE ENTRY                  00654000
+         N     R3,F4          CONVERT TO INDEX                          00655000
+         EX    0,STORPTE(R3)  STORE REAL ADDRESS INTO SHADOW PTE        00656000
+         IC    R1,EXTCOPY     GET THE LENGTH                            00657000
+         STC   R1,0(R6)       STORE IN SHADOW SEG TABLE                 00658000
+         BR    R8             RETURN TO CALLER                          00659000
+         SPACE                                                          00660000
+STORPTE  STH   R2,0(0,R7)     SHORT ENTRIES                             00661000
+         ST    R2,0(0,R7)     LONG ENTRIES                              00662000
+         SPACE                                                          00663000
+SHADCHK  EQU   *              TEST FOR INACTIVE SEGTABLE ENTRY          00664000
+         BAL   R14,ZAPPAGE    INVALIDATE PAGE TABLE, IF ANY             00665000
+         BNZ   SHADPAG        THERE IS ONE - FILL IT IN                 00666000
+         BAL   R3,GETPAGT     GET NEW SHADOW PAGE TABLE                 00667000
+         BAL   R14,ZAPPAGE    ...INVALIDATE IT                          00668000
+         B     SHADPAG        ...AND FILL IN ONE ENTRY                  00669000
+         EJECT                                                          00670000
+*.                                                                      00671000
+* SUBROUTINE NAME -                                                     00672000
+*                                                                       00673000
+*        DMKVATEX                                                       00674000
+*                                                                       00675000
+* FUNCTION -                                                            00676000
+*                                                                       00677000
+*        TO SERVICE PAGE OR SEGMENT EXCEPTIONS FOR VIRTUAL EXTENDED-    00678000
+*        CONTROL MACHINES.                                              00679000
+*                                                                       00680000
+* ATTRIBUTES -                                                          00681000
+*                                                                       00682000
+*        REENTRANT, RESIDENT, INVOKED FROM DMKPRGIN OR DMKPRVLG         00683000
+*                                                                       00684000
+* ENTRY POINTS -                                                        00685000
+*                                                                       00686000
+*        DMKVATPX - SERVICE PAGING EXCEPTION FOR V370R                  00687000
+*        DMKVATSX - SERVICE SEGMENT EXCEPTION FOR V370R                 00688000
+*        DMKVATEX - SIMULATE PAGE OR SEGMENT EXCEPTION                  00689000
+*        DMKVATPF - SIMULATE A PSEUDO PAGE FAULT                        00690000
+*                                                                       00691000
+* ENTRY CONDITIONS -                                                    00692000
+*                                                                       00693000
+*        GPR 12 = ADDRESS OF ENTRY POINT                                00694000
+*        GPR 11 = VMBLOK ADDRESS                                        00695000
+*        VIRTUAL MACHINE IS KNOWN TO BE IN EXTENDED-CONTROL MODE        00696000
+*        AND ADDRESS-TRANSLATION MODE.                                  00697000
+*                                                                       00698000
+* EXIT CONDITIONS -                                                     00699000
+*                                                                       00700000
+*        A PAGE HAS BEEN BROUGHT IN FOR THE VIRTUAL MACHINE, OR         00701000
+*        A TRANSLATION INTERRUPT HAS BEEN REFLECTED. SHADOW TABLES      00702000
+*        AND ECBLOK HAVE BEEN UPDATED.                                  00703000
+*                                                                       00704000
+* CALLS TO OTHER ROUTINES -                                             00705000
+*                                                                       00706000
+*        DMKPTRAN - TO BRING IN A USER PAGE                             00707000
+*        DMKDSPCH - TO RE-DISPATCH VIRTUAL MACHINE                      00708000
+*        DMKPRGSM - TO SIMULATE A PROGRAM INTERRUPT FOR VM              00709000
+*                                                                       00710000
+* EXTERNAL REFERENCES -                                                 00711000
+*                                                                       00712000
+*        NONE                                                           00713000
+*                                                                       00714000
+* TABLES / WORK AREAS -                                                 00715000
+*                                                                       00716000
+*        ECBLOK, VMBLOK, SHADOW TABLES                                  00717000
+*                                                                       00718000
+* REGISTER USAGE -                                                      00719000
+*                                                                       00720000
+*        GPR 12 = BASE REGISTER                                         00721000
+*        GPR 11 = VMBLOK ADDRESSABILITY                                 00722000
+*        GPR 10 = ECBLOK ADDRESSABILITY                                 00723000
+*        GPR  9 = ARCHITECTURE CONTROL VARIABLE INDEX                   00724000
+*        GPR  7 = VIRTUAL-VIRTUAL ADDRESS REFERENCED                    00725000
+*        GPRS 0-6 = WORK REGISTERS                                      00726000
+*        GPRS 13-15 = EXTERNAL LINKAGE REGISTERS                        00727000
+*                                                                       00728000
+* OPERATION -                                                           00729000
+*                                                                       00730000
+*        THE VIRTUAL SEGMENT AND PAGE TABLES ARE EXAMINED TO            00731000
+*        DETERMINE IF THE VIRTUAL MACHINE EXPECTS THE PAGE              00732000
+*        AND/OR SEGMENT TO BE AVAILABLE. IF NOT, THE PAGING             00733000
+*        INTERRUPT IS REFLECTED TO THE VIRTUAL MACHINE.                 00734000
+*             IF ANY TRANSLATION TABLE OR CONTROL REGISTER FORMAT       00735000
+*        ERRORS ARE DETECTED, A TRANSLATION SPECIFICATION EXCEPTION     00736000
+*        (PROGRAM INTERRUPT X'12') IS SIMULATED FOR THE VIRTUAL         00737000
+*        MACHINE.                                                       00738000
+*             WHEN THE VIRTUAL MACHINE EXPECTS THE PAGE TO BE IN        00739000
+*        CORE AND THERE ARE NO ERRORS IN THE TABLES, DMKPTRAN IS        00740000
+*        CALLED TO BRING THE PAGE INTO REAL MEMORY. SHADOW PAGE         00741000
+*        TABLES ARE UPDATED AND THE MACHINE IS RE-DISPATCHED VIA        00742000
+*        GOTO DMKDSPCH.                                                 00743000
+*        IF PSEUDO PAGE FAULT HANDLING HAS BEEN REQUESTED AND THE       00744000
+*        2ND LEVEL MEMORY PAGE IS NOT AVAILABLE, A PSEUDO PAGE FAULT    00745000
+*        IS REFLECTED TO THE VIRTUAL MACHINE VIA DMKPRGSM. WHEN THE     00746000
+*        PAGE IS FINALLY AVAILABLE, A PAGE AVAILABLE INTERRUPT WILL     00747000
+*        BE STACKED FOR DISPATCH, WHICH WILL PRESENT IT AT THE PROPER   00748000
+*        TIME VIA A GOTO TO DMKVATEX.                                   00749000
+*.                                                                      00750000
+         SPACE 2                                                        00751000
+*---------------------------------------------------------------------* 00752000
+*        SETUPEX  -  INITIAL SETUP FOR EXCEPTION HANDLING             * 00753000
+*        SETUPAT  -  INITIAL SETUP FOR TRANSLATION ROUTINES           * 00754000
+*---------------------------------------------------------------------* 00755000
+SETUPEX  EQU   *              SETUP FOR EXCEPTION ROUTINES              00756000
+         SLR   R13,R13        INDICATE ENTRY VIA 'GOTO'                 00757000
+         L     R7,TREXADD     EXCEPTION ADDRESS FROM PSA                00758000
+         LOCK  OBTAIN,TYPE=SYS,SPIN=NO  TRY FOR SYS-LOCK       @V407593 00758200
+         BZ    SETUPAT        GOTIT, KEEP GOING                @V407593 00758400
+         BAL   R14,STKDEFER   DIDNT GET IT...STACK A DEFER REQ @V407593 00758600
+SETUPAT  EQU   *              SETUP FOR TRANSLATE ROUTINES              00759000
+         L     R10,VMECEXT    EXTENSION BLOCK ADDRESS                   00760000
+         L     R8,EXTCR1      BASE ADDRESS OF VIRTUAL SEGTABLE          00761000
+         N     R8,=X'00FFFFC0'    REDUCE TO ACTUAL ADDRESS              00762000
+         LH    R9,EXTARCH     PICK UP ARCHITECTURE-CONTROL INDEX        00763000
+         LTR   R13,R13        WHERE DID WE COME FROM ?                  00764000
+         BCR   7,R6           TRANSLATE ENTRY - RETURN TO ENTRY POINT   00765000
+         B     SEGMENT        EXCEPTION ENTRY - GET VIRTUAL SEGTABLE    00766000
+         SPACE                                                          00767000
+TRANS21  EQU   *              COMMON 'TRANS' FOR SPACE-SAVING           00768000
+         TRANS 2,1,OPT=(BRING,DEFER)                                    00769000
+         BR    R3                                                       00770000
+         EJECT                                                          00771000
+*---------------------------------------------------------------------* 00772000
+*     DMKVATSX  -  INVOKED FROM DMKPRGIN WHEN A SEGMENT EXCEPTION     * 00773000
+*        IS RECEIVED FOR A VIRTUAL RELOCATE MACHINE. THE VM IS KNOWN  * 00774000
+*        TO BE IN EXTENDED-CONTROL MODE, TRANSLATE ON.                * 00775000
+*---------------------------------------------------------------------* 00776000
+DMKVATSX EQU   *                                                        00777000
+         USING *,R12                                                    00778000
+         L     R12,=A(DMKVAT) MODULE BASE ADDRESS                       00779000
+         USING DMKVAT,R12                                               00780000
+         SPACE 2                                                        00781000
+         BAL   R6,SETUPEX     SET UP FOR EXCEPTION PROCESSING           00782000
+         SPACE                                                          00783000
+         L     R2,0(0,R2)     ENTRY DATA FROM VIRTUAL SEGTABLE ENTRY    00784000
+         STCM  R2,B'1000',EXTCOPY  SAVE PAGE-TABLE LENGTH CODE          00785000
+         L     R6,EXTSHCR1    SHADOW SEGTABLE ORIGIN                    00786000
+         LA    R6,0(R5,R6)    ADDRESSED SLOT IN SHADOW SEGTABLE         00787000
+         BAL   R14,ZAPPAGE    INVALIDATE PAGE TABLE, IF ANY             00788000
+         BNZ   VATEXIT        THERE IS ONE - ALL DONE                   00789000
+         BAL   R3,GETPAGT     ALLOCATE NEW SHADOW PAGE TABLE            00790000
+         BAL   R14,ZAPPAGE    SET PAGE TABLE INVALID                    00791000
+         B     VATEXIT        ...AND RETURN VIA DMKDSPCH                00792000
+         SPACE 2                                                        00793000
+SEGMENT  EQU   *              LOCATE VIRTUAL SEGTABLE ENTRY             00794000
+         TM    VMESTAT,VMBADCR0    VALID C-REG 0 VALUE ?                00795000
+         BO    TRNEXCP             NO -- FORCE TRANSLATION EXCEPTION    00796000
+         L     R5,SEGMASK(R9) SEGMENT NUMBER MASK                       00797000
+         NR    R5,R7          SEG.NO. OF EXCEPTION ADDR.                00798000
+         LH    R1,SEGSHFT(R9) SHIFT COUNT FOR JUSTIFY                   00799000
+         SRL   R5,0(R1)       JUSTIFY SEGMENT NUMBER FOR INDEXING       00800000
+         CH    R5,EXTVSEGS    WITHIN SEGMENT TABLE?                     00801000
+         BNL   SEGEXCP        NO - SIMULATE EXCEPTION                   00802000
+         LA    R1,0(R5,R8)    ADDRESSED SLOT IN VIRTUAL SEGTABLE        00803000
+         BAL   R3,TRANS21     GET HIS VIRTUAL SEGTABLE IN CORE          00804000
+         BC    2,ADREXCP      OOPS... GENERATED AN INVALID ADDRESS      00805000
+         TM    3(R2),X'01'    SEGMENT AVAILABLE ?              @VA03696 00806000
+         BNZ   SEGEXCP        NO..REFLECT SEGMENT EXCEPTION    @VA03696 00807000
+         TM    0(R2),X'0F'    TEST 'MUST-BE-ZERO' BITS IN SEGTABLE      00808000
+         BNZ   TRNEXCP        TRANSLATION SPECIFICATION EXCEPTION       00809000
+         TM    3(R2),X'06'    ...DITTO                                  00810000
+         BNZ   TRNEXCP        ...DITTO                                  00811000
+         BR    R6             RETURN - EVERYTHING LOOKS O.K.            00812000
+STKDEFER DC    0H'0'          HERE TO FILL IN AND STACK        @V407593 00812050
+         AIF (NOT &AP).APCHK5                                           00812060
+         L     R15,VMDFTPNT   DEFER BLOCK FOR SYNC. EVENTS     @V407593 00812100
+         USING CPEXBLOK,R15   WHICH LOOKS LIKE A CPEXBLOCK     @V407593 00812150
+         STM   R0,R15,CPEXREGS     SAVE CALLERS REGS.          @V407593 00812200
+         LA    R0,DEFEREND    GET RETURN POINT                 @V407593 00812250
+         ST    R0,CPEXADD     FOR UNSTACK OF DEFER-BLOK        @V407593 00812300
+         DROP  R15                                             @V407593 00812350
+         LR    R1,R15         R1 HAS DEFER-BLOK ADDR...        @V407593 00812400
+         CALL  DMKSTKDE       AND STACK IT                     @V407593 00812450
+         GOTO  DMKDSPRU       GO RUN ANOTHER USER               V4M0005 00812500
+*     HERE ON UNSTACK OF DEFER BLOCK                                    00812550
+.APCHK5  ANOP                                                           00812560
+DEFEREND BR    R14            RETURN TO ORIGINAL CALLER        @V407593 00812600
+         EJECT                                                          00813000
+*---------------------------------------------------------------------* 00814000
+*    DMKVATPX  -  INVOKED FROM DMKPRGIN WHEN A PAGING EXCEPTION IS    * 00815000
+*        RECEIVED FOR A VIRTUAL RELOCATE MACHINE. THE VM IS KNOWN     * 00816000
+*        IS KNOWN TO BE IN EXTENDED-CONTROL MODE, TRANSLATE ON.       * 00817000
+*---------------------------------------------------------------------* 00818000
+DMKVATPX EQU   *              PAGING EXCEPTION ON V370R                 00819000
+         USING *,R12                                                    00820000
+         L     R12,=A(DMKVAT) MODULE BASE ADDRESS                       00821000
+         USING DMKVAT,R12                                               00822000
+         SPACE 2                                                        00823000
+         BAL   R6,SETUPEX     DO VARIOUS SETUP OPERATIONS               00824000
+         SPACE                                                          00825000
+         SLR   R3,R3                                                    00826000
+         IC    R3,0(0,R2)     GET SEGMENT PAGE-TABLE LENGTH CODE        00827000
+         SRL   R3,4(0)        ...RIGHT-JUSTIFIED                        00828000
+         LA    R3,1(0,R3)     BUMP ONE FOR ZERO BASE                    00829000
+         MH    R3,PAGINCR(R9) COMPUTE LENGTH IN BYTES                   00830000
+         L     R4,PAGEMSK(R9) PAGE-NUMBER MASK                          00831000
+         NR    R4,R7          EXTRACT PAGE NUMBER FROM VIRTUAL ADDRESS  00832000
+         LH    R6,PAGSHFT(R9) SHIFT COUNT FOR JUSTIFY                   00833000
+         SRL   R4,0(R6)       CONVERT INTO PAGE-TABLE INDEX             00834000
+         CR    R4,R3          WITHIN VIRTUAL PAGE TABLE LENGTH ?        00835000
+         BNL   PAGEXCP        NO -- SIMULATE PAGE EXCEPTION             00836000
+         L     R1,0(0,R2)     PICK UP PAGE TABLE ADDRESS                00837000
+         STCM  R1,B'1000',EXTCOPY  SAVE PAGE-TABLE LENGTH CODE          00838000
+         N     R1,=X'00FFFFF8'    STRIP RANDOM GARBAGE FROM ENTRY       00839000
+         LA    R1,0(R4,R1)    ACTUAL PAGE TABLE ENTRY ADDRESS           00840000
+         BAL   R3,TRANS21     GET PAGE TABLE DATA                       00841000
+         BC    2,ADREXCP      OOPS.. GENERATED AN INVALID ADDRESS       00842000
+         LA    R15,TRNEXCP    RETURN FOR TRANSLATION EXCEPTION          00843000
+         BAL   R14,CHEKPTE    IS THE ENTRY VALID?                       00844000
+         BO    PAGEXCP        NO - REFLECT INTERRUPT                    00845000
+         LCTL  C1,C1,VMSEG    GET SECOND-LEVEL SEGTABLE ORIGIN @V2A3120 00846000
+         LRA   R2,0(0,R6)     TRY FOR PAGE AVAILABLE           @V2A3120 00847000
+         BNZ   CHEKSPF        NOPE - MAYBE PSEUDO PAGE FAULT   @V2A3120 00848000
+         BAL   R8,SHADSET     GO FILL IN SHADOW PAGE TABLE              00849000
+         SPACE 2                                                        00850000
+VATEXIT  EQU   *              FAST DISPATCH EXIT                        00851000
+         NI    VMPEND,X'FF'-VMPERPND    'PER' WILL COME IN AGAIN        00852000
+         NI    VMRSTAT,X'FF'-VMEXWAIT   OUT OF EXECUTION WAIT           00853000
+         GOTO  DMKDSPCH       RETURN TO DISPATCHER                      00854000
+         EJECT                                                          00855000
+CHEKSPF  EQU   *              TEST FOR 'PAGEX ON', I/O ENABLED @V2A3120 00856000
+         LR    R1,R6          SECOND-LEVEL ADDRESS TO GR1      @V2A3120 00857000
+         LA    R2,BRING+DEFER NORMAL PARMS FOR DMKPTRAN        @V2A3120 00858000
+         TM    VMPSTAT,VMPAGEX     PSEUDO PAGE FAULTS WANTED ? @V2A3120 00859000
+         BZ    GETPAGE             NO -- JUST GET THE PAGE     @V2A3120 00860000
+         TM    VMPSW,VMIOPND       ENABLED FOR I/O INTERRUPTS ?@V2A3120 00861000
+         BZ    GETPAGE             NO -- JUST GET THE PAGE     @V2A3120 00862000
+         LA    R2,BRING       DON'T WAIT FOR THE PAGE          @V2A3120 00863000
+         LA    R3,PAGERES     RETURN WHEN PAGE IS RESIDENT     @V2A3120 00864000
+GETPAGE  EQU   *              START THE PAGE MOVING            @V2A3120 00865000
+         CALL  DMKPTRAN       PARMS ARE SET IN GR2             @V2A3120 00866000
+         BC    2,ADREXCP      VIRTUAL ADDRESSING EXCEPTION     @V2A3120 00867000
+         BC    4,PSEUDOF      PSEUDO PAGE FAULT REQUIRED       @V2A3120 00868000
+         BAL   R8,SHADSET     FILL IN THE SHADOW TABLES        @V2A3120 00869000
+         B     VATEXIT        RETURN TO THE DISPATCHER         @V2A3120 00870000
+         SPACE 2                                                        00871000
+PSEUDOF  EQU   *              REFLECT FIRST PSEUDO PAGE FAULT  @V2A3120 00872000
+         LR    R7,R1          EXCEPTION ADDRESS TO GR7         @V2A3120 00873000
+         LA    R6,X'0014'     PROGRAM INTERRUPT CODE X'0014'   @V2A3120 00874000
+         B     VATEXCP        SIMULATE VIRTUAL PROGRAM INTRPT  @V2A3120 00875000
+         EJECT                                                          00876000
+*---------------------------------------------------------------------* 00877000
+*        DMKVATPF - PSEUDO PAGE FAULT SUPPORT FOR ECMODE, NON-        * 00878000
+*                   TRANSLATE VIRTUAL MACHINE OPERATION.              * 00879000
+*---------------------------------------------------------------------* 00880000
+DMKVATPF DS    0D             ENTRY VIA GOTO FROM DMKPRGIN     @V2A3120 00881000
+         USING DMKVATPF,R12   TEMPORARY ADDRESSABILITY         @V2A3120 00882000
+         L     R12,=A(DMKVAT)      MODULE BASE ADDRESSABILITY  @V2A3120 00883000
+         USING DMKVAT,R12               . . .                  @V2A3120 00884000
+         SPACE                                                          00885000
+         L     R1,TREXADD     EXCEPTION ADDRESS TO GR1         @V2A3120 00886000
+         LOCK  OBTAIN,TYPE=SYS,SPIN=NO  TRY FOR SYS-LOCK       @V407593 00886200
+         BZ    GOTLOCK        GOT THE LOCK...KEEP GOING        @V407593 00886400
+         BAL   R14,STKDEFER   DIDNT GET IT...STACK A DEFER REQ.@V407593 00886600
+GOTLOCK  DS    0H                                              @V407593 00886800
+         LA    R3,PAGERES     RETURN WHEN PAGE IS RESIDENT     @V2A3120 00887000
+         CALL  DMKPTRAN,PARM=BRING                             @VA03696 00888000
+         BC    2,ADREXCP      VIRTUAL ADDRESSING EXCEPTION     @V2A3120 00889000
+         BC    4,PSEUDOF      PSEUDO PAGE FAULT REQUIRED       @V2A3120 00890000
+         B     VATEXIT        PAGE WAS RECLAIMED - JUST EXIT   @V2A3120 00891000
+         SPACE 2                                                        00892000
+PAGERES  DS    0H             ENTRY VIA CPEXBLOK FROM DMKPTRAN @V2A3120 00893000
+         LR    R7,R1          VIRTUAL ADDRESS NOW AVAILABLE    @V2A3120 00894000
+         ICM   R7,8,=X'80'    FLAG FOR PAGE NOW AVAILABLE      @V2A3120 00895000
+         LA    R0,PGBSIZE     GET STORAGE FOR A PAGE FAULT     @V2A3135 00896000
+         CALL  DMKFREE        STACK BLOCK                      @V2A3135 00897000
+         USING PGBLOK,R1      ADDRESSABILITY                   @V2A3135 00898000
+         ST    R7,PGADDR      SAVE EXCEPTION ADDRESS           @V2A3135 00899000
+         L     R13,VMPGPNT    AND STACK PAGE AVAILABLE         @V2A3135 00900000
+         ST    R1,VMPGPNT     INTERRUPTS                       @V2A3135 00901000
+         ST    R13,PGPNT      LIFO                             @V2A3135 00902000
+         OI    VMPEND,VMPGPND FLAG PSEUDO PAGE FAULT PENDING   @V2A3135 00903000
+         GOTO  DMKDSPCH       ALLOW DISPATCH TO UNSTACK        @V2A3135 00904000
+         EJECT                                                          00905000
+PAGEXCP  EQU   *              REFLECT PAGING EXCEPTION TO VM            00906000
+         LA    R6,X'11'       PROGRAM INTERRUPT CODE                    00907000
+         B     VATEXCP        REFLECT INTERRUPT                         00908000
+SEGEXCP  EQU   *              REFLECT SEGMENT EXCEPTION TO VM           00909000
+         LA    R6,X'10'       PROGRAM INTERRUPT CODE                    00910000
+         B     VATEXCP        REFLECT INTERRUPT                         00911000
+TRNEXCP  EQU   *              TRANSLATION EXCEPTION                     00912000
+         LA    R6,X'12'       INTERRUPT CODE                            00913000
+         B     VATEXCP        REFLECT INTERRUPT                         00914000
+ADREXCP  EQU   *              REFLECT ADDRESSING EXCEPTION TO VM        00915000
+         L     R1,VMPSW+4     GET FAILING INSTRUCTION          @VA08017 00916100
+         LH    R2,VMPRGIL     ILC IN BYTES                     @VA08017 00916300
+         ALR   R1,R2          (PSW ADDRESS MAY BE NEG - ILC)   @VA08017 00916500
+         ST    R1,VMPSW+4     UPDATE....                       @VA08017 00916700
+         LA    R6,X'05'       ADDRESSING EXCEPTION CODE        @VA08017 00916900
+         STH   R6,INTPR       RESET INTERRUPT CODE             @VA08017 00917100
+         B     VATPRGI        REFLECT INTERRUPT                @VA08017 00917300
+         SPACE 2                                                        00918000
+DMKVATEX EQU   *              ENTRY TO SIMULATE EXCEPTION               00919000
+         USING *,R12                                                    00920000
+         L     R12,=A(DMKVAT) MODULE BASE ADDRESS                       00921000
+         USING DMKVAT,R12                                               00922000
+         LR    R6,R1          INTERRUPT CODE IN R1                      00923000
+         LR    R7,R3          EXCEPTION ADDRESS IN R3                   00924000
+         SPACE 2                                                        00925000
+VATEXCP  EQU   *              TRANSLATION EXCEPTION OF SOME VARIETY     00926000
+         SLR   R1,R1          GET USER'S PAGE ZERO                      00927000
+         BAL   R3,TRANS21     GET USER'S PAGE ZERO                      00928000
+         ST    R7,TREXADD-PSA(,R2) EXCEPTION ADDRESS                    00929000
+VATPRGI  EQU   *              SIMULATE ADDRESSING EXCEPTION    @V2A3120 00930000
+         TM    VMTRCTL,VMTRPER     IS PER TRACING ACTIVE ?              00931000
+         BZ    VATSPRG             NO -- JUST REFLECT PROGRAM INT.      00932000
+         TM    VMPEND,VMPERPND     IS A TRACE EVENT PENDING ?           00933000
+         BZ    VATSPRG             NO -- JUST REFLECT INTERRUPT         00934000
+         CALL  DMKPERIL       EDIT THE TRACE EVENT                      00935000
+VATSPRG  EQU   *              SIMULATE PROGRAM INTERRUPT                00936000
+         LR    R0,R6          INTERRUPT CODE INTO R0                    00937000
+         GOTO  DMKPRGSM       GO SIMULATE PROGRAM INTERRUPT             00938000
+         EJECT                                                          00939000
+*---------------------------------------------------------------------* 00940000
+*        CHEKPTE  -  DETERMINE IF PAGE TABLE ENTRY IS VALID           * 00941000
+*                  -------------------------------                    * 00942000
+*        GPR 15= ERROR RETURN IF TABLE FORMAT ERROR                   * 00943000
+*        GPR 9 = INDEX TO ARCHITECTURE TABLES                         * 00944000
+*        GPR 2 = REAL ADDRESS OF PAGE TABLE ENTRY                     * 00945000
+*    ON EXIT:                                                         * 00946000
+*        GPR 6 = VIRTUAL PAGE ADDRESS FROM PAGE TABLE ENTRY           * 00947000
+*        CONDITION CODE SET BY 'TM' FOR VALID/INVALID                 * 00948000
+*---------------------------------------------------------------------* 00949000
+CHEKPTE  EQU   *              CHECK FOR VALID PAGE ENTRY                00950000
+         LH    R1,PTEINCR(R9) TABLE INCREMENT                           00951000
+         N     R1,F4          CONVERT TO INDEX                          00952000
+         EX    0,LOADPTE(R1)  GET ENTRY INTO R1                         00953000
+         L     R6,=F'-8'      CONVENIENT MASK                           00954000
+         NR    R6,R1          STRIP LOW-ORDER BITS FROM VALUE           00955000
+         SLL   R6,8(0)        JUSTIFY FOR ACTUAL ADDRESS                00956000
+         LA    R6,0(,R6)      ENSURE HI-ORDER BYTE IS ZERO     @VA04371 00956500
+         AH    R2,PTEINCR(R9) COMPUTE ADDRESS FOR TEST OF BIT           00957000
+         BCTR  R2,0           ...                                       00958000
+         IC    R1,PINVBIT(R9) PAGE INVALID BIT..               @VA03696 00959000
+         EX    R1,TESTPTE     PAGE AVAILABLE ?                 @VA03696 00960000
+         BNZR  R14            NO..RETURN WITH CC SET           @VA03696 00961000
+         IC    R1,ZEROBIT(R9) MUST-BE-ZERO BITS..              @VA03696 00962000
+         EX    R1,TESTPTE     PTE FORMAT ERROR ?               @VA03696 00963000
+         BNZR  R15            REFLECT EXCEPTION..              @VA03696 00964000
+         BR    R14            PTE OK..CC SET                   @VA03696 00965000
+LOADPTE  LH    R1,0(0,R2)     SHORT PAGE TABLE ENTRIES                  00966000
+         L     R1,0(0,R2)     LONG PAGE TABLE ENTRIES                   00967000
+TESTPTE  TM    0(R2),*-*      CHECK INVALID BIT                         00968000
+         EJECT                                                          00969000
+ARCHTECT DS    0F            ARCHITECTURE VARIABLES TABLE      @V3M4038 00969600
+DMKVATAT EQU   *             EXTERNAL REFERENCE TO TABLES      @V3M4038 00970200
+*---------------------------------------------------------------------* 00971000
+*        ARCHTECT IS INDEXED WITH C-REG 0, BYTE 1 VALUE AS FOLLOWS:   * 00972000
+*                                                                     * 00973000
+*        INDEX X'40' - SMALL PAGE, SMALL SEG, HALFWORD ENTRIES        * 00974000
+*              X'50' - SMALL PAGE, LARGE SEG, HALFWORD ENTRIES        * 00975000
+*              X'60' - SMALL PAGE, SMALL SEG, FULLWORD ENTRIES        * 00976000
+*              X'70' - SMALL PAGE, LARGE SEG, FULLWORD ENTRIES        * 00977000
+*              X'80' - LARGE PAGE, SMALL SEG, HALFWORD ENTRIES        * 00978000
+*              X'90' - LARGE PAGE, LARGE SEG, HALFWORD ENTRIES        * 00979000
+*              X'A0' - LARGE PAGE, SMALL SEG, FULLWORD ENTRIES        * 00980000
+*              X'B0' - LARGE PAGE, LARGE SEG, FULLWORD ENTRIES        * 00981000
+*        INDEXES ARE ADJUSTED TO A BASE OF X'40' = X'00'              * 00982000
+*---------------------------------------------------------------------* 00983000
+PAGEMSK  DC    X'0000F800'    PAGE NUMBER MASK                          00984000
+SEGMASK  DC    X'00FF0000'    SEGMENT NUMBER MASK                       00985000
+PINVBIT  DC    X'04'          PAGE-INVALID BIT IN PTE                   00986000
+ZEROBIT  DC    X'02'          "MUST BE ZERO" BITS IN PTE                00987000
+PAGSHFT  DC    H'10'          SHIFT COUNT FOR PAGE-NO. JUSTIFY          00988000
+SEGSHFT  DC    H'14'          SHIFT COUNT FOR SEG-NO. JUSTIFY           00989000
+PTEINCR  DC    H'2'           HALFWORD PAGE TABLE ENTRIES               00990000
+MAXSEGS  DC    H'15'          MAXIMUM SEGMENT-TABLE LENGTH CODE         00991000
+PAGTLEN  DC    H'64'          MAXIMUM PAGE-TABLE LENGTH (BYTES)         00992000
+PAGINCR  DC    H'4'           INCREMENT OF LENGTH FOR SEGTABLE CODE     00993000
+         DS    5H             RESERVED FOR FUTURE USE                   00994000
+         SPACE                                                          00995000
+CODE50   DC    X'000FF800'                                              00996000
+         DC    X'00F00000'                                              00997000
+         DC    X'04',X'02'                                              00998000
+         DC    H'10',H'18',H'2'                                         00999000
+         DC    H'0',H'1024',H'64'                                       01000000
+         DS    5H                                                       01001000
+         SPACE                                                          01002000
+CODE60   DC    X'0000F800'                                              01003000
+         DC    X'0FFF0000'                                              01004000
+         DC    X'04',X'02'                                              01005000
+         DC    H'09',H'14',H'4'                                         01006000
+         DC    H'255',H'128',H'8'                                       01007000
+         DS    5H                                                       01008000
+         SPACE                                                          01009000
+CODE70   DC    X'000FF800'                                              01010000
+         DC    X'7FF00000'                                              01011000
+         DC    X'04',X'02'                                              01012000
+         DC    H'09',H'18',H'4'                                         01013000
+         DC    H'127',H'2048',H'128'                                    01014000
+         DS    5H                                                       01015000
+         SPACE                                                          01016000
+CODE80   DC    X'0000F000'                                              01017000
+         DC    X'00FF0000'                                              01018000
+         DC    X'08',X'06'                                              01019000
+         DC    H'11',H'14',H'2'                                         01020000
+         DC    H'15',H'32',H'2'                                         01021000
+         DS    5H                                                       01022000
+         EJECT                                                          01023000
+CODE90   DC    X'000FF000'                                              01024000
+         DC    X'00F00000'                                              01025000
+         DC    X'08',X'06'                                              01026000
+         DC    H'11',H'18',H'2'                                         01027000
+         DC    H'0',H'512',H'32'                                        01028000
+         DS    5H                                                       01029000
+         SPACE                                                          01030000
+CODEA0   DC    X'0000F000'                                              01031000
+         DC    X'0FFF0000'                                              01032000
+         DC    X'08',X'06'                                              01033000
+         DC    H'10',H'14',H'4'                                         01034000
+         DC    H'255',H'64',H'4'                                        01035000
+         DS    5H                                                       01036000
+         SPACE                                                          01037000
+CODEB0   DC    X'000FF000'                                              01038000
+         DC    X'7FF00000'                                              01039000
+         DC    X'08',X'06'                                              01040000
+         DC    H'10',H'18',H'4'                                         01041000
+         DC    H'127',H'1024',H'64'                                     01042000
+         DS    5H                                                       01043000
+         SPACE 3                                                        01044000
+SEGSIZE  DC    X'00010000'                                     @VA06156 01044100
+CLRBITS  DC    X'00FFFFF8'    MASK TO CLEAR FLAG BITS - STE    @V4M0233 01044200
+         LTORG                                                          01045000
+         EJECT                                                          01046000
+         COPY  EQU                                                      01047000
+         COPY  VMBLOK                                                   01048000
+         COPY  CORE                                            @VA06156 01048100
+         COPY  PGBLOK                                          @V2A3135 01049000
+         EJECT                                                          01050000
+         PSA                                                            01051000
+         COPY  SAVE                                                     01052000
+         END   DMKVAT                                                   01053000

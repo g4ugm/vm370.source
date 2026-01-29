@@ -1,0 +1,995 @@
+UDR      TITLE 'DMKUDR     (CP)        VM/370 - RELEASE 6'              00001000
+         ISEQ  73,80          VALIDATE SEQUENCING OF INPUT              00002000
+*.                                                                      00003000
+*                                                                       00004000
+*        MODULE NAME                                                    00005000
+*                                                                       00006000
+*              DMKUDR         USER DIRECTORY MODULE                     00007000
+*                                                                       00008000
+*        FUNCTION                                                       00009000
+*                                                                       00010000
+*              THE USER DIRECTORY IS WRITTEN USING A PAGEABLE ACCESS    00011000
+*              METHOD. TO MINIMIZE THE PAGEING ACTIVITY SEVERAL         00012000
+*              CONCIDERATIONS SHOULD BE NOTED. FIRST THE USER           00013000
+*              DIRECTORY BLOCKS ARE IN A SEPERATE PAGE OR PAGES AND     00014000
+*              THE PAGES ARE ASSIGNED A VIRTUAL ADDRESS AT IPL          00015000
+*              TIME. SO NO SPECIAL CONCIDERATIONS ARE NECESSARY         00016000
+*              WHEN CALLING DMKUDRFU. THE USER MACHINE AND DEVICE       00017000
+*              BLOCKS, ON THE OTHER HAND, ARE NOT ASSIGNED              00018000
+*              PERMANENT VIRTUAL ADDRESSES. THE VIRTUAL ADDRESS IS      00019000
+*              ASSIGNED THE FIRST TIME A PAGE IS REFERENCED AND         00020000
+*              MUST BE REMEMBERED UNTIL THE CALLER IS FINISHED          00021000
+*              WITH THAT USER. TO FACILITATE THIS THE USER MUST         00022000
+*              PROVIDE A BUFFER, SEVEN DOUBLE WORDS LONG, WITH          00023000
+*              THE LAST DOUBLE WORD RESERVED FOR THE DMKUDRRD,          00024000
+*              DMKUDRFD AND DMKUDRRV ROUTINES. THE SAME BUFFER          00025000
+*              MUST BE PROVIDED FOR EACH SUBSEQUENT RETRIEVAL.          00026000
+*              A SECOND BUFFER MUST BE PROVIDED IF INNESTED LINKS       00027000
+*              ARE INCOUNTERED. A MAXIMUM OF TWO BUFFERS ARE TO         00028000
+*              BE USED AND THE BUFFER MUST HAVE THE LAST DOUBLE         00029000
+*              WORD ZERO'S, AT ENTRY TO ANY ROUTINE FOR THE FIRST       00030000
+*              TIME. ALL SUBSEQUENT ENTRIES TO ANY ROUTINE MUST         00031000
+*              NOT CHANGE THIS DOUBLE WORD. AFTER A BUFFER HAS          00032000
+*              BEEN USED FOR THE LAST TIME THE USER MUST CALL           00033000
+*              DMKUDRRV TO RETURN THE VIRTUAL PAGE AND THEN THE         00034000
+*              USER CAN FRET HIS BUFFER.                                00035000
+*                                                                       00036000
+*        CONTENTS                                                       00037000
+*                                                                       00038000
+*              DMKUDRFU       USER DIRECTORY FIND USER                  00039000
+*                                                                       00040000
+*              DMKUDRFD       USER DIRECTORY FIND DEVICE                00041000
+*                                                                       00042000
+*              DMKUDRRD       USER DIRECTORY READ                       00043000
+*                                                                       00044000
+*              DMKUDRRV       USER DIRECTORY RETURN VIRTUAL PAGE        00045000
+*                                                                       00046000
+*              DMKUDRBV       USER DIRECTORY BUILD VIRTUAL LIST         00047000
+*                                                                       00048000
+*              DMKUDRDS       USER DIRECTORY DYNAMIC SWAP               00049000
+*                                                                       00050000
+*.                                                                      00051000
+         SPACE 5                                                        00052000
+DMKUDR   CSECT                                                          00053000
+         USING PSA,R0                                                   00054000
+         USING SYSLOCS,R10                                              00055000
+         USING SAVEAREA,R13                                             00056000
+         USING DMKUDR,R12                                      @VA02644 00057000
+         USING VMBLOK,R11                                               00058000
+         SPACE 3                                                        00059000
+         EXTRN DMKPGTVG,DMKPGTVR,DMKRPAGT                      @V200820 00060000
+         EXTRN DMKIOSQR,DMKSYSOW,DMKSYSOC                               00061000
+         EXTRN DMKLOCKQ,DMKLOCKD                                        00062000
+         EXTRN DMKPTRFT                                        @VA02644 00063000
+         SPACE 2                                                        00064000
+         DC    CL8'DMKUDR'                                              00065000
+         EJECT                                                          00066000
+*.                                                                      00067000
+*                                                                       00068000
+*        SUBROUTINE NAME                                                00069000
+*                                                                       00070000
+*              DMKUDRFU       USER DIRECTORY FIND USER                  00071000
+*                                                                       00072000
+*        FUNCTION                                                       00073000
+*                                                                       00074000
+*              TO FIND A GIVEN USER ID,IN THE USER DIRECTORY,           00075000
+*              AND MOVE THE USERS DIRECTORY ENTRY INTO THE              00076000
+*              CALLERS BUFFER.                                          00077000
+*                                                                       00078000
+*        ATTRIBUTES                                                     00079000
+*                                                                       00080000
+*              REENTRANT,PAGEABLE                                       00081000
+*                                                                       00082000
+*        ENTRY POINT                                                    00083000
+*                                                                       00084000
+*              DMKUDRFU       USER DIRECTORY FIND USER                  00085000
+*                                                                       00086000
+*        ENTRY CONDITIONS                                               00087000
+*                                                                       00088000
+*              R0  IS THE LENGTH OF THE USER ID                         00089000
+*                                                                       00090000
+*              R1  POINTS TO THE USER ID WHOSE ENTRY IS TO BE FOUND.    00091000
+*                                                                       00092000
+*              R2  POINTS TO A BUFFER TO RECEIVE THE USER               00093000
+*                  DIRECTORY BLOCK,OR IF R2 = 0 ONLY THE                00094000
+*                  CC IS SET.                                           00095000
+*                                                                       00096000
+*        EXIT CONDITIONS                                                00097000
+*                                                                       00098000
+*              CC = 0 USER ID FOUND                                     00099000
+*                                                                       00100000
+*              CC = 1 USER ID NOT FOUND                                 00101000
+*                                                                       00102000
+*              CC = 3 FATAL IO ERROR TRYING TO READ DIRECTORY           00103000
+*                                                                       00104000
+*        CALLS TO OTHER ROUTINES                                        00105000
+*                                                                       00106000
+*              DMKLOCKQ - TO LOCK (QUEQE) THE USER DIRECTORY            00107000
+*              DMKPTRAN - TO BRING A PAGE INTO STORAGE                  00108000
+*              DMKLOCKD - TO DEQUEUE THE USER DIRECTORY                 00109000
+*              DMKPTRFT - TO RELEASE A REAL STORAGE PAGE FRAME          00110000
+*                                                                       00111000
+*        EXTERNAL REFERENCES                                            00112000
+*                                                                       00113000
+*              DMKSYSPL = POINTER TO THE START OF THE                   00114000
+*                         USER DIRECTORY ON THE SYSRES VOLUME           00115000
+*                                                                       00116000
+*        TABLES / WORK AREAS                                            00117000
+*                                                                       00118000
+*                                                                       00119000
+         EJECT                                                          00120000
+*        REGISTER  USAGE                                                00121000
+*                                                                       00122000
+*              R0 - R2 = INPUT POINTERS                                 00123000
+*              R3 = POINTER TO LIST OF DIRECTORY PAGES                  00124000
+*              R4 = POINTER TO THE LAST UDIRBLOK IN PAGE                00125000
+*              R5 = WORK REGISTER                                       00126000
+*              R6 = REAL ADDRESS OF BUFFER PAGE                         00127000
+*              R7 - R8 WORK REGISTERS                                   00128000
+*              R9 = INTERNAL LINKAGE                                    00129000
+*              R10 = POINTER TO SYSLOCS                                 00130000
+*              R11 = VMBLOK                                             00131000
+*              R12 = BASE                                               00132000
+*              R13 = SAVE                                               00133000
+*              R14 - R15 = SYSTEM USE                                   00134000
+*                                                                       00135000
+*        OPERATION                                                      00136000
+*                                                                       00137000
+*              1. CALL DMKLOCKQ TO LOCK THE NAME ' DIRCT  '.            00138000
+*                                                                       00139000
+*              2. MASK THE USERID, FROM THE CALLER, OFF AND             00140000
+*                 SET UP TO SCAN THE UDIRBLOK'S.                        00141000
+*                                                                       00142000
+*              3. TRANS TO BRING IN EACH PAGE FROM THE                  00143000
+*                 PAGE LIST (DMKSYSPL) UNTIL THE USERID IS              00144000
+*                 FOUND.                                                00145000
+*                                                                       00146000
+*              4. IF THE USERID IS NOT FOUND CALL DMKLOCKD TO UNLOCK    00147000
+*                 C' DIRCT  ' AND EXIT CC = 1.                          00148000
+*                                                                       00149000
+*              5. WHEN FOUND TEST IF THE USER PROVIDED                  00150000
+*                 A BUFFER.  IF NOT GO TO STEP 7.                       00151000
+*                                                                       00152000
+*              6. MOVE THE UDIRBLOK INTO THE USERS BUFFER AND           00153000
+*                 UNMASK THE BLOCK.                                     00154000
+*                                                                       00155000
+*              7. CALL DMKLOCKD TO UNLOCK C' DIRECT  ' AND EXIT CC = 0. 00156000
+*                                                                       00157000
+*        MESSAGES                                                       00158000
+*                                                                       00159000
+*        DMKUDR475I FATAL IO ERROR TRYING TO READ DIRECTORY             00160000
+*.                                                                      00161000
+         SPACE 3                                                        00162000
+DMKUDRFU RELOC                                                          00163000
+         USING UDBFBLOK,R3                                              00164000
+         USING UDIRBLOK,R2                                              00165000
+         EJECT                                                          00166000
+         L     R10,ASYSLC     POINT TO SYSLOCS                          00167000
+         LTR   R2,R0          IS LENGTH EQ ZERO                         00168000
+         BZ    EXITCC1        YES- ERROR RETURN CC = 1 (USER NOT FOUND) 00169000
+         CL    R2,F8          IS IT OVER 8                              00170000
+         BH    EXITCC1        YES- ERROR RETURN CC = 1 (USER NOT FOUND) 00171000
+         BCTR  R2,0           -1                                        00172000
+         MVC   SAVEWRK2(8),BLANKS  BLANK OUT SAVEWRK2 AND 3             00173000
+         EX    R2,MOVEUID     MOVE IN USER ID                           00174000
+         XC    SAVEWRK2(8),MASK    MASK OFF THE USER ID                 00175000
+         LA    R1,=CL8' DIRCT'     POINT AT NAME TO LOCK                00176000
+         CALL  DMKLOCKQ       LOCK SO DMKUDRBV CAN'T CHANGE DMKSYSPL    00177000
+         L     R3,DMKSYSPL    PICK UP POINTER TO DIRECTORY              00178000
+         B     NXTPAGE        START SEARCH OF DIRECTORY PAGES  @VA02644 00179000
+         SPACE                                                          00180000
+FREPAGE  EQU   *              CLEAR AND RELEASE LAST PAGE      @VA02644 00181000
+         BAL   R9,CLRPAGE     CLEAR AND RELEASE PREVIOUS PAGE  @VA02644 00182000
+         LA    R3,4(0,R3)     NEXT ENTRY IN BUFFER LIST        @VA02644 00183000
+NXTPAGE  EQU   *              GET NEXT DIRECTORY BUFFER PAGE   @VA02644 00184000
+         ICM   R1,15,0(R3)    LOAD AND TEST FOR LAST ENTRY     @VA02644 00185000
+         BM    UNLOCK         END OF LIST -- USERID NOT FOUND  @VA02644 00186000
+         TRANS 2,1,OPT=(BRING,DEFER,SYSTEM),IOER=UNLKCC3       @VA04993 00187000
+         LH    R4,UDIRDISP    PICK UP DISPLACEMENT TO END OF DIR PAGE   00188000
+         AR    R4,R2           SET R4 EQ TO THE REAL ADD OF DIR PAGE    00189000
+         LR    R6,R2          SAVE REAL ADDR OF BUFFER START   @VA02644 00190000
+FINDUSER LA    R2,UDIRSIZE*8(,R2)    POINT TO NEXT BLOCK                00191000
+         CLR   R2,R4          HAVE WE REACHED THE END ?        @VA02644 00192000
+         BH    FREPAGE        YES -- GET THE NEXT BUFFER       @VA02644 00193000
+         CLC   SAVEWRK2(8),UDIRUSER     IS THIS THE USERID ?   @VA02644 00194000
+         BNE   FINDUSER                                                 00195000
+         EJECT                                                          00196000
+         L     R3,SAVER2      POINT TO USER BUFFER                      00197000
+         LTR   R3,R3          DO I HAVE A BUFFER                        00198000
+         BZ    CLREXIT        NO -- CLEAR THE PAGE AND EXIT    @VA02644 00199000
+         MVC   UDBFWORK(UDIRSIZE*8),UDIRBLOK  MOVE BLOCK TO CALLER      00200000
+         XC    UDBFWORK+8,MASK     MASK ON THE BUFFER (USERID)          00201000
+         XC    UDBFWORK+16,MASK    MASK ON THE BUFFER (PASSWORD)        00202000
+CLREXIT  EQU   *              CLEAR PAGE, UNLOCK DIRECTORY     @VA02644 00203000
+         BAL   R9,CLRPAGE     CLEAR BUFFER AND RELEASE PAGE    @VA02644 00204000
+         LA    R1,=CL8' DIRCT'     DIRECTORY LOCK NAME         @VA02644 00205000
+         CALL  DMKLOCKD       UNLOCK THE DIRECTORY             @VA02644 00206000
+         B     EXITCC0        SET CC EQ 0                               00207000
+UNLKCC3  DS    0H                                              @VA04993 00207200
+         LA    R1,=CL8' DIRCT' POINT TO NAME                   @VA04993 00207400
+         CALL  DMKLOCKD       UNLOCK THE DIRECTORY             @VA04993 00207600
+         B     EXITCC3        RETURN WITH CC=3                 @VA04993 00207800
+         SPACE 2                                                        00208000
+UNLOCK   LA    R1,=CL8' DIRCT'     POINT TO NAME                        00209000
+         CALL  DMKLOCKD       UNLOCK THE DIRECTORY                      00210000
+         B     EXITCC1        RETURN TO CALLER CC=1                     00211000
+         DROP  R2,R3                                           @VA02644 00212000
+         SPACE                                                          00213000
+MOVEUID  MVC   SAVEWRK2(0),0(R1)   SET UP USER ID                       00214000
+         SPACE 2                                                        00215000
+CLRPAGE  EQU   *              CLEAR AND RELEASE PAGE FRAME     @VA02644 00216000
+         LR    R7,R6          REAL PAGE ADDRESS TO GR7         @VA02644 00217000
+         SRL   R7,8(0)        PAGE NUMBER * 16 FOR INDEXING    @VA02644 00218000
+         AL    R7,ACORETBL    GR7 = CORETABLE ENTRY ADDRESS    @VA02644 00219000
+         USING CORTABLE,R7    CORETABLE ENTRY ADDRESSABILITY   @VA02644 00220000
+         L     R5,CORPGPNT    POINTER TO PAGE TABLE ENTRY      @VA02644 00221000
+         LA    R0,PAGINVAL    VALUE FOR UNAVAILABLE PAGE       @VA02644 00222000
+         STH   R0,0(0,R5)     MARK THE PAGE UNAVAILABLE        @VA02644 00223000
+         XC    CORPGPNT(4),CORPGPNT     CLEAR OUT PTE ADDRESS  @VA02644 00224000
+         L     R15,CORFPNT    VMBLOK POINTER                   @V408246 00225100
+         LH    R0,VMPAGES-VMBLOK(,R15) DECREMENT               @V408246 00225600
+         BCTR  R0,0           IN-CORE PAGE COUNT               @V408246 00226100
+         LTR   R0,R0          VMPAGES TO GO NEGATIVE ?         @VA07224 00226200
+         BM    UDR2           YES - ABEND                      @VA07224 00226300
+         STH   R0,VMPAGES-VMBLOK(,R15)                         @V408246 00226600
+         CALL  DMKPTRFT       PUT PAGE FRAME ON THE FREE LIST  @VA02644 00228000
+         L     R7,F4096       LENGTH OF ONE PAGE               @VA02644 00229000
+         SR    R15,R15        PAD WITH ZEROES                  @VA02644 00230000
+         MVCL  R6,R14         CLEAR REAL PAGE TO ZEROES        @VA02644 00231000
+         BR    R9             RETURN TO INTERNAL CALLER        @VA02644 00232000
+         ABEND 2              VMPAGES TO GO NEGATIVE - TERM CP @VA07224 00232100
+         EJECT                                                          00233000
+*.                                                                      00234000
+*                                                                       00235000
+*        SUBROUTINE NAME                                                00236000
+*                                                                       00237000
+*              DMKUDRFD       USER DIRECTORY FIND DEVICE                00238000
+*                                                                       00239000
+*        FUNCTION                                                       00240000
+*                                                                       00241000
+*              TO ALLOW THE USER TO READ A SPECIFIC DEVICE              00242000
+*              BLOCK INTO THE CALLER'S BUFFER                           00243000
+*                                                                       00244000
+*        ATTRIBUTES                                                     00245000
+*                                                                       00246000
+*              REENTRANT,PAGEABLE                                       00247000
+*                                                                       00248000
+*        ENTRY POINTS                                                   00249000
+*                                                                       00250000
+*              DMKUDRFD       USER DIRECTORY FIND DEVICE                00251000
+*                                                                       00252000
+*        ENTRY CONDITIONS                                               00253000
+*                                                                       00254000
+*              R0  IS THE DEVICE ADD                                    00255000
+*                                                                       00256000
+*              R1  POINTS TO THE DISPLACEMENT FOLLOWED BY THE DASD      00257000
+*                  ADD OF THE USER'S ''USER MACHINE BLOCK'' .           00258000
+*                  THE DASD ADD IS ON A WORD BOUNDRY.                   00259000
+*                                                                       00260000
+*              R2  POINTS TO THE BUFFER TO RECEIVE THE USER DEVICE      00261000
+*                  BLOCK.  THE BUFFER MUST BE AS DESCRIBED IN THE DSECT 00262000
+*                  UDBFWORK. (SEVEN DOUBLE WORDS LONG WITH THE          00263000
+*                  LAST DOUBLE WORD USED BY THIS ROUTINE )              00264000
+*                                                                       00265000
+*        EXIT CONDITIONS                                                00266000
+*                                                                       00267000
+*              CC = 0  DEVICE FOUND                                     00268000
+*                                                                       00269000
+*              CC = 1  DEVICE NOT FOUND                                 00270000
+*                                                                       00271000
+*              CC = 3 FATAL IO ERROR TRYING TO READ DIRECTORY           00272000
+*                                                                       00273000
+*        CALLS TO OTHER ROUTINES                                        00274000
+*                                                                       00275000
+*              DMKPGTVG - TO GET A VIRTUAL PAGE BUFFER                  00276000
+*              DMKRPAGT - TO POINT TO A PAGE ON DASD DEVICE             00277000
+*              DMKPTRAN - TO BRING A PAGE INTO STORAGE                  00278000
+*              DMKQCNWT - WRITE ERROR MSG                               00279000
+*                                                                       00280000
+*        EXTERNAL REFERENCES                                            00281000
+*                                                                       00282000
+*              NONE                                                     00283000
+*                                                                       00284000
+*        TABLES / WORK AREAS                                            00285000
+*                                                                       00286000
+*              UDBFBLOK - TO POINT TO PROPER PAGE                       00287000
+*                                                                       00288000
+         EJECT                                                          00289000
+*        REGISTER  USAGE                                                00290000
+*                                                                       00291000
+*              R0 - R2 INPUT POINTERS                                   00292000
+*              R3 = DISPLACEMENT OF UDEVBLOK                            00293000
+*              R4 = REALADD = REAL ADDRESS OF THE PAGE BUFFER           00294000
+*              R5 = LINK TO GETBUFF SUBROUTINE                          00295000
+*              R6 = DATA FROM UDEVBLOK                                  00296000
+*                                                                       00297000
+*        OPERATION                                                      00298000
+*                                                                       00299000
+*              1. GET THE POINTER TO THE UMACBLOK FROM THE CALLER.      00300000
+*                                                                       00301000
+*              2. BRING THE PAGE INTO CORE CALLING DMKPGTVG,DMKRPAGT    00302000
+*                 AND/OR DMKPTRAN AS NEEDED.                            00303000
+*                                                                       00304000
+*              3. SCAN THE UDEVBLOK'S UNTIL THE DEVICE IS FOUND,        00305000
+*                 IF NOT FOUND RETURN CC = 1.                           00306000
+*                                                                       00307000
+*              4. MOVE THE UDEVBLOK INTO THE USERS BUFFER               00308000
+*                 AND UNMASK IT.                                        00309000
+*                                                                       00310000
+*              5. EXIT CC = 0.                                          00311000
+*                                                                       00312000
+*        MESSAGES                                                       00313000
+*                                                                       00314000
+*        DMKUDR475I FATAL IO ERROR TRYING TO READ DIRECTORY             00315000
+*.                                                                      00316000
+         EJECT                                                          00317000
+DMKUDRFD RELOC                                                          00318000
+         USING USERDISP,R1                                              00319000
+         USING UDBFBLOK,R2                                              00320000
+         L     R10,ASYSLC     POINT TO SYSLOCS                          00321000
+         LH    R3,USERDISP    GET DISPLACEMENT  FROM USER               00322000
+         L     R0,USERDASD    GET DASD ADD FROM USER                    00323000
+         BAL   R5,GETBUFF     GET PAGE IN CORE AND RETURN WITH REAL ADD 00324000
+         USING UMACBLOK,R3                                     @VA03188 00325000
+         LH    R6,UMACDVCT(R4) GET USER DEVICE COUNT           @VA07491 00325100
+         LTR   R6,R6          CHECK FOR ZERO                   @VA07491 00325200
+         BZ    EXITCC1        IF ZERO, RETURN TO CALLER        @VA07491 00325300
+         L     R6,UMACDASD(R4) GET DASD ADDR OF 1ST DEVBLOK    @VA03188 00326000
+         LTR   R6,R6          ANY DEVICES?                     @VA03188 00327000
+         BZ    EXITCC1        NO, CONDITIONAL RETURN           @VA03188 00328000
+         LH    R3,UMACDISP(R4) GET OFFSET TO NEXT BLOCK        @VA03188 00329000
+         DROP  R3                                              @VA03188 00330000
+         LA    R5,FINDDEV     SET GETBUFF RETURN REGISTER      @VA03188 00331000
+         CL    R6,UDBFDASD    IS PAGE IN BUFFER?               @VA03188 00332000
+         BER   R5             YES, GO FIND UDEVBLOK            @VA03188 00333000
+         LR    R0,R6          POINT TO NEW DASD ADDRESS        @VA03188 00334000
+         B     GETBUFF        BRING NEW PAGE IN (RETURN VIA R5)@VA03188 00335000
+         SPACE 1                                                        00336000
+FINDDEV  EQU   *              (GETBUFF RETURNS HER ON R5)      @VA03188 00337000
+         USING UDEVBLOK,R3                                     @VA03188 00338000
+         CH    R0,UDEVADD(R4) IS THIS THE DEVICE?              @VA03188 00339000
+         BE    DEVFOUND       YES GET OUT                               00340000
+         L     R6,UDEVDASD(R4)     DASD ADDRESS                @VA02644 00341000
+         LTR   R6,R6               IS THIS THE END OF THE LIST          00342000
+         BZ    EXITCC1        YES- RETURN TO CALLER                     00343000
+         CL    R6,UDBFDASD         IS PAGE IN BUFFER                    00344000
+         LH    R3,UDEVDISP(R4)     POINTER TO NEXT BLOCK       @VA02644 00345000
+         BE    FINDDEV        YES- GO FIND DEVICE                       00346000
+         LR    R0,R6          POINT TO NEW DASD ADDRESS                 00347000
+         B     GETBUFF        BRING NEW PAGE IN (RETURN ON REG 5)       00348000
+DEVFOUND EQU   *                                               @VA02644 00349000
+         AR    R3,R4          GR3 = REAL ADDRESS OF UDEVBLOK   @VA02644 00350000
+         MVC   UDBFWORK(UDEVSIZE*8),UDEVBLOK  MOVE BLOCK TO CALLER      00351000
+         B     MASKON         GO MASK THE BUFFER ON                     00352000
+         DROP  R1,R2,R3                                        @VA02644 00353000
+         EJECT                                                          00354000
+*.                                                                      00355000
+*                                                                       00356000
+*        SUBROUTINE NAME                                                00357000
+*                                                                       00358000
+*              DMKUDRRD       USER DIRECTORY READ                       00359000
+*                                                                       00360000
+*        FUNCTION                                                       00361000
+*                                                                       00362000
+*              TO ALLOW THE USER TO READ THE NEXT USER DIRECTORY        00363000
+*              BLOCK INTO THE CALLERS BUFFER.                           00364000
+*                                                                       00365000
+*        ATTRIBUTES                                                     00366000
+*                                                                       00367000
+*              REENTRANT,PAGEABLE                                       00368000
+*                                                                       00369000
+*        ENTRY POINTS                                                   00370000
+*                                                                       00371000
+*              DMKUDRRD       USER DIRECTORY READ                       00372000
+*                                                                       00373000
+*        ENTRY CONDITIONS                                               00374000
+*                                                                       00375000
+*              R1  POINTS TO THE DISPLACEMENT FOLLOWED BY THE ADD       00376000
+*                  OF THE NEXT BLOCK TO BE READ.                        00377000
+*                  THE DASD ADD IS ON A WORD BOUNDARY.                  00378000
+*                                                                       00379000
+*              R2  POINTS TO A BUFFER TO RECEIVE THE MACHINE OR DEVICE  00380000
+*                  BLOCK. THE BUFFER MUST BE AS DESCRIBED IN THE DSECT  00381000
+*                  UDBFWORK. ( SEVEN DOUBLE WORDS LONG WITH THE         00382000
+*                  LAST DOUBLE WORD USED BY THIS ROUTINE )              00383000
+*                                                                       00384000
+*        EXIT CONDITIONS                                                00385000
+*                                                                       00386000
+*              CC = 0  BLOCK READ INTO BUFFER                           00387000
+*                                                                       00388000
+*              CC = 1  INVALID DISPLACEMENT OR DASD ADD                 00389000
+*                                                                       00390000
+*              CC = 3 FATAL IO ERROR TRYING TO READ DIRECTORY           00391000
+*                                                                       00392000
+*        CALLS TO OTHER ROUTINES                                        00393000
+*                                                                       00394000
+*              DMKPGTVG - TO GET A VIRTUAL PAGE BUFFER                  00395000
+*              DMKRPAGT - TO POINT TO A PAGE ON DASD DEVICE             00396000
+*              DMKPTRAN - TO BRING A PAGE INTO STORAGE                  00397000
+*              DMKQCNWT - TO WRITE ERROR MSG                            00398000
+*                                                                       00399000
+*        EXTERNAL REFERENCES                                            00400000
+*                                                                       00401000
+*              NONE                                                     00402000
+*                                                                       00403000
+*        TABLES / WORK AREAS                                            00404000
+*                                                                       00405000
+*              UDBFBLOK - POINT TO PROPER PAGE                          00406000
+*                                                                       00407000
+         EJECT                                                          00408000
+*        REGISTER  USAGE                                                00409000
+*                                                                       00410000
+*              R0 = DASD ADDRESS OF UDEVBLOK                            00411000
+*              R1 - R2 = INPUT POINTERS                                 00412000
+*              R3 = DISPLACEMENT OF UDEVBLOK                            00413000
+*              R4 = REALADD = REAL ADDRESS OF PAGE BUFFER               00414000
+*              R5 = LINK TO GETBUFF SUBROUTINE                          00415000
+*                                                                       00416000
+*        OPERATION                                                      00417000
+*                                                                       00418000
+*              1. GET THE POINTER TO THE UDEVBLOK FROM THE CALLER.      00419000
+*                                                                       00420000
+*              2. IF THE POINTER IS INVALED EXIT CC = 1.                00421000
+*                 (EOF LAST DEVICE FOUND)                               00422000
+*                                                                       00423000
+*              3. BRING THE PAGE INTO CORE CALLING DMKPGTVG, DMKRPAGT   00424000
+*                 AND/OR DMKPTRAN AS NEEDED.                            00425000
+*                                                                       00426000
+*              4. MOVE THE UDEVBLOK INTO THE CALLERS BUFFER AND         00427000
+*                 EXIT CC = 0.                                          00428000
+*                                                                       00429000
+*        MESSAGES                                                       00430000
+*                                                                       00431000
+*        DMKUDR475I FATAL IO ERROR TRYING TO READ DIRECTORY             00432000
+*.                                                                      00433000
+         SPACE 3                                                        00434000
+DMKUDRRD RELOC                                                          00435000
+         USING UDBFBLOK,R2                                              00436000
+         USING UDEVBLOK,R3                                              00437000
+         USING USERDISP,R1                                              00438000
+         L     R10,ASYSLC     POINT TO SYSLOCS                          00439000
+         LH    R3,USERDISP    GET DISPLACEMENT FROM USER                00440000
+         L     R0,USERDASD    GET DASD ADD FROM USER                    00441000
+         LTR   R0,R0          IS IT 0 (LAST DASD ADD)                   00442000
+         BE    EXITCC1                                                  00443000
+         LA    R6,4095        SET TO 4K - 1                             00444000
+         CLR   R3,R6          IS IT 4K UP                               00445000
+         BH    EXITCC1        YES- GET OUT SET CC EQ 1                  00446000
+         BAL   R5,GETBUFF     GET PAGE IN CORE AND RETURN WITH REAL ADD 00447000
+         AR    R3,R4          GR3 = REAL ADDRESS OF DIR PAGE   @VA02644 00448000
+         MVC   UDBFWORK(UDEVSIZE*8),UDEVBLOK   GIVE BLOCK TO USER       00449000
+         B     MASKON         GO MASK THE BUFFER ON                     00450000
+         EJECT                                                          00450020
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 00450040
+*  DMKUDRMD PERFORMS THE SAME FUNCTION AS DMKUDRRD EXCEPT THAT THE    * 00450060
+*  UMACBLOK IS READ IN INSTEAD OF THE UDEVBLOK.                       * 00450080
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 00450100
+         SPACE 2                                                        00450120
+DMKUDRMD RELOC                                                 @V407466 00450140
+         USING UDBFBLOK,R2                                     @V407466 00450160
+         USING UMACBLOK,R3                                     @V407466 00450180
+         USING USERDISP,R1                                     @V407466 00450200
+         L     R10,ASYSLC     POINT TO SYSLOCS                 @V407466 00450220
+         LH    R3,USERDISP    GET DISPLACEMENT FROM USER       @V407466 00450240
+         L     R0,USERDASD    GET DASD ADD FROM USER           @V407466 00450260
+         LTR   R0,R0          IS IT 0? (LAST DASD ADD)         @V407466 00450280
+         BE    EXITCC1        YES                              @V407466 00450300
+         LA    R6,4095        SET TO 4K-1                      @V407466 00450320
+         CLR   R3,R6          IS IT 4K UP                      @V407466 00450340
+         BH    EXITCC1        YES, GET OUT SET CC EQ 1         @V407466 00450360
+         BAL   R5,GETBUFF     GET PAGE IN & RETURN W/ REAL ADD @V407466 00450380
+         AR    R3,R4          GR3 = REAL ADDR OF DIR PAGE      @V407466 00450400
+         MVC   UDBFWORK(UMACSIZE*8),UMACBLOK GIVE BLOCK TO USER@V407466 00450420
+         B     MASKON         GO MASK THE BUFFER ON            @V407466 00450440
+         EJECT                                                          00451000
+**************************************************                      00452000
+*                                                                       00453000
+*        GET BUFFER SUBROUTINE                                          00454000
+*                                                                       00455000
+**************************************************                      00456000
+         SPACE 2                                                        00457000
+GETBUFF  L     R1,UDBFVADD    GET VIRTUAL ADD                           00458000
+         LTR   R1,R1          DO I HAVE A BUFFER                        00459000
+         BNZ   GETPAGE        YES- BRANCH                               00460000
+         CALL  DMKPGTVG                                                 00461000
+         ST    R1,UDBFVADD    SAVE BUFFER ADD                           00462000
+GETPAGE  CL    R0,UDBFDASD    IS PAGE IN STORAGE                        00463000
+         BE    GETRADD        YES- BRANCH                               00464000
+         ST    R0,UDBFDASD    POINT TO THE NEW DASD PAGE ADDRESS        00465000
+         IC    R0,DMKSYSUD+3  POINT TO PROPER DEVICE IN OWNED LIST      00466000
+         LA    R2,SYSTEM      SET SYSTEM OPTION ON                      00467000
+         CALL  DMKRPAGT                                                 00468000
+GETRADD  TRANS 2,1,OPT=(BRING,DEFER,SYSTEM),IOER=EXITCC3                00469000
+         LR    R4,R2          RETURN PAGE ADDRESS IN GR4       @VA02644 00470000
+         LM    R0,R2,SAVER0   RETURN REGS                               00471000
+         BR    R5             RETURN TO CALLER                          00472000
+         DROP  R1,R2,R3                                        @VA02644 00473000
+         EJECT                                                          00474000
+*.                                                                      00475000
+*        SUBROUTINE NAME                                                00476000
+*                                                                       00477000
+*              DMKUDRRV       USER DIRECTORY RETURN VIRTUAL PAGE        00478000
+*                                                                       00479000
+*        FUNCTION                                                       00480000
+*                                                                       00481000
+*              TO ALLOW THE USER TO RETURN A VIRTUAL PAGE USED          00482000
+*              BY THE DIRECTORY PROGRAMS AS A BUFFER.                   00483000
+*                                                                       00484000
+*        ATTRIBUTES                                                     00485000
+*                                                                       00486000
+*              REENTRANT , PAGEABLE                                     00487000
+*                                                                       00488000
+*        ENTRY POINTS                                                   00489000
+*                                                                       00490000
+*              DMKUDRRV       USER DIRECTORY RETURN VIRTUAL PAGE        00491000
+*                                                                       00492000
+*        ENTRY CONDITIONS                                               00493000
+*                                                                       00494000
+*              R2  POINTS TO THE BUFFER AS DESCRIBED IN THE DSECT       00495000
+*                  UDBFWORK. (SEVEN DOUBLE WORDS LONG WITH THE          00496000
+*                  LAST DOUBLE WORD USED BY THIS ROUTINE )              00497000
+*                                                                       00498000
+*        EXIT CONDITIONS                                                00499000
+*                                                                       00500000
+*              NONE                                                     00501000
+*                                                                       00502000
+*        CALLS TO OTHER ROUTINES                                        00503000
+*                                                                       00504000
+*              DMKPGTVR - TO RETURN A VIRTUAL PAGE BUFFER               00505000
+*                                                                       00506000
+*        EXTERNAL REFERENCES                                            00507000
+*                                                                       00508000
+*              NONE                                                     00509000
+*                                                                       00510000
+*        TABLES / WORK AREAS                                            00511000
+*                                                                       00512000
+*              UDBFBLOK - POINT TO VIRTUAL PAGE BUFFER                  00513000
+*                                                                       00514000
+*        REGISTER USAGE                                                 00515000
+*                                                                       00516000
+*              R2 = POINTER TO BUFFER                                   00517000
+*                                                                       00518000
+*        OPERATION                                                      00519000
+*                                                                       00520000
+*              1. TEST IF A VIRTUAL PAGE WAS USED.                      00521000
+*                                                                       00522000
+*              2. IF NOT USED EXIT CC = 0.                              00523000
+*                                                                       00524000
+*              3. CALL DMKRPAGT AND DMKPGTVR TO RETURN PAGE.            00525000
+*                                                                       00526000
+*              4. EXIT CC = 0                                           00527000
+*.                                                                      00528000
+         EJECT                                                          00529000
+DMKUDRRV RELOC                                                          00530000
+         USING UDBFBLOK,R2                                              00531000
+         L     R1,UDBFVADD    GET ADD OF PAGE BUFFER                    00532000
+         LTR   R1,R1          DO I HAVE A BUFFER                        00533000
+         BZ    EXITCC1        NO- GET OUT                               00534000
+         TRANS 2,1,OPT=SYSTEM      SEE IF PAGE IS RESIDENT     @VA02644 00535000
+         BNZ   RELPAGE             NO -- NO NEED TO CLEAR IT   @VA02644 00536000
+         L     R3,F4096       LENGTH OF THE PAGE BUFFER        @VA02644 00537000
+         SR    R15,R15        PAD WITH ZEROES                  @VA02644 00538000
+         MVCL  R2,R14         CLEAR THE BUFFER PAGE            @VA02644 00539000
+RELPAGE  EQU   *              RELEASE THE REAL PAGE FRAME      @VA02644 00540000
+         SR    R0,R0          SET UP TO ZERO DASD PAGE ADD              00541000
+         CALL  DMKRPAGT,PARM=SYSTEM     RELEASE THE PAGE       @VA02644 00542000
+         CALL  DMKPGTVR       RETURN VIRTUAL PAGE                       00543000
+         B     EXITCC0        RETURN TO THE CALLER                      00544000
+         EJECT                                                          00545000
+******************************************************************      00546000
+*                                                                       00547000
+*        EXIT SUBROUTINE                                                00548000
+*                                                                       00549000
+******************************************************************      00550000
+         SPACE 2                                                        00551000
+MASKON   XC    UDBFBLOK+8(8),MASK  *    MASK THE BUFFER ON              00552000
+         XC    UDBFBLOK+16(8),MASK *                                    00553000
+         XC    UDBFBLOK+24(8),MASK *                                    00554000
+         XC    UDBFBLOK+32(8),MASK *                                    00555000
+         XC    UDBFBLOK+40(8),MASK *                                    00556000
+EXITCC0  SR    R0,R0          SET CC = 0                                00557000
+         B     EXIT           RETURN TO CALLER CC EQ 0                  00558000
+EXITCC1  TM    *,X'FF'        SET CC EQ 1                               00559000
+         B     EXIT           RETURN TO CALLER CC = 1                   00560000
+EXITCC2  CLI   *,X'00'        SET CC = 2                                00561000
+         B     EXIT           RETURN TO CALLER CC EQ 2                  00562000
+EXITCC3  EQU   *              SET CONDITION CODE THREE, EXIT   @V200820 00563000
+         LA    R1,FATALIO     DMKUDR475I MESSAGE FOR OPERATOR  @V200820 00564000
+         LA    R0,L'FATALIO   ...LENGTH                        @V200820 00565000
+         CALL  DMKQCNWT,PARM=NORET+OPERATOR+ALARM              @V200820 00566000
+         TM    *+1,X'FF'      SET CC = 3                       @V200820 00567000
+EXIT     EXIT                 RETURN TO CALLER                          00568000
+         DROP  R2                                              @VA02644 00569000
+         SPACE 2                                                        00570000
+FATALIO  DC    C'DMKUDR475I FATAL I/O ERROR TRYING TO READ DIRECTORY'   00571000
+         DS    0D                                                       00572000
+         EJECT                                                          00573000
+*.                                                                      00574000
+*                                                                       00575000
+*        SUBROUTINE NAME                                                00576000
+*                                                                       00577000
+*              DMKUDRBV       USER DIRECTORY BUILD VIRTUAL LIST         00578000
+*                                                                       00579000
+*        FUNCTION                                                       00580000
+*                                                                       00581000
+*              TO ALLOW THE DMKDIRCT PROGRAM OR DMKCPINT PROGRAM TO     00582000
+*              BUILD A LIST OF VIRTUAL PAGE BUFFERS.  ONE FOR EACH      00583000
+*              UDIRBLOK PAGE ON DISK.                                   00584000
+*                                                                       00585000
+*        ATTRIBUTES                                                     00586000
+*                                                                       00587000
+*              REENTRANT , PAGEABLE                                     00588000
+*                                                                       00589000
+*        ENTRY POINTS                                                   00590000
+*                                                                       00591000
+*              DMKUDRBV       USER DIRECTORY BUILD VIRTUAL LIST         00592000
+*                                                                       00593000
+*        ENTRY CONDITIONS                                               00594000
+*              R0 CONTAINS THE DASD ADDRESS OF THE START OF THE         00595000
+*                 USER DIRECTORY FROM THE VOL1 LABEL ON THE             00596000
+*                 DIRECTORY DEVICE.  THE DASD ADDRESS MUST POINT        00597000
+*                 TO THE PROPER DEVICE IN THE OWNED LIST.               00598000
+*                 ON THE DIRECTORY DEVICE.                              00599000
+*                                                                       00600000
+*        EXIT CONDITIONS                                                00601000
+*                                                                       00602000
+*              CC = 0  LIST BUILT                                       00603000
+*                                                                       00604000
+*              CC = 3 FATAL IO ERROR TRYING TO READ DIRECTORY           00605000
+*                                                                       00606000
+*        CALLS TO OTHER ROUTINES                                        00607000
+*                                                                       00608000
+*              DMKFREE - TO GET FREE STORAGE                            00609000
+*              DMKFRET - TO RETURN THE STORAGE                          00610000
+*              DMKRPAGT - GET A PAGE INTO STORAGE                       00611000
+*              DMKPGTVG - GET A VIRTUAL BUFFER                          00612000
+*              DMKLOCKQ - LOCK THE DIRECTORY C' DIRCT  ' TO SWAP        00613000
+*              DMKLOCKD - UNLOCK THE DIRECTORY                          00614000
+*              DMKPGTVR - TO RETURN A VIRTUAL PAGE BUFFER               00615000
+*                                                                       00616000
+*        EXTERNAL REFERENCES                                            00617000
+*                                                                       00618000
+*              DMKSYSPL - USER DIRECTORY PAGE LIST                      00619000
+*              DMKSYSUD - POINTER TO THE USER DIRECTORY                 00620000
+*                                                                       00621000
+*        TABLES / WORK AREAS                                            00622000
+*                                                                       00623000
+*              USER DIRECTORY LIST                                      00624000
+*                                                                       00625000
+         EJECT                                                          00626000
+*        REGISTER USAGE                                                 00627000
+*                                                                       00628000
+*              R4 = POINTER TO OLD LIST                                 00629000
+*              R5 = DASD ADD                                            00630000
+*              R6 = DISPLACEMENT OF END OF LIST - 4                     00631000
+*              R7 = POINTER TO LIST                                     00632000
+*              R8 = DISPLACEMENT INTO LIST                              00633000
+*              R9 = LENGTH OF LIST ( IN DUBBLE WORDS )                  00634000
+*              R10 = POINTER TO SYSLOCS                                 00635000
+*                                                                       00636000
+*        OPERATION                                                      00637000
+*                                                                       00638000
+*              1. CALL DMKFREE TO GET A PAGE LIST BUFFER.               00639000
+*                                                                       00640000
+*              2. CALL DMKPGTVR TO GET A VIRTUAL PAGE, AND SAVE         00641000
+*                 ITS ADDRESS IN THE LIST.                              00642000
+*                                                                       00643000
+*              3. CALL DMKRPAGT TO BRING IN THE PAGE.                   00644000
+*                                                                       00645000
+*              4. IF THIS IS THE LAST PAGE CONT. ELSE GO TO STEP 2.     00646000
+*                                                                       00647000
+*              5. CALL DMKLOCKQ TO QUEQE UNTIL THE DIRECTORY IS FREE    00648000
+*                 THEN SWAP PAGE LIST AND CALL DMKLOCKD TO UNLOCK       00649000
+*                 THE USER DIRECTORY.                                   00650000
+*                                                                       00651000
+*              6. POINT TO OLD LIST. IF NO OLD LIST EXIT CC = 0.        00652000
+*                                                                       00653000
+*              7. CALL DMKRPAGE AND DMKPGTVR TO RETURN PAGES IN LIST.   00654000
+*                                                                       00655000
+*              8. CALL DMKFRET TO RETURN THE LIST.                      00656000
+*                                                                       00657000
+*              9. IF THE NEW LIST WAS RETURNED THEN EXIT CC = 1 .       00658000
+*                                                                       00659000
+*              10. POINT TO THE NEW LIST (DMKSYSPL) AND EXIT CC = 0.    00660000
+*                                                                       00661000
+*        MESSAGES                                                       00662000
+*                                                                       00663000
+*        DMKUDR475I FATAL IO ERROR TRYING TO READ DIRECTORY             00664000
+*.                                                                      00665000
+         EJECT                                                          00666000
+DMKUDRBV RELOC                                                          00667000
+         USING UDIRBLOK,R2                                              00668000
+         USING SYSLOCS,R10                                              00669000
+         L     R10,ASYSLC     POINT TO SYSLOCS                          00670000
+         LM    R6,R9,ZEROES   ZERO OUT REGS                             00671000
+         LR    R5,R0          SAVE DASD ADD FROM USER                   00672000
+         LA    R6,4(,R6)      POINT TO END OF LIST - 4                  00673000
+LOOP1    LA    R9,1(,R9)      POINT TO LENGTH OF LIST IN DUBBLE WORDS   00674000
+         LR    R0,R9          SET UP TO GET STORAGE                     00675000
+         CALL  DMKFREE                                                  00676000
+         XR    R1,R7          *    REVERSE POINTERS TO OLD AND          00677000
+         XR    R7,R1          *    NEW LIST                             00678000
+         XR    R1,R7          *                                         00679000
+         LTR   R8,R8          IS THIS THE FIRST TIME                    00680000
+         BZ    GETVPAGE       YES- BRANCH                               00681000
+         CL    R8,F256        IS THE BLOCK TO BIG TO MOVE?              00682000
+         BNH   MOVEIT         NO- GO DO IT                              00683000
+         ABEND 1              LOOPING (DATA ON DISK BAD OR THE         *00684000
+                              DIRECTORY CONTANES OVER 10,816 USERS)     00685000
+MOVEIT   EX    R8,MOVE        MOVE THE OLD BLOCK+1 INTO THE NEW BLOCK   00686000
+         SL    R0,F1          SUBTRACT 1 FROM LENGTH COUNT              00687000
+         CALL  DMKFRET                                                  00688000
+GETVPAGE CALL  DMKPGTVG       GET A VIRTUAL BUFFER                      00689000
+         LR    R0,R5          POINT TO DASD PAGE                        00690000
+         ST    R1,0(R7,R8)    SAVE VIRTUAL ADD IN LIST                  00691000
+         O     R9,NOADD       SET UP END OF LISTING,           @VA02223 00692000
+*                             X'FF000000' + SIZE                        00693000
+         ST    R9,4(R7,R8)    SAVE FLAG AND SIZE               @VA02223 00694000
+         LA    R2,BRING+SYSTEM     SET UP PARM.                         00695000
+         CALL  DMKRPAGT       BRING PAGE IN                             00696000
+         BNZ   FRETLIST       FATAL IO ERROR GO FRET THE BUFFER         00697000
+         ICM   R5,14,UDIRDASD GET THE DASD ADD OF THE NEXT PAGE 'CCR'  *00698000
+                              SAVING THE POINTER TO THE PROPER DEVICE  *00699000
+                              IN THE OWNED LIST.                        00700000
+         BZ    ENDLIST        BRANCH IF ZERO ( LAST UDIR PAGE )         00701000
+         LA    R8,4(,R8)      POINT TO NEXT ENTRY IN LIST               00702000
+         CLR   R8,R6          DO I NEED ADDITIONAL STORAGE              00703000
+         BL    GETVPAGE       NO- GO BRING PAGE IN                      00704000
+         LA    R6,8(,R6)      UPDATE POINTER TO END OF LIST             00705000
+         B     LOOP1          YES- GO GET STORAGE FIRST                 00706000
+ENDLIST  LA    R1,=CL8' DIRCT' POINT TO USER,                  @VA02223 00707000
+*                            DIRECTORY LOCK VALUE                       00708000
+         L     R4,DMKSYSPL    POINT TO OLD LIST                         00709000
+         CALL  DMKLOCKQ       WAIT FOR THE DIRECTORY TO FREE UP         00710000
+         ST    R7,DMKSYSPL    POINT TO THE NEW DIRECTORY                00711000
+         CALL  DMKLOCKD       UNLOCK THE USER DIRECTORY                 00712000
+         LTR   R7,R4          SET UP TO FRET OLD LIST                   00713000
+         BZ    EXITCC0        RETURN IF NO OLD LIST                     00714000
+FRETLIST SR    R8,R8          SET DISPLACEMINT TO ZERO                  00715000
+LOOP2    L     R1,0(R8,R7)    GET VIRTUAL ADD FROM LIST                 00716000
+         LTR   R1,R1          IS IT THE END OF THE LIST                 00717000
+         BM    RETLIST        YES- GO RETURN STORAGE                    00718000
+         SR    R0,R0          SET UP TO ZERO DASD PAGE ADDRESS          00719000
+         LA    R2,SYSTEM      SET UP PARM                               00720000
+         CALL  DMKRPAGT       RETURN REAL PAGE TO THE SYSTEM            00721000
+         CALL  DMKPGTVR       RETURN VIRTUAL PAGE ADD                   00722000
+         LA    R8,4(,R8)      POINT TO NEXT VIRTUAL ADD IN LIST         00723000
+         B     LOOP2          DO IT AGAIN                               00724000
+RETLIST  LH    R0,2(R8,R7)    GET LENGTH FROM LIST                      00725000
+         LR    R1,R7          POINT TO STORAGE TO FRET                  00726000
+         CALL  DMKFRET                                                  00727000
+         CLR   R4,R7          DID THE DIRECTORY SWAP                    00728000
+         BNE   EXITCC3        NO- RETURN CC = 3 (FATAL IO ERROR)        00729000
+         MVC   DMKSYSUD,SAVER0     SAVE THE POINTER TO THE START       X00730000
+                                   OF THE USER DIRECTORY                00731000
+         B     EXITCC0        YES- RETURN CC EQ 0                       00732000
+MOVE     MVC   0(0,R7),0(R1)  MOVE OLD LIST TO NEW LIST                 00733000
+         EJECT                                                          00734000
+*.                                                                      00735000
+*                                                                       00736000
+*        SUBROUTINE NAME                                                00737000
+*                                                                       00738000
+*              DMKUDRDS       USER DIRECTORY DYNAMIC SWAP               00739000
+*                                                                       00740000
+*        FUNCTION                                                       00741000
+*                                                                       00742000
+*              TO ALLOW THE DMKDIRCT PROGRAM TO DYNAMICALLY SWAP        00743000
+*              THE ACTIVE DIRECTORY TO THE NEWLY CREATED DIRECTORY.     00744000
+*                                                                       00745000
+*        ENTRY POINTS                                                   00746000
+*                                                                       00747000
+*              DMKUDRDS       USER DIRECTORY DYNAMIC SWAP               00748000
+*                                                                       00749000
+*        ENTRY CONDITIONS                                               00750000
+*                                                                       00751000
+*              CALLED BY SVC FROM DMKHVC   ( X'83XY003C' )              00752000
+*                                                                       00753000
+*                R5 WILL POINT TO THE CALLERS VIRTUAL GP REGISTER 'X'   00754000
+*                   X = GPR CONTAINING THE FIRST 4 BYTES OF THE VOLUME  00755000
+*                       SERIAL NUMBER OF THE USER DIRECTORY VOLUME.     00756000
+*                                                                       00757000
+*                R6 WILL POINT TO THE CALLERS VIRTUAL GP REGISTER 'Y'   00758000
+*                   Y = GPR CONTAINING THE LAST 2 BYTES OF THE SAME     00759000
+*                       VOLUME SERIAL NUMBER.                           00760000
+*                                                                       00761000
+*                                                                       00762000
+*        EXIT CONDITIONS                                                00763000
+*                                                                       00764000
+*              CC = 0  LIST BUILT                                       00765000
+*                                                                       00766000
+*              CC = 2  INVALID VOLUME SPECIFIED BY THE CALLER           00767000
+*                                                                       00768000
+*              CC = 3 FATAL IO ERROR TRYING TO READ DIRECTORY           00769000
+*                                                                       00770000
+*        CALLS TO OTHER ROUTINES                                        00771000
+*                                                                       00772000
+*              DMKFREE - GET FREE STORAGE                               00773000
+*              DMKFRET - TO RETURN FREE STORAGE                         00774000
+*              DMKIOSQR - TO READ THE DIRECTORY VOLUME                  00775000
+*              DMKDSPCH - TO WAIT                                       00776000
+*              DMKUDRBV - TO BUILD A VIRTUAL PAGE LIST                  00777000
+*              DMKQCNWT - TO WRITE ERROR MSG                            00778000
+*                                                                       00779000
+*        EXTERNAL REFERENCES                                            00780000
+*                                                                       00781000
+*              DMKSYSOW - OWNED LIST                                    00782000
+*              DMKSYSOC - OWNED LIST COUNT                              00783000
+*              DMKSYSUD - POINTER TO THE USER DIRECTORY                 00784000
+*                                                                       00785000
+*        TABLES / WORK AREAS                                            00786000
+*                                                                       00787000
+*              USER DIRECTORY LIST                                      00788000
+*              OWND LIST                                                00789000
+*                                                                       00790000
+*        REGISTER USAGE                                                 00791000
+*                                                                       00792000
+*              R0 - R4 = WORK                                           00793000
+*              R5 = THE VOLUME SERIAL NUMBER FROM THE CALLER (4 BYTES)  00794000
+*              R6 = THE VOLUME SERIAL NUMBER FROM THE CALLER (2 BYTES)  00795000
+*              R8 = POINTER TO THE RDEVBLOK OF THE DIRECTORY VOL        00796000
+*              R9 = DISPLACEMENT INTO THE OWNDLIST OF THE DIRECTORY VOL 00797000
+*              R10 = POINTER TO OWNDLIST AND IOBLOK                     00798000
+*              R14 - R15 = WORK                                         00799000
+*                                                                       00800000
+*        OPERATION                                                      00801000
+*                                                                       00802000
+*              1. SET CALLERS VMPSW CC TO 0 AND ZERO DMKHVC'S REG2.     00803000
+*                                                                       00804000
+*              2. SCAN THE OWNDLIST FOR THE VOLUME PASSED BY THE        00805000
+*                 CALLER. IF NOT FOUND OR MOUNTED RETURN CC = 2.        00806000
+*                                                                       00807000
+*              3. CALL DMKFREE TO GET A BUFFER FOR THE                  00808000
+*                 IOB+CCW'S+DATA AND FILL IT IN.                        00809000
+*                                                                       00810000
+*              4. CALL DMKIOSRQ TO READ THE VOL1 AND ALLOCATION         00811000
+*                  RECORDS (R3 AND R4) AND GO TO DMKDSPCH.              00812000
+*                                                                       00813000
+*              5. CHECK TO SEE IF THIS IS A VALID DIRECTORY VOLUME.     00814000
+*                 IF NOT EXIT CC = 2.                                   00815000
+*                                                                       00816000
+*              6. CALL DMKUDRBV TO BUILD A VIRTUAL LIST OF UDIRBLOK'S.  00817000
+*                                                                       00818000
+*              7. SET CC RETURNED BY DMKUDRBV INTO CALLERS VMPSW        00819000
+*                 AND EXIT USING THE SAME CC.                           00820000
+*                                                                       00821000
+*        MESSAGES                                                       00822000
+*                                                                       00823000
+*        DMKUDR475I FATAL IO ERROR TRYING TO READ DIRECTORY             00824000
+*.                                                                      00825000
+         EJECT                                                          00826000
+DMKUDRDS RELOC                                                          00827000
+         USING OWNDLIST,R10                                             00828000
+         MVC   SAVER2,ZEROES  ZERO OUT THE RETURN REG TO DMKHVC         00829000
+         NI    VMPSW+4,X'CF'  SET THE VIRTUAL MACHINE STANDARD PSW'S   *00830000
+                              CONDITION CODE TO ZERO                    00831000
+         NI    VMPSW+2,X'CF'  CLEAR EC-MODE CC AS WELL.        @VA03299 00832000
+         L     R5,0(,R5)       *    GET THE VOL SER NO FROM THE REG'S   00833000
+         L     R6,0(,R6)       *    PROVIDED BY THE USER.               00834000
+         L     R10,=A(DMKSYSOW)    GET THE POINT TO THE OWNED LIST      00835000
+         L     R9,=A(DMKSYSOC)     GET POINTER TO THE OWNDLIST COUNT    00836000
+         L     R9,0(,R9)           AND PICK UP THE COUNT                00837000
+         LR    R8,R9          SAVE THE COUNT                            00838000
+NEXT     CL    R5,OWNDVSER    IS THIS THE VSN THE DIRECTORY IS ON       00839000
+         BE    TESTR6         YES- GO TEST THE NEXT REG                 00840000
+POINTOL  LA    R10,8(,R10)    POINT TO THE NEXT BLOCK                   00841000
+         BCT   R8,NEXT        GO TEST THE NEXT BLOCK                    00842000
+         B     SETCC2         NOT FOUND SET CC = 2 AND RETURN TO CALLER 00843000
+TESTR6   CLM   R6,12,OWNDVSER+4    IS THIS THE VOL                      00844000
+         BNE   POINTOL        NO- GO POINT TO THE NEXT BLOCK            00845000
+         SR    R9,R8          GET THE DISP IN THE OWNDLIST OF THIS     X00846000
+                              BLOCK (NUMBER OF BLOCKS INTO THE LIST)    00847000
+         LH    R8,OWNDRDEV    GET THE POINTER TO THE REAL DEV           00848000
+         LTR   R8,R8          IS IT MOUNTED                             00849000
+         BM    SETCC2         NO- RETURN TO THE CALLER CC = 2           00850000
+         SLL   R8,3(0)        CONVERT TO BYTE INDEX            @V200820 00851000
+         A     R8,ARIODV      POINT TO THE REAL DEV BLOCK               00852000
+         LA    R0,IOBSIZE+6+10+128 GET A BUFFER FOR THE IOB+CCW'S+DATA  00853000
+         CALL  DMKFREE                                                  00854000
+         LR    R10,R1         POINT TO THE IOB IN FREE ST.              00855000
+         DROP  R10                                                      00856000
+         USING IOBLOK,R10                                               00857000
+         XC    IOBLOK(IOBSIZE*8),IOBLOK CLEAR THE BLOCK                 00858000
+         MVI   IOBFLAG,IOBCP  SET UP THE CP IO FLAG                     00859000
+         LA    R1,(IOBSIZE+1)*8(,R10)     POINT TO THE FIRST CCW        00860000
+         ST    R1,IOBCAW      AND SAVE THE ADD IN THE IOB               00861000
+         LA    R1,IORETURN    SET UP THE RETURN ADD                     00862000
+         ST    R1,IOBIRA      AND SAVE IT                               00863000
+         ST    R11,IOBUSER    POINT TO THE USER                         00864000
+         ST    R13,IOBMISC    SAVE THE SAVE AREA ADD                    00865000
+         ST    R9,IOBMISC2    SAVE THE POINTER TO THE OWNED LIST ALSO   00866000
+         MVC   IOBSIZE*8(8,R10),CHANPROG  MOVE IN THE BB CC HH RR       00867000
+         LM    R14,R7,CCW1    *    RELOCATE THE CCW STRING              00868000
+         ALR   R14,R10        *    AND SAVE IT IN THE FREE              00869000
+         ALR   R0,R10         *    ST. BLOCK AFTER THE IOB              00870000
+         ALR   R2,R10         *                                         00871000
+         ALR   R4,R10         *                                         00872000
+         ALR   R6,R10         *                                         00873000
+         STM   R14,R7,(IOBSIZE+1)*8(R10)                                00874000
+         CALL  DMKIOSQR                                                 00875000
+         GOTO  DMKDSPCH       WAIT FOR IO TO COMPLETE                   00876000
+IORETURN EQU   *              RETURN POINT FROM IOS                     00877000
+         USING *,R12          TEMP ADDRESSABILITY                       00878000
+         S     R12,=A(IORETURN-DMKUDR)   RESTORE BASE ADDRESS           00879000
+         USING DMKUDR,R12                                               00880000
+         L     R13,IOBMISC    RESTORE ADD OF SAVE AREA                  00881000
+         L     R9,IOBMISC2    GET THE POINTER TO THE OWNED LIST         00882000
+         L     R11,IOBUSER    POINT TO THE USER                         00883000
+         TM    IOBSTAT,IOBFATAL    DID I HAVE AN ERROR                  00884000
+         BO    FRETCC3        YES- FRET IOB AND RETURN CC 3 TO CALLER   00885000
+         ICM   R9,14,((IOBSIZE+6)*8)+52(R10) INSERT THE DASD ADD (CCR-) 00886000
+         BNP   FRETCC2        RETURN TO THE CALLER IF THE POINTER TO   X00887000
+                              DIRECTORY IS ZERO OR MINUS               X00888000
+                              (THE USER DIRECTORY POINTER IS NOT VALID) 00889000
+         LH    R2,((IOBSIZE+6)*8)+52(,R10)   GET THE CYLINDER NUMBER    00890000
+         CH    R2,=H'1024'    IS IT LARGER THAN THE ALLOCATION TABLE    00891000
+         BH    FRETCC2        NO- FRET THE IOB AND RETURN CC = 2        00892000
+         LA    R1,(IOBSIZE+6+10)*8(R2,R10)   ADD THE LOCATION OF       *00893000
+                                   THE ALLOCATION TABLE TO THE         *00894000
+                                   CYLINDER LOCATION                    00895000
+         CLI   0(R1),X'0C'    IS THIS AN ALLOCATED DIRECTORY CYLINDER   00896000
+         BNE   FRETCC2        NO- RETURN TO THE CALLER CC = 2           00897000
+         BAL   R5,FRETIOB     RETURN THE IOBLOK TO SYSTEM               00898000
+         DROP  R10                                                      00899000
+         USING SYSLOCS,R10                                              00900000
+         L     R10,ASYSLC     POINT TO THE SYSLOCS TABLE                00901000
+         CL    R9,DMKSYSUD    IS THIS DIRECTORY IN USE BY THE SYSTEM?   00902000
+         BE    SETCC2         YES- RETURN TO THE CALLER CC = 2.  THIS  *00903000
+                              USER IS UPDATING A VIRTUAL DIRECTORY.     00904000
+         LR    R0,R9          POINT TO THE PAGE ON DISK (CCRD)          00905000
+         CALL  DMKUDRBV       GO BUILD A LIST OF PAGE BUFFERS          X00906000
+                              FOR THE NEW USER DIRECTORY                00907000
+         BC    1,SETCC3       SET CC = 3 AND RETURN TO THE CALLER       00908000
+SETCC0   B     EXITCC0        RETURN CC = 0 TO CALLER                   00909000
+SETCC1   LA    R2,X'10'       INDICATE COND CODE = 1.          @VA03299 00910000
+         BAL   R5,SETALLCC    USE CODE INDICATOR TO SET THE CC.@VA03299 00911000
+         B     EXITCC1        RETURN TO CALLER                          00912000
+FRETCC2  BAL   R5,FRETIOB     RETURN THE IOBLOK TO SYSTEM               00913000
+SETCC2   LA    R2,X'20'       INDICATE COND CODE = 2.          @VA03299 00914000
+         BAL   R5,SETALLCC    USE CODE INDICATOR TO SET THE CC.@VA03299 00915000
+         B     EXITCC2        RETURN TO CALLER                          00916000
+FRETCC3  BAL   R5,FRETIOB     RETURN THE IOBLOK TO SYSTEM               00917000
+SETCC3   LA    R2,X'30'       INDICATE COND CODE = 3.          @VA03299 00918000
+         BAL   R5,SETALLCC    USE CODE INDICATOR TO SET THE CC.@VA03299 00919000
+         B     EXITCC3        RETURN TO CALLER                 @VA03299 00920000
+         SPACE 1                                                        00921000
+SETALLCC LA    R1,VMPSW+4     ASSUME A BC MODE PSW IS CORRECT  @VA03299 00922000
+         TM    VMESTAT,VMEXTCM IS THIS AN ECMODE MACHINE?      @VA03299 00923000
+         BZ    SET12OR3       NO, PSW INDEX IS ALREADY CORRECT @VA03299 00924000
+         LA    R1,VMPSW+2     GET PROPER OFFSET FOR EC-MODE PSW@VA03299 00925000
+SET12OR3 EX    R2,CCSETTER    SET CONDITION CODE IN VMPSW      @VA03299 00926000
+         BR    R5             RETURN TO CALLER                 @VA03299 00927000
+         SPACE 1                                                        00928000
+CCSETTER OI    0(R1),*-*      EXECUTED CONDITION CODE SETTER   @VA03299 00929000
+         SPACE                                                          00930000
+FRETIOB  LA    R0,IOBSIZE+6+10+128 SET UP SIZE OF IOB+CCW'S+DATA        00931000
+         LR    R1,R10         POINT AT ST TO FRET                       00932000
+         CALL  DMKFRET                                                  00933000
+         BR    R5             RETURN TO THE CALLER                      00934000
+         SPACE 2                                                        00935000
+         DS    0D                                                       00936000
+CHANPROG DC    X'0000000000000300'                                      00937000
+CCW1     CCW   07,IOBSIZE*8,CC+SILI,6   SEEK TO REC 3 (THE CP VOL1 REC) 00938000
+CCW2     CCW   49,(IOBSIZE*8)+2,CC+SILI,5    SEARCH FOR REC NO 3        00939000
+CCW3     CCW   08,(IOBSIZE+2)*8,0,0     TIC - 8                         00940000
+CCW4     CCW   06,(IOBSIZE+6)*8,CC+SILI,80   READ IN THE VOL1 REC       00941000
+CCW5     CCW   06,(IOBSIZE+6+10)*8,SILI,1024 READ IN THE ALLOCATION REC 00942000
+         SPACE 2                                                        00943000
+MASK     DC    XL8'AAAAAAAAAAAAAAAA'    THE MASK FOR THE USER DIRECTORY 00944000
+         SPACE 2                                                        00945000
+         LTORG                                                          00946000
+         SPACE 2                                                        00947000
+USER     DSECT                                                          00948000
+         CNOP  2,4                                                      00949000
+USERDISP DS    1H                                                       00950000
+USERDASD DS    1F                                                       00951000
+         EJECT                                                          00952000
+         COPY  CORE                                                     00953000
+         COPY  EQU                                                      00954000
+         COPY  SAVE                                                     00955000
+         COPY  VMBLOK                                                   00956000
+         COPY  UDIRECT                                                  00957000
+         SYSLOCS                                                        00958000
+         PSA                                                            00959000
+         COPY  ALLOC                                           @V306638 00960000
+         COPY  IOBLOKS                                                  00961000
+         END   DMKUDR                                                   00962000

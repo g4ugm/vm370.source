@@ -1,0 +1,1104 @@
+BLD      TITLE 'DMKBLD     (CP)        VM/370 - RELEASE 6'              00001000
+         ISEQ  73,80          VALIDATE SEQUENCING OF SYSIN              00002000
+*.                                                                      00003000
+* MODULE NAME -                                                         00004000
+*                                                                       00005000
+*        DMKBLD                                                         00006000
+*                                                                       00007000
+* CONTENTS -                                                            00008000
+*                                                                       00009000
+*        DMKBLDRT - BUILD REAL SEGMENT, PAGE, AND SWAP TABLES           00010000
+*        DMKBLDRL - RELEASE REAL SEGMENT, PAGE, AND SWAP TABLES         00011000
+*        DMKBLDVM - BUILD A NEW VMBLOK                                  00012000
+*        DMKBLDEC - BUILD AND INITIALIZE AN ECBLOK                      00013000
+*.                                                                      00014000
+         EJECT                                                          00015000
+         COPY  OPTIONS                                                  00016000
+         COPY  LOCAL                                                    00017000
+         SPACE 2                                                        00018000
+DMKBLD   CSECT                                                          00019000
+         SPACE                                                          00020000
+         USING PSA,R0                                                   00021000
+         USING VMBLOK,R11                                               00022000
+         USING SAVEAREA,R13                                             00023000
+         SPACE                                                          00024000
+         EXTRN DMKSCNRD                                                 00025000
+         EXTRN DMKCVTBH                                                 00026000
+         EXTRN DMKCVTAB                                        @V408246 00026500
+         EXTRN DMKSCHCP,DMKTMRCK                               @V2B4320 00027000
+         EXTRN DMKRIORN       LIST OF 3705 DEVICES IN DMKRIO   @V200820 00028000
+         AIF   (NOT &VIRREAL).VIRT0                                     00029000
+         EXTRN DMKSLC,DMKQCNWT                                          00030000
+         EXTRN DMKERMSG                                                 00031000
+.VIRT0   ANOP                                                           00032000
+         EJECT                                                          00033000
+*.                                                                      00034000
+* SUBROUTINE NAME -                                                     00035000
+*                                                                       00036000
+*        DMKBLDRT - BUILD REAL SEGMENT, PAGE, AND SWAP TABLES           00037000
+*                                                                       00038000
+* FUNCTION -                                                            00039000
+*                                                                       00040000
+*        TO CREATE AND INITIALIZE SEGMENT, PAGE, AND SWAP TABLES,       00041000
+*        AS A FUNCTION OF VIRTUAL CORE SIZE, AS PART OF THE             00042000
+*        PROCESS OF CREATING A USER'S VIRTUAL MACHINE.                  00043000
+*                                                                       00044000
+* ATTRIBUTES -                                                          00045000
+*                                                                       00046000
+*        REENTRANT, PAGEABLE, CALLED VIA SVC                            00047000
+*                                                                       00048000
+* ENTRY POINT -                                                         00049000
+*                                                                       00050000
+*        DMKBLDRT                                                       00051000
+*                                                                       00052000
+* ENTRY CONDITIONS -                                                    00053000
+*                                                                       00054000
+*        GPR 1 = BEGINING AND ENDING ADDRESS TO BUILD TABLES.           00055000
+*        BYTES 0-1 = BEGINING ADDRESS                                   00056000
+*              FIRST 4 BITS = 0,NEXT 8 BITS = SEGMENT, NEXT 4 = PAGE    00057000
+*        BYTES 2-3 = ENDING ADDRESS                                     00058000
+*              FIRST 4 BITS = 0,NEXT 8 BITS = SEGMENT, NEXT 4 = PAGE    00059000
+*                                                                       00060000
+*        PARMS ARE PASSED IN R2+3:                                      00061000
+*                                                                       00062000
+*        PAGTONLY = BUILD ONE PAGE/SWAP TABLE & RETURN IN R1            00062100
+*        NEWPAGES = BUILD A NEW PAGE/SWAP TABLE                         00063000
+*        NEWSEGS = BUILD SET OF NEW SEGMENT TABLES                      00064000
+*        KEEPSEGS = RETAIN THE INFORMATION IN THE OLD SEGMENT TABLE     00065000
+*        OLDVMSEG = VMSEG POINTER IN VMBLOK IS VALID                    00066000
+*                                                                       00067000
+*                                                                       00068000
+*        GPR 11 = ADDRESS OF USER'S VMBLOK                              00069000
+*        GPR 12 = ADDRESS OF DMKBLDRT                                   00070000
+*        GPR 13 = ADDRESS OF STANDARD SAVE AREA                         00071000
+*                                                                       00072000
+* EXIT CONDITIONS -                                                     00073000
+*                                                                       00074000
+*        SEGMENT, PAGE, AND SWAP TABLES HAVE BEEN CREATED AND FILLED IN 00075000
+*                                                                       00076000
+* CALLS TO OTHER ROUTINES -                                             00077000
+*                                                                       00078000
+*        DMKFREE - TO OBTAIN FREE STORAGE FOR TABLES TO BE CREATED      00079000
+*        DMKERMSG - TO OUTPUT ERROR MESSAGES                            00080000
+*        DMKBLDRL - TO RELEASE THE OLD SEGMENT TABLE                    00081000
+*                                                                       00082000
+* EXTERNAL REFERENCES -                                                 00083000
+*                                                                       00084000
+*        AVMREAL - POINTER TO VMBLOK OF VIRT=REAL USER                  00085000
+*        DMKSLC  - ADDRESS OF UPPER BOUNDARY OF VIRT=REAL AREA          00086000
+*                                                                       00087000
+* TABLES / WORK AREAS -                                                 00088000
+*                                                                       00089000
+*        SEGMENT TABLE                                                  00090000
+*        PAGE TABLE                                                     00091000
+*        SWAP TABLE                                                     00092000
+         EJECT                                                          00093000
+* REGISTER USAGE -                                                      00094000
+*                                                                       00095000
+*        GPR  6 = ADDRESS OF SEGMENT TABLE                              00096000
+*        GPR  7 = ADDRESS OF PAGE TABLE                                 00097000
+*        GPR  8 = ADDRESS OF SWAP TABLE                                 00098000
+*        GPR 11 = ADDRESS OF USER'S VMBLOK                              00099000
+*        GPR 12 = BASE REGISTER                                         00100000
+*        GPR 13 = ADDRESS OF STANDARD SAVE AREA                         00101000
+*                                                                       00102000
+*        GPRS 0-5, 9-10, AND 14-15 ARE WORK REGISTERS.                  00103000
+*                                                                       00104000
+* NOTES -                                                               00105000
+*                                                                       00106000
+* OPERATION -                                                           00107000
+*        A) IF PAGE-SWAP SKIP SPECIFIED, GO TO STEP C                   00108000
+*        B) ADJUST R5 WITH NEW TOTAL NUMBER OF PAGES TO BUILD           00109000
+*           PAGE AND SWAP TABLES FOR                                    00110000
+*        C) IF SKIP SEGTABLE PROCESS SPECIFIED, GO TO 1.7               00111000
+*        D) IF THERE IS AN OLD VMSEG POINTER, TEST IF NUMBER OF         00112000
+*           ENTRIES IS THE SAME AS DESIRED IN THE NEW SEGTABLE.         00113000
+*           IF NOT THE SAME, OR IF NO OLD VMSEG, GO TO STEP 1           00114000
+*        E) IF OLD SEGTABLE ENTRIES ARE TO BE SAVED, GO TO STEP 1.7     00115000
+*        F) CALL BLDRL TO RELEASE ALL PAG-SWAP TABLES, BUT NOT          00116000
+*           OLD SEGTABLE, AND GO TO STEP 1.7                            00117000
+*                                                                       00118000
+*                                                                       00119000
+*        1. DMKFREE IS CALLED FOR 15 DOUBLE WORDS OF FREE STORAGE FOR   00120000
+*        THE SEGMENT TABLE.  THE ADDRESS OBTAINED FROM DMKFREE IS       00121000
+*        ROUNDED (AS NEEDED) TO ALIGN THE SEGMENT TABLE ON A 64-BYTE    00122000
+*        1.10 IF DATA IN OLD SEGTABLE IS NOT TO BE SAVED, GO TO 1.14    00123000
+*        1.11 MOVE DATA FROM OLD SEGTABLE TO NEW                        00124000
+*        1.12 IF NEW SEGTABLE > OLD, GO TO STEP 1.15                    00125000
+*        1.13 SET R1,R2 FOR FRETS OF OLD PAG-SWP TABLES NOT MOVED       00126000
+*             AND FRET OLD SEGTABLE. GO TO STEP 1.2                     00127000
+*        1.14 SET R1,R2 FOR FRET OF ALL PAGE,SWAP,SEG TABLES. GO TO 1.2 00128000
+*        1.15 SET R1,R2 FOR FRET OF OLD SEGTABLE ONLY                   00129000
+*                                                                       00130000
+*        1.2 CALL BLDRL TO DO FRETS                                     00131000
+*                                                                       00132000
+*        1.3 STORE NEW VMSEG, VMSEGDSP                                  00133000
+*                                                                       00134000
+*                                                                       00135000
+*        1.60 IF OLD SEGTABLE ENTRIES NOT SAVED, GO TO 1.62             00136000
+*        1.61 COMPUTE START OF INVALID STE'S                            00137000
+*        1.62 INVALIDATE STE'S                                          00138000
+*                                                                       00139000
+*        1.70 IF VIRT=REAL GO TO STEP 2                                 00140000
+*        1.71 IF SKIP PAG-SWP BUILD SPECIFIED, RETURN TO CALLER         00141000
+*        1.72 ADJUST R6 FOR START OF SEGMENTS TO BUILD                  00142000
+*             PAGE AND SWAP TABLES FOR                                  00143000
+*                                                                       00144000
+*        1.5 IF VM ASSIST IS AVAILABLE, ADDRESS OF SEGMENT TABLE        00145000
+*        IS PUT INTO MICBLOK.                                           00146000
+*                                                                       00147000
+*        2. THEN, DEPENDING UPON THE CORE SIZE, THE APPROPRIATE SIZE    00148000
+*        OF PAGE TABLE AND SWAP TABLE FOR A SEGMENT ARE COMPUTED AND    00149000
+*        OBTAINED FROM FREE STORAGE, AND THEN INITIALIZED TO THEIR      00150000
+*        DEFAULT VALUES.                                                00151000
+*                                                                       00152000
+*              2.1  IF PAGETONLY IS SPECIFIED, RETURN TO CALLER.        00152100
+*        3. STEP 2 IS THEN REPEATED, AS NECESSARY, UNTIL SUFFICIENT     00153000
+*        PAGE TABLES AND SWAP TABLES HAVE BEEN OBTAINED AND SET UP      00154000
+*        TO HANDLE THE VIRTUAL MACHINE SIZE SPECIFIED.                  00155000
+*                                                                       00156000
+*        4. BEFORE RETURNING TO THE CALLER; THE VMPSTAT FIELD IS        00157000
+*           CHECKED FOR VIRT=REAL OPTION. IF THIS USER DOES NOT HAVE    00158000
+*           VIRT=REAL PRIVILEGE, EXIT TO THE CALLER. OTHERWISE          00159000
+*           DETERMINE IF THE VIRT=REAL AREA CAN BE GIVEN TO THIS USER,  00160000
+*                                                                       00161000
+*           A. CALCULATE THE SIZE OF VIRT=REAL AREA; A(DMKSLC-4096),    00162000
+*              IS THE SIZE IN BYTES OF THE AREA.                        00163000
+*                                                                       00164000
+*           B. VIRTUAL MACHINE SIZE MUST BE LESS THAN VIRT=REAL SIZE    00165000
+*                                                                       00166000
+*           C. THE POINTER IN PSA WORD <AVMREAL> MUST BE ZERO (0)       00167000
+*              INDICATING THE VIRT=REAL AREA IS FREE AND NOT IN USE     00168000
+*                                                                       00169000
+*           IF THE ABOVE CONDITIONS ARE MET, THE PAGE AND SEGMENT       00170000
+*           TABLE ENTRIES ARE CHANGED TO REFLECT THAT THE PAGES ARE IN  00171000
+*           REAL STORAGE. THE AVMREAL WORD IN PSA IS ALTERED TO POINT   00172000
+*           TO THIS USER'S VMBLOK. EXIT IS NOW MADE TO THE CALLER.      00173000
+*                                                                       00174000
+*                                                                       00175000
+*                                                                       00176000
+* RESPONSES -                                                           00177000
+*                                                                       00178000
+*   STORAGE IS VIRTUAL=REAL                                             00179000
+*                                                                       00180000
+*                                                                       00181000
+* ERROR MESSAGES -                                                      00182000
+*                                                                       00183000
+*   DMKBLD200E VIRT=REAL AREA NOT AVAILABLE; IN USE BY <SYSTEM>         00184000
+*                                                      <USERID>         00185000
+*                                                                       00186000
+*   DMKBLD201E VIRT=REAL AREA NOT AVAILABLE; DAMAGED PAGES              00187000
+*                                                                       00188000
+*   DMKBLD202E VIRT=REAL AREA NOT AVAILABLE; INSUFFICIENT STORAGE       00189000
+*                                                                       00190000
+*.                                                                      00191000
+         EJECT                                                          00192000
+         DC    CL8'DMKBLD'    MODULE IDENTIFIER.                        00193000
+         SPACE                                                          00194000
+DMKBLDRT RELOC                BUILD REAL SEGMENT, PAGE, AND SWAP TABLES 00195000
+         LR    R5,R1          SAVE THE CORE SIZE                        00196000
+         N     R5,F4095       CLEAR OUT FIRST ADDRESS          @V304635 00197000
+         LA    R5,1(,R5)      INCREASE IT BY 1 FULL PAGE.      @V304635 00198000
+         LR    R0,R5          SAVE TOTAL NUMBER OF PAGES       @V304635 00199000
+         TM    SAVER2+3,NEWPAGES NEW PAGE TABLES REQUESTED     @V304635 00200000
+         BZ    BLDRT01        NO, THEN NO NEED TO ADJ R5       @V304635 00201000
+         SRL   R1,16          ADDRESS OF FIRST SEG. TO BUILD.  @V304635 00202000
+         SR    R5,R1          GET NEW TOTAL NUMBER OF PAGES    @V304635 00203000
+*                             TO BUILD PAG-SWP TABLES FOR               00204000
+BLDRT01  EQU   *                                               @V304635 00205000
+         TM    SAVER2+3,PAGTONLY JUST WANT TABLE?              @V408246 00205100
+         BO    SEGSKIP        YES, SKIP SEGMENT TABLE          @V408246 00205300
+*                             PROCESSING                                00205500
+         SR    R1,R1          CLEAR R1                                  00206000
+         SRDL  R0,8           SHIFT TO OBTAIN NUMBER OF SEGMENT TABLES  00207000
+         LTR   R1,R1          DID IT COME OUT EVEN ?                    00208000
+         BZ    BLDR01         YES, THIS TIME.                           00209000
+         AL    R0,F1          ADD 1 TO R0 IF NOT.                       00210000
+BLDR01   LR    R3,R0          REMEMBER NUMBER OF SEGMENT TABLES IN R3   00211000
+         SR    R4,R4          ZIP REG                          @V304635 00212000
+         TM    SAVER2+3,OLDVMSEG IS THERE AN OLD SEGTABLE      @V304635 00213000
+         BZ    NOSEG01        NO, THEN LEAVE R4=0              @V304635 00214000
+         IC    R4,VMSEG       SET R4=NUMBER SEGTABLES IN       @V304635 00215000
+         LA    R4,1(,R4)      OLD VMSEG(ORIGIN 1)              @V304635 00216000
+NOSEG01  EQU   *                                               @VA06171 00216600
+         CR    R4,R3          IS OLD HIGHER THAN NEW           @VA06171 00217200
+         BL    BLDRT02        NO WE NEED FREE STORAGE          @VA06171 00217800
+*                             FOR THE NEW SEGTABLE                      00219000
+         TM    SAVER2+3,KEEPSEGS KEEP OLD SEG. TABLE DATA ?    @V304635 00220000
+         BO    SEGSKIP        YES, THE OLD SEGTABLE WILL DO    @V304635 00221000
+         SR    R1,R1          CLEAR                            @V408246 00222100
+         IC    R1,VMSEG       SEGMENT COUNT/16 -1              @V408246 00222300
+         LA    R1,1(,R1)      SEGMENT COUNT/16                 @V408246 00222500
+         SLL   R1,4+4         SEGMENT COUNT * 16               @V408246 00222700
+         BCTR  R1,0           -1                               @V408246 00222900
+         CALL  DMKBLDRL,PARM=DELPAGES RELEASE PAGE/SWAP TABLES @V304635 00224000
+         B     SEGSKIP        FINISHED WITH SEGTABLE PROCESSING@V304635 00225000
+         EJECT                                                          00226000
+BLDRT02  EQU   *              HERE TO GET FREE STORAGE FOR     @V304635 00227000
+         CLI   SAVER2+3,KEEPSEGS+OLDVMSEG COMPRESS SEGTABLE?   @V408246 00228100
+         BE    COMPPAGE       YES, GET STORAGE FOR NEW SEG     @V408246 00228200
+         CLI   SAVER2+3,NEWPAGES+KEEPSEGS+OLDVMSEG+DELPAGES    @V408246 00228300
+         BE    COMPPAGE       COMPRESS SEGMENT TABLE           @V408246 00228400
+         CR    R4,R3          WILL NEW PAGES FIT INTO OLD?     @V408246 00228500
+         BNL   SEGSKIP        YES, LEAVE OLD AS IS             @V408246 00228600
+COMPPAGE DS    0H             BUILD NEW TABLES                 @V408246 00228700
+         SLL   R0,3           8 DBL-WORDS NEEDED FOR EACH 64-BYTE SEG.  00240000
+         AL    R0,F7          PLUS 7 TO ENSURE 64-BYTE ALIGNMENT        00241000
+         CALL  DMKFREE        GET SPACE FOR REAL SEGMENT TABLES         00242000
+         LA    R6,63(,R1)     ROUND UP TO NEXT 64-BYTE BOUNDARY         00243000
+         N     R6,=A(X'FFFFC0')    (IN R6)                              00244000
+         ST    R1,SAVEWRK1    SAVE REAL BEGINING OF NEW        @V304635 00245000
+         TM    SAVER2+3,OLDVMSEG OLD TABLES?                   @V408246 00246010
+         BZ    NOSOLD         NOPE, BYPASS QUIESE              @V408246 00246030
+BLDRQ    DS    0H             MAKE SURE OLD TABLE IS QUITE     @V408246 00246050
+         L     R8,VMSEG       START OF OLD SEG TABLE           @V408246 00246070
+         LA    R8,0(,R8)                                       @V408246 00246090
+         LR    R9,R4          LENGTH OF OLD / 64               @V408246 00246110
+         SLL   R9,6           LENGTH OF OLD TABLE              @V408246 00246130
+         LA    R9,0(R9,R8)    END OF OLD TABLE                 @V408246 00246150
+         SR    R1,R1          VIRTUAL ADDRESS OF SEGMENT       @V408246 00246170
+         USING SEGTABLE,R8                                     @V408246 00246190
+SEGQCHK  DS    0H                                              @V408246 00246210
+         TM    SEGPAGE+3,SEGENQ+SEGINV SEGMENT AVAILABLE?      @V408246 00246230
+         BNO   SEGCHKL        YES, CHECK NEXT                  @V408246 00246250
+         ICM   R0,B'0110',SEGPAGE+1 (ONLY IF POINTER = 0)      @V408246 00246270
+         BNZ   SEGCHKL        NOT ZERO                         @V408246 00246290
+         TRANS 2,1,OPT=(DEFER) WAIT FOR AWHILE                 @V408246 00246310
+         B     BLDRQ          START ALL OVER AGAIN             @V408246 00246330
+SEGCHKL  DS    0H                                              @V408246 00246350
+         A     R1,=A(X'10000') NEXT VIRTUAL SEGMENT ADDRESS    @V408246 00246370
+         LA    R8,4(,R8)      NEXT STE ADDRESS                 @V408246 00246390
+         CR    R8,R9          LAST ENTRY PROCESSESED?          @V408246 00246410
+         BL    SEGQCHK        NO                               @VA08670 00246430
+         DROP  R8                                              @V408246 00246450
+NOSOLD   DS    0H                                              @V408246 00246470
+         TM    SAVER2+3,KEEPSEGS KEEP OLD SEG. TABLE DATA ?    @V304635 00247000
+         BZ    NOMOVE         NO, THEN SKIP THE MVCL           @V304635 00248000
+         LR    R7,R3          GET NUM SEGTABLES IN NEW VMSEG   @V304635 00249000
+         SLL   R7,6           TIMES 64 BYTES PER TABLE         @V304635 00250000
+         LR    R9,R4          GET NUM SEGTABLES IN OLD VMSEG   @V304635 00251000
+         SLL   R9,6           TIMES 64                         @V304635 00252000
+         L     R8,VMSEG       GET OLD VMSEG ORIGIN             @V304635 00253000
+         LA    R8,0(,R8)      WITHOUT LENGTH                   @V304635 00254000
+         LR    R2,R6          SAVE STARTING ADDRESS OF VMSEG   @V304635 00255000
+         MVCL  R6,R8          MOVE OLD SEGTABLE DATA TO NEW    @V304635 00256000
+         LR    R6,R2          RESTORE STARTING ADDRESS OF VMSEG@V304635 00257000
+         EJECT                                                          00257100
+NOMOVE   TM    SAVER2+3,OLDVMSEG IS THERE AN OLD SEGTABLE.     @V304635 00258000
+         BZ    SKIPFRET       NO, THEN DON'T FRET ABOUT IT     @V304635 00259000
+CALBLDRL CALL  DMKBLDRL,PARM=DELSEGS FRET OLD SEGMENT TABLE    @V304635 00260000
+         EJECT                                                          00260100
+SKIPFRET ST    R6,VMSEG       STORE NEW SEGTABLE POINTER       @V304635 00261000
+         LR    R15,R3         GET NUMBER OF SEGMENT TABLES LESS 1       00262000
+         BCTR  R15,0          ...                                       00263000
+         STC   R15,VMSEG      AND STORE IN LEFTMOST BYTE OF VMSEG.      00264000
+         LR    R15,R6         GET SEGTABLE POINTER             @V304635 00265000
+         S     R15,SAVEWRK1   SUB REAL BEG OF SEGTABLE         @V304635 00266000
+         STH   R15,VMSEGDSP   SAVE IN VMBLOK                   @V304635 00267000
+         L     R15,VMMICRO    GET ADDRESS OF MICBLOK           @V201537 00268000
+         LA    R15,0(R15)     CLEAR ANY FLAG BITS              @V201537 00269000
+         LTR   R15,R15        IS THERE A MICBLOK?              @V201537 00270000
+         BE    NOMIC1         BRANCH IF NOT                    @V201537 00271000
+         USING MICBLOK,R15                                     @V201537 00272000
+         MVC   MICRSEG,VMSEG  SAVE SEG TABLE PTR FOR MICRO ASST@V201537 00273000
+         DROP  R15                                             @V201537 00274000
+NOMIC1   EQU   *                                               @V201537 00275000
+         TM    SAVER2+3,KEEPSEGS IF WE DIDN'T SAVE OLD SEG     @V304635 00276000
+         BZ    ALLNG          TABLE ENTRIES, THEN ALL OF NEW   @V304635 00277000
+*                             SEGTABLE ENTRIES ARE INVALID              00278000
+         SR    R3,R4          SUB NUM OLD SEGTABLES FROM NEW   @V304635 00279000
+         BNP   SEGSKIP        IF NEG, THEN THERE ARE NO        @V304635 00280000
+*                             INVALID STE, SINCE WE DECREASED           00281000
+*                             THE SEGTABLE AND SAVED DATA               00282000
+         SLL   R4,6           GET DSP FROM TOP OF SEGTABLE TO  @V304635 00283000
+*                             START INVALIDATING                        00284000
+         AR    R6,R4          BY MUL NUM SEGTABLES BY 64. AND  @V304635 00285000
+*                             ADD TO SEGTABLE ORIGIN IN R6              00286000
+ALLNG    LA    R15,1          INVALID STE INDICATOR            @V304635 00287000
+BLDRSEG  ST    R15,0(R6)      STORE INVALID STE                @V304635 00288000
+         MVC   4(60,R6),0(R6) DO ALL SEGTABLE                  @V304635 00289000
+         LA    R6,64(,R6)     POINT TO NXT SEGTABLE            @V304635 00290000
+         BCT   R3,BLDRSEG     DO NXT SEGTABLE(IF ANY)          @V304635 00291000
+         EJECT                                                          00292000
+SEGSKIP  EQU   *              FINISHED WITH SEGTABLE PROCESSING@V304635 00293000
+         TM    SAVER2+3,NEWPAGES REQUESTING PAGE TABLES ?      @VM03017 00294000
+         BZ    RETBLDRT       IF NOT - RETURN TO CALLER        @VM03017 00295000
+         SLR   R3,R3          CLEAR                            @VM03017 00296000
+         L     R6,VMSEG       GET SEGTABLE ORIGIN              @VM03017 00297000
+         LH    R3,SAVER1      GET SEG TO BEG BUILD             @V304635 00298000
+         SRL   R3,4           DROP THE PAGE NUMBER             @V304635 00299000
+         SLL   R3,2           GET DSP INTO VMSEG TO START      @V304635 00300000
+DOPAGSWP LA    R6,0(R3,R6)    POINT TO 1ST STE TO BUILD FOR    @V304635 00301000
+         L     R3,=XL4'00010000'   TO ADD 1 TO PAGE NUMBER IN SWPTABLE  00302000
+         LA    R10,8               TO ADD 8 TO A REGISTER LATER         00304000
+         TM    SAVER2+3,PAGTONLY RETURN IN R2 REQUESTED?       @V408246 00305100
+         BZ    BLDRPAGE       NO, THEN CONTINUE                @V408246 00305200
+         LA    R6,SAVEWRK9    YES, POINT TO DUMMY STE          @V408246 00305300
+         LA    R4,16          LOAD R4 WITH CONSTANT 16         @V408246 00305400
+         CR    R5,R4          INSURE BUILD IS FOR 1 SEG        @V408246 00305500
+         BNH   ISINVAL        ELSE QUIT                        @V408246 00305600
+         ABEND 3                                               @V408246 00305700
+         USING SEGTABLE,R6                                              00306000
+* INITIALIZE PAGE & SWAP TABLES FOR ONE SEGMENT OF 16 PAGES (OR LESS)   00307000
+BLDRPAGE LA    R4,16          LOAD THE CONSTANT 16                      00308000
+         ICM   R15,B'0011',SEGPAGE+1 IS THERE A PAGTABLE PTR   @V408246 00309100
+         BNZ   NOTINVAL       YES THERE IS ONE                 @V408246 00309200
+         TM    SEGPAGE+3,SEGINV IF NOT, MAKE SURE IT'S         @VA08431 00309305
+         BO    ISINVAL        NOT ON DASD BUT INVALID          @VA08431 00309405
+         CLI   SAVER2+3,OLDVMSEG+KEEPSEGS+NEWPAGES+NEWSEGS ??  @V408246 00309500
+         BNE   BLD4           NO, DIE                          @V408246 00309600
+         TM    SEGPAGE+3,SEGENQ IS SEGMENT ENQUEUED?           @V408246 00309700
+         BZ    SKIPBLD        NO, BYPASS                       @V408246 00309800
+         ABEND 4                                               @V408246 00309900
+NOTINVAL DS    0H                                              @V408246 00310000
+         CLI   SAVER2+3,OLDVMSEG+KEEPSEGS+NEWPAGES+NEWSEGS     @V304635 00311000
+         BE    SKIPBLD        ONLY BUILD THOSE INVALID STE     @V304635 00312000
+         TM    SAVER2+3,OLDVMSEG+KEEPSEGS+NEWPAGES BUILD ALL ? @V304635 00313000
+         BNO   BLDTHEM        YES                              @V304635 00314000
+         LH    R1,SAVER1+2    GET ENDING ADDRESS TO BUILD FOR  @V304635 00315000
+         SLL   R1,12          ADD TO IT THE DISPLACEMENT       @V304635 00316000
+         CL    R1,VMSTOR      ADDRESS < VM STORAGE SIZE        @V304635 00317000
+         BH    BLDTHEM        NO - BUILD PAGE TABLES           @V304635 00318000
+         CLR   R5,R4          IS THERE 16 PAGES IN SEGMENT     @V304635 00319000
+         BL    FORCE16        NO - FORCE IT TO 16              @V304635 00320000
+         CLI   SEGPLEN,X'F0'  ARE THERE PRESENTLY 16 PAGES IN  @V304635 00321000
+*                             SEG                                       00322000
+         BE    SKIPBLD        YES - THEN NO NEED TO BUILD      @V304635 00323000
+*                             ANYTHING                                  00324000
+FORCE16  LA    R5,16          BUILD 16 PAGE TABLE ENTRIES      @V304635 00325000
+BLDTHEM  L     R2,VMSEG       GET SEGTABLE ORIGIN              @V304635 00326000
+         LA    R2,0(,R2)      STRIP LENGTH                     @V304635 00327000
+         LR    R1,R6          GET CURRENT STE ADDRESS          @V304635 00328000
+         SR    R1,R2          DSP INTO SEGTABLE                @V304635 00329000
+         SRL   R1,2           DIVIDED BY 4=SEGMENT NUMBER      @V304635 00330000
+         LR    R2,R1          SAVE SEG NUM IN LOW BYTE R2      @V304635 00331000
+         SLL   R1,20          MOVE BEG SEG NUM TO FRET.        @V304635 00332000
+         SLL   R2,4           ENDING SEGMENT NUMBER            @V304635 00333000
+         OR    R1,R2          FORM BEGINING/ENDING ADDRESSES   @V304635 00334000
+         CALL  DMKBLDRL,PARM=DELPAGES RELEASE OLD PAGE TABLES  @V304635 00335000
+*                             THEN BUILD NEW DUMMY TABLE                00336000
+ISINVAL  EQU   *                                               @V304635 00337000
+         CR    R5,R4          AT LEAST 16 PAGES ?                       00338000
+         BNL   BLDRP16        BRANCH IF YES                             00339000
+         LR    R4,R5          NUMBER OF PAGES LEFT INTO R4 IF < 16      00340000
+BLDRP16  BCTR  R4,0           SUBTRACT 1                                00341000
+         LA    R0,PAGBMP      LOAD SIZE OF PAGE AND SWPTABLES  @V407511 00342100
+         SRL   R0,3           OBTAIN NUMBER OF DOUBLEWORDS     @V407511 00342200
+*                             PAGTABLE+SWAPTABLE                        00342600
+         CALL  DMKFREE        PAGE AND SWAP TABLE              @V408246 00343100
+         LR    R7,R1          PAGETABLE HEADER                 @V408246 00343600
+         USING PAGTABLE,R7                                     @V408246 00344100
+         STCK  PAGSTMP        TIME-STAMP PAGE TABLE            @V408246 00344600
+         BC    8+4,*+10       IGNORE ANY TIMER ERROR HERE      @V408246 00345100
+         XC    PAGSTMP,PAGSTMP ZERO IN CASE OF ERROR           @V408246 00345600
+         XC    PAGACT(12),PAGACT CLEAR HEADER                  @V408246 00346100
+         MVC   PAGCORE,F8+2   INVALIDATE 1ST ENTRY             @V408246 00346600
+         MVC   PAGCORE+2(15*2),PAGCORE INVALIDATE REST OF THE  @V408246 00347100
+*                             ENTRIES                                   00347600
+         LA    R2,PAGCORE     LOAD ADR OF PTE                  @V408246 00348100
+         ST    R2,SEGPAGE     STORE IN SEGTABLE                @V408246 00348600
+         LR    R15,R4         GET NUMBER OF PAGES              @V408246 00349100
+         SLL   R15,4          SHIFT FOR HARDWARE               @V408246 00349600
+         STC   R15,SEGPLEN    AND SAVE IN SEGTABLE             @V408246 00350100
+         OI    SEGPAGE+3,SEGINV                                @V408246 00350600
+*                             SIGNALS NO PAGES IN CORE                  00351100
+         LA    R8,PAGCORE+16*2 START OF SWAP TABLE HEADER      @V408246 00351600
+         USING SWPTABLE,R8                                              00356000
+         ST    R11,SWPVM      STORE VMBLOK ADDRESS IN SWPTABLE HEADER   00357000
+         ST    R2,SWPPAG      STORE PAGTABLE ADDRESS IN SWPTABLE HEADER 00358000
+         LA    R2,SWPFLAG     LOAD 1ST SWPTABLE ENTRY ADDRESS           00359000
+         ST    R2,PAGSWP      STORE SWPTABLE ADDRESS IN PAGTABLE HEADER 00360000
+         LA    R4,1(,R4)      RELOAD NUMBER OF PAGES                    00361000
+         LA    R1,SWPRECMP    LOAD RECOMPUTE FLAG                       00363000
+         SLL   R1,24          SHIFT TO HIGH ORDER BYTE                  00364000
+         SR    R2,R2          LOAD ZERO FOR 2ND WORD OF SWPTABLE ENTRY  00365000
+BLDRINIT DS    0H                                              @V408246 00366100
+         STM   R1,R2,SWPFLAG  INITIALIZE SWPTABLE - ZEROES PAGE         00367000
+         AR    R1,R3          ADD 00010000 TO PAGE NUMBER IN SWPTABLE   00368000
+         AR    R8,R10         R8+8 - POINT TO NEXT SWPTABLE ENTRY       00370000
+         BCT   R4,BLDRINIT    BRANCH IF MORE ENTRIES                    00371000
+         LA    R4,1           INCREMENT                        @V408246 00371100
+         L     R14,PREFIXA    GET PREFIX VALUE TO ADDRESS PSA  @V4M0132 00371300
+*                             AT ABSOLUTE 0                    @V4M0132 00371400
+         AL    R4,TTSEGCNT(R14) ADD INCR TO TOTAL SEGMENT CNT  @V4M0132 00371500
+         ST    R4,TTSEGCNT(R14) STORE UPDATED SEGMENT COUNT    @V4M0132 00371600
+SKIPBLD  LA    R6,SEGPAGE+4   POINT TO NXT STE                 @V304635 00372000
+         S     R5,F16         SUBTRACT 16 FROM NUMBER OF PAGES          00373000
+         BP    BLDRPAGE       ITERATE THE PROCESS IF SOME PAGES LEFT.   00374000
+         AIF   (NOT &VIRREAL).VIRT1                                     00375000
+         TM    SAVER2+3,VRALOC ATTEMPT TO GIVE OUT V=R AREA    @VM03144 00376000
+         BZ    RETBLDRT       NOPE, DONE; BR.                  @VM03144 00377000
+         TM    VMPSTAT,VMREAL IS USER A VIRT=REAL USER                  00378000
+         BO    VIRTREAL       IF YES, TRY TO GIVE HIM THE AREA          00379000
+.VIRT1   ANOP                                                           00380000
+RETBLDRT DS    0H                                              @V408246 00380100
+         TM    SAVER2+3,PAGTONLY RETURN IN R2 REQUESTED?       @V408246 00380300
+         BZ    RETBLD2        NOPE                             @V408246 00380500
+         MVC   SAVER2,SAVEWRK9 PASS BACK 'STE' IN REGISTER     @V408246 00380700
+RETBLD2  DS    0H                                              @V408246 00380900
+         EXIT                                                  @V408246 00381100
+*                                                                       00382000
+         DROP  R6,R7,R8                                                 00383000
+DOWNWEGO DS    0H                                              @V408246 00383100
+         GOTO  DMKCVTAB                                        @V408246 00383200
+         EJECT                                                          00383300
+         AIF   (NOT &VIRREAL).VIRT2                                     00384000
+VIRTREAL ICM   R1,15,AVMREAL  LOAD V=R VMBLOK POINTER          @VM08649 00385000
+         BM    BLD201         BRANCH, IF AREA HAS DAMAGED PAGES         00386000
+         BP    BLD200         BRANCH, IF AREA ALREADY IN USE            00387000
+         L     R1,=A(DMKSLC-4096)  GET SIZE OF VIRT=REAL AREA           00388000
+         LTR   R1,R1          CHECK IF V=R SYSGENED            @VM08649 00389000
+         BM    BLD202         BRANCH, IF AREA NOT DEFINED FROM SYSGEN   00390000
+         L     R0,VMSIZE      LOAD SIZE OF THIS VIRTUAL MACHINE         00391000
+         CR    R0,R1          IS VIRTUAL MACHINE > THEN VIRT=REAL AREA  00392000
+         BH    BLD202         IF YES, USER CAN'T HAVE IT                00393000
+         SPACE                                                          00394000
+         USING SEGTABLE,R7                                              00395000
+         USING PAGCORE,R8                                      @V408246 00396100
+         USING SWPTABLE,R9                                              00397000
+         USING CORTABLE,R10                                             00398000
+         SPACE                                                          00399000
+         LA    R4,16          PAGE NUMBERING TO START WITH 1            00400000
+         LR    R6,R0          SIZE OF THIS VIRTUAL MACHINE     @VA01062 00401000
+         SRL   R6,12          TOTAL NO. OF PAGES REQUIRED      @VA01062 00402000
+         S     R6,F1          LESS ONE FOR HIPAGE              @VA01377 00403000
+         L     R7,VMSEG       GET SEGMENT TABLE ADDRESS                 00404000
+         NI    SEGPAGE+3,255-SEGINV CLEAR INVALID BIT          @V408246 00404100
+         L     R8,SEGPAGE     LOAD ADDRESS OF PAGE TABLE                00405000
+         LA    R8,0(,R8)      CLEAR OUT NUMBER OF PAGES                 00406000
+         LA    R9,PAGCORE+16*2+8 ADDRESS OF 1ST SWAPTABLE      @V408246 00407100
+         SR    R5,R5          CLEAR REG                                 00410000
+         IC    R5,SEGPLEN     NUMBER OF PAGES IN THIS SEGMENT           00411000
+         SRL   R5,4           SHIFT OUT UNWANTED BITS                   00412000
+         L     R10,ACORETBL   LOAD ADDRESS OF CORE TABLE                00413000
+         LA    R8,PAGCORE+2   SKIP ENTRY FOR PAGE 0            @V408246 00414100
+         LA    R9,SWPTABLE+8  SKIP SWAP ENTRY FOR PAGE 0                00415000
+         LA    R10,CORTABLE+16     SKIP CORE ENTRY FOR PAGE 0           00416000
+NXTENTRY DS    0H                                              @V408246 00417100
+         ST    R11,CORFPNT    STORE USER'S VMBLOK ADDRESS.     @V408246 00417600
+         L     R0,F1          LOCK COUNT OF 1 TO                        00419000
+         ST    R0,CORLCNT     STORE IN CORE TABLE ENTRY                 00420000
+         ST    R9,CORSWPNT    STORE ADDRESS OF SWAP TABLE ENTRY         00421000
+         ST    R8,CORPGPNT    STORE ADDRESS OF PAGE TABLE ENTRY         00422000
+         MVI   CORFLAG,CORCFLCK+CORIOLCK LOCK PAGE IN CORE     @V408246 00423100
+         STH   R4,PAGCORE     SOTRE REAL PAGE NUMBER           @V408246 00423200
+         BCTR  R6,R0          KEEP COUNT OF PAGES ALLOCATED    @VA01062 00425000
+         LTR   R6,R6          GOT 'EM ALL?                     @VA01062 00426000
+         BZ    HIPAGE         ALL EXCEPT PAGE 0                @VA01062 00427000
+         LA    R8,PAGCORE+2   GET NEXT PAGE TABLE ENTRY ADDRESS@V408246 00428100
+         LA    R9,SWPTABLE+8  GET NEXT SWAP TABLE ENTRY                 00429000
+         LA    R10,CORTABLE+16     GET NEXT CORE TABLE ENTRY            00430000
+         LA    R4,16(,R4)     INCREMENT THE PAGE NUMBER                 00431000
+         BCT   R5,NXTENTRY    PROCESS ALL CORE TABLE ENTRIES FOR SEG.   00432000
+         LA    R7,SEGTABLE+4  POINT TO NEXT SEG. TABLE ADDR.            00433000
+         NI    SEGPAGE+3,255-SEGINV CLEAR INVALID BIT          @V408246 00433100
+         IC    R5,SEGPLEN     PICK UP NUM, PAGES IN THIS SEGMENT        00434000
+         SRL   R5,4           CLEAR OUT UNWANTED BITS                   00435000
+         A     R5,F1          CORRECTION FOR BCT LOOP                   00436000
+         L     R8,SEGPAGE     LOAD ADDRESS OF THIS PAGE TABLE           00437000
+         LA    R8,0(,R8)      CLEAR OUT PAGE NUMBER                     00438000
+         LR    R9,R8          BACK UP THE ADDRESS OF THE PAGE           00439000
+         S     R9,F4          TABLE SO THAT THE SWAP TABLE              00440000
+         L     R9,0(,R9)      ADDRESS CAN BE FOUND                      00441000
+         B     NXTENTRY       CONTINUE PROCESSING ALL ENTRIES           00442000
+         SPACE                                                          00443000
+HIPAGE   L     R1,=A(DMKSLC-4096)  FIND PAGE 0 ADDRESS                  00444000
+         SRL   R1,8           INDEX FOR PROPER CORE TABLE ENTRY         00445000
+         L     R7,VMSEG       LOAD ADDRESS OF SEG. FOR PAGE 0           00446000
+         L     R8,SEGPAGE     LOAD ADDRESS OF PAGE 0                    00447000
+         LA    R8,0(,R8)      CLEAR HIGH BYTE                           00448000
+         LR    R9,R8          GET ADDRESS OF SWAP ENTRY FOR             00449000
+         S     R9,F4          PAGE 0.                                   00450000
+         L     R9,0(,R9)                                                00451000
+         L     R10,ACORETBL   LOAD ADDRESS OF CORE TABLE AND            00452000
+         LA    R10,CORTABLE(R1)    LOCATE TOP OF VIRT=REAL - 4096       00453000
+         STH   R1,PAGCORE     STORE ADDRESS OF REAL PAGE 0     @V408246 00454100
+         ST    R11,CORFPNT    STORE USER'S VMBLOK ADDRESS.     @V408246 00454200
+         L     R0,F1          CONSTANT FOR LOCK COUNT                   00457000
+         ST    R0,CORLCNT     SET LOCK COUNT                            00458000
+         ST    R9,CORSWPNT    STORE SWAP ADDRESS OF PAGE 0              00459000
+         ST    R8,CORPGPNT    STORE PAGE ADDRESS OF PAGE 0              00460000
+         MVI   CORFLAG,CORCFLCK+CORIOLCK LOCK PAGE IN CORE     @V408246 00461100
+         ST    R11,AVMREAL    THIS USER NOW OWNS THE VIRT=REAL AREA     00462000
+         L     R15,PREFIXB    GET PREFIX ADDR OF OTHER PROC    @V4M0132 00462100
+         ST    R11,AVMREAL(R15) MAINTAIN AVMREAL IN BOTH PSA'S @V4M0132 00462200
+         SLR   R0,R0          ZERO R-0                                  00463000
+         STH   R0,VMPAGES     CLEAR NUMBER PAGES RESIDENT (PAGEABLE)    00464000
+         STH   R0,VMWSPROJ    ZERO PROJECTED WORKING SET SIZE           00465000
+         OI    VMQLEVEL,VMAEX GIVE THIS USER ASSURED EXECUTION @VA08851 00465500
+         MSG   'STORAGE IS VIRTUAL=REAL'                                00467000
+         CALL  DMKQCNWT,PARM=NORET                                      00468000
+         EXIT                                                           00469000
+BLD200   LA    R2,200         MESSAGE DMKBLD200                         00470000
+         DROP  R11                                                      00471000
+         CL    R1,F1          IS V=R AREA UNLOCKED?            @V4M0167 00471100
+         BNE   *+8            NO, O.K.                         @V4M0167 00471200
+         L     R1,ASYSVM      YES, SHOW SYSTEM AS V=R OWNER    @V4M0167 00471300
+         USING VMBLOK,R1                                                00472000
+         MVC   SAVEWRK2(8),VMUSER  USERID                               00473000
+         DROP  R1                                                       00474000
+         USING VMBLOK,R11                                               00475000
+         LA    R1,SAVEWRK2    ADDRESS OF THE DATA                       00476000
+         LA    R0,8           LENGTH OF DATA                            00477000
+         B     VARDATA        SEND THE MESSAGE                          00478000
+         SPACE                                                          00479000
+BLD201   LA    R2,201         MESSAGE DMKBLD201                         00480000
+         B     CALLERM        SEND THE MESSAGE                          00481000
+         SPACE                                                          00482000
+BLD202   LA    R2,202         MESSAGE DMKBLD202                         00483000
+CALLERM  SLR   R0,R0                                                    00484000
+         SLR   R1,R1                                                    00485000
+VARDATA  ICM   R0,B'1110',=C'BLD'  MODULE IDENTIFIER                    00486000
+         CALL  DMKERMSG       WRITE THE MESSAGE                         00487000
+*                                                                       00488000
+*   RETURN WILL BE DIRECTLY TO THE CALLER FROM DMKERM                   00489000
+*                                                                       00490000
+         SPACE                                                          00491000
+         SPACE                                                          00492000
+BLDMSG   CALL  DMKQCNWT,PARM=NORET                                      00493000
+         EXIT                                                           00494000
+         SPACE                                                          00495000
+         DROP  R7,R8,R9,R10                                             00496000
+.VIRT2   ANOP                                                           00497000
+         EJECT                                                          00498000
+*.                                                                      00499000
+* SUBROUTINE NAME -                                                     00500000
+*                                                                       00501000
+*        DMKBLDRL - RELEASE REAL SEGMENT, PAGE, AND SWAP TABLES         00502000
+*                                                                       00503000
+* FUNCTION -                                                            00504000
+*                                                                       00505000
+*        TO RELEASE SEGMENT, PAGE, AND SWAP TABLES                      00506000
+*        WHEN THEY ARE NO LONGER NEEDED.                                00507000
+*                                                                       00508000
+* ATTRIBUTES -                                                          00509000
+*                                                                       00510000
+*        REENTRANT, PAGEABLE, CALLED VIA SVC                            00511000
+*                                                                       00512000
+* ENTRY POINT -                                                         00513000
+*                                                                       00514000
+*        DMKBLDRL                                                       00515000
+*                                                                       00516000
+* ENTRY CONDITIONS -                                                    00517000
+*        GPR 2 - PARM REGISTER                                          00518000
+*        DELSEGS = RELEASE SEGMENT TABLE                                00519000
+*        DELPAGES = RELEASE PAGE/SWAP TABLES                            00520000
+*                                                                       00521000
+*        PAGTONLY             RELEASE TABLE POINTED TO BE R1            00521100
+*                                                                       00522000
+*        GPR 1 = BEGINING AND ENDING ADDRESS TO RELEASE                 00523000
+*        BYTE 0-1 = FIRST ADDRESS TO RELEASE                            00524000
+*             FIRST 4 BITS = 0, NEXT 8 BITS = SEGMENT, NEXT 4 = PAGE    00525000
+*        BYTE 2-3 = LAST ADDRESS TO RELEASE                             00526000
+*              FIRST 4 BITS = 0, NEXT 8 BITS = SEGMENT, NEXT 4 = PAGE   00527000
+*                                                                       00528000
+*        GPR 11 = ADDRESS OF USER'S VMBLOK                              00529000
+*        GPR 12 = ADDRESS OF DMKBLDRL                                   00530000
+*        GPR 13 = ADDRESS OF STANDARD SAVE AREA                         00531000
+*                                                                       00532000
+* EXIT CONDITIONS -                                                     00533000
+*                                                                       00534000
+*        SWAP, PAGE, AND SEGMENT TABLES HAVE                            00535000
+*        BEEN RETURNED TO FREE STORAGE.                                 00536000
+*                                                                       00537000
+* CALLS TO OTHER ROUTINES -                                             00538000
+*                                                                       00539000
+*        DMKFRET - TO RETURN TABLES TO FREE STORAGE                     00540000
+*                                                                       00541000
+* EXTERNAL REFERENCES -                                                 00542000
+*                                                                       00543000
+*        NONE                                                           00544000
+*                                                                       00545000
+* TABLES / WORK AREAS -                                                 00546000
+*                                                                       00547000
+*        SWAP TABLE                                                     00548000
+*        PAGE TABLE                                                     00549000
+*        SEGMENT TABLE                                                  00550000
+         EJECT                                                          00551000
+* REGISTER USAGE -                                                      00552000
+*                                                                       00553000
+*        GPR  6 = ADDRESS OF SEGMENT TABLE                              00554000
+*        GPR  7 = ADDRESS OF PAGE TABLE                                 00555000
+*        GPR 11 = ADDRESS OF USER'S VMBLOK                              00556000
+*        GPR 12 = BASE REGISTER                                         00557000
+*        GPR 13 = ADDRESS OF STANDARD SAVE AREA                         00558000
+*                                                                       00559000
+*        GPRS 0-2, 4-5, 14-15 ARE WORK REGISTERS.                       00560000
+*                                                                       00561000
+*        GPRS 3, 8-10 ARE NOT USED.                                     00562000
+*                                                                       00563000
+* NOTES -                                                               00564000
+*                                                                       00565000
+*        NONE                                                           00566000
+*                                                                       00567000
+* OPERATION -                                                           00568000
+*        A) IF JUST A SEGTABLE FRET, GO TO 1.5                          00569000
+*        B) IF ALL PAG-SWP TABLES TO BE FRETTED,                        00570000
+*           GO TO STEP D                                                00571000
+*        C) USE R1 TO ADJ FOR PARTIAL FRET, GO TO STEP 1                00572000
+*        D) SET FOR FRET OF ALL PAGE-SWP TABLES. GO TO STEP 1           00573000
+*                                                                       00574000
+*                                                                       00575000
+*        1. EACH ENTRY IN THE 16 WORD SEGMENT TABLE IS EXAMINED TO SEE  00576000
+*        IF IT HAS A VALID ENTRY.  IF YES, THE SIZES OF THE             00577000
+*        SWAP TABLE AND PAGE TABLE ARE COMPUTED, AND THEY ARE           00578000
+*        RETURNED TO FREE STORAGE VIA DMKFRET.  THIS                    00579000
+*        PROCESS IF REPEATED FOR ALL OF THE POSSIBLE 16                 00580000
+*        SEGMENT TABLE ENTRIES.                                         00581000
+*        1.5 IF A FRET OF PAG-SWP TABLES ONLY, RETURN TO CALLER         00582000
+*                                                                       00583000
+*                                                                       00584000
+*        2. FINALLY, THE BEGINNING ADDRESS OF THE SEGMENT TABLE         00585000
+*        IS COMPUTED FROM ITS ALIGNED ADDRESS AND DISPLACEMENT,         00586000
+*        AND IT ALSO IS RETURNED TO FREE STORAGE VIA DMKFRET.           00587000
+*                                                                       00588000
+*        3. DETERMINE IF USER IS USING THE VIRT=REAL AREA;              00589000
+*           IF HE IS ZERO (AVMREAL) FIELD IN PSA BEFORE RETURNING       00590000
+*           TO THE CALLER.                                              00591000
+*                                                                       00592000
+*.                                                                      00593000
+         EJECT                                                          00594000
+DMKBLDRL RELOC                RELEASE REAL SEGMENT, PAGE, & SWAP TABLES 00595000
+         CLI   SAVER2+3,DELSEGS SEGS TABLE RELEASE ONLY ?      @V304635 00596000
+         BE    JUSSEG         YES, THEN DO IT                  @V304635 00597000
+         L     R6,VMSEG       LOAD SEGMENT TABLE ADDRESS       @V304635 00598000
+         LA    R6,0(,R6)      STRIP LENGTH                     @V408246 00598100
+         USING SEGTABLE,R6                                              00599000
+         LA    R4,1           LOAD UNUSED SEGMENT INDICATOR             00601000
+         TM    SAVER2+3,PAGTONLY PAGE TABLE FROM REG?          @V408246 00602100
+         BNO   CHKSEG         NO                               @V408246 00602300
+         LA    R6,SAVER1      R6 POINTS TO THE STE (R1)        @V408246 00602500
+         LA    R5,1           DO ONLY ONE TABLE                @V408246 00602700
+         B     BLDRL01        ALL SET UP                       @V408246 00602900
+*                                                                       00603100
+CHKSEG   DS    0H             CALCULATE STARTING STE AND       @V408246 00603300
+*                             COUNT OF STES                             00603500
+         L     R8,SAVER1      GET ADDRESSES OF SEGMENTS        @V304635 00604000
+         LR    R9,R8          SAVE STARTING/ENDING ADDRESSES   @V408246 00605100
+         SRL   R8,20          GET STARTING STE NUMBER          @V408246 00605300
+         LR    R15,R9         SAVE THE REMAINING ADDRESS       @V304635 00606000
+         N     R15,=A(X'F0000') PAGE NUMBER WITHING SEG. = 0?  @V408246 00607100
+         BZ    COMPSEG        YES - SEGMENT ADDRESS  IS OK     @VM03135 00608000
+         LA    R8,1(,R8)      SKIP PARTIAL SEGMENT             @VM03135 00609000
+COMPSEG  DS    0H                                              @V408246 00610100
+         SRL   R9,4           ENDING SEG. NUMBER TO LOW R9     @V408246 00610600
+         N     R9,F255        CLEAR ALL BUT SEGMENT NUMBER     @V408246 00611100
+         SR    R9,R8          R9=NUM STE-1 TO FRET             @V304635 00612000
+         BM    RETBLDRL       RETURN IF PARTIAL SEGMENT        @V304635 00613000
+         LA    R5,1(,R9)      R5 = NUMBER OF SEGMENTS TO FRET  @VM03171 00614000
+         SLL   R8,2           DSP OF 1ST STE TO FRET           @V304635 00615000
+         LA    R6,0(R8,R6)    R6 POINTS TO 1ST STE TO FRET     @V304635 00616000
+BLDRL01  EQU   *                                               @V304635 00617000
+RELRLOOP L     R7,SEGPAGE     LOAD PAGE TABLE ADDRESS                   00618000
+         N     R7,=A(X'FFFFFE') CLEAR POSSIBLE INVALID BIT     @V408246 00619100
+         BZ    RELRNEXT       NOTHING THERE BUT INVALID BIT    @V408246 00619200
+         ICM   R15,B'0011',SEGPAGE+1 IS THERE A PAGETABLE PTR  @V408246 00619300
+         BNZ   DOFRET         YES, THEN FRET IT                @V408246 00619400
+         TM    SEGPAGE+3,SEGINV IF NOT, MAKE SURE IT'S         @VA08431 00619505
+         BO    RELRNEXT       NOT ON DASD BUT INVALID          @VA08431 00619605
+*        ATTEMPTING TO RELEASE A SEGMENT THAT HAS ITS TABLE             00619700
+*        MIGRATED TO BACKING STORE                                      00619800
+         ABEND 5                                               @V408246 00619900
+         EJECT                                                          00620000
+*                                                                       00620100
+*        PROCESS INDIVIDUAL STES, RETURN PAGE/SWAP TABLE TO             00620200
+*        AVAILABLE FREE STORAGE                                         00620300
+*                                                                       00620400
+DOFRET   DS    0H             HERE TO FRET TABLES              @V408246 00620500
+         SR    R2,R2          CLEAR REG                        @V408246 00620600
+         IC    R2,SEGPLEN     PAGE TABLE LENTH (NO PAGES -1)   @V304635 00621000
+         SRL   R2,4           NUM. PAGES TO LOW ORDER REG.     @V304635 00622000
+         CL    R11,AVMREAL    V=R?                             @VA04952 00622400
+         BE    FRETPGTB       YES - GO FRET PAGE TABLE         @VA04952 00622800
+         LA    R14,1(,R2)     NUM. PAGES+1 FOR BCT LOOP        @V304635 00623000
+         USING PAGCORE,R7                                      @V408246 00624100
+CHKPAGE  DS    0H                                              @V408246 00624600
+         LH    R0,PAGCORE     PTE                              @V408246 00625100
+         N     R0,=A(X'FFF0') CHECK FOR REAL PAGE ALLOCATED    @V408246 00625600
+         BZ    NXTPAGE        NO                               @V408246 00626100
+         ABEND 2              ERROR - PAGE NOT RELEASED        @V408246 00626600
+NXTPAGE  DS    0H                                              @V408246 00627100
+         LA    R7,PAGCORE+2   NEXT PAGE TABLE ENTRY            @V408246 00627600
+         BCT   R14,CHKPAGE    PROCESS AL PAGE TABLE ENTIRES    @V408246 00628100
+FRETPGTB DS    0H                                              @V408246 00628600
+         L     R15,PREFIXA    GET PREFIX VALUE TO ADDRESS PSA  @V4M0132 00629100
+*                             AT ABSOLUTE 0                    @V4M0132 00629200
+         L     R0,TTSEGCNT(R15) GET CURRENT TOTAL SEGMENT CNT  @V4M0132 00629300
+         BCTR  R0,0           DECREMENT THIS SYSTEM COUNT      @V4M0132 00629400
+         ST    R0,TTSEGCNT(R15) REPLACE UPDATED SEGMENT COUNT  @V4M0132 00629500
+         L     R1,SEGPAGE     GET PAGETABLE POINTER            @V408246 00630600
+         ST    R4,SEGPAGE     CLEAR STE ENTRY                  @V408246 00631100
+         OI    VMESTAT,VMINVPAG REMEMBER TO RESET TLB          @V408246 00631600
+         OI    APSTAT2,CPPTLBR SET PTLB REQUIRED FOR THIS PROCR@V407594 00631700
+         L     R15,PREFIXB    AND OTHER PROCESSOR              @V407594 00631720
+         OI    APSTAT2-PSA(R15),CPPTLBR  (IF THERE IS ANOTHER) @V407594 00631740
+         N     R1,=A(X'FFFFFE') CLEAR POSSIBLE INVALID BIT     @V408246 00632100
+         S     R1,F16         BACK-UP TO START OF CORE FOR     @V408246 00632600
+*                             TABLES                                    00633100
+         LA    R0,PAGBMP      LOAD SIZE OF PAGE AND SWPTABLES  @V407511 00633600
+         SRL   R0,3           OBTAIN NUMBER OF DOUBLEWORDS     @V407511 00634100
+         CALL  DMKFRET                                         @V408246 00634600
+         ST    R4,0(,R6)      STORE INVALID STE                @V408246 00635100
+RELRNEXT LA    R6,SEGPAGE+4   POINT TO NEXT SEGMENT TABLE ENTRY         00643000
+         BCT   R5,RELRLOOP    LOOP IF MORE SEGMENT TABLE ENTRIES        00644000
+         EJECT                                                          00644100
+*                                                                       00644200
+*        FINISHED RESETING INDIVIDUAL STES, NOT PROCESS SEGMENT         00644300
+*        TABLE                                                          00644400
+*                                                                       00644500
+JUSSEG   TM    SAVER2+3,DELSEGS REQUEST ALSO TO FRET SEGS.     @V304635 00645000
+         BZ    RETBLDRL       NO, THEN RETURN TO CALLER        @V304635 00646000
+         L     R1,VMSEG       GET ADDRESS OF SEGMENT TABLE BLOCK        00647000
+         LR    R0,R1          REMEMBER IN R0                            00648000
+         LA    R1,0(,R1)      STRIP OFF HIGH-ORDER BYTE,                00649000
+         SH    R1,VMSEGDSP    GET THE REAL BEGINNING OF IT              00650000
+         SRL   R0,24          OBTAIN NO. OF SEGMENT TABLES (LESS 1)     00651000
+         SLL   R0,3           TIMES 8, FOR 8 DBL- WORDS EACH            00652000
+         AL    R0,F15         PLUS 8, PLUS 7 FOR ALIGNMENT              00653000
+         CALL  DMKFRET        NOW RETURN IT TO FREE STORAGE             00654000
+         SR    R15,R15        CLEAR                                     00655000
+         ST    R15,VMSEG      THE SLOT IN THE VMBLOK.                   00656000
+         AIF   (NOT &VIRREAL).VIRT3                                     00657000
+         C     R11,AVMREAL    DOES USER OCCUPY VIRT=REAL AREA           00658000
+         BNE   RETBLDRL            NO - EXIT TO CALLER         @V4M0237 00659100
+         NI    VMQLEVEL,X'FF'-VMAEX NOLONGER FAVORED.          @VM08649 00660000
+         ST    R15,AVMREAL    YES, REMOVE THE AREA FROM HIM             00661000
+         L     R14,PREFIXB    GET PREFIX ADDR OF OTHER PROC    @V4M0132 00661100
+         ST    R15,AVMREAL(R14) MAINTAIN AVMREAL IN BOTH PSA'S @V4M0132 00661200
+.VIRT3   ANOP                                                           00662000
+RETBLDRL EXIT                                                  @V304635 00663000
+*                                                                       00664000
+         DROP  R6,R7                                                    00665000
+         EJECT                                                          00666000
+*.                                                                      00667000
+* SUBROUTINE NAME -                                                     00668000
+*                                                                       00669000
+*        DMKBLDVM - BUILD A NEW VMBLOK                                  00670000
+*                                                                       00671000
+* FUNCTION -                                                            00672000
+*                                                                       00673000
+*        TO CREATE AND PARTIALLY INITIALIZE A VMBLOK FOR A              00674000
+*        USER IDENTIFIED BY HIS TERMINAL REAL DEVICE BLOCK.             00675000
+*                                                                       00676000
+* ATTRIBUTES -                                                          00677000
+*                                                                       00678000
+*        REENTRANT, PAGEABLE, CALLED VIA SVC                            00679000
+*                                                                       00680000
+* ENTRY POINT -                                                         00681000
+*                                                                       00682000
+*        DMKBLDVM                                                       00683000
+*                                                                       00684000
+* ENTRY CONDITIONS -                                                    00685000
+*                                                                       00686000
+*        GPR  8 = ADDRESS OF TERMINAL REAL DEVICE BLOCK                 00687000
+*        GPR  9 = ADDRESS OF NICBLOK ( IF DEVTYPE = TYP3705 )           00688000
+*        GPR 12 = ADDRESS OF DMKBLDVM                                   00689000
+*        GPR 13 = ADDRESS OF STANDARD SAVE AREA                         00690000
+*                                                                       00691000
+* EXIT CONDITIONS -                                                     00692000
+*                                                                       00693000
+*        VMBLOK HAS BEEN CREATED, CLEARED, PARTIALLY FILLED IN,         00694000
+*        AND CHAINED TO THE OTHER VMBLOKS.                              00695000
+*                                                                       00696000
+*        GPR 11 = ADDRESS OF VMBLOK JUST CREATED.                       00697000
+*                                                                       00698000
+* CALLS TO OTHER ROUTINES -                                             00699000
+*                                                                       00700000
+*        DMKFREE - TO OBTAIN FREE STORAGE FOR VMBLOK TO BE CREATED      00701000
+*        DMKSCNRD - TO CONVERT TERMINAL DEVICE ADDRESS TO CCU FORM      00702000
+*        DMKCVTBH - CONVERT TERMINAL REAL DEVICE ADDRESS TO HEX         00703000
+*                                                                       00704000
+* EXTERNAL REFERENCES -                                                 00705000
+*                                                                       00706000
+*        DMKRIORN                                                       00707000
+*                                                                       00708000
+* TABLES / WORK AREAS -                                                 00709000
+*                                                                       00710000
+*        NONE                                                           00711000
+         EJECT                                                          00712000
+* REGISTER USAGE -                                                      00713000
+*                                                                       00714000
+*        GPR  8 = ADDRESS OF RDEVBLOK FOR TERMINAL                      00715000
+*        GPR 11 = ADDRESS OF NEWLY CREATED VMBLOK                       00716000
+*        GPR 12 = BASE REGISTER                                         00717000
+*        GPR 13 = ADDRESS OF STANDARD SAVE AREA                         00718000
+*                                                                       00719000
+*        GPRS 0-1 AND 14-15 ARE WORK REGISTERS                          00720000
+*                                                                       00721000
+*        GPRS 2-7 AND 9-10 ARE NOT USED.                                00722000
+*                                                                       00723000
+* NOTES -                                                               00724000
+*                                                                       00725000
+*        NONE                                                           00726000
+*                                                                       00727000
+* OPERATION -                                                           00728000
+*                                                                       00729000
+*        1. FREE STORAGE IS OBTAINED VIA DMKFREE FOR A VMBLOK,          00730000
+*        WHICH IS THEN CLEARED.  THE VM CHANNEL TABLE IS SET            00731000
+*        TO ALL FFFF'S, INDICATING THAT NO VIRTUAL CHANNELS             00732000
+*        HAVE BEEN BUILT YET.  THE ADDRESS OF THE TERMINAL              00733000
+*        RDEVBLOK (IN R8 AT ENTRY) IS STORED IN VMTERM.                 00734000
+*                                                                       00735000
+*        2. A USERID CONSISTING OF 'LOGON' + THE THREE-BYTE HEX         00736000
+*        TERMINAL REAL DEVICE ADDRESS IS STORED AS THE USERID           00737000
+*        (FOR EXAMPLE 'LOGON063' OR 'LOGON8B5').                        00738000
+*                                                                       00739000
+*        3. THE USER IS SIGNALED IN CONSOLE-FUNCTION-WAIT, AND          00740000
+*        THE USER IS PUT INTO DISABLED WAIT STATE.  ALSO, THE           00741000
+*        TERMINAL REAL DEVICE BLOCK IS SET TO THE DEFAULT VALUES FOR    00742000
+*        THE BLIP, LINE-END, CHARACTER-DELETE, AND LINE-DELETE SYMBOLS. 00743000
+*                                                                       00744000
+*        4. FINALLY, THE NEWLY CREATED VMBLOK IS PATCHED INTO           00745000
+*        THE CHAIN OF ACTIVE VMBLOKS, AND RETURN IS MADE TO THE         00746000
+*        CALLER.                                                        00747000
+*.                                                                      00748000
+         EJECT                                                          00749000
+DMKBLDVM RELOC                BUILD NEW VMBLOK                          00750000
+         CLC   SAVER8,=C'AUTO' AUTOLOG CMD.                    @V305535 00751000
+         BE    AUTOLOG1       YES - THEN NO RDEVBLOK           @V305535 00752000
+         LTR   R8,R8          R8 MUST BE GREATER THAN 0                 00753000
+         BNP   BLD1           CATCH CALLER BUG IF BAD GR8      @V200820 00754000
+AUTOLOG1 EQU   *              HERE FOR AUTOLOG USER            @V305535 00755000
+         LA    R0,VMBSIZE     GET STORAGE FOR A VMBLOK                  00756000
+         CALL  DMKFREE        ...                                       00757000
+         CHARGE STOP          STOP CHARGING CALLER FOR LOGON   @V407594 00758000
+         CL    R11,ASYSVM     IS THIS SYSTEM                   @V407594 00758010
+         BE    NOUNLK         YES, BYPASS UNLOCK               @V407594 00758020
+         CL    R11,LASTUSER   LAST USER                        @V407594 00758030
+         BE    NOUNLK         YES, BYPASS UNLOCK               @V407594 00758040
+         LR    R14,R1         SAVE NEW VMBLOK                  @V407594 00758050
+         LR    R1,R11         VMBLOK TO UNLOCK                 @V407594 00758060
+         LOCK  RELEASE,TYPE=VMBLOK,SAVE  UNLOCK R11 VMBLOK     @V407594 00758070
+         LR    R1,R14         RESTORE NEW VMBLOK TO R1         @V407594 00758080
+NOUNLK DS      0H                                              @V407594 00758090
+         LR    R11,R1         REFERENCE VIA R11 AS USUAL                00759000
+         USING VMBLOK,R11     ...                                       00760000
+         MVC   VMBLOK(8),ZEROES         CLEAR ENTIRE VMBLOK             00761000
+         MVC   VMBLOK+8(256),VMBLOK                ...                  00762000
+         MVC   VMBLOK+264(VMBSIZE*8-264),VMBLOK    ...                  00763000
+         MVC   VMCHTBL(8),FFS        FFFF-FILL THE VM CHANNEL TABLE     00764000
+         MVC   VMCHTBL+8(24),VMCHTBL (INDICATING NO CHANNELS THERE YET) 00765000
+         MVC   VMVTERM(2),FFS INDICATE NO VIRTUAL CONSOLE      @V200820 00766000
+         OI    VMRSTAT,VMLOGON+VMCFWAIT 'NOT YET LOGGED ON' & IN CFWAIT 00767000
+         OI    VMMLEVEL,VMMSGON+VMWNGON+VMMCODE+VMMTEXT+VMMLINED        00768100
+         MVI   VMPSW+1,WAIT   PUT USER INTO DISABLED WAIT STATE.        00769000
+         MVC   VMTMOUTQ,=X'7FFFFFFFFFFFF000'  INITIALIZE VMTMOUTQ       00770000
+         MVC   VMTTIME(16),VMTMOUTQ          VMTTIME AND VMTMINQ        00771000
+         TM    APSTAT1,APUOPER     RUNNING AS AP               @V407594 00772010
+         BZ    NOAP           NO                               @V407594 00772020
+         LR    R1,R11         VMBLOK PTR                       @V407594 00772030
+         LOCK  OBTAIN,TYPE=VMBLOK,OPTION=NOUPDT,SPIN=NO        @V407594 00772040
+         MVC   VMCPTIME,HALFTIME   INITIALIZE TIMER            @V4M0203 00772042
+         MVC   VMAPTIME,HALFTIME   INITIALIZE TIMER            @V4M0203 00772044
+*        IT IS NOT NECESSARY TO UNLOCK R11 AT ENTRY (ASYSVM)   @V407594 00772050
+         LA    R0,CPEXSIZE    SIZE OF DEFERRED EXECUTION BLOCK @V407594 00772060
+         CALL  DMKFREE        OBTAIN DEFERRED EXECUTION BLOCK  @V407594 00772070
+         ST    R1,VMDFTPNT    & SAVE ITS ADDRESS IN VMBLOK     @V407594 00772080
+NOAP     DS    0H                                              @V407594 00772090
+         CHARGE START         START CHARGING NEW USER          @V4M0203 00772092
+         STCK  VMTODINQ       CURRENT TOD                      @V408246 00772100
+         BC    3,DOWNWEGO     ABEND CVT001                     @V408246 00772300
+         LM    R2,R3,VMTODINQ CONVERT TO PRIORITY UNITS        @V408246 00772500
+         SL    R2,STARTIME    . .                              @V408246 00772700
+         SLDL  R2,5           . .                              @V408246 00772900
+         ST    R2,VMEPRIOR    INITIAL PRIORITY                 @V408246 00773100
+         LA    R2,5           INITIAL PROJECTED WORKING SET    @V408246 00773300
+*                             VALUE                                     00773500
+         ST    R2,VMWSPROJ    . .                              @V408246 00773700
+         L     R15,ASYSLC          REFERENCE SYSLOCS INFORMATION        00775000
+         USING SYSLOCS,R15         ...                                  00776000
+         MVC   VMTLEND(4),DMKSYSLE DEFAULT EDITING CHARACTERS  @V200820 00777000
+         MVI   VMGRFTAB,X'6A' SET LOGICAL TAB CHAR TO DEFAULT  @V60A6B6 00777100
+         CLC   SAVER8,=C'AUTO' IS THIS AN AUTOLOG USER?        @VA04867 00777200
+         BE    AUTOLOG2       IF SO, BRANCH                    @VA04867 00777400
+         ST    R8,VMTERM      SET REAL TERM RDEVBLOK PTR       @V200820 00778000
+         USING RDEVBLOK,R8                                     @V200820 00779000
+         LA    R1,CLASSPEC*256+TYP3705  IS THIS A 3705 RDEVBLOK@V200820 00780000
+         CH    R1,RDEVTYPC                   ...               @V200820 00781000
+         BE    BLDNIC         YES, BYPASS TEST FOR TERMINAL    @VM01043 00782000
+*                             CLASS                                     00783000
+         CLI   RDEVTYPC,CLASTERM IS THIS A TERMINAL CLASS      @VM01043 00784000
+         BNE   BLDRTERM       NO,CONTINUE                      @VM01043 00785000
+         TM    RDEVTYPE,TYPBSC IS THIS A BISYNC LINE           @VM01043 00786000
+         BZ    BLDRTERM       NO, CONTINUE                     @VM01043 00787000
+BLDNIC   EQU   *                                               @VM01043 00788000
+         USING NICBLOK,R9     GR9 STILL O.K. FROM ENTRY        @V200820 00789000
+         ST    R11,NICUSER    SET VMBLOK POINTER IN NICBLOK    @V200820 00790000
+         L     R1,DMKSYSLL    SYSTEM DEFAULT LINE LENGTHS      @V200820 00793000
+         STCM  R1,B'0100',NICLLEN  SET LINE LEN FOR 2741-TYPE D@V200820 00794000
+         TM    NICTYPE,NICTERM+NICCIBM  2741-TYPE TERMINAL ?   @V200820 00795000
+         BO    BYPAS          YES...O.K. AS IS                 @VA04807 00796000
+         TM    NICTYPE,NICGRAF REMOTE GRAPHICS?                @VA04807 00796165
+         BNO   BYPAS1         NO...TTY TYPE                    @VA04807 00796330
+         STCM  R1,B'0001',NICLLEN USE GRAPHICS LINE LENGTH     @VA04807 00796495
+         B     BYPAS                                           @VA04807 00796660
+BYPAS1   STCM  R1,B'0010',NICLLEN USE TTY LINE LENGTH          @VA04807 00796825
+BYPAS    EQU   *                                               @VM01043 00798000
+         CALL  DMKSCNRD       GET RADDR FROM RDEVBLOK          @V200820 00799000
+         L     R3,=A(DMKRIORN)     LIST OF 3705 RDEVBLOK PTRS  @V200820 00800000
+         L     R2,0(0,R3)          COUNT OF 3705'S IN THE LIST @V200820 00801000
+BLDNFND  EQU   *              FIND DEVICE CODE FOR THIS 3705   @V200820 00802000
+         CH    R1,6(0,R3)     COMPARE AGAINST DEVICE ADDRESS   @V200820 00803000
+         BE    BLDNFRN        O.K. -- FOUND IT                 @V200820 00804000
+         LA    R3,4(0,R3)     NEXT LIST ENTRY                  @V200820 00805000
+         BCT   R2,BLDNFND     SEARCH THE LIST                  @V200820 00806000
+         B     BLD1      OOPS -- LOGIN ON A NON-EXISTENT DEVICE@V200820 00807000
+BLDNFRN  EQU   *              ADD DEVICE CODE TO VMTRMID       @V200820 00808000
+         SL    R3,=A(DMKRIORN)     GET DISP TO LIST ENTRY      @V200820 00809000
+         SRL   R3,2(0)        ...IN NUMBER OF ENTRIES          @V200820 00810000
+         MVC   VMUSER(4),=C'LOGN'  USERID IS "LOGN103C", ETC.  @V200820 00811000
+         LR    R1,R3          GET DEVICE CODE VALUE            @VM01043 00812000
+         CALL  DMKCVTBH       CONVERT TO HEXADECIMAL           @VM01043 00813000
+         STC   R1,VMUSER+4    SAVE DEVICE CODE VALUE           @VM01043 00814000
+         SLL   R3,12(0)       MOVE DEVICE CODE TO HIGH-ORDER   @V200820 00815000
+         LH    R2,NICNAME     BASIC RESOURCE ID FROM NICBLOK   @V200820 00816000
+         OR    R3,R2          ADD DEVICE CODE FOR MESSAGES     @V200820 00817000
+         STH   R3,VMTRMID     ...SAVE IN THE VMBLOK            @V200820 00818000
+         LR    R1,R2          RESOURCE ID TO GR1 FOR USERID    @V200820 00819000
+         B     BLDNAME        GO FINISH USERID CONSTRUCTION    @V200820 00820000
+         DROP  R9                                              @V200820 00821000
+BLDRTERM EQU   *              RDEVBLOK IS A SINGLE TERMINAL    @V200820 00822000
+         SR    R1,R1          CLEAR FOR IC                              00823000
+         IC    R1,RDEVTYPE    GET TERMINAL DEVICE TYPE                  00824000
+         SRL   R1,4           ISOLATE ADAPTER TYPE                      00825000
+         IC    R1,DMKSYSLL(R1)     GET DEFAULT LINE LENGTH              00826000
+         STC   R1,RDEVLLEN    STORE IT                                  00827000
+         TM    RDEVTYPC,CLASGRAF GRAPHICS CONSOLE?             @VA04807 00827150
+         BNO   PSUP           NO...SET PRINT SUPPRESS          @VA04807 00827300
+         L     R1,DMKSYSLL    GET DEFAULT LINE LENGTHS         @VA04807 00827450
+         STCM  R1,B'0001',RDEVLLEN STORE GRAPHICS LINE LENGTH  @VA04807 00827600
+PSUP     EQU   *                                               @VA04807 00827750
+         OI    RDEVFLAG,RDEVPSUP   ASSUME TERMINAL HAS PRINT-SUPPRESS   00828000
+         ST    R11,RDEVUSER   SET VMBLOK POINTER IN RDEVBLOK   @V200820 00829000
+         MVC   VMUSER(5),=C'LOGON' USERID IS "LOGON03C", ETC.  @V200820 00830000
+         CALL  DMKSCNRD       GET REAL DEVICE ADDRESS IN BINARY@V200820 00831000
+BLDNAME  EQU   *              CONVERT TO HEXADECIMAL FOR USERID@V200820 00832000
+         CALL  DMKCVTBH       ...                              @V200820 00833000
+         STCM  R1,B'0111',VMUSER+5 SETUP LAST PART OF USERID   @V200820 00834000
+AUTOLOG2 EQU   *              AUTOLOG ON USER                  @V305535 00835000
+         L     R1,ASYSVM      START WITH SYSTEM VMBLOK,                 00836000
+         L     R14,VMPNT-VMBLOK(,R1) POINT TO 1ST USER IN CHAIN         00837000
+         LTR   R14,R14        ANYBODY THERE AT ALL ?                    00838000
+         BZ    BLDVM1ST       NOPE - PUT IN THE VERY 1ST GUY.           00839000
+         MVC   VMPNT(4),VMPNT-VMBLOK(R14)     ...                       00840000
+         ST    R11,VMPNT-VMBLOK(,R14)         ...                       00841000
+BLDSTR11 ST    R11,SAVER11    STORE R11 FOR RETURNING TO CALLER         00842000
+         EXIT                 RETURN TO CALLER.                         00843000
+         EJECT                                                          00844000
+BLDVM1ST ST    R11,VMPNT      LET THE ONE USER POINT TO HIMSELF, AND    00845000
+         ST    R11,VMPNT-VMBLOK(,R1) STORE HIS ADDR AT ANCHOR IN SYSVM  00846000
+         B     BLDSTR11              AND GO RETURN R11 TO OUR CALLER.   00847000
+*                                                                       00848000
+         ABEND 1              ENTRY WITH INVALID RDEVBLOK PTR  @V200820 00849000
+*                                                                       00850000
+         DROP  R8,R15                                                   00851000
+         EJECT                                                          00852000
+*.                                                                      00853000
+* SUBROUTINE NAME -                                                     00854000
+*                                                                       00855000
+*        DMKBLDEC - BUILD AN EXTENDED CONTROL MODE BLOCK                00856000
+*                                                                       00857000
+* FUNCTION -                                                            00858000
+*                                                                       00859000
+*        TO ALLOCATE STORAGE FOR A VIRTUAL ECBLOK AND THE TWO           00860000
+*        TRQBLOK'S REQUIRED FOR A VIRTUAL MACHINE WITH THE              00861000
+*        ECMODE OPTION, AND TO INITIALIZE THESE BLOCKS.                 00862000
+*                                                                       00863000
+* ATTRIBUTES -                                                          00864000
+*                                                                       00865000
+*        RE-ENTRANT, PAGEABLE, CALLED VIA SVC                           00866000
+*                                                                       00867000
+* ENTRY CONDITIONS -                                                    00868000
+*                                                                       00869000
+*        GR13 = ADDRESS OF A STANDARD SAVEAREA                          00870000
+*        GR12 = ADDRESS OF DMKBLDEC                                     00871000
+*        GR11 = ADDRESS OF THE USER'S VMBLOK                            00872000
+*                                                                       00873000
+* EXIT CONDITIONS -                                                     00874000
+*                                                                       00875000
+*        GPRS 0-13 UNCHANGED, VMECEXT POINTS TO THE NEW ECBLOK          00876000
+*        VMBLOK HAS BEEN MARKED FOR ECMODE OPERATION ALLOWED            00877000
+*                                                                       00878000
+* CALLS TO OTHER ROUTINES -                                             00879000
+*                                                                       00880000
+*        DMKFREE  - TO ALLOCATE STORAGE FOR THE BLOCKS                  00881000
+*                                                                       00882000
+* EXTERNAL REFERENCES -                                                 00883000
+*                                                                       00884000
+*        DMKSCHCP - INTERRUPT RETURN FOR CPU TIMER TRQBLOK              00885000
+*        DMKTMRCK - INTERRUPT RETURN FOR CLOCK COMPARATOR TRQBLOK       00886000
+*                                                                       00887000
+* TABLES / WORK AREAS -       NONE                                      00888000
+*                                                                       00889000
+* REGISTER USAGE -                                                      00890000
+*                                                                       00891000
+*        GR14,15 EXTERNAL LINKAGE REGISTERS                             00892000
+*        GR13 =  SAVEAREA ADDRESSABILITY                                00893000
+*        GR12 =  MODULE BASE ADDRESSABILITY                             00894000
+*        GR11 =  VMBLOK ADDRESSABILITY                                  00895000
+*        GR10 =  ECBLOK ADDRESSABILITY                                  00896000
+*        GR0-9   ARE WORK REGISTERS                                     00897000
+*                                                                       00898000
+* OPERATION -                                                           00899000
+*                                                                       00900000
+*        1. STORAGE IS ALLOCATED FOR THE ECBLOK ITSELF, AND THE         00901000
+*           ADDRESS OF THE ECBLOK IS PLACED IN VMECEXT IN THE VMBLOK.   00902000
+*        2. STORAGE IS ALLOCATED FOR TWO TRQBLOK'S, ONE FOR THE         00903000
+*           VIRTUAL CPU TIMER (IRA = DMKSCHCP), AND ONE FOR THE         00904000
+*           VIRTUAL TOD CLOCK COMPARATOR (IRA = DMKTMRCK).              00905000
+*        3. RESET VALUES FOR THE CONTROL REGISTERS ARE MOVED INTO       00906000
+*           THE ECBLOK FIELDS, AND THE TRQBLOK'S ARE CONNECTED          00907000
+*           TO THE ECBLOK ANCHORS.                                      00908000
+*        4. THE VMPSTAT FLAGS IN THE VMBLOK ARE UPDATED TO SHOW         00909000
+*           THAT AN ECBLOK NOW EXISTS.                                  00910000
+*.                                                                      00911000
+         EJECT                                                          00912000
+DMKBLDEC RELOC ,              BUILD AND INITIALIZE AN ECBLOK   @V2B4320 00913000
+         SPACE                                                          00914000
+         LA    R0,EXTSIZE     SIZE OF EXTENDED CONTROL BLOCK   @V2B4320 00915000
+         CALL  DMKFREE        SET ASIDE SOME FREE STORAGE      @V2B4320 00916000
+         LR    R10,R1         ADDRESS IT VIA GR10              @V2B4320 00917000
+         USING ECBLOK,R10                                      @V2B4320 00918000
+         XC    0(EXTSIZE*8,R1),0(R1)                           @V2B4320 00919000
+         ST    R10,VMECEXT    CONNECT ECBLOK TO THE VMBLOK     @V2B4320 00920000
+         MVC   EXTCR2(8),FFS  SET C-REG 2,3 TO X'FFFFFFFF'     @V2B4320 00921000
+         MVI   EXTCR0+3,X'E0' RESET VALUES FOR C-REG 0         @V2B4320 00922000
+         MVI   EXTCR14,X'C4'              . . .C-REG 14        @V2B4320 00923000
+         MVI   EXTCR15+2,X'02'            . . .C-REG 15        @V2B4320 00924000
+         LA    R0,TRQBSIZE    GET TWO TRQBLOK'S                @V2B4320 00925000
+         CALL  DMKFREE        ONE FOR THE VIRTUAL CPU TIMER    @V2B4320 00926000
+         ST    R1,EXTCPTRQ    HANG IT OFF OF THE ECBLOK        @V2B4320 00927000
+         USING TRQBLOK,R1                                      @V2B4320 00928000
+         XC    0(TRQBSIZE*8,R1),0(R1)                          @V2B4320 00929000
+         ST    R11,TRQBUSER        SET VMBLOK POINTER          @V2B4320 00930000
+         L     R2,=A(DMKSCHCP)     INTERRUPT RETURN ADDRESS    @V2B4320 00931000
+         ST    R2,TRQBIRA               . . .                  @V2B4320 00932000
+         SPACE                                                          00933000
+         CALL  DMKFREE        GR0 IS STILL SET FROM BEFORE     @V2B4320 00934000
+         ST    R1,EXTCCTRQ    ONE FOR THE TOD CLOCK COMPARATOR @V2B4320 00935000
+         XC    0(TRQBSIZE*8,R1),0(R1)                          @V2B4320 00936000
+         ST    R11,TRQBUSER        SET THE VMBLOK POINTER      @V2B4320 00937000
+         L     R2,=A(DMKTMRCK)     INTERRUPT RETURN ADDRESS    @V2B4320 00938000
+         ST    R2,TRQBIRA               . . .                  @V2B4320 00939000
+         OI    VMPSTAT,VMV370R     ECMODE IS NOW ALLOWED       @V2B4320 00940000
+         EXIT  ,              RETURN TO THE CALLER             @V2B4320 00941000
+         L     R1,VMCONBUF                                     @V60C2B8 00941100
+         DROP  R1,R10                                          @V2B4320 00942000
+         EJECT                                                          00943000
+HALFTIME DC    X'3FFFFFFFFFFFF000'  HALF OF VMTTIME            @V4M0203 00943100
+         LTORG                                                          00944000
+         EJECT                                                          00945000
+         PSA                                                 , @V306638 00946000
+         COPY  CORE                                            @V306638 00947000
+         COPY  DEVTYPES                                        @V306638 00948000
+         COPY  EQU                                             @V306638 00949000
+         COPY  MICBLOK                                         @V306638 00950000
+         COPY  NETWORK                                         @V306638 00951000
+         COPY  RBLOKS                                          @V306638 00952000
+         COPY  SAVE                                            @V306638 00953000
+         SYSLOCS                                             , @V306638 00954000
+         COPY  VMBLOK                                          @V306638 00955000
+         EJECT                                                          00956000
+         COPY  TIMER                                           @V2B4320 00957000
+         SPACE 2                                                        00958000
+         END                                                            00959000

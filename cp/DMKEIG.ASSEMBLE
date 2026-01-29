@@ -1,0 +1,338 @@
+EIG      TITLE 'DMKEIG     (CP)        VM/370 - RELEASE 6'              00001000
+         ISEQ  73,80          VALIDATE INPUT SEQUENCE FIELDS   @V200820 00002000
+DMKEIG   CSECT                                                          00003000
+MODULEID DC    CL8'DMKEIG'                                     @VA01068 00004000
+**********************************************************************  00005000
+*                                                                       00006000
+*        MODULE NAME - DMKEIG                                           00007000
+*                                                                       00008000
+* FUNCTION                                                              00009000
+*        THIS ROUTINE WILL ANALYZE THE 2880 CHANNEL LOGOUT AND          00010000
+*        SET APPROPRIATE BITS IN THE ECSW FIELD ACCORDING TO THE        00011000
+*        RESULTS OF THIS ANALYSIS. IT WILL ALSO MOVE THE CHANNEL        00012000
+*        LOGOUT TO THE CHANNEL CHECK RECORD.                            00013000
+*                                                                       00014000
+* ENTRY POINTS                                                          00015000
+*        DMKEIG - FROM THE CHANNEL CONTROL ROUTINE                      00016000
+*                                                                       00017000
+* INPUT                                                                 00018000
+*        1. CHANNEL LOGOUT DATA                                         00019000
+*        2. POINTER TO THE CHANNEL CHECK RECORD                         00020000
+*        3. POINTER TO THE CCH SWITCH FIELD (ENTSW)                     00021000
+*                                                                       00022000
+* OUTPUT                                                                00023000
+*        1. APPROPRIATE BITS ARE SET IN THE CCH RECORD                  00024000
+*           FIELD (FAILECSW).                                           00025000
+*        2. THE CHANNEL LOGOUT IS MOVE TO THE CCH RECORD.               00026000
+*                                                                       00027000
+* EXTERNAL REFERENCES                                                   00028000
+*        THE POINTER AT LOCATION 172 POINTS TO THE CHANNEL LOGOUT.      00029000
+*                                                                       00030000
+* EXIT - NORMAL                                                         00031000
+*        RETURN TO THE CCH CONTROL ROUTINE VIA REGISTER 14.             00032000
+*                                                                       00033000
+* EXIT - ERROR                                                          00034000
+*        NONE                                                           00035000
+*                                                                       00036000
+* TABLES / WORK AREA                                                    00037000
+*        THE CHANNEL CHECK RECORD                                       00038000
+*                                                                       00039000
+* ATTRIBUTES                                                            00040000
+*        DMKEIG IS PRIVILEGED AND REUSABLE                              00041000
+*                                                                       00042000
+* CHARACTER CODE DEPENDENCIES                                           00043000
+*        NONE                                                           00044000
+*                                                                       00045000
+* NOTE                                                                  00046000
+*        NONE                                                           00047000
+*                                                                       00048000
+**********************************************************************  00049000
+         EJECT                                                          00050000
+**********************************************************************  00051000
+**********************************************************************  00052000
+***********  2880 LOGOUT INDICATORS ***********************             00053000
+**********************************************************************  00054000
+CCHDCIN  EQU   X'01'          DISCONNECT IN INDICATION                  00055000
+SCANMAJR EQU   X'80'          SCAN MAJOR BIT                            00056000
+UCWARCK  EQU   X'20'          UCWAR UNIT ADDR CHECK                     00057000
+PSEUDOCC EQU   X'80'          PSEUDO CONTROL CHECK                      00058000
+SCSPCK   EQU   X'04'          SCS PARITY CHECK                          00059000
+PRIORCK  EQU   X'80'          PRIORITY CHECK                            00060000
+SIOMAJOR EQU   X'20'          SIO MAJOR OP                              00061000
+IRPTRESP EQU   X'20'          INTERRUPT RESPONSE BIT                    00062000
+CCRESELM EQU   X'02'          CC RESELECT MAJOR                         00063000
+CCWLATCH EQU   X'80'          CCW LATCH BIT                             00064000
+CMDADDRV EQU   X'04'          CMD ADDRESS VALID                         00065000
+USVALID  EQU   X'08'          UNIT STATUS VALID                         00066000
+CMDOUT   EQU   X'80'          CMD OUT SENT                              00067000
+DATAXFER EQU   X'40'          DATA TRANSFER INDICATOR                   00068000
+INITDATA EQU   X'10'          INITIAL DATA                              00069000
+DATAXMAJ EQU   X'04'          DATA XFER MAJOR                           00070000
+CURMAJOR EQU   X'40'          CUR MAJOR OP                              00071000
+UCW0111  EQU   X'18'          UCW0 AND 1 OP                             00072000
+ICBD     EQU   10             ICB EQUAL 5                               00073000
+UNITSEL  EQU   X'80'          UNIT SELECT                               00074000
+SHARSUBC EQU   X'10'          SHARED SUBCHANNEL BIT                     00075000
+**********************************************************************  00076000
+         EJECT                                                          00077000
+**********************************************************************  00078000
+         ENTRY DMKEIG80                                                 00079000
+DMKEIG80 EQU   *                                                        00080000
+         USING PSA,R0         SETUP ADDRESSABILITY FOR LOWCORE          00081000
+         USING SAVEAREA,R13   SETUP ADDRESSABILITY FOR SAVE AREA        00082000
+         USING *,R12          SETUP ADDRESSABILITY FOR MODULE           00083000
+         USING CCHREC,R9      SETUP ADDRESSABILITY FOR CCH RECORD       00084000
+         USING IOERBLOK,R4    SETUP ADDRESSABILITY FO I/O ERROR         00085000
+         USING IOELOG,R1      SETUP ADDRESSABILITY FOR LOGOUT AREA      00086000
+*                             BLOCK                                     00087000
+         LR    R1,R12         SAVE THE BASE REG. TO AVIOD DESTROYING    00088000
+         LR    R12,R15        SETUP BASE ADDRESS                        00089000
+         STM   R2,R0,CCHSAVE  SAVE ALL REGS. EXECPT REGISTER 1          00090000
+         ST    R1,CCHSAVE+40  SAVE THE CONTENT OF REGISTER 12           00091000
+         LA    R2,6           SETUP COUNT VALUE FOR LOOP                00092000
+         ICM   R1,15,IOELPNTR GET THE I/O EXTENDED LOGOUT POINTER       00093000
+         BZ    CLEANUP        IF ADDR IS ZERO, GO INDICATE TERMINATION  00094000
+*                             OPERATING SYSTEM                          00095000
+CCHLOGU  EQU   *                                                        00096000
+         CLC   0(4,R1),FFS    HAS CHANNEL LOGOUT ?                      00097000
+         BE    SETRCINV       NO, GO SET SYSTEM TERMINATION             00098000
+         LA    R1,4(R1)       UPDATE THE I/O EXTENDED LOGOUT POINTER    00099000
+         BCT   R2,CCHLOGU     GO TEST NEXT LOCATION                     00100000
+         ICM   R1,15,IOELPNTR GET THE I/O EXTENDED LOGOUT POINTER       00101000
+         TM    CSW+5,CCC+IFCC IS INTERFACE OR CHANNEL CONTROL           00102000
+*                             CHECK SET ?                               00103000
+         BZ    CKTIOADR       NO, MUST BE CDC                           00104000
+         TM    LW1,CCHDCIN    WAS UNIT DISCONNECTED ?                   00105000
+         BZ    ANALBEG        NO, GO TEST MAJOR SCAN                    00106000
+         OI    IGTERMSQ,CCHDI SET DISCONNECT IN FLAG                    00107000
+ANALBEG  EQU   *                                                        00108000
+         TM    LW3,SCANMAJR   IS THIS A MAJOR SCAN ?                    00109000
+         BZ    CHECKCLR       NO, GO INDICATE UNIT ADDR IS VALID        00110000
+         TM    LW1,UCWARCK    IS THIS CCWAR UA CHECK ?                  00111000
+         BO    SET0303        YES, GO SET CODE                 @VA03071 00112000
+SET0301  EQU   *                                                        00113000
+         OI    IGTERMSQ,RTCODE3+COMPFES SET RETRY CODE TO 3,TERM TO 1   00114000
+         B     CCHRETRN       GO INDICATE THE SOURCE OF THE ERROR       00115000
+SET0303  EQU   *                                                        00116000
+         OI    IGTERMSQ,RTCODE3+COMPSYS SET RETRY CODE TO 3, TERM TO 3  00117000
+         B     CLEANUP1       GO SET SYSTEM TERMINATION FLAG            00118000
+CHECKCLR EQU   *                                                        00119000
+         TM    ENTSW,INTERCCH WAS THIS ERROR ON AN INTERRUPT ?          00120000
+         BO    CKPSEUDO       YES, GO SET UNIT ADDRESS VALID            00121000
+         TM    ENTSW,TIOCCH   WAS THIS ON A TIO INSTRUCTION ?           00122000
+         BO    TIOSYNCH       YES, GO TEST TIO FLAG                     00123000
+         TM    LW3+3,X'02'    WAS THIS ON A HIO INSTRUCTION ?           00124000
+         BZ    CKPSEUDO       NO, GO SET UNIT ADDRESS VALID             00125000
+SETRCINV EQU   *                                                        00126000
+         NI    IGVALIDB,X'FF'-CCHRCV SET RETRY CODE INVALID             00127000
+         B     CLEANUP1       GO SET SYSTEM TERMINATION FLAG            00128000
+TIOSYNCH EQU   *                                                        00129000
+         TM    LW27,X'40'     IS THE TIO SYNCH LATCH ON ?               00130000
+         BO    CKPSEUDO       YES, GO SET UNIT ADDRESS VALID            00131000
+         LH    R2,LW2         GET THE TIO UNIT ADDRESS                  00132000
+         N     R2,MASK1       CLEAR UNWANTED BITS                       00133000
+         LH    R3,LW2+2       GET THE UCWAR AND IAB                     00134000
+         N     R3,MASK1       CLEAR UNWANTED BITS                       00135000
+         CR    R2,R3          ARE THE ADDRESSES EQUAL ?                 00136000
+         BNE   HIONBCK        NO, GO TEST FOR HIO                       00137000
+CKPSEUDO EQU   *                                                        00138000
+         OI    IGVALIDB,CCHDAV       SET UNIT ADDRESS VALID             00139000
+HIONBCK  EQU   *                                                        00140000
+         TM    LW3,X'08'      IS HIO BUSY STATE SET ?                   00141000
+         BZ    TESTSIOM       NO, GO TEST SIO FLAG                      00142000
+         TM    LW7+1,X'20'    IS THE OP-IN ON ?                         00143000
+         BZ    SET0401        NO, GO SET RETRY CODE                     00144000
+SET0410  EQU   *                                                        00145000
+         OI    IGTERMSQ,RTCODE4+COMPSEL SET RETRY CODE TO (4) AND       00146000
+*                             TERMINATION CODE TO (10)                  00147000
+         B     LASTVAL        GO CHECK LAST VALIDITY FLAG               00148000
+TESTSIOM EQU   *                                                        00149000
+         TM    LW3,SIOMAJOR   IS THIS A SIO MAJOR OP                    00150000
+         BO    CKCCWLCH       YES, GO TEST CCW LCA                      00151000
+         TM    LW3,CCRESELM   IS THIS CC RESELECT MAJOR                 00152000
+         BNO   CKDATATR       NO, GO CHECK DATA XFER                    00153000
+CKCCWLCH EQU   *                                                        00154000
+         TM    LW3+2,CCWLATCH IS CCW LATCH SET ?                        00155000
+         BO    CKCMDOUT       YES, GO SEE IF CMD OUT IS ON              00156000
+SET0401  EQU   *                                                        00157000
+         OI    IGTERMSQ,RTCODE4+COMPFES SET RETRY CODE TO 4 AND         00158000
+*                             TERMINATION CODE TO 01                    00159000
+LASTVAL  EQU   *                                                        00160000
+         TM    LW0+2,SCSPCK   IS THIS A SCS P CHECK ?                   00161000
+         BO    CLEANUP1       YES, GO SET SYSTEM TERMINATION            00162000
+         TM    LW2,CMDADDRV   IS COMMAND ADDRESS VALID ?                00163000
+         BNO   CKUSVAL        NO, GO CHECK US VALID FLAG                00164000
+         OI    IGVALIDB,CCHCMDV      SET CMD ADDRESS VALID BIT          00165000
+CKUSVAL  EQU   *                                                        00166000
+         TM    LW2,USVALID    IS UNIT STATUS VALID FLAG ON ?            00167000
+         BNO   SETRCVAL       NO, GO SET RC VALID FLAG                  00168000
+         OI    IGVALIDB,CCHUSV       SET UNIT STATUS VALIDITY FLAG      00169000
+SETRCVAL EQU   *                                                        00170000
+         OI    IGVALIDB,CCHRCV       SET RETRY CODE VALIDITY FLAG       00171000
+CKDCIN   EQU   *                                                        00172000
+         TM    LW1,CCHDCIN    IS UNIT DISCONNECTED ?                    00173000
+         BZ    CCHRETRN       NO, GO INITIALIZE THE LOGOUT AREA         00174000
+         NI    IGTERMSQ,X'FF'-COMPSYS RESET TERMINATION CODE            00175000
+         OI    IGTERMSQ,COMPSEL      SET SELECTIVE RESET FLAG           00176000
+         B     CCHRETRN       GO INITIALIZE LOGOUT AREA                 00177000
+CKCMDOUT EQU   *                                                        00178000
+         TM    LW3+3,CMDOUT   HAS DATA BEEN XFERRED ?                   00179000
+         BNO   SET0410        NO, GO SET THE RETRY CODE (4) AND         00180000
+*                             TERMINATION CODE (10)                     00181000
+CKDATAXR EQU   *                                                        00182000
+         TM    LW9,DATAXFER   HAS DATA BEEN XFERRED ?                   00183000
+         BO    CKINDATA       YES, GO TEST INITIAL DATA                 00184000
+SET0110  EQU   *                                                        00185000
+         OI    IGTERMSQ,RTCODE1+COMPSEL SET RETRY CODE TO (1) AND       00186000
+*                             TERMINATION CODE TO (10)                  00187000
+         B     LASTVAL        GO CHECK LAST VALIDITY FLAG               00188000
+CKINDATA EQU   *                                                        00189000
+         TM    LW9,INITDATA   IS THIS THE INITIAL DATA ?                00190000
+         BO    SET0210        YES, GO SET CODES                         00191000
+SET0310  EQU   *                                                        00192000
+         OI    IGTERMSQ,RTCODE3+COMPSEL SET RETRY CODE TO (3) AND       00193000
+*                             TERMINATION CODE TO (10)                  00194000
+         B     LASTVAL        GO CHECK LAST VALIDITY FLAG               00195000
+SET0210  EQU   *                                                        00196000
+         OI    IGTERMSQ,RTCODE2+COMPSEL SET RETRY CODE TO (2) AND       00197000
+*                             TERMINATION CODE TO (10)                  00198000
+         B     LASTVAL        GO CHECK LAST VALIDITY FLAG               00199000
+CKDATATR EQU   *                                                        00200000
+         TM    LW3,DATAXMAJ   IS THIS DATA XFER MAJOR                   00201000
+         BO    CKINDATA       YES, GO CHECK INITIAL DATA                00202000
+         TM    LW3,CURMAJOR   IS CUR MAJOR UP ?                         00203000
+         BNO   CKTIOMAJ       NO, GO CHECK RESPONSE                     00204000
+         TM    LW3+3,CMDOUT   IS COMMAND OUT  ?                         00205000
+         BNO   SETUAINV       NO, GO SET UA INVALID                     00206000
+         TM    LW2+2,SHARSUBC IS THIS A SHARED SUBCHANNEL ?             00207000
+         BNO   SET0510        NO, GO SET RETRY CODE                     00208000
+         TM    LW3+3,UCW0111  IS UCW 0 AND 1 SET TO ONE ?               00209000
+         BO    SET0510        YES, GO SET RETRY CODE                    00210000
+SETUAINV EQU   *                                                        00211000
+         NI    IGVALIDB,X'FF'-CCHDAV SET UNIT ADDRESS INVALID           00212000
+SET0510  EQU   *                                                        00213000
+         OI    IGTERMSQ,RTCODE5+COMPSEL SET RETRY CODE TO (5) AND       00214000
+*                             TERMINATION CODE TO (10)                  00215000
+         B     LASTVAL        GO CHECK LAST VALIDITY FLAG               00216000
+SET0501  EQU   *                                                        00217000
+         OI    IGTERMSQ,RTCODE5+COMPFES SET RETRY CODE TO (5) AND       00218000
+*                             TERMINATION CODE TO (1)                   00219000
+         B     LASTVAL        GO CHECK VALIDITY FLAG                    00220000
+CKTIOMAJ EQU   *                                                        00221000
+         TM    LW3,X'10'      IS TIO MAJOR ON ?                         00222000
+         BO    CKSCS          YES, GO GET SCS INDICATORS                00223000
+         TM    LW3+1,IRPTRESP IRPT RESPONSE UP ?                        00224000
+         BNO   CLEANUP1       NO, GO SET SYSTEM TERMINATION             00225000
+         TM    LW2+2,X'0E'    DOES ICB EQUAL 7 ?                        00226000
+         BO    SET0501        YES, GO SET RETRY CODE                    00227000
+         TM    LW2+2,ICBD     IS ICB EQUAL D ?                          00228000
+         BO    SET0501        YES, GO SET CODE                          00229000
+CKUNITSL EQU   *                                                        00230000
+         TM    LW9,UNITSEL    IS UNIT SELECT ON ?                       00231000
+         BO    SET0010        YES, GO SET RETRY CODE                    00232000
+SET0001  EQU   *                                                        00233000
+         OI    IGTERMSQ,RTCODE0+COMPFES SET RETRY CODE TO (0) AND       00234000
+*                             TERMINATION CODE TO (01)                  00235000
+         B     LASTVAL        GO CHECK VALIDITY FLAG                    00236000
+SET0010  EQU   *                                                        00237000
+         OI    IGTERMSQ,RTCODE0+COMPSEL SET RETRY CODE TO (0) AND       00238000
+*                             TERMINATION CODE TO (10)                  00239000
+         B     LASTVAL        GO CHECK VALIDITY FLAG                    00240000
+CKSCS    EQU   *                                                        00241000
+         SR    R2,R2          CLEAR REGISTER 2                          00242000
+         IC    R2,LW22        GET THE SCS INDICATORS                    00243000
+         LA    R3,14          GET THE MASK FLAGS                        00244000
+         NR    R2,R3          CLEAR THE UNWANTED BITS                   00245000
+         IC    R2,SCSLIST(R2) GET THE SCS INDICATOR                     00246000
+         CR    R2,R3          IS THE INDICATOR EQUAL TO 14 ?            00247000
+         BNE   SET0001        NO, GO SET RETRY CODE                     00248000
+         B     CKUNITSL       GO TEST FOR UNIT SELECT                   00249000
+CKTIOADR EQU   *                                                        00250000
+         TM    ENTSW,TIOCCH   IS THIS ERROR ON A TIO ?                  00251000
+         BZ    CCHRETRN       NO, GO INITIALIZE THE LOGOUT              00252000
+         CLC   SIOADDR+1(1),LW2+3 IS THE UNIT ADDRESS SAME AS           00253000
+*                             IN THE LOGOUT ?                           00254000
+         BE    CCHRETRN       YES, GO INITIALIZE LOGOUT                 00255000
+CLEANUP  EQU   *                                                        00256000
+         OI    ENTSW,TERMSYS    SET SYSTEM TERMINATION                  00257000
+         B     CCHEXIT4       GO RESTORE REGISTERS                      00258000
+CLEANUP1 EQU   *                                                        00259000
+         OI    ENTSW,TERMSYS  SET SYSTEM TERMINATION                    00260000
+CCHRETRN EQU   *                                                        00261000
+         SR    R2,R2          CLEAR REGISTER 2                          00262000
+         IC    R2,BLAME       GET SOURCE OF ERROR                       00263000
+         SLL   R2,3           SETUP CORRECT FORMAT                      00264000
+         STC   R2,IGBLAME     SAVE IN CCH RECORD (ECSW)                 00265000
+         MVC   CCHLOG80(112),0(R1)    SAVE THE I/O EXTENDED LOGOUT      00266000
+         MVI   0(R1),X'FF'    INITIALIZE THE I/O EXTENDED LOGOUT        00267000
+         MVC   1(111,R1),0(R1) TO ALL ONES                              00268000
+         MVI   CCHSAVE+59,X'18' CHANGE THE LENGTH OF THE CCH   @VA00881 00269000
+*                             RECORD                                    00270000
+CCHEXIT4 EQU   *                                                        00271000
+         LM    R2,R0,CCHSAVE  RESTORE THE REGISTERS                     00272000
+         BR    R14            RETURN TO CCH CONTROL ROUTINE             00273000
+**********************************************************************  00274000
+         SPACE 2                                                        00275000
+**********************************************************************  00276000
+**********************************************************************  00277000
+         EJECT                                                          00278000
+**********************************************************************  00279000
+CCHSAVE  DS    16F                                                      00280000
+MASK1    DC    X'000001FF'    CLEAR UNWANTED BITS WITH THIS MASK        00281000
+SCSLIST  DC    X'0E'          SUBCHANNEL STATUS BITS                    00282000
+         DC    5X'00'                                                   00283000
+         DC    X'0E000E'                                                00284000
+         DC    6X'00'                                                   00285000
+********************************************************************    00286000
+**********************************************************************  00287000
+**********************************************************************  00288000
+         EJECT                                                          00289000
+**********************************************************************  00290000
+**********************************************************************  00291000
+********    DESECT FOR THE 2880 CHANNEL LOGOUT AREA                     00292000
+**********************************************************************  00293000
+IOELOG    DSECT                                                         00294000
+LW0      DS    F              I/O LOGOUT WORD 0                         00295000
+LW1      DS    F              I/O LOGOUT WORD 1                         00296000
+LW2      DS    0F             I/O LOGOUT WORD 2                         00297000
+CHANLID  DS    C              CHANNEL NUMBER                            00298000
+         DS    3C             PART OF WORD 2                            00299000
+LW3      DS    F              I/O LOGOUT WORD 3                         00300000
+LW4      DS    F              I/O LOGOUT WORD 4                         00301000
+LW5      DS    F              I/O LOGOUT WORD 5                         00302000
+LW6      DS    F              I/O LOGOUT WORD 6                         00303000
+LW7      DS    F              I/O LOGOUT WORD 7                         00304000
+LW8      DS    F              I/O LOGOUT WORD 8                         00305000
+LW9      DS    F              I/O LOGOUT WORD 9                         00306000
+LW10     DS    F              I/O LOGOUT WORD 10                        00307000
+LW11     DS    F              I/O LOGOUT WORD 11                        00308000
+LW12     DS    F              I/O LOGOUT WORD 12                        00309000
+LW13     DS    F              I/O LOGOUT WORD 13                        00310000
+LW14     DS    F              I/O LOGOUT WORD 14                        00311000
+LW15     DS    F              I/O LOGOUT WORD 15                        00312000
+LW16     DS    F              I/O LOGOUT WORD 16                        00313000
+LW17     DS    F              I/O LOGOUT WORD 17                        00314000
+LW18     DS    F              I/O LOGOUT WORD 18                        00315000
+LW19     DS    F              I/O LOGOUT WORD 19                        00316000
+LW20     DS    F              I/O LOGOUT WORD 20                        00317000
+LW21     DS    F              I/O LOGOUT WORD 21                        00318000
+LW22     DS    F              I/O LOGOUT WORD 22                        00319000
+LW23     DS    F              I/O LOGOUT WORD 23                        00320000
+LW24     DS    F              I/O LOGOUT WORD 24                        00321000
+LW25     DS    F              I/O LOGOUT WORD 25                        00322000
+LW26     DS    F              I/O LOGOUT WORD 26                        00323000
+LW27     DS    0F             I/O LOGOUT WORD 27                        00324000
+OPERATN  DS    CL1            MAJOROPERATION INDICATOR                  00325000
+BLAME    DS    CL1            SOURCE OF ERROR                           00326000
+         DS    CL2            LAST TWO BYTES                            00327000
+**********************************************************************  00328000
+         EJECT                                                          00329000
+         PSA                                                            00330000
+         COPY  EQU                                                      00331000
+         COPY  DEVTYPES                                                 00332000
+         COPY  SAVE                                                     00333000
+ENTSW    EQU   SAVEWRK1                                        @VA01638 00334000
+SIOADDR  EQU   SAVEWRK9                                                 00335000
+         COPY  IOER                                                     00336000
+         COPY  CCHREC                                                   00337000
+         END                                                            00338000

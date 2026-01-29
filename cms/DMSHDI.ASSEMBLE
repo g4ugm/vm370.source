@@ -1,0 +1,389 @@
+HDI      TITLE 'DMSHDI     (CMS)       VM/370 - RELEASE 6'              00001000
+         SPACE 2                                                        00002000
+*.                                                                      00003000
+* MODULE NAME -                                                         00004000
+*                                                                       00005000
+*        DMSHDI                                                         00006000
+*                                                                       00007000
+* FUNCTION -                                                            00008000
+*                                                                       00009000
+*        TO SET THE CMS INTERRUPT HANDLING FUNCTIONS TO TRANSFER CON-   00010000
+*        TROL TO A GIVEN LOCATION FOR AN I/O DEVICE OTHER THAN THOSE    00011000
+*        NORMALLY HANDLED BY CMS, OR TO CLEAR PREVIOUSLY                00012000
+*        INITIALIZED I/O INTERRUPT HANDLING.                            00013000
+*                                                                       00014000
+* ATTRIBUTES -                                                          00015000
+*                                                                       00016000
+*        REENTRANT, DISK RESIDENT, AND EXECUTES IN THE TRANSIENT AREA   00017000
+* NOTE:  HNDINT MUST BE GENMOD'D WITH THE SYSTEM OPTION                 00017100
+*                                                                       00018000
+* ENTRY POINTS -                                                        00019000
+*                                                                       00020000
+*        1.  DMSHDI, HNDINT                                             00021000
+*                                                                       00022000
+* ENTRY CONDITIONS -                                                    00023000
+*                                                                       00024000
+*        LA    R1,PLIST                                                 00025000
+*        SVC   202                                                      00026000
+*                                                                       00027000
+*        PLIST = CL8'HNDINT'                                            00028000
+*                CL4'SET'|'CLR'                                         00029000
+*                TRAP:  SEE TRAP MACRO                                  00030000
+*                .                                                      00031000
+*                .                                                      00032000
+*                XL8 - FENCE                                            00033000
+*                                                                       00034000
+* EXIT CONDITIONS -                                                     00035000
+*                                                                       00036000
+*        NORMAL -                                                       00037000
+*        GPR15 = 0: SUCCESSFUL COMPLETION                               00038000
+*                                                                       00039000
+*        ERROR -                                                        00040000
+*        GPR15 = XXX: INCORRECT PARAMETER LIST                          00041000
+*                YYY: TRAP ITEM REPLACES ANOTHER OF THE SAME DEV. NAME  00042000
+*                ZZZ: CLEARING NON-EXISTING INTERRUPT                   00043000
+*                                                                       00044000
+* CALLS TO OTHER ROUTINES -                                             00045000
+*                                                                       00046000
+*        TYPLIN - TYPE A MESSAGE ON THE TERMINAL                        00047000
+*        FREE - GET FREE STORAGE                                        00048000
+*        FRET - RETURN FREE STORAGE                                     00049000
+*                                                                       00050000
+* EXTERNAL REFERENCES -                                                 00051000
+*                                                                       00052000
+*        IOSECT - USER INTERRUPT INFORMATION                            00053000
+*        NUCON - NUCLEUS AREA CONSTANTS                                 00054000
+*                                                                       00055000
+* TABLES / WORKAREAS -                                                  00056000
+*                                                                       00057000
+*        TEMP - TEMPORARY STORAGE SUPPLIED BY SVCINT                    00058000
+*                                                                       00059000
+* REGISTER USAGE -                                                      00060000
+*                                                                       00061000
+*        GPR1, GPR2 = A(PLIST)                                          00062000
+*        GPR3, GPR4, GPR5, GPR6, GPR7, GPR8, GPR9 = WORK REGS.          00063000
+*        GPR10 = A(IOSECT)                                              00064000
+*        GPR11 = UNUSED                                                 00065000
+*        GPR12 = BASE REGISTER                                          00066000
+*        GPR13 = A(TEMP)                                                00067000
+*        GPR14 = LINK REGISTER                                          00068000
+*        GPR15 = BRANCH REGISTER                                        00069000
+*                                                                       00070000
+* NOTES -                                                               00071000
+*                                                                       00072000
+*        WHEN INTERRUPT IS RECEIVED AND PROCESSED BY CMS 'IOINT'        00073000
+*        IT PASSES CONTROL TO INTERRUPT HANDLER AS FOLLOWS:             00074000
+*                                                                       00075000
+*        GPR0 - GPR1 = IO OLD PSW                                       00076000
+*        GPR2 - GPR3 = CSW                                              00077000
+*        GPR4 = DEVICE NUMBER (RIGHT JUSTIFIED BINARY NUMBER)           00078000
+*        GPR14 = RETURN ADDRESS IN IOINT                                00079000
+*        GPR15 = A(INTERRUPT HANDLER BEING INVOKED)                     00080000
+*                                                                       00081000
+*        WHEN THRU PROCESSING INTERRUPT, THE INTERRUPT HANDLER MUST     00082000
+*        RETURN TO IOINT VIA R14, WITH R15 AS FOLLOWS:                  00083000
+*                                                                       00084000
+*        GPR15 = 0: SUCCESSFUL AND NORMAL COMPLETION                    00085000
+*        GPR15 NE 0: ANOTHER INTERRUPT EXPECTED (E.G. CHANNEL END,      00086000
+*                    DEVICE END COMING SHORTLY)                         00087000
+*                                                                       00088000
+* OPERATION -                                                           00089000
+*                                                                       00090000
+*        1.  PROGRAM INITIALIZES HANDLING TO BE DONE VIA 'HNDINT SET'   00091000
+*                                                                       00092000
+*        2.  WHEN I/O TO APPROPRIATE DEVICE IS TO BE DONE,              00093000
+*            SYSTEM-MASK IS SET 'OFF'  (BY 'SSM' INSTRUCTION)           00094000
+*            AND APPRORPATE 'SIO' GIVEN.                                00095000
+*                                                                       00096000
+*        3.  WHEN 'SIO' PERFORMED SATISFACTORILY, SYSTEM-MASK CAN BE    00097000
+*            SET TO ALLOW ALL INTERRUPTS.                               00098000
+*                                                                       00099000
+*        4A. IF 'ASAP' WAS SPECIFIED, INTERRUPT-HANDLER IS INVOKED AS   00100000
+*            SOON AS THE INTERRUPT IS 'FIELDED' BY CMS 'IOINT'          00101000
+*            INTERRUPT-HANDLER RETURNS TO 'IOINT' WHICH RETURNS TO PROG 00102000
+*                                                                       00103000
+*        4B. IF 'ASAP' WASN'T SPECIFIED, 'IOINT' RETAINS NEEDED         00104000
+*            INFORMATION UNTIL CMS 'WAIT' FUNCTION IS CALLED.           00105000
+*                                                                       00106000
+*        5.  WHEN PROGRAM 'NEEDS' THE INTERRUPT TO HAVE BEEN RECEIVED,  00107000
+*            CMS 'WAIT' FUNCTION IS CALLED.  IF INTERRUPT HAS NOT       00108000
+*            YET BEEN RECEIVED, CMS GOES IN 'WAIT' STATE UNTIL 'IOINT'  00109000
+*            FIELDS AND PROCESSES THE INTERRUPT IN NORMAL WAY.          00110000
+*                                                                       00111000
+*            IF INTERRUPT HAS BEEN RECEIVED & PROCESSED (E.G. ON 'ASAP' 00112000
+*            RETURNS TO CALLER WITH NECESSARY INTERNAL FLAGS CLEARED.   00113000
+*                                                                       00114000
+*            IF INTERRUPT HAS BEEN RECEIVED BUT NOT YET PROCESSED       00115000
+*            (AS UNDER 'WAIT' OPTION INSTEAD OF 'ASAP'), CMS 'WAIT'     00116000
+*            NOW CALLS IOINT TO INVOKE DESIRED INTERRUPT-HANDLER,       00117000
+*            THEN CLEARS NEEDED FLAGS AND RETURNS TO CALLER.            00118000
+*                                                                       00119000
+*        6.  WHEN THRU, USING PROGRAM SHOULD NORMALLY CLEAR             00120000
+*            THE INTERRUPT-HANDLING SCHEME THRU 'HNDINT CLR' CALL       00121000
+*            (UNLESS 'KEEP' OPTION IS USED & INTERRUPT-HANDLER          00122000
+*            REMAINS INTACT IN CORE)                                    00123000
+*.                                                                      00124000
+         EJECT                                                          00125000
+HNDINT   START X'E000'                                                  00126000
+DMSHDI   EQU  HNDINT                                                    00127000
+         ENTRY DMSHDI                                             P3031 00128000
+         USING NUCON,R0       ACCESS NUCLEUS AREA CONSTANTS             00129000
+         BALR  R12,0          ADDRESSABILITY                            00130000
+         USING *,R12          ...                                       00131000
+         L     R10,AIOSECT    R10 = A(USER INT. TABLE)                  00132000
+         USING TEMP,R13       USE FREE STORAGE PROVIDED BY SVCINT.      00133000
+         ST    R14,JS14       SAVE R14,                                 00134000
+*                             (SAVE R1 HERE IF BECOMES NECESSARY)       00135000
+         CLC   =CL4'SET',8(R1)    IS IT 'SET' ?                         00136000
+         BE    HSET           BE IF YES, HANDLE 'SET'.                  00137000
+         CLC   =CL4'CLR',8(R1)            IS IT 'CLR' ?                 00138000
+         BE    HSET           BE IF YES, HANDLE 'CLR'.                  00139000
+         CLC   =CL4'PURGE',8(R1)  IF NOT, IS IT 'PURGE' ?               00140000
+         BE    JPURGE         BE IF YES, GO HANDLE IT.                  00141000
+         B     ERR01          ERROR IF NO LEGAL CALL.                   00142000
+*                                                                       00143000
+HSET     DS    0H             HANDLE EITHER FORM ...                    00144000
+         L     R7,ANUCEND     R7 = A(END OF NUCLEUS AREA)               00145000
+         L     R8,VMSIZE      R8 = END VIRTUAL MACHINE                  00146000
+         LA    R2,12(,R1)     NOW LET R2 BE START OF IODEV ENTRIES ETC. 00147000
+         LR    R3,R2          R3 WILL BE LAST IODEV ENTRY               00148000
+         LA    R4,12          SET R4 = 12                               00149000
+         LA    R0,28          R0 = INITIAL VALUE OF 28 BYTES (1 ENTRY)  00150000
+         CLC   0(4,R3),FENCE   MAKE SURE 'FENCE' ISN'T FIRST            00151000
+         BNE   LM1415         OK IF NOT, START CHECKING P-LIST.         00152000
+ERR01    DS    0H             ERROR 1 ...                               00153000
+         LA    R15,1          (ERROR 1)                                 00154000
+         B     RETURN         GO EXIT.                                  00155000
+*                                                                       00156000
+LAR3     AR    R3,R4          INCREMENT R3 AND KEEP LOOKING ...         00157000
+         A     R0,=F'28'      INCREMENT R0 FOR ANOTHER ENTRY,           00158000
+LM1415   LM    R14,R15,0(R3)  GET SYMBOLIC-NAME & INT. RTN. ADD.        00159000
+         LTR   R14,R14        ERROR IF NAME = 0                         00160000
+         BZ    ERR01          (MUST BE SOMETHING)                       00161000
+         N     R15,=A(X'FFFFFF')   ISOLATE ADDRESS-BITS ONLY            00162000
+         BZ    CLC4           ADDRESS OF ZERO IS OK, OTHERWISE CHECK... 00163000
+         CR    R15,R7         COMPARE WITH LOWEST REASONABLE VALUE      00164000
+         BL    ERR01          ERROR IF LESS THAN THAT.                  00165000
+         CR    R15,R8         COMPARE WITH HIGHEST REASONABLE VALUE     00166000
+         BL    NR15               BRANCH IF LOW                @VA04960 00166100
+         IC    R7,DOSFLAGS        SAVE DOS FLAG                @VA04960 00166200
+         NI    DOSFLAGS,255-DOSSVC CLEAR DOSSVC (IF DOS )      @VA04960 00166300
+         SPIE  PROGCHK,(5)        SET FOR ADDRESSING EXCEPT.   @VA04960 00166400
+         SR    R5,R5              CLEAR FOR IDENTIFICATION     @VA04960 00166500
+         CLI   0(R15),B0          CHECK FOR DCSS ADDRESS       @VA04960 00166600
+         SPIE  ,MF=(E,(1))        RESTORE PREVIOUS SPIE        @VA04960 00166700
+         STC   R7,DOSFLAGS        RESTORE DOS FLAG             @VA04960 00166800
+         LTR   R5,R5              WAS THERE AN ITERRUPTION?    @VA04960 00166900
+         BNZ   ERR01              BRANCH IF YES, NO GOOD       @VA04960 00167000
+         L     R1,JS01            RESTORE REGISTER 1           @VA04960 00167100
+NR15     EQU   *                                               @VA04960 00167200
+         N     R15,ONE        CHECK LOWEST BIT                          00168000
+         BNZ   ERR01          ERROR IF IT WAS AN ODD-NUMBERED ADDRESS.  00169000
+*        PARAMATER-LIST SEEMS REASONABLE (SO FAR) ...                   00170000
+CLC4     CLC  12(4,R3),FENCE  LOOK FOR FENCE AFTER PARAMETER-LIST       00171000
+         BNE   LAR3           BNE IF NOT FOUND, KEEP LOOKING...         00172000
+*        R3 NOW POINTS TO THE 'LAST' IODEV ENTRY (BEFORE THE 'FENCE')   00173000
+         LR    R8,R4          SET R8 = 12 FOR USE LATER,                00174000
+         LR    R9,R3          LOCATION OF 'LAST' IODEV INTO R9,         00175000
+         CR    R2,R3          IS THERE ONLY ONE ENTRY ?                 00176000
+         BE    PLISTOK        BE IF YES, P-LIST IS OK.                  00177000
+*        IF MORE THAN ONE, MAKE SURE THERE ISN'T MORE THAN ONE          00178000
+*        WITH THE SAME NAME ...                                         00179000
+         LA    R7,12(,R2)      SET UP R7, R8, & R9 FOR OUTER LOOP       00180000
+*              (NOTE - R8 AND R9 HAVE ALREADY BEEN SET UP)              00181000
+*              (NOTE - R4 ALREADY = 12)                                 00182000
+         LA    R6,ERR01       (FOR 'BCR' BELOW)                         00183000
+LR32     LR    R3,R2          SET UP STARTING-ADDRESS                   00184000
+         LR    R5,R7          AND ENDING-ADDRESS OF                     00185000
+         SR    R5,R4          THE 'PREVIOUS' ONES                       00186000
+CLC37    CLC   0(4,R3),0(R7)       CHECK THE SYMBOLIC-NAMES,            00187000
+         BCR   8,R6           'BE' IF THEY'RE EQUAL (AN ERROR)          00188000
+         BXLE  R3,R4,CLC37    ITERATE ALL PRECEDING ONES                00189000
+         BXLE  R7,R8,LR32     GET NEXT ONE AND CHECK AGAIN.             00190000
+PLISTOK  EQU   *              USER'S P-LIST IS OK ...                   00191000
+         USING IOSECT,R10                                               00192000
+         LA    R4,28          LET R4 = 28 NOW  (R8 STILL = 12)          00193000
+         SR    R15,R15        CLEAR 15,                                 00194000
+         ST    R15,ERRCODE    (CLEAR ERROR-CODE)                        00195000
+         CLI   8(R1),C'C'     IS THIS A 'CLR' CALL ?                    00196000
+         BE    HCLR           BE IF YES, GO HANDLE IT.                  00197000
+         SR    R5,R5          CLEAR R5 IN CASE NO OLD TABLE,            00198000
+         C     R15,AUSRITBL   IS THERE AN OLD TABLE AT ALL ?            00199000
+         BE    SRA03          BE IF THERE IS NONE TO WORRY ABOUT.       00200000
+*        COMES HERE IF THE OLD TABLE IS REALLY THERE ...                00201000
+         L     R5,AUSRILST    GET ADDRESS OF OLD LAST ADCON,            00202000
+         L     R3,AUSRITBL    AND THAT OF OLD FIRST ADCON,              00203000
+         SR    R5,R3          LAST - FIRST                              00204000
+         AR    R5,R4          PLUS 28 GIVES NO. OF BYTES IN OLD TABLE   00205000
+         AR    R0,R5          R0 = COMBINED SIZE BOTH TABLES (BYTES)    00206000
+SRA03    A     R0,=F'7'       ROUND AS MAY BE NEEDED AND                00207000
+         SRA   R0,3           DIVIDE BY 8 FOR DOUBLE-WORDS,             00208000
+         DMSFREE DWORDS=(0),TYPCALL=BALR GET SOME FREE STORAGE @VM03083 00209100
+*                             FOR OLD + NEW TABLES                      00209200
+         STM   R0,R1,NEWNUMB  STORE 'NEWNUMB' & 'NEWFIRST'.             00211000
+         LTR   R6,R5          SAVE BYTE-COUNT OF OLD TABLE FOR LATER    00212000
+         BZ    AR6            BZ IF OLD TABLE DOESN'T EXIST AT ALL      00213000
+         C     R5,F256        IS BYTE-COUNT OF OLD TABLE 256 OR LESS?   00214000
+         BNH   EXMVC          BNH IF YES, ONE EX-MVC WILL DO IT.        00215000
+MVC256   MVC   0(256,R1),0(R3)     IF > 256, MOVE 256 BYTES,            00216000
+         LA    R1,256(,R1)    ADJUST FOR NEXT MVC,                      00217000
+         LA    R3,256(,R3)    ...                                       00218000
+         S     R5,F256        ...                                       00219000
+         C     R5,F256        IS IT STILL MORE THAN 256 ?               00220000
+         BH    MVC256         BE IF YES, GO MOVE ANOTHER BIG CHUNK.     00221000
+EXMVC    BCTR  R5,0           IF 256 OR LESS, ADJUST R5 AND             00222000
+         EX    R5,DMVC        MOVE THE CORRECT NUMBER OF BYTES.         00223000
+         L     R3,NEWFIRST    LET R3 POINT TO OLD 1ST ONE IN FREE STRG. 00224000
+         LA    R5,0(R3,R6)    LET R5 POINT TO OLD LAST ONE              00225000
+         SR    R5,R4          IN FREE STORAGE,                          00226000
+AR6      A     R6,NEWFIRST    LET R6 POINT TO WHERE NEW ONES SHOULD GO, 00227000
+         LR    R7,R2          R7 POINTS TO NEW FIRST ONE,               00228000
+         LA    R14,STNEW      SET UP R14 IN CASE NO OLD TABLE,          00229000
+         LTR   R5,R5          WAS THERE AN OLD TABLE?                   00230000
+         BCR   8,R14          'BZ' IF NOT, START STORING NEW TABLE.     00231000
+         LA    R0,2           '2' INTO R0,                              00232000
+         LA    R1,REPLACE     (FOR BCR BELOW)                           00233000
+         LA    R14,LR3N       FOR 0(R14) IN BXLE A BIT LATER...         00234000
+LR3N     L     R3,NEWFIRST    LET R3 POINT TO OLD 1ST ONE IN FREE STRG. 00235000
+CLC37A   CLC   4(4,R3),0(R7)  COMPARE NEW ONE WITH AN OLD ONE           00236000
+         BCR   8,R1           'BE' IF IT MATCHES, GO REPLACE IT.        00237000
+         BXLE  R3,R4,CLC37A   ITERATE FOR ALL OLD ONES                  00238000
+STNEW    LR    R15,R6         SET R15 FOR A 'NEW' ONE,                  00239000
+         AR    R6,R4          ADJUST R6 FOR NEXT TIME.                  00240000
+STNEW1   MVC   0(28,R15),=7F'0'   ZERO-FILL 28-BYTE ENTRY,              00241000
+         MVC   0(2,R15),8(R7) DEVICE-NUMBER INTO TABLE,                 00242000
+         MVC   4(8,R15),0(R7) DEVICE-NAME & INT.-RTN.ADD. TO TABLE,     00243000
+         CLI   10(R7),C'A'     IS IT 'A' FOR 'ASAP' ?                   00244000
+         BNE   ASAPOK         BNE IF NOT (PRESUMABLY 'WAIT')            00245000
+         OI    2(R15),ASAP    SET 'ASAP' BIT IF CALLER WANTS THAT.      00246000
+ASAPOK   CLI   11(R7),C'K'     IS IT 'K' FOR 'KEEP' ?                   00247000
+         BNE   BXLE78         BNE IF NOT (USUALLY WON'T BE)             00248000
+         OI    2(R15),KEEP    SET 'KEEP' BIT IF CALLER WANTS THAT.      00249000
+BXLE78   BXLE  R7,R8,0(R14)   GO CHECK ANOTHER NEW-ONE.                 00250000
+         SR    R6,R4          LET R6 POINT TO LAST ONE IN NEW TABLE     00251000
+         LM    R0,R1,IONTABL    CHECK THE OLD TABLE (STILL THERE)       00252000
+         LTR   R0,R0          IF R0 = 0, WASN'T IN FREE STORAGE         00253000
+         BZ    MOVNEW         BZ IF SUCH THE CASE, DON'T FRET.          00254000
+         DMSFRET DWORDS=(0),LOC=(1),TYPCALL=BALR FRET OLD TBL  @VM03083 00255100
+MOVNEW   MVC   IONTABL(8),NEWNUMB MOVE NEW TABLE INTO POSITION @V305066 00257000
+         ST    R6,AUSRILST    (INCLUDING ADDRESS OF LAST ADCON)         00259000
+LR15E    L     R15,ERRCODE    ERROR CODE INTO R15 AND                   00261000
+RETURN   L     R14,JS14       RESTORE R14, AND                          00262000
+         BR    R14            RETURN TO CALLER.                         00263000
+*                                                                       00264000
+REPLACE  LR    R15,R3      IF NEW-ONE HAS SAME NAME, SET R15 TO REPLACE 00265000
+         ST    R0,ERRCODE     MAKE SURE ERROR-CODE WILL BE 2,           00266000
+         B     STNEW1         GO REPLACE OLD 28-BYTE ENTRY WITH NEW.    00267000
+         EJECT                                                          00268000
+*        HANDLE 'CLR' CALL ...                                          00269000
+HCLR     C     R15,AUSRITBL   IS THERE AN OLD TABLE AT ALL ?            00270000
+         BNE   YES2           BNE IF YES (NORMALLY WOULD BE)            00271000
+ERR03    LA    R15,3          ERROR 3 IF OLD TABLE UTTERLY NONEXISTENT. 00272000
+         B     RETURN         ...                                       00273000
+*                                                                       00274000
+YES2     L     R5,AUSRILST    GET ADDRESS OF OLD LAST ADCON,            00275000
+         L     R3,AUSRITBL    AND THAT OF OLD FIRST ADCON,              00276000
+         SR    R5,R3          LAST - FIRST                              00277000
+         AR    R5,R4          PLUS 28 GIVES NO. OF BYTES IN OLD TABLE   00278000
+         LA    R6,NOTPERF     SET R6 FOR 'NOT A PERFECT MATCH'          00279000
+         CR    R5,R0          DOES COUNT MATCH WHAT NEW TABLE WOULD BE? 00280000
+         BCR   7,R6           'BNE' IF NOT A PERFECT MATCH.             00281000
+         LR    R7,R2          R7 POINTS TO FIRST ONE IN CALLER'S TABLE, 00282000
+CLC37B   CLC   4(4,R3),0(R7)  DOES THE IODEV ENTRY MATCH THE TABLE ?    00283000
+         BCR   7,R6           'BNE' IF NOT A PERFECT MATCH.             00284000
+         AR    R3,R4          ADD 28 TO R3, AND                         00285000
+         BXLE  R7,R8,CLC37B   ITERATE FOR WHOLE TABLE.                  00286000
+         LM    R0,R1,IONTABL    IF PERFECT MATCH, GET OLD IONTABL & JFI 00287000
+LR15D    EQU   *                                                        00288000
+         DMSFRET DWORDS=(0),LOC=(1),TYPCALL=BALR CALL "FRET"   @VM03083 00289100
+         SR    R0,R0          CLEAR R0,                                 00291000
+         ST    R0,IONTABL       CLEAR 'IONTABL'                         00293000
+         ST    R0,AUSRITBL    AND 'AUSITBL'                             00294000
+         ST    R0,AUSRILST    (ALSO 'AUSILST' (TO BE NEAT)              00295000
+         B     LR15E          GO LOAD ERROR-CODE AND EXIT.              00297000
+*                                                                       00298000
+NOTPERF  MVC   NEWNUMB(8),IONTABL      MOVE THE TABLE,                  00299000
+         L     R5,AUSRILST    SET UP R5  (R3 SET UP SHORTLY BELOW)      00300000
+         LR    R7,R2          ALSO SET UP R7,                           00301000
+         LA    R0,3           3 INTO R0 FOR POSSIBLE ERROR-CODE,        00302000
+         LA    R1,ZREPLACE    LET R1 POINT TO ZERO-REPLACE,             00303000
+LR3NE    L     R3,NEWFIRST    START WITH BEGINNING OF OLD TABLE,        00304000
+CLC37C   CLC   4(4,R3),0(R7)  DO WE HAVE A MATCH ?                      00305000
+         BCR   8,R1           'BE' IF YES, REPLACE BY ZERO.             00306000
+         BXLE  R3,R4,CLC37C   ITERATE ...                               00307000
+         ST    R0,ERRCODE     'SET' ERROR-CODE 3 IF DROPS THRU BXLE     00308000
+         BXLE  R7,R8,LR3NE    ITERATE FOR ALL OF CALLER'S LIST.         00309000
+         B     FINTST         GO TO FINAL TEST IF DROP THRU BXLE HERE.  00310000
+*                                                                       00311000
+ZREPLACE MVC   0(28,R3),=7F'0'     CLEAR 28 BYTES THERE,                00312000
+         BXLE  R7,R8,LR3NE    ITERATE FOR ALL OF CALLER'S P-LIST.       00313000
+FINTST   L     R3,NEWFIRST    FINAL TEST - 'COMPACT' EMPTY SPACES ---   00314000
+         LR    R6,R3          R3 AND R6 POINT TO THE BEGINNING ...      00315000
+         LA    R1,BXLE3       FOR 'BCR' BELOW ...                       00316000
+LR73     L     R7,0(,R3)      PICK UP A WORD FROM TABLE                 00317000
+         LTR   R7,R7          IS IT ZERO ?                              00318000
+         BCR   8,R1           'BZ' IF YES, GO GET NEXT ONE.             00319000
+         MVC   0(28,R6),0(R3)  MOVE 28-BYTE-ITEM TO FRONT OF TABLE      00320000
+         AR    R6,R4          INCREMENT R6 FOR NEXT TIME,               00321000
+BXLE3    BXLE  R3,R4,LR73     ITERATE THRU TABLE LOOKING FOR ZEROES     00322000
+         LM    R0,R1,NEWNUMB  TENTATIVELY SET UP R0 AND R1,             00323000
+         CR    R6,R1          IF R6 STILL = NEWFIRST ?                  00324000
+         BE    LR15D          BE IF YES, TABLE EMPTY, GIVE IT BACK.     00325000
+         STM   R0,R1,IONTABL     IF TABLE NOT EMPTY, SET IT UP AGAIN    00327000
+         SR    R6,R4          INCLUDING THE POINTER                     00328000
+         ST    R6,AUSRILST    TO THE LAST ONE.                          00329000
+         B     LR15E          GO LOAD ERROR-CODE AND EXIT.              00331000
+         EJECT                                                          00332000
+*        COMES HERE IF CALLING SEQUENCE = 'HNDINT PURGE'                00333000
+*        MEANS 'PURGE' IONTABL OF ALL ITEMS NOT HAVING 'KEEP' FLAG SET. 00334000
+JPURGE   LM    R2,R5,IONTABL    GET OLD TABLE IN REGISTERS,             00335000
+         LTR   R6,R3          A(FIRST-ONE) ALSO INTO R6 & CHECK IT      00336000
+         BZ    ERR03          ERROR 3 IF NOTHING THERE AT ALL           00337000
+         STM   R2,R3,NEWNUMB  STORE NEWNUMB & NEWFIRST FOR USE LATER,   00338000
+         SR    R15,R15        SHOW NO ERRORS                            00339000
+         ST    R15,ERRCODE    ...                                       00340000
+CHECK    TM    2(R3),KEEP     IS 'KEEP' FLAG SET ?                      00341000
+         BO    BXLE4          BO IF YES, LEAVE WELL ENOUGH ALONE        00342000
+         MVC   0(28,R3),=7F'0'     BUT CLEAR 28-BYTE ITEM IF NOT SET    00343000
+         SR    R6,R6          INDICATE WE CLEARED SOMETHING...          00344000
+BXLE4    BXLE  R3,R4,CHECK    ITERATE THRU IONTABL ...                  00345000
+         LTR   R6,R6          DID WE CLEAR ANYTHING AT ALL ?            00346000
+         BZ    FINTST         BZ IF R6=0, LET FINTST FINISH UP FOR US.  00347000
+         B     RETURN         OTHERWISE, GO EXIT, NOTHING MORE TO DO.   00348000
+         SPACE 1                                               @VA04960 00348200
+PROGCHK  EQU   *                                               @VA04960 00348400
+         LR    R5,R14             MAKE REGISTER 5 NON-ZERO     @VA04960 00348600
+         BR    R14                AND RETURN                   @VA04960 00348800
+         SPACE 3                                                        00349000
+*        CONSTANTS ...                                                  00350000
+DMVC     MVC   0(*-*,R1),0(R3) MOVES 1 TO 256 BYTES TO FREE STORAGE.    00351000
+ONE      DC    F'1'                                                     00352000
+F256     DC    F'256'         LIMIT OF IBM360 MVC INSTRUCTION           00353000
+FENCE    DC    X'FFFFFFFF'                                              00354000
+B0       EQU   0                  CHARACT FIELD FOR IMMED INST.@VA04960 00354500
+         SPACE 2                                                        00355000
+         LTORG                                                          00356000
+         SPACE 2                                                        00357000
+TEMP     DSECT                TEMPORARY STORAGE (VIA R13) ...           00358000
+*                                                                       00359000
+JS01     DS    1F             R1 (POINTS TO PARAMETER-LIST) SAVED HERE  00360000
+JS14     DS    1F             R14 (RETURN-REGISTER) SAVED HERE          00361000
+*                                                                       00362000
+ERRCODE  DC    F'0'           ERROR-CODE FOR R15 AT EXIT.               00363000
+         SPACE 2                                                        00364000
+*        TABLE OF 'NEW' INFORMATION  (SEE 'IONTABLE' BELOW)             00365000
+*                                                                       00366000
+NEWNUMB  DC    F'0'           NO. OF DBL-WORDS OF FREE STORAGE          00367000
+NEWFIRST DC    A(*-*)         ADDRESS OF FIRST ITEM IN TABLE            00368000
+         DC    F'28'          (FOR BXLE)                                00369000
+NEWLAST  DC    A(*-*)         ADDRESS OF LAST ITEM IN TABLE             00370000
+         SPACE 2                                                        00371000
+ASAP     EQU   X'40'          'ASAP' FLAG-BIT                           00372000
+KEEP     EQU   X'08'          'KEEP' FLAG-BIT                           00373000
+*                                                                       00374000
+         EJECT                                                          00375000
+         NUCON                                                          00376000
+         IOSECT                                                         00377000
+         REGEQU                                                         00378000
+*                                                                       00379000
+         END                                                            00380000

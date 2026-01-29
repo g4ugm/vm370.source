@@ -1,0 +1,379 @@
+VPD      TITLE 'DMSVPD     (CMS)       VM/370 - RELEASE 6'              00001000
+*.                                                                      00002000
+*   MODULE NAME:   DMSVPD                                               00003000
+*                                                                       00004000
+*   FUNCTION:   READ DOS/VS VSAM AND AMS MODULES FROM A                 00005000
+*               DOS/VS PTF TAPE AND WRITE THE MODULES TO THE USER'S     00006000
+*               CMS 'A' DISK.                                           00007000
+*                                                                       00008000
+*   ATTRIBUTES:   DISK RESIDENT, LOADED INTO USER AREA:                 00009000
+*                      LOAD DMSVPD (CLEAR                               00010000
+*                      GENMOD DMSVPD                                    00011000
+*                 THIS ROUTINE IS NON-REUSABLE.                         00012000
+*                                                                       00013000
+*   ENTRY POINTS:   DMSVPD                                              00014000
+*                                                                       00015000
+*   ENTRY CONDITIONS:   GPR1 POINTS TO PARAMETER LIST AS FOLLOWS:       00016000
+*              DC    CL8'DMSTPD'                                        00017000
+*              DC    CL8'ALL' OR CL8'SELECT'   ('ALL' IS DEFAULT)       00018000
+*              DC    8X'FF'                                             00019000
+*                                                                       00020000
+*   EXIT CONDITIONS:                                                    00021000
+*        NORMAL - GPR15 = 0                                             00022000
+*        ERROR -  GPR15 = NONZERO                                       00023000
+*                       = 24  INVALID PARAMETER                         00024000
+*                       = 100 DISK WRITE ERR,                           00025000
+*                              TAPE NOT ATTACHED,                       00026000
+*                              TAPE READ ERROR                          00027000
+*                       = 104 VIRTUAL STORAGE EXCEEDED                  00028000
+*                                                                       00029000
+*   CALLS TO OTHER CMS ROUTINES:                                        00030000
+*        DMSFRE,DMSCRD,DMSTIO,DMSERR,DMSRNM,DMSBWR,DMSFNS,DMSERS        00031000
+*                                                                       00032000
+*   EXTERNAL REFERENCES:           NONE                                 00033000
+*                                                                       00034000
+*   CALLED BY:  VSAMGEN EXEC                                            00035000
+*                                                                       00036000
+*   TABLES AND WORKAREAS:                                               00037000
+*        WRBUFF  -  80-BYTE LOGICAL DISK RECORD BUFFER                  00038000
+*        TRANTBL -  LIST OF VSAM LOGICAL TRANSIENTS                     00039000
+*        R11->   -  3440-BYTE TAPE READ BUFFER                          00040000
+*                                                                       00041000
+*   REGISTER USAGE:                                                     00042000
+*        R1 - PLIST POINTER                                             00043000
+*        R2 - POINT TO CURRENT LOGICAL RECORD                           00044000
+*        R11 - POINTER TO TAPE READ BUFFER                              00045000
+*        R12 - BASE ADDRESS REGISTER                                    00046000
+*        R14 - LINKAGE REGISTER                                         00047000
+*        ALL OTHER GPRS USED AS WORK REGISTERS                          00048000
+*                                                                       00049000
+*   OPERATION:                                                          00050000
+*        IF PARAMETERS PASSED ARE VALID, DMSVPD GETS A TAPE READ        00051000
+*        BUFFER FROM FREE STORAGE (3440 BYTES) AND PROCEEDS TO READ     00052000
+*        TAPE RECORDS UNTIL REACHING END OF FILE(TAPE MARK).            00053000
+*        EACH TIME A TAPE RECORD IS READ, A POINTER IS USED TO          00054000
+*        MOVE EACH 80-BYTE LOGICAL RECORD TO ANOTHER BUFFER AREA        00055000
+*        IN ORDER TO WRITE THE LOGICAL RECORD TO DISK, THUS             00056000
+*        'DEBLOCKING' THE TAPE RECORDS.                                 00057000
+*                                                                       00058000
+*        ALL JCL CARDS ('//') INCLUDING COMMENT CARDS ARE IGNORED.      00059000
+*        DMSVPD SEARCHES FOR THE 'CATALX' CARD  AND WHEN IT IS FOUND    00060000
+*        THE FILENAME IS SAVED IN ORDER TO NAME THE CMS OBJECT FILE     00061000
+*        'FILENAME TEXT' WHEN THE WRITING TO DISK IS COMPLETED.         00062000
+*        AN IMTERMEDIATE FILE BY THE NAME OF 'FILENAME CMSUT1'          00063000
+*        IS USED TO WRITE THE NEW FILE TO DISK, SINCE IT COULD BE       00064000
+*        REPLACING A FILE ALREADY ON THE DISK. WHEN THE FILE IS         00065000
+*        COMPLETELY WRITTEN TO DISK, THE OLD FILE 'FILENAME TEXT ' IS   00066000
+*        ERASED AND THE 'FILENAME CMSUT1' FILE IS RENAMED TO            00067000
+*        'FILENAME TEXT'.                                               00068000
+*                                                                       00069000
+*        IF THE 'SELECT' OPTION IS USED, DMSVPD WILL PROMPT THE USER    00070000
+*        WITH THE NAME OF THE VSAM OR AMS FILE WHICH IT HAS EN-         00071000
+*        COUNTERED AND IF THE USER ANSWERS 'NO' THE THAT PARTICULAR     00072000
+*        FILE WILL NOT BE APPLIED (WRIITEN TO DISK).                    00073000
+*                                                                       00074000
+*        DMSVPD WILL APPLY ANY FILE BEGINNING WITH 'IDC' (AMS),         00075000
+*        'IKQ' (VSAM), 'IGG0' (VSAM CATALOG) OR ANY VSAM LOGICAL        00076000
+*        TRANSIENT ROUTINE WHOSE NAME APPEARS IN THE 'TRANTBL' AREA.    00077000
+*                                                                       00078000
+*        DMSVPD ASSUMES THAT A DOS/VS PTF TAPE IS ATTACHED AS           00079000
+*        VIRTUAL DEVICE 181 AND THAT THE TAPE IS POSITIONED AT          00080000
+*        THE TAPE FILE TO BE PROCESSED.                                 00081000
+*                                                                       00082000
+*        ALL FILES ARE WRITTEN TO THE USER'S 'A' DISK.                  00083000
+*.                                                                      00084000
+         EJECT                                                          00085000
+DMSVPD   START                                               , @V305106 00086000
+         LR    R12,R15                                         @V305106 00087000
+         USING DMSVPD,R12                                      @V305106 00088000
+         ST    R14,SAVE14                                      @V305106 00089000
+         CLC   8(8,R1),FENCE       OPTION ENTERED?             @V305106 00090000
+         BE    GETSTOR             NO, START 'ER UP...         @V305106 00091000
+         CLC   8(8,R1),SELECT      IS IT 'SELECT' OPTION?      @V305106 00092000
+         BNE   ALLCHEK             NO, CHEK FOR 'ALL'          @V305106 00093000
+         OI    MISCFLAG,SELECTF    YES, REMEMBER TO SELECT PTFS@V305106 00094000
+         B     FENCECHK            CHEKA THE FENSA...          @V305106 00095000
+ALLCHEK  CLC   8(8,R1),ALL         'ALL' ENTERED?              @V305106 00096000
+         BNE   ERR70E              UNKNOWN IF NOT...           @V305106 00097000
+FENCECHK CLC   16(8,R1),FENCE      FOLLOWED BY FENCE?          @V305106 00098000
+         BNE   ERR70EA             EXTRANEOUS OPTIONS IF NOT   @V305106 00099000
+         SPACE                                                          00100000
+GETSTOR  L     R0,DWORDS           GET NO. DOUBLE WORDS        @V305106 00101000
+         DMSFREE DWORDS=(0),ERR=ERR109S                        @V305106 00102000
+         LR    R11,R1              KEEP BEGINING BUFFER ADDR   @V305106 00103000
+         LR    R2,R1               USE R2 FOR LRECL POINTER    @V305106 00104000
+         ST    R1,STARTADR         SAVE ADDR OF TAPE BUFFER    @VA04385 00105100
+         SPACE                                                          00107000
+         RDTAPE (R2),3440,ERROR=TAPERR  READ FIRST TAPE RECORD @V305106 00108000
+         L     R9,STARTADR         GET START OF TAPE BUFFER    @VA04385 00108100
+         AR    R9,R0               ADD NO.BYTES READ...        @VA04385 00108150
+         ST    R9,ENDADDR          SAVE 'END OF BUFFER'        @VA04385 00108200
+         EJECT                                                          00109000
+*********************************************************************** 00110000
+*        MAIN LOOP FOR READING LOGICAL RECORDS (I.E.,DEBLOCKING)        00111000
+*********************************************************************** 00112000
+TOP      EQU   *                                               @V305106 00113000
+         CLC   0(2,R2),SLSLASH     '//' ?                      @V305106 00114000
+         BE    NXTLREC             YES, IGNORE IT...           @V305106 00115000
+         CLI   0(R2),STAR          COMMENT ('*') ?             @V305106 00116000
+         BE    NXTLREC             YES, IGNORE AND GET NEXT REC@V305106 00117000
+         CLC   0(2,R2),SLAMPER     '/&' ?                      @V305106 00118000
+         BE    NXTLREC             YES, IGNORE IT AT THIS POINT@V305106 00119000
+         CLI   0(R2),BLANK         HIT POTENTIAL 'CATALS'?     @V305106 00120000
+         BNE   NXTLREC             NO, DISPLAY THE UNKNOWN...  @V305106 00121000
+SETUP3   LR    R3,R2               USE R3 FOR SCANNING LOG REC @V305106 00122000
+CLOOP    LA    R3,1(,R3)           GET NEXT CHARACTER...       @V305106 00123000
+         CLI   0(R3),BLANK         BLANK?                      @V305106 00124000
+         BE    CLOOP               YES, KEEP LOOKING...        @V305106 00125000
+         CLC   0(5,R3),=CL5'CATAL'   'CATAL' RECORD?           @V305106 00126000
+         BNE   NXTLREC             NO, DISPLAY THE UNKNOWN...  @V305106 00127000
+         LA    R3,6(,R3)           NOW LOOK FOR FILE NAME      @V305106 00128000
+NLOOP    CLI   0(R3),BLANK         BLANK?                      @V305106 00129000
+         BNE   NAMHIT              NO, WE'VE GOT A NAME..      @V305106 00130000
+         LA    R3,1(,R3)           YES, GET NEXT CHARACTER     @V305106 00131000
+         B     NLOOP               AND SEE WHAT WE HAVE NOW... @V305106 00132000
+         SPACE                                                          00133000
+NAMHIT   EQU   *                   R3 -> FILE NAME             @V305106 00134000
+         LR    R4,R3               REMEMBER BEGIN OF NAME      @V305106 00135000
+         LA    R3,6(,R3)           ASSUME NAME AT LEAST 6 CHARS@V305106 00136000
+ELOOP    CLI   0(R3),COMMA         END OF NAME?                @V305106 00137000
+         BE    VSAMCHEK            YES, CHEK FOR VSAM NAMES    @V305106 00138000
+         CLI   0(R3),BLANK         END OF NAME?                @V305106 00139000
+         BE    VSAMCHEK            YES, CHEK FOR VSAM NAMES    @V305106 00140000
+         LA    R3,1(,R3)           NO, KEEP LOOKING...         @V305106 00141000
+         B     ELOOP               ...                         @V305106 00142000
+VSAMCHEK CLC   0(3,R4),=CL3'IKQ'   VSAM MODULE?                @V305106 00143000
+         BE    ASK                 YES, GOTO PROMPT CHEK       @V305106 00144000
+         CLC   0(4,R4),=CL4'IGG0'  VSAM CATALOG MODULE?        @V305106 00145000
+         BE    ASK                 YES, ASK USER IF HE WANTS IT@V305106 00146000
+         CLC   0(3,R4),=CL3'IDC'   AMS MODULE?                 @V305106 00147000
+         BE    ASK                 YES, GOTO PROMPT CHEK       @V305106 00148000
+         LA    R5,TRANTBL          SEARCH FOR VSAM TRANSIENTS  @V305106 00149000
+         LA    R6,EIGHT            SIZE OF EACH ENTRY          @V305066 00150000
+         LA    R7,ENDTBL           END OF TABLE                @V305106 00151000
+TRANLOOP CLC   0(8,R4),0(R5)       VSAM TRANSIENT ROUTINE?     @V305106 00152000
+         BE    ASK                 YES, GOTO PROMPT CHEK       @V305106 00153000
+         BXLE  R5,R6,TRANLOOP      FLY THRU THE TABLE...       @V305106 00154000
+         LA    R14,OBJLOOP         NO WANT...READ THRU MODULE  @V305106 00155000
+         B     NXTREC              SO GET NEXT LOGICAL RECORD  @V305106 00156000
+         EJECT                                                          00157000
+*********************************************************************** 00158000
+*        VSAM OR AMS FILE FOUND...ASK USER WHETHER HE WANTS IT APPLIED. 00159000
+*********************************************************************** 00160000
+ASK      EQU   *                                               @V305106 00161000
+         LA    R6,FNAME            LET'S SET UP MVCL FOR FNAME @V305106 00162000
+         LA    R7,EIGHT            LENGTH OF 'FNAME'           @V305066 00163000
+         LR    R5,R3               R3->BLANK OR COMMA AFT NAME @V305106 00164000
+         SR    R5,R4               COMPUTE LENGTH OF NAME      @V305106 00165000
+         ICM   R5,8,ALL+3          SET PAD CHARACTER TO BLANK  @V305106 00166000
+         MVCL  R6,R4               KEEP FILENAME IN STATIC AREA@V305106 00167000
+         MVC   FSCB+8(8),FNAME     MOVE NAME INTO THE FSCB     @V305106 00168000
+         TM    MISCFLAG,SELECTF    CALLER WANT PTF SELECTION?  @V305106 00169000
+         BZ    SETWRITE            NO, APPLY THEM ALL...       @V305106 00170000
+         SPACE                                                          00171000
+         DMSERR NUM=383,LET=R,SUB=(CHARA,FNAME),               @V305106*00172000
+               TEXT='APPLY ''........''? ...ENTER ''NO'' OR EOB:',     *00173000
+               DOT=NO                                          @V305106 00174000
+         SPACE                                                          00175000
+         RDTERM ANSWER,EDIT=UPCASE GET THE ANSWER...           @V305106 00176000
+         SPACE                                                          00177000
+         CLC   ANSWER(2),=CL2'NO'  APPLY IT?                   @V305106 00178000
+         BE    CONT                NO, JUST READ ON BY...      @V305106 00179000
+SETWRITE OI    MISCFLAG,WRITE      REMEMBER TO WRITE THE RCDS  @V305106 00180000
+         MVC   FSCB+16(8),WNAME    MAKE FSCB REUSABLE          @V305106 00181000
+CONT     LA    R14,OBJLOOP         GOTO LOOP FOR READING DECK  @V305106 00182000
+         B     NXTREC              GET FIRST OBJECT CARD       @V305106 00183000
+         EJECT                                                          00184000
+*********************************************************************** 00185000
+*        READ THROUGH THE OBJECT DECK                                   00186000
+*********************************************************************** 00187000
+OBJLOOP  EQU   *                   READING THRU THE OBJECT DECK@V305106 00188000
+         CLI   0(R2),BLANK         'CATAL' CARD?               @V305106 00189000
+         BNE   ENDCHEK             NO, CONTINUE..              @V305106 00190000
+         OI    MISCFLAG,NOREAD     YES, REM'BR NO READ LOG REC @V305106 00191000
+         B     ENDECK              AND CLEANUP THIS FILE...    @V305106 00192000
+ENDCHEK  CLC   0(2,R2),SLSTAR      '/*' ?                      @V305106 00193000
+         BE    ENDECK              YES, END OF MODULE...       @V305106 00194000
+         CLC   0(2,R2),SLAMPER     '/&' ?                      @V305106 00195000
+         BE    ENDECK              YES, END OF MODULE...       @V305106 00196000
+         TM    MISCFLAG,WRITE      DO WE WANT THIS MODULE?     @V305106 00197000
+         BZ    NXTOBJ              NO, DON'T WRITE ANY RECORDS @V305106 00198000
+         SPACE                                                          00199000
+         MVC   WRBUFF(80),0(R2)    MOVE LOGL REC TO WRITE BUFF @V305106 00200000
+         FSWRITE ,FSCB=FSCB,ERROR=WRERR                        @V305106 00201000
+         SPACE                                                          00202000
+NXTOBJ   BAL   R14,NXTREC          GET NEXT LOGICAL RECORD     @V305106 00203000
+         B     OBJLOOP             AND CONTINUE THE READING    @V305106 00204000
+         EJECT                                                          00205000
+*********************************************************************** 00206000
+*        END OF OBJECT DECK...DECIDE WHETHER TO WRITE IT ON DISK.       00207000
+*********************************************************************** 00208000
+ENDECK   EQU   *                   END OF OBJECT MODULE        @V305106 00209000
+         TM    MISCFLAG,WRITE      ARE WE WRITING THIS FILE?   @V305106 00210000
+         BZ    ENDEND              NO, DROP THRU               @V305106 00211000
+         NI    MISCFLAG,255-WRITE  YES, TURN OFF WRITE FLAG    @V305106 00212000
+         SPACE                                                          00213000
+         FSCLOSE ,FSCB=FSCB        CLOSE THE NEW WORK FILE     @V305106 00214000
+         SPACE                                                          00215000
+         MVC   FSCB+16(8),TEXT                                 @V305106 00216000
+         FSERASE ,FSCB=FSCB        ERASE THE OLD CMS TEXT FILE @V305106 00217000
+         SPACE                                                          00218000
+         MVC   RENOLD(8),FNAME     PROVIDE FNAME FOR 'RENAME'  @V305106 00219000
+         MVC   RENNEW(8),FNAME                                 @V305106 00220000
+         LA    R1,RENAME                                       @V305106 00221000
+         SVC   202                 RENAME WORK FILE TO NEW TEXT@V305106 00222000
+         SPACE                                                          00223000
+         DMSERR NUM=367,LET=I,SUB=(CHARA,FNAME),               @V305106*00224000
+               TEXT='''........ TEXT'' WRITTEN ON DISK ''A'''  @V305106 00225000
+         SPACE                                                          00226000
+         L     R6,FCOUNT           GET CURRENT FILE COUNT      @V305106 00227000
+         LA    R6,1(,R6)           AND INCR BY ONE...          @V305106 00228000
+         ST    R6,FCOUNT           AND STORE NEW COUNT         @V305106 00229000
+ENDEND   TM    MISCFLAG,EXITF      ARE WE AT END OF TAPE ?     @V305106 00230000
+         BO    EXIT                YES, EXIT                   @V305106 00231000
+         TM    MISCFLAG,NOREAD     DO WE HAVE RECORD ALREADY?  @V305106 00232000
+         BZ    NXTLREC             NO, CONTINUE READING...     @V305106 00233000
+         NI    MISCFLAG,255-NOREAD TURN IT OFF AND             @V305106 00234000
+         B     SETUP3              GO BACK TO LOOK FOR 'CATAL' @V305106 00235000
+         EJECT                                                          00236000
+*********************************************************************** 00237000
+*        SUBROUTINE TO 'DEBLOK' TAPE RECORDS                            00238000
+*********************************************************************** 00239000
+NXTLREC  LA    R14,TOP             GO BACK CNTL RECORD READING @V305106 00240000
+NXTREC   EQU   *                   GET NEXT LOG RCD (DEBLOCK)  @V305106 00241000
+         LA    R2,80(,R2)          PT. TO NXT LOG REC IN BUFFR @V305106 00242000
+         C     R2,ENDADDR          END OF TAPE BUFFER?         @V305106 00243000
+         BLR   R14                 NO, RETURN TO CALLER        @V305106 00244000
+         LR    R2,R11              YES, PT. BACK TO BEG OF BUFF@V305106 00245000
+         SPACE                                                          00246000
+         RDTAPE (R2),3440,ERROR=TAPERR  READ NEXT TAPE RECORD  @V305106 00247000
+         L     R9,STARTADR         GET START OF TAPE BUFFER    @VA04385 00247100
+         AR    R9,R0               ADD NO.BYTES READ...        @VA04385 00247150
+         ST    R9,ENDADDR          SAVE 'END OF BUFFER'        @VA04385 00247200
+         SPACE                                                          00248000
+         BR    R14                 AND RETURN TO CALLER        @V305106 00249000
+         EJECT                                                          00250000
+*********************************************************************** 00251000
+*        EXIT PROCESSING... THREE ENTRY POINTS:                         00252000
+*              EXIT  - NORMAL COMPLETION                                00253000
+*              EXITE - ERRORS IN PROCESSING                             00254000
+*              EXIT2 - ERRORS IN PROCESSING PRIOR TO DMSFREE CALL       00255000
+*********************************************************************** 00256000
+EXIT     EQU   *                                               @V305106 00257000
+         SR    R15,R15             NO ERRORS HERE              @V305106 00258000
+EXITE    LR    R3,R15              SAVE RETURN CODE            @V305106 00259000
+         L     R0,DWORDS           NO. DOUBLEWORDS FREED       @V305106 00260000
+         LR    R1,R11              POINT TO FREE STORAGE       @V305106 00261000
+         DMSFRET DWORDS=(0),LOC=(1)                            @V305106 00262000
+         SPACE                                                          00263000
+         DMSERR NUM=368,LET=I,SUB=(DECA,FCOUNT),               @V305106*00264000
+               TEXT='''......'' NEW PTF DECKS WILL BE APPLIED' @V305106 00265000
+         LR    R15,R3              RESTORE RETURN CODE         @V305106 00266000
+EXIT2    L     R14,SAVE14          AND RETURN ADDRESS TO CMS   @V305106 00267000
+         BR    R14                 RETURN TO CMS (DMSITS)      @V305106 00268000
+         EJECT                                                          00269000
+*********************************************************************** 00270000
+*        ERROR PROCESSING...                                            00271000
+*********************************************************************** 00272000
+WRERR    EQU   *                   ERROR WRITING WORK FILE...  @V305106 00273000
+         LR    R2,R15              FOR ERROR MSG               @V305106 00274000
+         DMSERR NUM=105,LET=S,SUB=(DEC,(R2),CHARA,FNAME),      @V305106*00275000
+               TEXT='ERROR ''..'' WRITING ''........ CMSUT1 A1'' ON DIS*00276000
+               K',RENT=NO                                      @V305106 00277000
+         LA    R15,HUNDRED                                     @V305066 00278000
+         B     EXITE                                           @V305106 00279000
+         SPACE                                                          00280000
+TAPERR   EQU   *                                               @V305106 00281000
+         CH    R15,=H'2'           END OF TAPE FILE?           @V305106 00282000
+         BNE   ATTCHEK             NO, CHEK FOR OTHER ERRS     @V305106 00283000
+         TM    MISCFLAG,WRITE      ARE WE WRITING A NEW FILE?  @V305106 00284000
+         BZ    EXIT                NO, END THE PROGRAM.        @V305106 00285000
+         OI    MISCFLAG,EXITF      REM'BR IN EXIT PROCESS      @V305106 00286000
+         B     ENDECK              AND CLOSE THE OPEN FILE     @V305106 00287000
+ATTCHEK  CH    R15,=H'5'           TAPE NOT ATTACHED?          @V305106 00288000
+         BNE   IOERR               YES, MUST BE I/O ERROR      @V305106 00289000
+         DMSERR NUM=113,LET=S,TEXT='TAP1(181) NOT ATTACHED'    @V305106 00290000
+         LA    R15,HUNDRED                                     @V305066 00291000
+         B     EXITE                                           @V305106 00292000
+         EJECT                                                          00293000
+IOERR    DMSERR NUM=110,LET=S,TEXT='ERROR READING ''TAP1(181)'''        00294000
+         LA    R15,HUNDRED                                     @V305066 00295000
+         B     EXITE                                           @V305106 00296000
+         SPACE                                                          00297000
+ERR70EA  LA    R1,8(,R1)      POINT TO UNKNOWN                 @V305106 00298000
+ERR70E   LA    R1,8(,R1)      DITTO                            @V305106 00299000
+         LR    R5,R1                                           @V305106 00300000
+         DMSERR NUM=70,LET=E,SUB=(CHARA,(R5)),                 @V305106*00301000
+               TEXT='INVALID PARAMETER ''........'''           @V305106 00302000
+         LA    R15,TWENTY4                                     @V305066 00303000
+         B     EXIT2               'EXIT2' FOR NO DMSFRET      @V305106 00304000
+         SPACE                                                          00305000
+ERR109S  DMSERR NUM=109,LET=S,TEXT='VIRTUAL STORAGE CAPACITY EXCEEDED'  00306000
+         LA    R15,HUNDRED4                                    @V305066 00307000
+         B     EXIT2               'EXIT2' FOR NO DMSFRET      @V305106 00308000
+         EJECT                                                          00309000
+*                                                                       00310000
+*        STORAGE DECLARATIONS                                           00311000
+*                                                                       00312000
+SAVE14   DS    F                   CMS RETURN ADDR             @V305106 00313000
+STARTADR DS    F                   START OF TAPE BUFFER        @VA04385 00313100
+ENDADDR  DS    F                   END OF TAPE BUFFER          @V305106 00314000
+BLKSIZE  DC    F'3440'             SIZE OF PTF TAPE RECORDS    @V305106 00315000
+DWORDS   DC    F'430'              NO. DOUBLEWORDS IN 'BLKSIZE'@V305106 00316000
+SLSTAR   DC    CL2'/*'             DOS END OF DATA             @V305106 00317000
+SLAMPER  DC    CL2'/&&'            DOS END OF JOB              @V305106 00318000
+SLSLASH  DC    CL2'//'             DOS CONTROL CARD PREFIX     @V305106 00319000
+SELECT   DC    CL8'SELECT'                                     @V305106 00320000
+ALL      DC    CL8'ALL'                                        @V305106 00321000
+FNAME    DC    CL8' '              KEEP PTF FILE NAME HERE     @V305106 00322000
+FCOUNT   DC    F'0'                CNT OF FILES WRITTEN TO DISK@V305106 00323000
+         SPACE                                                          00324000
+MISCFLAG DC    X'00'               DMSVDB FLAG                 @V305106 00325000
+SELECTF  EQU   X'80'               CALLER WANTS PTF SELECTION  @V305106 00326000
+WRITE    EQU   X'40'               CALLER WANTS CURRENT MODULE @V305106 00327000
+EXITF    EQU   X'20'               END OF TAPE FILE REACHED    @V305106 00328000
+NOREAD   EQU   X'10'               DON'T READ NEXT LOGICAL REC @V305106 00329000
+         SPACE                                                          00330000
+BLANK    EQU   X'40'                                           @V305106 00331000
+COMMA    EQU   C','                                            @V305106 00332000
+STAR     EQU   C'*'                DOS COMMENT                 @V305106 00333000
+EIGHT    EQU   8                                               @V305066 00334000
+HUNDRED  EQU   100                                             @V305066 00335000
+TWENTY4  EQU   24                                              @V305066 00336000
+HUNDRED4 EQU   104                                             @V305066 00337000
+         SPACE                                                          00338000
+WRBUFF   DS    10D                 WRBUFF AREA (LOGL DISK REC) @V305106 00339000
+         SPACE                                                          00340000
+RENAME   DC    CL8'RENAME'                                     @V305106 00341000
+RENOLD   DC    CL8'DUMMY'                                      @V305106 00342000
+WNAME    DC    CL8'CMSUT1'                                     @V305106 00343000
+         DC    CL8'A1'                                         @V305106 00344000
+RENNEW   DC    CL8'DUMMY'                                      @V305106 00345000
+TEXT     DC    CL8'TEXT'                                       @V305106 00346000
+         DC    CL8'A1'                                         @V305106 00347000
+FENCE    DC    8X'FF'                                          @V305106 00348000
+         SPACE                                                          00349000
+FSCB     FSCB  'DUMMY CMSUT1 A1',RECFM=F,BUFFER=WRBUFF,BSIZE=80         00350000
+TRANTBL  EQU   *              TABLE OF DOS/VSAM TRANSIENTS     @V305106 00352000
+         DC    CL8'$$BCVSAM'                                   @V305106 00353000
+         DC    CL8'$$BOVSAM'                                   @V305106 00354000
+         DC    CL8'$$BENDQB'                                   @V305106 00355000
+         DC    CL8'$$BODADS'                                   @V305106 00356000
+         DC    CL8'$$BODADE'                                   @V305106 00357000
+         DC    CL8'$$BCVS02'                                   @V305106 00358000
+         DC    CL8'$$BCVS03'                                   @V305106 00359000
+         DC    CL8'$$BOVS01'                                   @V305106 00360000
+         DC    CL8'$$BTCLOS'                                   @V305106 00361000
+         DC    CL8'$$BACLOS'                                   @V305106 00362000
+         DC    CL8'$$BCLCRA'                                   @V305106 00363000
+         DC    CL8'$$BOMSG1'                                   @V305106 00364000
+         DC    CL8'$$BOMSG2'                                   @V305106 00365000
+         DC    CL8'$$BOMSG7'                                   @V305106 00366000
+         DC    CL8'$$BJIB00'                                   @V305106 00367000
+         DC    CL8'$$BJIBFF'                                   @V305106 00368000
+ENDTBL   EQU   *                                               @V305106 00369000
+ANSWER   DS    130C                                            @V305106 00370000
+         LTORG                                                 @V305106 00371000
+         EJECT                                                          00372000
+         REGEQU                                                @V305106 00373000
+         END                                                            00374000

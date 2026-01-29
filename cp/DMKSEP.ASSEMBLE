@@ -1,0 +1,940 @@
+SEP      TITLE 'DMKSEP     (CP)        VM/370 - RELEASE 6'              00001000
+         ISEQ  73,80          VALIDATE INPUT SERIALIZATION              00002000
+*.                                                                      00003000
+*                                                                       00004000
+* MODULE NAME -                                                         00005000
+*                                                                       00006000
+*        DMKSEP                                                         00007000
+*                                                                       00008000
+* FUNCTION -                                                            00009000
+*                                                                       00010000
+*        TO PRINT OUTPUT SEPARATOR PAGES ON THE REAL SPOOLING PRINTERS  00011000
+*        IN BETWEEN THE OUTPUT OF DIFFERENT SYSTEM USERS                00012000
+*                                                                       00013000
+*        TO PUNCH OUTPUT SEPARATOR CARDS ON THE REAL SPOOLING PUNCHES   00014000
+*        IN BETWEEN THE OUTPUT OF DIFFERENT SYSTEM USERS                00015000
+*                                                                       00016000
+* ATTRIBUTES -                                                          00017000
+*                                                                       00018000
+*        REENTRANT, PAGEABLE, CALLED VIA SVC                            00019000
+*                                                                       00020000
+* ENTRY POINTS -                                                        00021000
+*                                                                       00022000
+*        DMKSEPSP - SEPARATOR ROUTINE                                   00023000
+*                                                                       00024000
+* ENTRY POINTS - DATA                                                   00025000
+         SPACE                                                          00026000
+*        DMKSEPHR - CLASS X DEFAULT HEADER LINE                         00027000
+*                                                                       00028000
+* ENTRY CONDITIONS -                                                    00029000
+*                                                                       00030000
+*        GPR2  = ADDRESS OF LOCKED PAGE BUFFER                          00031000
+*        GPR7  = ADDRESS OF SFBLOK FOR FILE BEING PRINTED               00032000
+*        GPR8  = ADDRESS OF RDEVBLOK FOR PRINTER                        00033000
+*        GPR9  = ADDRESS OF RSPLCTL WORKAREA                            00034000
+*        GPR10 = ADDRESS OF IOBLOK FOR PRINTER IO                       00035000
+*        GPR12 = ADDRESS OF DMKSEP                                      00036000
+*        GPR13 = ADDRESS OF STANDARD SAVEAREA                           00037000
+*                                                                       00038000
+* EXIT CONDITIONS -                                                     00039000
+*                                                                       00040000
+*        NONE                                                           00041000
+*                                                                       00042000
+* CALLS TO OTHER ROUTINES -                                             00043000
+*                                                                       00044000
+*        DMKIOSQR - TO START THE REAL PRINTER                           00045000
+*        DMKCVTDT - TO OBTAIN THE DATE AND TIME OF OUTPUT               00046000
+*        DMKDSPCH - TO AWAIT PRINTER INTERRUPTS                         00047000
+*        DMKPGTVG - TO GET A VIRTUAL BUFFER                             00048000
+*        DMKPGTVR - TO RELEASE A VIRTUAL BUFFER                         00049000
+*        DMKPTRUL - TO UNLOCK A LOCK BUFFER PAGE                        00050000
+*        DMKCVTBH - TO CONVERT DEVICE ADDRESS                           00051000
+*        DMKCVTBD - TO CONVERT SPOOLID AND RECORD COUNT                 00052000
+*        DMKTCSSP - TO LOAD A 3800 PRINTER WITH FCB AND CHAR ARR        00052100
+*                   TABLE PRIOR TO PRINTING SEP PAGE                    00052200
+*                                                                       00053000
+* EXTERNAL REFERENCES -                                                 00054000
+*                                                                       00055000
+*        DMKBOXBX - ADDRESS OF SEPARATOR PAGE BOX                       00056000
+*        DMKCPEID - ADDRESS OF VERSION LEVEL ID                         00057000
+*                                                                       00058000
+* TABLES / WORKAREAS -                                                  00059000
+*                                                                       00060000
+*        NONE                                                           00061000
+*                                                                       00062000
+*                                                                       00063000
+* REGISTER USAGE -                                                      00064000
+*                                                                       00065000
+*        THE FOLLOWING USAGE APPLIES TO ALL DMKSEP CODE EXCEPT FOR THE  00066000
+*        BLOCK LETTER GENERATOR SUBROUTINE.  REGISTER USAGE AND OPER-   00067000
+*        ATION OF THIS ROUTINE ARE EXPLAINED SEPARATELY                 00068000
+*                                                                       00069000
+*        GPR0  - NOT USED                                               00070000
+*        GPR1  - SCRATCH                                                00071000
+*        GPR2  = ADDRESS OF LOCATION TO STORE CCWS AND DATA             00072000
+*        GPR3-5  CONTAIN MODEL CCWS TO BE STORED IN BUFFER              00073000
+*        GPR6  = INTERNAL SUBROUTINE LINKAGE AND LOOP CONTROL           00074000
+*        GPR7  = ADDRESS OF SFBLOK                                      00075000
+*        GPR8  = ADDRESS OF RDEVBLOK FOR PRINTER, AND POINTER TO OUTPUT 00076000
+*                AREA FOR THE BLOCK LETTER GENERATOR                    00077000
+*        GPR9  - NOT USED                                               00078000
+*        GPR10 = ADDRESS OF IOBLOK FOR PRINTER                          00079000
+*        GPR12 = MODULE BASE ADDRESS                                    00080000
+*        GPR13 = ADDRESS OF SAVEAREA                                    00081000
+*        GPR14,15 - EXTERNAL SUBROUTINE LINKAGE                         00082000
+*                                                                       00083000
+* NOTES -                                                               00084000
+*                                                                       00085000
+*        NONE                                                           00086000
+*                                                                       00087000
+         EJECT                                                          00088000
+* OPERATION -                                                           00089000
+*                                                                       00090000
+*        1. THE OUTPUT SEPARATOR PRODUCED BY THIS ROUTINE ASSUMES THAT  00091000
+*           THE PRINTER HAS MOUNTED ON IT A CARRAIGE CONTROL TAPE WITH  00092000
+*           A CHANNEL ONE PUNCH AT LINE 3 OF A 66 LINE PAGE             00093000
+*           PROVIDING THE PRINTER IS NOT A 3800.                        00093100
+*           IF THE PRINTER IS A 3800, THE ASSUMPTION IS THAT            00093200
+*           CHANNEL 1 SKIPS TO THE FIRST PRINTABLE LINE ON THE PAGE     00093300
+*           AND THAT THE PAGE IS CAPABLE OF HOLDING AT LEAST 55 LINES   00093400
+*           OF PRINT AT THE FCB SPECIFIED FOR SEPARATOR PAGES.          00093500
+*            IF THIS IS A SYSTEM RESTART AND THE DEVICE IS              00094000
+*            A PRINTER: A'SYSTEM RESTARTED'                             00095000
+*            MESSAGE WITH A LINE OF ASTERISKS BEFORE AND                00096000
+*            AFTER IS PRINTED ON THE PRINTER, AND EXIT                  00097000
+*            OTHERWISE, CONT:                                           00098000
+*                                                                       00099000
+*        2. A CHANNEL PROGRAM IS CONSTRUCTED TO PERFORM THE FOLLOWING   00100000
+*           SEQUENCE OF EVENTS -                                        00101000
+*              A. SKIP TO CHANNEL 1 AND SPACE DOWN TO LINE 60           00102000
+*                 AND GO TO STEP B.                                     00102100
+*                 EXCEPT FOR A 3800 PRINTER WHEN WE JUST                00102200
+*                 SKIP TO CHANNEL 1 AND GO TO STEP D.                   00102300
+*              B. PRINT 5 LINES OF ASTERISKS                            00103000
+*              C. PRINT ONE LINE OF UNDERSCORES ALONG THE PERFORATION   00104000
+*                 BETWEEN PAPER SHEETS                                  00105000
+*              D. PRINT 5 LINES OF ASTERISKS, THE 5TH LINE CONTAINS     00106000
+*                 VERSION AND LEVEL, OUTPUT DEVVICE ADDRESS AND         00107000
+*                 CLASS, DATE AND TIME PRINTED. FOLLOWED                00108000
+*                 BY 3 BLANK LINES                                      00109000
+*                 IN THIS STEP, IF THE DEVICE IS A 3800 PRINTER,        00109100
+*                 ONLY TWO LINES OF ASTERISKS ARE PRINTED WITH          00109200
+*                 THE SECOND LINE CONTAINING THE DESIRED INFO.          00109300
+*              E. THE NEXT 16 LINES CONTAINS USERID, DISTRIBUTION       00110000
+*                 CODE, SPOOL FILE NAME AND TYPE, CREATION DATE AND     00111000
+*                 TIME, SPOOLID AND RECORD COUNT.                       00112000
+*                 ALSO INCLUDED IN THESE 16 LINES IS A 16 LINE BY       00113000
+*                 46 CHARACTER AREA. THE INFORMATION FOR THIS AREA      00114000
+*                 IS LOADED FROM DMKBOX AT LABEL DMKBOXBX.  IF          00115000
+*                 MODULE IS NOT AVAILABLE, THE DEFAULT                  00116000
+*                 INFORMATION LOCATE AT LABEL 'CONSTANT' IN             00117000
+*                 THIS MODULE IS USED.                                  00118000
+*                 CODE, SPOOL FILE NAME AND TYPE, CREATION DATE,        00119000
+*                 SPOOL FILE ID AND RECORD COUNT.                       00120000
+*                 INCLUDED IN THESE 15 LINES IS A 15 BY 46 DC           00121000
+*                 CONSTANT BOX IN WHICH DC                              00122000
+*                 INFORMATION CAN BE PLACED FOR PRINTING OF             00123000
+*              F. PRINT THE USERID OF THE FILE'S OWNER IN A SERIES OF   00124000
+*                 12 X 12 MATRIX BLOCK LETTERS, FOLLOWED BY 4 BLANK     00125000
+*                 LINES.  THE DISTRIBUTION CODE IS PRINTED IN A         00126000
+*                 SERIES OF 12 X 12 MATRIX BLOCK LETTERS,               00127000
+*                 FOLLOWED BY  5 BLANK LINES.                           00128000
+*                                                                       00129000
+*        3. AFTER THE CHANNEL PROGRAM HAS BEEN EXECUTED ONCE FROM THE   00130000
+*           BEGINNING, IT IS RE-EXECUTED STARTING AT STEP B. ABOVE,     00131000
+*           THEREBY CREATING A SECOND SEPARATOR PAGE                    00132000
+*           FOR A 3800 START FROM STEP A. ABOVE, AND REPEAT.            00132100
+*                                                                       00133000
+*        4. AFTER THE PAGES ARE COMPLETE, DMKSEP RETURNS TO DMKRSPEX    00134000
+*                                                                       00135000
+*        5. FOR PUNCH OUTPUT PUNCH 4 CARDS CONTAINING USER I.D.,        00136000
+*           DISTRIBUTION CODE AND 12-4-9 PUNCHES IN THE LAST            00137000
+*           10 COLUMNS.  EACH LETTER OF THE DISTRIBUTION CODE IS        00138000
+*           RIPPLED PUNCHED IN GROUPS OF FOUR STARTING IN               00139000
+*           COLUMN 19.                                                  00140000
+*                                                                       00141000
+*        EXAMPLE OF SEPARATOR CARD FOR USERID OF OPERATOR AND           00142000
+*        DISTRIBUTION CODE OF 12345678                                  00143000
+*                                                                       00144000
+*OPERATOR 12345678  1111 2222 3333 4444 5555 6666 7777 8888   (12-4-9)  00145000
+*                                                                       00146000
+* RESPONSE -                                                            00147000
+*                                                                       00148000
+*        NONE                                                           00149000
+*                                                                       00150000
+* ERROR MESSAGES -                                                      00151000
+*                                                                       00152000
+*        NONE                                                           00153000
+*.                                                                      00154000
+         EJECT                                                          00155000
+         COPY  OPTIONS                                                  00156000
+         COPY  LOCAL               OPTIONS                              00157000
+         EJECT                                                          00158000
+DMKSEP   CSECT LOADER              CONTROL ONLY                         00159000
+         SPACE 3                                                        00160000
+         ENTRY DMKSEPHR                                                 00161000
+         EXTRN DMKIOSQR                                                 00162000
+         EXTRN DMKCPEID                                                 00163000
+         EXTRN DMKCVTDT,DMKPGTVG,DMKPGTVR,DMKPTRUL                      00164000
+         EXTRN DMKCVTBH,DMKCVTBD                                        00165000
+         EXTRN DMKBOXBX                                                 00166000
+         EXTRN DMKSCNRD                                        @VA01236 00167000
+         EXTRN DMKTCSSP                                        @V60B9BA 00167100
+         SPACE 3                                                        00168000
+         USING PSA,R0                                                   00169000
+         USING SFBLOK,R7                                                00170000
+         USING RDEVBLOK,R8                                              00171000
+         USING IOBLOK,R10                                               00172000
+         USING VMBLOK,R11                                               00173000
+         USING SAVEAREA,R13                                             00174000
+         SPACE 3                                                        00175000
+         DC    CL8'DMKSEPSP'       MODULE NAME                          00176000
+         SPACE 3                                                        00177000
+DMKSEPSP RELOC                                                          00178000
+         SPACE 2                                                        00179000
+         XC    SAVEWRK1(4),SAVEWRK1 CLEAR SAVEWRK AREA                  00180000
+         XC    SAVEWRK2(32),SAVEWRK2                                    00181000
+         ST    R2,IOBCAW           SAVE CAW FOR 1ST AND 2ND PAGES       00182000
+         TM    RDEVTYPE,TYPPUN     PUNCH  ??                            00183000
+         BO    TSTSEP              YES - CHECK FOR SEP                  00184000
+         LA    R1,RSTRIRA          GET NEW IRA FOR RESTART              00185000
+         ST    R1,IOBIRA           AND STORE IT                         00186000
+         ST    R13,IOBMISC         SAVE GPR13                           00187000
+         LR    R1,R2               GET BUFFER ADDRESS                   00188000
+         LM    R3,R4,LOADCK        GET BLOCK DATA CHECK CCW             00189000
+         ALR   R3,R1               UPDATE DATA ADDRESS                  00190000
+         STM   R3,R4,0(R1)         AND STORE IN BUFFER                  00191000
+         MVC   8(8,R1),LOADSNS     MOVE IN DUMMY SENSE CCW              00192000
+         LM    R3,R6,RSTRCCW1      LOAD 1ST CCW                         00193000
+         ALR   R5,R1               UPDATE DATA ADDRESS                  00194000
+         STM   R3,R6,16(R1)        STORE CCW IN BUFFER                  00195000
+         TM    SFBFLAG2,SFBRSTRT   SYSTEM RESTARTED ??                  00196000
+         BZ    SEP001              NO --CHECK FOR UCS VERIFIED @V60B9BA 00197000
+         OI    12(R1),CC           COMMAND CHAIN TO RESTART MESSAGE     00198000
+         B     SEP002              ..                          @V60B9BA 00199000
+SEP001   TM    RDEVFLAG,RDEVLOAD   UCS VERIFIED ??             @V60B9BA 00200000
+         BO    TSTSEP              YES --                               00201000
+         CLI   RDEVTYPE,TYP3800    IS IT A 3800 PRINTER ?      @V60B9BA 00201600
+         BE    TSTSEP              XFER IF SO - NO UCS VER     @V60B9BA 00201800
+SEP002   LM    R3,R6,RSTRCCW2      GET NEXT TWO CCWS                    00202000
+         ALR   R3,R1               UPDATE ADDRESSES                     00203000
+         ALR   R5,R1               ..                                   00204000
+         STM   R3,R6,32(R1)        AND STORE IN BUFFER                  00205000
+         MVC   48(8,R1),RSTRCCW3   MOVE IN SENSE CCW                    00206000
+         MVI   56(R1),C'*'         FILE THE BUFFER WITH *               00207000
+         MVC   57(238,R1),56(R1)   ..                                   00208000
+         MVI   188(R1),C' '        BLANK AREA                           00209000
+         MVC   189(81,R1),188(R1)  ..                                   00210000
+         MVC   217(22,R1),=C'** SYSTEM RESTARTED **' ..                 00211000
+         B     SEPSIO                                                   00212000
+         SPACE                                                          00213000
+RSTRIRA  EQU   *                   HERE ON INTERRUPT FOR RESTART MSG    00214000
+         USING *,R12               TEMPORARY ADDRESSABILITY             00215000
+         S     R12,=A(RSTRIRA-DMKSEP)                                   00216000
+         USING DMKSEP,R12                                               00217000
+         L     R13,IOBMISC         RESTORE ADDRESS OF SAVEAREA          00218000
+         LM    R0,R11,SAVEREGS     RESTORE REGISTERS                    00219000
+         ST    R1,IOBMISC2         CLEAR OUT 'SEP'                      00220000
+         TM    IOBSTAT,IOBFATAL    FATAL IO ERROR                       00221000
+         BO    EXIT           YES -- RETURN TO CALLER.         @VA05923 00222100
+         SPACE                                                          00223000
+         TM    IOBCSW+4,UE         UNIT EXCEPTION ??                    00224000
+         BO    SEPUE               YES --                               00225000
+         SWITCH          MAKE SURE WE ARE ON THE IO PROCESSOR  @V4075A0 00225100
+         OI    RDEVFLAG,RDEVLOAD   INDICATE UCS VERIFIED OK             00226000
+         TM    SFBFLAG2,SFBRSTRT   SYSTEM RESTARTED ??                  00227000
+         BZ    TSTSEP              NO --                                00228000
+         B     EXIT                YES EXIT -- NO SEPARATOR NEEDED      00229000
+SEPUE    L     R1,IOBCSW           ADDRESS OF NEXT CCW                  00230000
+         LA    R1,0(R1)            CLEAR HIGH ORDER BYTE                00231000
+         ST    R1,IOBCAW           SET CAW                              00232000
+         B     SEPSIO              FINISH IT                            00233000
+         SPACE                                                          00234000
+TSTSEP   ST    R1,IOBMISC2         CLEAR OUT 'SEP '                     00235000
+         TM    RDEVFLAG,RDEVSEP    PUNCH OR PRINT SEPARATOR             00236000
+         BZ    EXIT                NO -- 'NOSEP'                        00237000
+         TM    RDEVTYPE,TYPPUN     PUNCH ??                             00238000
+         BO    PUNTYPE             YES                                  00239000
+         CLI   BOXFLAG,X'FF'  BOX ALL SET UP?                  @VA05226 00240750
+         BE    DOSEP1         YES - - -                        @VA05204 00241500
+         L     R9,=A(DMKCPEID)     ADDRESS OF VERSION LEVEL ID          00242000
+         MVC   VERID(2),0(R9)      GET VERSION ID                       00243000
+         MVC   LEVELID(2),2(R9)    GET LEVEL ID                         00244000
+         MVC   PLCID(4),4(R9)      AND PLC ID                  @VA03492 00245000
+         L     R9,=A(DMKBOXBX)     ADDRESS OF INSTALLATION BOX          00246000
+         LTR   R9,R9               ONE PRESENT ??                       00247000
+         BZ    DOSEP               NO - USE IN HOUSE                    00248000
+         LR    R1,R9               ADDRESS OF BOX                       00249000
+         TRANS 2,1,OPT=(BRING,DEFER,SYSTEM)                             00250000
+         LA    R3,782              LENGTH OF BOX                        00251000
+         LR    R5,R3               SET LENGTH                           00252000
+         LR    R4,R2               SET UP FROM ADDRESS                  00253000
+         LA    R2,CONSTANT         SET TO ADDRESS                       00254000
+         MVCL  R2,R4               MOVE USERS BOX AND OVERLAY IN HOUSE  00255000
+DOSEP    MVI   BOXFLAG,X'FF'  SET BOX COMPLETE FLAG            @VA05226 00256750
+DOSEP1   LM    R0,R11,SAVEREGS RESTORE ENTRY REGS              @VA05204 00257500
+         CLI   RDEVTYPE,TYP3800    IS IT A 3800 ?              @V60B9BA 00257700
+         BNE   DOSEP2              XFER IF NOT                 @V60B9BA 00257750
+         CALL  DMKTCSSP            SET UP THE PRINTER          @V60B9BA 00257800
+         BZ    DOSEP2              XFER IF ALL OK              @V60B9BA 00257850
+         OI    IOBSTAT,IOBFATAL    FATAL ERROR IN SETUP        @V60B9BA 00257900
+         B     SEPEXIT             EXIT                        @V60B9BA 00257950
+DOSEP2   ST    R2,IOBCAW           SET CAW ADDRESS                      00258000
+         LM    R3,R4,SKIPTO1       LOAD MODEL CCW - SKIP TO CHANNEL ONE 00259000
+         STM   R3,R4,0(R2)         PLACE IN BUFFER                      00260000
+         ST    R2,SAVEWRK7         SAVE CAW FOR POSSIBLE 3800  @V60B9BAX00260100
+                                   SECOND SEP PAGE                      00260200
+         LA    R2,8(,R2)           POINT TO NEXT SLOT                   00261000
+         CLI   RDEVTYPE,TYP3800    IS IT A 3800 ?              @V60B9BA 00261100
+         BE    DOSEP3              DON'T SPACE OUT FOR A 3800  @V60B9BA 00261200
+         LA    R14,8               GET INDEX VALUE                      00262000
+         LA    R15,18*8(,R2)       POINT TO LAST CCW SLOT               00263000
+         LM    R3,R4,SPACE3        LOAD MODEL CCW - SPACE 3 LINES       00264000
+         STM   R3,R4,0(R2)         STORE IN BUFFER                      00265000
+         BXLE  R2,R14,*-4          INSERT CCWS TO SPACE 57 LINES        00266000
+         ST    R2,SAVEWRK7         SAVE CAW FOR THIRD PAGE              00267000
+         SPACE 3                                                        00268000
+DOSEP3   LA    R14,144             GET INDEX VALUE             @V60B9BA 00269000
+         BALR  R6,0                SET TO LOOP ONCE                     00270000
+         LM    R3,R5,PRINTIC       LOAD MODEL CCWS - PRINT AND SPACE    00271000
+*                                  1, TIC                               00272000
+         ALR   R3,R2               ADJUST DATA ADDRESS IN PRINT         00273000
+         ALR   R5,R2               AND TRANSFER ADDRESS IN TIC          00274000
+         LA    R15,4*144(,R2)      POINT TO SLOT FOR 5TH PRINT LINE     00275000
+         CLI   RDEVTYPE,TYP3800    IS IT A 3800 ?              @V60B9BA 00275100
+         BNE   SEPLOOP1            XFER IF NOT                 @V60B9BA 00275200
+         LA    R15,144(,R2)        ONLY PRINT 2 LINES OF *     @V60B9BA 00275300
+         LA    R6,SKIP2            AND DON'T REPEAT THEM       @V60B9BA 00275400
+SEPLOOP1 STM   R3,R5,0(R2)         STORE CCWS IN BUFFER                 00276000
+         MVI   12(R2),C'*'         INSERT SEPARATOR CHARACTER           00277000
+         MVC   13(131,R2),12(R2)   AND RIPPLE IT THRU THE LINE          00278000
+         ALR   R3,R14              ADJUST DATA ADDRESS IN PRINT         00279000
+         ALR   R5,R14              AND TRANSFER ADDRESS IN TIC          00280000
+         BXLE  R2,R14,SEPLOOP1     AND REPEAT FOR 4 MORE LINES          00281000
+         AL    R3,=A(18)           ADJUST ADDRESS TO DATA               00282000
+         STM   R3,R4,0(R2)         INSERT PRINT AND TIC                 00283000
+         MVI   0(R2),X'01'         WRITE NO SPACE CCW OP-CODE           00284000
+         BCTR  R3,0                -1 BUFFER ADDRESS                    00285000
+         STM   R3,R4,8(R2)         STORE NEXT CCW                       00286000
+         MVI   8(R2),X'01'         WRITE NO SPACE CCW OP-CODE           00287000
+         AL    R5,=A(24)           ADJUST TIC ADDRESS TO NEXT CCW       00288000
+         BCTR  R3,0                -1 DATA ADDRESS                      00289000
+         STM   R3,R5,16(R2)        STORE WRITE AND TIC CCW              00290000
+         MVC   28(3,R2),=C' _ '    RIPPLE PATTERN THRU DATA AREA        00291000
+         MVC   31(136,R2),28(R2)                                        00292000
+         LA    R2,168(R2)          UPDATE TO NEXT BUFFER SLOT           00293000
+         BALR  R6,R6               AND REPEAT FOR NEXT 5 LINES          00294000
+         SPACE                                                          00295000
+SKIP2    S     R2,=A(168)          GO BACK TWO LINES           @V60B9BA 00296000
+         SR    R2,R14                                                   00297000
+         MVC   14(MSGSIZE,R2),VERSION   MOVE IN VER, LEV & PLC @VA03492 00298000
+         MVC   67(9,R2),=C' CLASS   '                          @VA04376 00299500
+         MVC   74(1,R2),SFBCLAS    MOVE CLASS TYPE                      00300000
+         MVC   79(9,R2),=C' DEV     '                                   00301000
+         CALL  DMKSCNRD       GET AND CONVERT DEVICE ADDRESS   @VA01236 00302000
+         CALL  DMKCVTBH                                                 00303000
+         STCM  R1,7,84(R2)         STORE ADDRESS                        00304000
+         SPACE                                                          00305000
+         MVI   119(R2),C' '        CLEAR SPACE FOR DATE AND TIME        00306000
+         MVI   128(R2),C' '        ..                                   00307000
+         MVI   132(R2),C' '        ..                                   00308000
+         MVI   141(R2),C' '        ..                                   00309000
+         SPACE                                                          00310000
+         LA    R1,120(R2)          ADDRESS FOR DATE AREA                00311000
+         LA    R2,13(R1)           ADDRESS OF TIME AREA                 00312000
+         CALL  DMKCVTDT            GET DATE AND TIME                    00313000
+         LA    R2,11(R2)           UPDATE TO NEXT SLOT                  00314000
+         BAL   R6,NEXT3A           SET UP CCW FOR NEXT 3 LINES          00315000
+         BAL   R6,NEXT1            GET PRINT AND TIC CCW                00316000
+         LA    R9,CONSTANT         ADDRESS OF DATA CONTANTS             00317000
+         MVC   23(6,R2),=C'USERID' MOVE IN 'USERID'                     00318000
+         MVC   45(8,R2),SFBUSER    MOVE USER ID                         00319000
+         MVC   33(6,R2),=C'ORIGIN' ORIGINATING USERID          @V200930 00320000
+         MVC   57(8,R2),SFBORIG ...                            @V200930 00321000
+         BAL   R6,MVCLINE2         SET NEXT TWO LINES                   00322000
+         MVC   23(17,R2),=C'DISTRIBUTION CODE'                          00323000
+         MVC   45(8,R2),SFBDIST    MOVE DISTRIBUTION CODE               00324000
+         CLI   SFBDIST,X'40'       VALID DIST- CODE ??                  00325000
+         BH    *+10                YES -                                00326000
+         MVC   45(8,R2),SFBUSER    NO - USE USER ID-                    00327000
+         BAL   R6,MVCLINE2         SET NEXT 2 LINES                     00328000
+         MVC   23(20,R2),=C'SPOOL FILE NAME TYPE'                       00329000
+         MVC   45(24,R2),SFBFNAME  MOVE FILE NAME TYPE                  00330000
+         BAL   R6,MVCLINE2                                              00331000
+         MVC   23(13,R2),=C'CREATION DATE'                              00332000
+         MVC   45(8,R2),SFBDATE    MOVE DATE AND                        00333000
+         MVC   54(8,R2),SFBTIME    TIME                                 00334000
+         BAL   R6,MVCLINE2         SET NEXT 2 LINES                     00335000
+         MVC   23(13,R2),=C'SPOOL FILE ID'                              00336000
+         LH    R1,SFBFILID         CONVERT SPOOL ID                     00337000
+         CALL  DMKCVTBD                                                 00338000
+         STCM  R1,15,45(R2)        MOVE SPOOL ID                        00339000
+         BAL   R6,MVCLINE2         SET NEXT 2 LINES                     00340000
+         MVC   23(12,R2),=C'RECORD COUNT'                               00341000
+         L     R1,SFBRECNO         GET RECORD COUNT AND CONVERT         00342000
+         CALL  DMKCVTBD                                                 00343000
+         STCM  R1,15,45(R2)        STORE COUNT                          00344000
+         C     R0,=X'F0F0F0F0'     COUNT OVER 4 DIGETS                  00345000
+         BE    DIGET4              4 DIGETS ONLY                        00346000
+         STM   R0,R1,45(R2)        STORE 8 DIGETS                       00347000
+DIGET4   EQU   *                                                        00348000
+         BAL   R6,MVCLINE2                                              00349000
+         BAL   R6,MVCLINE                                               00350000
+         SPACE                                                          00351000
+         CLI   SFBCLAS,C'X'   PRINT USER SUPPLIED MSG ?        @VA05908 00352100
+         BNE   NOTCONS             NO -                                 00353000
+         MVC   23(46,R2),DMKSEPHR  MOVE IN DEADER MESSAGE               00354000
+NOTCONS  EQU   *                                                        00355000
+         MVC   87(46,R2),0(R9)     MOVE IN NEXT CONSTANT                00356000
+         LA    R9,46(R9)           UPDATE CONSTANT ADDRESS              00357000
+         LR    R3,R2               SAVE ADDRESS                         00358000
+         SPACE                                                          00359000
+         CALL  DMKPGTVG            OBTAIN VITUAL ADDRESS                00360000
+         SPACE                                                          00361000
+         TRANS 2,1,OPT=(BRING,DEFER,LOCK,SYSTEM) GET PAGE               00362000
+         STM   R1,R2,SAVEWRK5      SAVE VIRTUAL AND REAL ADDRESS        00363000
+         STCM  R2,15,8(R3)         SET UP TIC                           00364000
+         MVI   8(R3),X'08'                                              00365000
+         SPACE                                                          00366000
+         BAL   R6,NEXT1            GET PRT AND TIC CCW FOR ONE LINE     00367000
+         BAL   R6,MVCLINE          SET NEXT LINE                        00368000
+         MVC   87(46,R2),0(R9)     MOVE IN LAST CONSTANT LINE           00369000
+         BAL   R6,NEXT3            SPACE 3                              00370000
+         BAL   R6,SPACE1           OVERLAY PRT AND TIC CCW              00371000
+         SPACE                                                          00372000
+         SPACE                                                          00373000
+         MVC   SAVEWRK8(8),SFBUSER MOVE USERID TO WORK AREA             00374000
+SETBLOCK LA    R4,8                MAX CHARACTER LENGTH                 00375000
+         LA    R3,SAVEWRK9+4       ADDRESS OF USER ID END + 1           00376000
+*        CAL THE LENGTH OF THE USER ID AND DISTRIBUTION CODE            00377000
+*        AND CENTER IT ON THE SEPARATOR PAGE                            00378000
+         SPACE                                                          00379000
+LENGTH   BCTR  R3,0                -1 FROM ADDRESS                      00380000
+         CLI   0(R3),C' '          IS THIS A BLANK                      00381000
+         BNE   *+8                 NO - END OF SCAN                     00382000
+         BCT   R4,LENGTH           KEEPING LOOKING FOR BLANK            00383000
+         SPACE                                                          00384000
+         LR    R3,R4               USER ID LENGTH                       00385000
+         SLL   R3,4                TIMES 16                             00386000
+         SR    R3,R4               - 2 TIME NUMBER OF CHARACTERS        00387000
+         SR    R3,R4                                                    00388000
+         BCTR  R3,0                                                     00389000
+         BCTR  R3,0                - TWO                                00390000
+*                                                                       00391000
+*        RESULT EQUALS (NUMBER OF CHARACTERS TIMES 12) PLUS             00392000
+*        (THE NUMBER OF CHARCTERS MINUS 1 TIMES 2)                      00393000
+         SPACE                                                          00394000
+         SRL   R3,1                DIVIDE BY TWO                        00395000
+         LA    R5,66               ONE HALF A PRINT LINE                00396000
+         SR    R5,R3               DISPLACEMENT TO START OUTPUT         00397000
+         STH   R5,SAVEWRK1         SAVE DISPLACEMENT TO START OF OUTPUT 00398000
+         STC   R4,SAVEWRK1+2       SAVE CHARACTER COUNT                 00399000
+         SPACE                                                          00400000
+         LA    R14,144             LENGTH OF A PRINTER RECORD           00401000
+         LA    R15,11*144(,R2)     POINT TO 12TH LINE                   00402000
+         SR    R1,R1               SET LINE COUNTER TO 0                00403000
+SEPLOOP2 LM    R3,R5,PRINTIC       GET MODEL CCWS - PRINT AND SPACE     00404000
+*                                  1, TIC                               00405000
+         ALR   R3,R2               ADJUST DATA ADDRESS IN PRINT         00406000
+         ALR   R5,R2               AND TRANSFER ADDRESS IN TIC          00407000
+         STM   R3,R5,0(R2)         AND STORE IN BUFFER                  00408000
+         LA    R3,SAVEWRK8         ADDRESS OF CHARACTER STRING          00409000
+         LA    R8,12(R2)           START OF OUTPUT AREA                 00410000
+         AH    R8,SAVEWRK1         ADJUST TO START OF OUTPUT            00411000
+         SR    R4,R4               SET UP CHARACTER COUNT               00412000
+         IC    R4,SAVEWRK1+2       --                                   00413000
+         MVI   12(R2),C' '         BLANK OUT                            00414000
+         MVC   13(131,R2),12(R2)   THE PRINT LINE                       00415000
+         BAL   R6,BLOKLETR         GO CREATE THE NEXT LINE OF BLOK      00416000
+*                                  LETTERS                              00417000
+         LA    R1,1(,R1)           GET NEXT LINE NUMBER                 00418000
+         BXLE  R2,R14,SEPLOOP2     REPEAT FOR 12 LINES OF BLOK LETTERS  00419000
+         SPACE 3                                                        00420000
+         BAL   R6,NEXT3A           SPACE 3                              00421000
+         BAL   R6,SPACE1           SPACE 1                              00422000
+         TM    SAVEWRK1+3,X'80'    DISTRIBUTION CODE DONE ??            00423000
+         BO    CLEANUP             YES                                  00424000
+         OI    SAVEWRK1+3,X'80'    SET SWITCH ON                        00425000
+         CLI   SFBDIST,X'40'       VALID DIST CODE  ??                  00426000
+         BNH   SETBLOCK            NO - USE USERID                      00427000
+         MVC   SAVEWRK8(8),SFBDIST MOVE DISTRIBUTION TO WORK            00428000
+         B     SETBLOCK            GO BLOCK THESE CHARACTERS            00429000
+         SPACE                                                          00430000
+CLEANUP  L     R8,SAVER8           RESTORE ADDRESS OF RDEVBLOK          00431000
+         L     R10,SAVER10         RESTORE ADDRESS OF IOBLOK            00432000
+         OI    SAVEWRK1+3,X'40'    INDICATE FIRST TIME THRU             00433000
+         LM    R3,R4,SENSECCW      COMPLETE THE CHANNEL PROGRAN WITH    00434000
+         STM   R3,R4,0(R2)         SENSE TO FORCE CONCURRENT CE+DE      00435000
+         ST    R2,SAVEWRK8    POINT TO CCW TO BE CHANGE LATER  @VA03492 00436000
+         STM   R3,R4,8(R2)    SECOND SENSE TO BE USED PRINTING @VA03492*00437000
+               LAST PAGE WHEN FIRST SENSE IS CHANGED TO A SKIP TO 1.    00438000
+PUNSIO   LA    R1,SEPIRA           GET IRA                              00439000
+         ST    R1,IOBIRA           AND SAVE IN IOB                      00440000
+         ST    R13,IOBMISC         SAVE R13 IN IOBLOK                   00441000
+SEPSIO   MVC   IOBMISC2(4),=C'SEP ' INDICATE SEPARATOR PAGE             00442000
+         NI    IOBFLAG,X'FF'-IOBRSTRT   CLEAR RESTART FLAG              00443000
+         CALL  DMKIOSQR            GO WRITE THE BUFFER                  00444000
+SEPDSP   GOTO  DMKDSPCH       WAIT FOR INTERRUPT               @VA01772 00445000
+         SPACE 3                                                        00446000
+SEPIRA   EQU   *                                                        00447000
+         USING *,R12               TEMPORARY ADDRESSABILITY             00448000
+         S     R12,=A(SEPIRA-DMKSEP)                                    00449000
+         USING DMKSEP,R12                                               00450000
+         LR    R1,R10         CHECK FOR COPY IOBLOCK           @VA01772 00451000
+         L     R10,IOBLINK    LOAD ADDRESS OF ORIGINAL         @VA01772 00452000
+         CR    R1,R10         COPY IOBLOK PRESENT ?            @VA01772 00453000
+         BE    CHK            NO--CHECK FOR ERRORS             @VA01772 00454000
+         OI    IOBSTAT,IOBFATAL INDICATE FATAL ERROR           @VA01772 00455000
+         LA    R0,IOBSIZE     LOAD IOBSIZE                     @VA01772 00456000
+         CALL  DMKFRET        RETURN STORAGE                   @VA01772 00457000
+         B     SEPDSP         WAIT FOR DEVICE END              @VA01772 00458000
+CHK      L     R13,IOBMISC    RESTORE CALLER'S R13             @VA01772 00459000
+         ST    R13,IOBMISC2        CLEAR OUT 'SEP '                     00460000
+         TM    IOBSTAT,IOBFATAL    WAS THERE A FATAL IOERROR?           00461000
+         BO    SEPEXIT             YES -- LEAVE NOW                     00462000
+         TM    SAVEWRK1+3,X'80'    PRINTER ??                           00463000
+         BZ    SEPEXIT             NO - GET OUT                         00464000
+         TM    IOBCSW+4,UE         UNIT EXCEPTION ??                    00465000
+         BZ    NOUE                NO -                                 00466000
+         L     R1,IOBCSW           GET NEXT CCW ADDRESS                 00467000
+         CLI   0(R1),X'08'         IS IT A TIC ??                       00468000
+         BNE   *+8                 NO -                                 00469000
+         L     R1,0(R1)            GET ADDRESS OF TIC TO CCW            00470000
+         LA    R1,0(R1)            CLEAR HIGH BYTE                      00471000
+         ST    R1,IOBCAW           STORE IN IOBCAW                      00472000
+         B     SEPLP               GO CONTINUE PRINTING                 00473000
+         SPACE                                                          00474000
+NOUE     TM    SAVEWRK1+3,X'40'    LAST TIME ??                         00475000
+         BZ    SEPEXIT             YES - LEAVE                          00476000
+         L     R1,SAVEWRK8    POINT TO FIRST OF TWO SENSE CCW'S@VA03492 00477000
+         MVC   0(8,R1),SKIPTO1     AND REPLACE WITH SKIP TO 1  @VA03492 00478000
+         L     R1,SAVEWRK7         GET IOBCAW FOR THIRD PAGE            00479000
+         ST    R1,IOBCAW           AND STORE IN IOB                     00480000
+         NI    SAVEWRK1+3,X'BF'    RESET FIRST PAGE SWITCH              00481000
+SEPLP    L     R8,SAVER8           RESTORE ADDRESS OF RDEVBLOK          00482000
+         B     SEPSIO              AND REPEAT THE THE SEPARATOR PAGE    00483000
+         SPACE 3                                                        00484000
+PUNTYPE  EQU   * HERE TO SET UP FOR PUNCHING SEP CARDS                  00485000
+*                                                                       00486000
+         LR    R6,R2               ADDRESS OF LOCK PAGE                 00487000
+         LA    R14,4               NUMBER OF CCWS                       00488000
+PUNLOOP  LM    R3,R4,PUNCCW        GET MODEL CCW FOR PUNCH              00489000
+         ALR   R3,R2               UPDATE DATA ADDRESS TO REAL ADDRESS  00490000
+         STM   R3,R4,0(R6)         STORE CCWS IN LOCK BUFFER            00491000
+         LA    R6,8(R6)            UPDATE TO NEXT SPACE                 00492000
+         BCT   R14,PUNLOOP         NEXT CCW                             00493000
+         MVC   0(8,R6),PUNSNSE     MOVE DUMMY SENSE CCW TO BUFFER       00494000
+         LA    R3,0(R3)            POINT DATA BUFFER                    00495000
+         MVI   0(R3),C' '          CLEAR BUFFER                         00496000
+         MVC   1(79,R3),0(R3)      TO BLANKS                            00497000
+         SPACE                                                          00498000
+         MVC   0(8,R3),SFBUSER     MOVE IN USER'S I.D. COL 1-8          00499000
+         MVC   9(8,R3),SFBORIG ORIGINATING USERID              @V200930 00500000
+         MVC   18(8,R3),SFBDIST DIST CODE                      @V200930 00501000
+         CLI   18(R3),C' '    IS IT BLANK ??                   @V200930 00502000
+         BH    *+10                YES -                                00503000
+         MVC   18(8,R3),SFBUSER SET DIST CODE TO USERID        @V200930 00504000
+         LA    R14,4               CHARACTER COUNTER                    00505000
+         LA    R4,8                NUMBER OF CHARACTER IN MAX ID        00506000
+         LA    R1,25(R3)      END OF DIST CODE                 @V200930 00507000
+         LA    R2,72(R3)      END OF EXPANDED DIST CODE        @V200930 00508000
+MVCNAME  MVC   0(1,R2),0(R1)       MOVE ONE CHARACTER                   00509000
+         BCTR  R2,0                -1 OUTPUT ADDRESS                    00510000
+         BCT   R14,MVCNAME         LOOP 4 TIMES                         00511000
+         BCTR  R2,0                OUTPUT AREA - 2                      00512000
+         BCTR  R2,0                                                     00513000
+         BCTR  R1,0                -1 INPUT ADDRESS                     00514000
+         LA    R14,4               SET UP COUNTER                       00515000
+         BCT   R4,MVCNAME          LOOP  FOR 8 CHARACTERS               00516000
+         MVC   73(7,R3),=X'04040404040404' COL 73-80, FLAG     @V200930 00517000
+*                             BYTES                                     00518000
+         B     PUNSIO                                                   00519000
+         SPACE 3                                                        00520000
+MVCLINE2 LR    R1,R6               SAVE RETURN ADDRESS                  00521000
+         BAL   R6,MVCLINE          MOVE CONSTANT AND CCW FOR 1 LENE     00522000
+         LR    R6,R1               RESTORE RETURN ADDRESS               00523000
+         SPACE                                                          00524000
+MVCLINE  MVC   87(46,R2),0(R9)     MOVE CONTANT TO BUFFER               00525000
+         LA    R9,46(R9)           UPDATE TO NEXT CONSTANT              00526000
+NEXTLINE LA    R2,144(R2)          SET BUFFER ADDRESS TO NEXT SLOT      00527000
+NEXT1    LM    R3,R5,PRINTIC       PRINT AND TIC CCW                    00528000
+         ALR   R3,R2                                                    00529000
+         ALR   R5,R2               UPDATE ADDRESSES                     00530000
+         STM   R3,R5,0(R2)         STORE IN OUTPUT BUFFER               00531000
+         MVI   12(R2),C' '         CLEAR DATA AREA                      00532000
+         MVC   13(131,R2),12(R2)                                        00533000
+         BR    R6                  RETURN TO CALLER                     00534000
+         SPACE                                                          00535000
+SPACE1   LM    R3,R4,SPACE3        GET CCW AND                          00536000
+         STM   R3,R4,0(R2)         AND STORE                            00537000
+         MVI   0(R2),X'0B'         CHANGE TO 1 SPACE CCW OP-CODE        00538000
+         LA    R2,8(R2)            UPDATE DATA ADDRESS                  00539000
+         BR    R6                  RETURN TO CALLER                     00540000
+         SPACE                                                          00541000
+NEXT3    LA    R2,144(R2)          UPDATE TO NEXT SLOT                  00542000
+NEXT3A   LM    R3,R4,SPACE3        CCW                                  00543000
+         STM   R3,R4,0(R2)         STORE SPACE3 CCW                     00544000
+         LA    R2,8(R2)            UPDATE TO DATA AREA                  00545000
+         BR    R6                  RETURN TO CALLER                     00546000
+         SPACE                                                          00547000
+SEPEXIT  EQU   *                                                        00548000
+         TM    SAVEWRK1+3,X'80'    PRINTER ??                           00549000
+         BZ    EXIT                NO -                                 00550000
+         LM    R1,R2,SAVEWRK5      RELOAD VIRUAL AND REAL ADDRESS       00551000
+         CALL  DMKPTRUL                                                 00552000
+         SPACE                                                          00553000
+         CALL  DMKPGTVR                                                 00554000
+         SPACE                                                          00555000
+EXIT     NI    IOBFLAG,X'FF'-IOBRSTRT RESET RESTART FLAG                00556000
+         EXIT                                                           00557000
+         EJECT                                                          00558000
+*.                                                                      00559000
+*                                                                       00560000
+* OPERATION OF THE BLOCK LETTER GENERATION SUBROUTINE -                 00561000
+*                                                                       00562000
+* ENTRY CONDITIONS -                                                    00563000
+*                                                                       00564000
+*        GPR1  = RELATIVE LINE NUMBER OF THE 12 LINE MATRIX (0-11)      00565000
+*        GPR3  = ADDRESS OF THE CHARACTER STRING TO BE TRANSLATED       00566000
+*        GPR4  = NUMBER OF CHARACTERS TO BE TRANSLATED                  00567000
+*        GPR6  = RETURN ADDRESS                                         00568000
+*        GPR8  = ADDRESS OF OUTPUT AREA FOR TRANSLATION                 00569000
+*                                                                       00570000
+*        UPON ENTRY, THE OUTPUT AREA POINTED TO BY GPR8 SHOULD HAVE     00571000
+*        BEEN CLEARED TO BLANKS BY THE CALLER.  THE OUTPUT AREA MUST BE 00572000
+*        LONG ENOUGH TO HOLD 12 CHARACTERS FOR EACH CHARACTER           00573000
+*        TRANSLATED, PLUS 2 SPACES BETWEEN EACH BLOK LETTER. FOR        00574000
+*        EXAMPLE, IF 5 CHARACTERS ARE TO BE TRANSLATED, THE OUTPUT AREA 00575000
+*        FOR THE TRANSLATOR MUST BE AT LEAST (5*12)+(4*2)= 68 BYTES     00576000
+*        LONG.  IT IS THE RESPONSIBILITY OF THE CALLER TO INSURE THAT   00577000
+*        THE OUTPUT AREAS FOR THE 12 LINES ARE VERTICALLY ALIGNED ON    00578000
+*        THE PAGE WHEN THEY ARE FINALLY PRINTED                         00579000
+*                                                                       00580000
+* EXIT CONDITIONS -                                                     00581000
+*                                                                       00582000
+*        NORMAL -                                                       00583000
+*        THE OUTPUT AREA IS FILLED WITH A LINE OF CHARACTERS, ONE       00584000
+*        GROUP OF 12 FOR EACH OF THE LETTERS TRANSLATED                 00585000
+*                                                                       00586000
+*        ERROR -                                                        00587000
+*        NONE                                                           00588000
+*                                                                       00589000
+* REGISTER USAGE -                                                      00590000
+*                                                                       00591000
+*        GPR0  = CHARACTER REGISTER - HOLDS THE CHARACTER TO BE TRANS-  00592000
+*                LATED                                                  00593000
+*        GPR1  = RELATIVE LINE NUMBER (0-11) IN MATRIX                  00594000
+*        GPR2  - NOT USED                                               00595000
+*        GPR3  = ADDRESS OF NEXT LETTER TO TRANSLATE                    00596000
+*        GPR4  = NUMBER OF LETTERS REMAINING TO BE TRANSLATED           00597000
+*        GPR5  = SHIFT REGISTER FOR PATTERN DETERMINATION               00598000
+*        GPR6  = RETURN ADDRESS                                         00599000
+*        GPR7  - NOT USED                                               00600000
+*        GPR8  = ADDRESS OF LOCATION FOR NEXT 12 BYTE PATTERN           00601000
+*        GPR9  = INDEX REGISTER FOR LINE AND PATTERN TABLES             00602000
+*        GPR10 = INDEX FOR NEXT BYTE STORE ADDRESS                      00603000
+*        GPR11-13 - NOT USED                                            00604000
+*        GPR14,15 - BXLE LOOP CONTROL                                   00605000
+*                                                                       00606000
+*        NOTE THAT GPR14-0 ARE SAVED AND RESTORED, REGISTERS 3-5 AND    00607000
+*        8-10 WILL BE DESTROYED, AND THE OTHERS WILL BE UNCHANGED       00608000
+*                                                                       00609000
+         EJECT                                                          00610000
+*                                                                       00611000
+* NOTES -                                                               00612000
+*                                                                       00613000
+*        THIS ROUTINE IS AN ADAPTATION OF THE OS/360 MODULE 'IEFSD095   00614000
+*        BLOCK LETTER AND NUMBER ROUTINE'                               00615000
+*                                                                       00616000
+* OPERATION -                                                           00617000
+*                                                                       00618000
+*        1. THE PATTERN TO BE STORED FOR A GIVEN LETTER                 00619000
+*           OR NUMBER IS DETERMINED BY INDEXING INTO A PATTERN TABLE    00620000
+*           BASED ON THE HEXADECIMAL VALUE OF THE CHARACTER.  WHEN      00621000
+*           THE PROPER ENTRY IS FOUND, IT IS FURTHER INDEXED BY THE     00622000
+*           RELATIVE LINE NUMBER THAT IS BEING PRODUCED.  THE RESULTING 00623000
+*           NUMBER IS USED TO INDEX INTO A BIT TABLE WHERE EACH ENTRY   00624000
+*           IS TWELVE BITS LONG AND INDICATES VIA A ONE OR ZERO BIT     00625000
+*           WHETHER OR NOT A CHARACTER IS TO BE STORED IN A COLUMN OF   00626000
+*           OF THAT ROW OF THE MATRIX                                   00627000
+*                                                                       00628000
+*        2. THE BIT MAP IS INSERTED INTO THE HIGH ORDER HALFWORD        00629000
+*           OF A REGISTER, WHICH IS THEN SHIFTED AND TESTED VIA A BXH   00630000
+*           LOOP.  IF A ONE BIT IS SHIFTED INTO THE HIGH ORDER (0)      00631000
+*           POSITION OF THE REGISTER, A CHARACTER IS STORED IN THE      00632000
+*           CORRESPONDING COLUMN OF THE MATRIX; IF NO BIT IS SHIFTED,   00633000
+*           NO CHARACTER IS STORED                                      00634000
+*                                                                       00635000
+*        3. AS THE REGISTER IS SHIFTED AND TESTED, THE COLUMN INDEX IS  00636000
+*           INCREMENTED AND ALWAYS POINTS TO THE NEXT POSITION TO BE    00637000
+*           FILLED; THEREFOR, IF NO CHARACTER IS STORED, THE COLUMN     00638000
+*           REMAINS BLANK                                               00639000
+*                                                                       00640000
+*        4. AFTER THE 12TH COLUMN HAS BEEN PROCESSED, THE TRANSLATION   00641000
+*           COUNT IS DECREMENTED AND TESTED AND ANY FURTHER LETTERS ARE 00642000
+*           TRANSLATED IN THE SAME MANNER                               00643000
+*                                                                       00644000
+*.                                                                      00645000
+         EJECT                                                          00646000
+BLOKLETR EQU   *  HERE TO GENERATE BLOCK LETTERS FOR THE PAGE SEPARATOR 00647000
+         SPACE 2                                                        00648000
+         STM   R14,R0,SAVEWRK2     SAVE REGS 14, 15, AND 0              00649000
+         SR    R0,R0               CLEAR CHARACTER REGISTER             00650000
+         LA    R14,1               GENERAL INCREMENT REGISTER           00651000
+         LA    R15,11              OFFSET OF LAST MATRIX CHARACTER      00652000
+GETCHAR  SR    R10,R10             OFFSET OF 1ST MATRIX CHARACTER       00653000
+         IC    R0,0(,R3)           PICK UP NEXT CHARACTER               00654000
+         LR    R9,R0               AND SAVE IT                          00655000
+         O     R9,=XL4'C0'         FORCE INTO THE RANGE OF UPPER CASE   00656000
+         IC    R9,CHARTABL-X'C0'(R9) GET OFFSET FOR CHARACTER PATTERN   00657000
+         LTR   R5,R9               WAS CHARACTER A BLANK?               00658000
+         BZ    NEXTCHAR            YES -- SKIP TO NEXT CHARACTER        00659000
+         AR    R5,R5               MULTIPLY OFFSET BY 2                 00660000
+         LA    R5,CHARPATN-12(R5)  AND POINT TO CHARACTER PATTERN       00661000
+         IC    R9,0(R1,R5)         GET OFFSET INTO LINE PATTERN TABLE   00662000
+         LH    R5,LINEPATN(R9)     AND GET LINE PATTERN IN R5           00663000
+         SLL   R5,19               SHIFT LINE PATTERN INTO BITS 1-12    00664000
+         AR    R5,R14              AND INSERT LOW ORDER 1               00665000
+         SPACE 3                                                        00666000
+BLOKLOOP BXH   R5,R5,*+8           TEST FOR A ONE BIT SHIFTED INTO HIGH 00667000
+*              ORDER POSITION -- IF BIT WAS SHIFTED, BRANCH WILL NOT    00668000
+*              BE TAKEN, SINCE RESULTING SUM IS NEGATIVE, AND A CHAR-   00669000
+*        ACTER WILL BE STORED. IF BIT WAS NOT SHIFTED, SUM WILL BE POS- 00670000
+*        ITIVE, AND ONE GREATER THAN LAST VALUE IN R5                   00671000
+         STC   R0,0(R10,R8)        STORE MATRIX CHARACTER               00672000
+         BXLE  R10,R14,BLOKLOOP    POINT TO SLOT FOR NEXT CHAR          00673000
+*                                  ACTER, AND LOOP 11 MORE TIMES        00674000
+NEXTCHAR AR    R3,R14              POINT TO NEXT CHARACTER TO TRANSLATE 00675000
+         LA    R8,14(,R8)          POINT TO NEXT SLOT IN WORKAREA       00676000
+         BCT   R4,GETCHAR          GET NEXT CHARACTER, IF THERE IS ONE  00677000
+         SPACE 2                                                        00678000
+         LM    R14,R15,SAVEWRK2    RESTORE REGISTERS 14 AND 15          00679000
+         BR    R6                  AND RETURN TO CALLER                 00680000
+         EJECT                                                          00681000
+CHARTABL EQU   *  TABLE OF OFFSETS INTO CHARPATN TABLE --               00682000
+*              SINCE EACH ENTRY IN THE CHARPATN TABLE IS 12 BYTES,      00683000
+*              THESE INDICES ARE REALLY ONLY HALF AS BIG AS THE ACTUAL  00684000
+*              OFFSET.  AFTER THE INDEX IS FOUND, IT IS MULTIPLIED BY 2 00685000
+         SPACE 3                                                        00686000
+         SPACE 3                                                        00687000
+         DC    X'00'               BLANK                                00688000
+         DC    AL1(((A-XX)/2),((B-XX)/2),((C-XX)/2),((D-XX)/2))         00689000
+         DC    AL1(((E-XX)/2),((F-XX)/2),((G-XX)/2),((H-XX)/2))         00690000
+         DC    AL1((I-XX)/2)                                            00691000
+         DC    7X'00'              UNDEFINED GRAPHICS - FORCED TO       00692000
+*                                  BLANKS                               00693000
+         DC    AL1(((J-XX)/2),((K-XX)/2),((L-XX)/2),((M-XX)/2))         00694000
+         DC    AL1(((N-XX)/2),((O-XX)/2),((P-XX)/2),((Q-XX)/2))         00695000
+         DC    AL1((R-XX)/2)                                            00696000
+         DC    8X'00'              UNDEFINED GRAPHICS - FORCED TO       00697000
+*                                  BLANKS                               00698000
+         DC    AL1(((S-XX)/2),((T-XX)/2),((U-XX)/2),((V-XX)/2))         00699000
+         DC    AL1(((W-XX)/2),((X-XX)/2),((Y-XX)/2),((Z-XX)/2))         00700000
+         DC    6X'00'              UNDEFINED GRAPHICS - FORCED TO       00701000
+*                                  BLANKS                               00702000
+         DC    AL1(((ZERO-XX)/2),((ONE-XX)/2),((TWO-XX)/2))             00703000
+         DC    AL1(((THREE-XX)/2),((FOUR-XX)/2),((FIVE-XX)/2))          00704000
+         DC    AL1(((SIX-XX)/2),((SEVEN-XX)/2),((EIGHT-XX)/2))          00705000
+         DC    AL1((NINE-XX)/2)                                         00706000
+         DC    6X'00'              UNDEFINED GRAPHICS - FORCED TO       00707000
+*                                  BLANKS                               00708000
+         SPACE 3                                                        00709000
+*********************************************************************** 00710000
+*                                                                     * 00711000
+*        FOLLOWING IS THE CHARACTER PARM LIST CONTAINING 444 BYTES    * 00712000
+*        WHERE EACH BYTE IS THE OFF SET FROM L1 IN THE LINE PARAMETER * 00713000
+*        LIST WHERE ONE LINE PATTERN OF A PARTICULAL CHARACTER IS     * 00714000
+*        STORED . A CHARACTER IS REPRESENTED BY 12 ORDERED LINE       * 00715000
+*        PATTERNS .FOR EXAMPLE A IS REPRESENTED BY THE  FOLLOWING     * 00716000
+*        ORDERED LINE PATTERNS  L2,L1,L5,L5,L5,L1,L1,L5,L5,L5,L5,L5   * 00717000
+*        AND WILL APPEAR ON THE PRINTER AS FOLLOWS                    * 00718000
+*                                                                     * 00719000
+*                             AAAAAAAAAA                              * 00720000
+*                            AAAAAAAAAAAA                             * 00721000
+*                            AA        AA                             * 00722000
+*                            AA        AA                             * 00723000
+*                            AA        AA                             * 00724000
+*                            AAAAAAAAAAAA                             * 00725000
+*                            AAAAAAAAAAAA                             * 00726000
+*                            AA        AA                             * 00727000
+*                            AA        AA                             * 00728000
+*                            AA        AA                             * 00729000
+*                            AA        AA                             * 00730000
+*                            AA        AA                             * 00731000
+*                                                                     * 00732000
+*********************************************************************** 00733000
+CHARPATN EQU   *                                                        00734000
+XX       EQU   *-12                JUST FOR EASE OF TYPING              00735000
+A        DC    X'020008080800000808080808'                              00736000
+B        DC    X'2C000808322A2A320808002C'                              00737000
+C        DC    X'020008262626262626080002'                              00738000
+D        DC    X'282A32080808080808322A28'                              00739000
+E        DC    X'000026262668682626260000'                              00740000
+F        DC    X'000026262668682626262626'                              00741000
+G        DC    X'020008262626343408080002'                              00742000
+H        DC    X'080808080800000808080808'                              00743000
+I        DC    X'020214141414141414140202'                              00744000
+J        DC    X'66660A0A0A0A0A0A3A3A686A'                              00745000
+K        DC    X'08322E3C3A36363A3C2E3208'                              00746000
+L        DC    X'262626262626262626260000'                              00747000
+M        DC    X'083E40424446080808080808'                              00748000
+N        DC    X'086C6E484A464E5052540876'                              00749000
+O        DC    X'000008080808080808080000'                              00750000
+P        DC    X'2C00080808002C2626262626'                              00751000
+Q        DC    X'020008080808084E50522C56'                              00752000
+R        DC    X'2C00080808002C3A3C2E3208'                              00753000
+S        DC    X'02000826585A5C5E64080002'                              00754000
+T        DC    X'000014141414141414141414'                              00755000
+U        DC    X'080808080808080808080002'                              00756000
+V        DC    X'080808080808083062206014'                              00757000
+W        DC    X'080808080808464442403E08'                              00758000
+X        DC    X'080830622060602062300808'                              00759000
+Y        DC    X'080830622060141414141414'                              00760000
+Z        DC    X'00001070120A147216742400'                              00761000
+ZERO     DC    X'040208080808080808080204'                              00762000
+ONE      DC    X'140C0E141414141414140202'                              00763000
+TWO      DC    X'020008646410121416180000'                              00764000
+THREE    DC    X'02000864641A1A6464080002'                              00765000
+FOUR     DC    X'061C1E202224001212121212'                              00766000
+FIVE     DC    X'0000262626282A106464002C'                              00767000
+SIX      DC    X'02000826262C000808080002'                              00768000
+SEVEN    DC    X'002C2E120A14141414141414'                              00769000
+EIGHT    DC    X'020008083004043008080002'                              00770000
+NINE     DC    X'020008080800006464080002'                              00771000
+         SPACE 3                                                        00772000
+*********************************************************************** 00773000
+*                                                                     * 00774000
+*        FOLLOWING IS THE LINE PARAMETER LIST CONTAINING 60           * 00775000
+*        DISTINCT LINE PATTERNS . IF THE BIT IS ON THE CHARACTER      * 00776000
+*        WILL BE PRINTED, AND IF THE BIT IS OFF THE PRINTING OF         00777000
+*        THE CHARACTER IS SUPPRESSED . A COMBINATION OF 12 LINE       * 00778000
+*        PATTERNS ( AS SPECIFIED IN THE CHARACTER REPRESENTATION      * 00779000
+*        LIST ) REPRESENTS EITHER A BLANK , A LETTER FROM A TO Z,     * 00780000
+*        OR A NUMBER FROM 0 TO 9 .                                    * 00781000
+*                                                                     * 00782000
+*********************************************************************** 00783000
+LINEPATN DS    0F                                                       00784000
+L1       DC    BL2'111111111111'                                        00785000
+L2       DC    BL2'011111111110'                                        00786000
+L3       DC    BL2'001111111100'                                        00787000
+L4       DC    BL2'000000111000'                                        00788000
+L5       DC    BL2'110000000011'                                        00789000
+L6       DC    BL2'000000110000'                                        00790000
+L7       DC    BL2'000011100000'                                        00791000
+L8       DC    BL2'000111100000'                                        00792000
+L9       DC    BL2'000000000110'                                        00793000
+L10      DC    BL2'000000011000'                                        00794000
+L11      DC    BL2'000001100000'                                        00795000
+L12      DC    BL2'000110000000'                                        00796000
+L13      DC    BL2'011000000000'                                        00797000
+L14      DC    BL2'000000011110'                                        00798000
+L15      DC    BL2'000001111000'                                        00799000
+L16      DC    BL2'000011011000'                                        00800000
+L17      DC    BL2'000110011000'                                        00801000
+L18      DC    BL2'001100011000'                                        00802000
+L19      DC    BL2'011111111111'                                        00803000
+L20      DC    BL2'110000000000'                                        00804000
+L21      DC    BL2'111111111000'                                        00805000
+L22      DC    BL2'111111111100'                                        00806000
+L23      DC    BL2'111111111110'                                        00807000
+L24      DC    BL2'110000001100'                                        00808000
+L25      DC    BL2'011000000110'                                        00809000
+L26      DC    BL2'110000000110'                                        00810000
+L27      DC    BL2'110000011111'                                        00811000
+L28      DC    BL2'111111100000'                                        00812000
+L29      DC    BL2'110001100000'                                        00813000
+L30      DC    BL2'110000110000'                                        00814000
+L31      DC    BL2'110000011000'                                        00815000
+L32      DC    BL2'111000000111'                                        00816000
+L33      DC    BL2'111100001111'                                        00817000
+L34      DC    BL2'110110011011'                                        00818000
+L35      DC    BL2'110011110011'                                        00819000
+L36      DC    BL2'110001100011'                                        00820000
+L37      DC    BL2'110110000011'                                        00821000
+L38      DC    BL2'110011000011'                                        00822000
+L39      DC    BL2'000000000000'                                        00823000
+L40      DC    BL2'110000110011'                                        00824000
+L41      DC    BL2'110000011011'                                        00825000
+L42      DC    BL2'110000001111'                                        00826000
+L43      DC    BL2'110000000111'                                        00827000
+L44      DC    BL2'011111111011'                                        00828000
+L45      DC    BL2'111000000000'                                        00829000
+L46      DC    BL2'011111111100'                                        00830000
+L47      DC    BL2'001111111110'                                        00831000
+L48      DC    BL2'000000000111'                                        00832000
+L49      DC    BL2'000011110000'                                        00833000
+L50      DC    BL2'001100001100'                                        00834000
+L51      DC    BL2'000000000011'                                        00835000
+L52      DC    BL2'001111111111'                                        00836000
+L53      DC    BL2'111111110000'                                        00837000
+L54      DC    BL2'011111100000'                                        00838000
+L55      DC    BL2'111000000011'                                        00839000
+L56      DC    BL2'111100000011'                                        00840000
+L57      DC    BL2'000000001100'                                        00841000
+L58      DC    BL2'000011000000'                                        00842000
+L59      DC    BL2'001100000000'                                        00843000
+L60      DC    BL2'110000000001'                                        00844000
+         SPACE 3                                                        00845000
+BOXFLAG  DC    X'00'          BOX COMPLETE FLAG                @VA05226 00845500
+VERSION  DC    C' VM/370 VERSION '                                      00847000
+VERID    DC    C'00'                                                    00848000
+         DC    C' LEVEL '                                               00849000
+LEVELID  DC    C'00 '                                                   00850000
+         DC    C'PLC '                                         @VA03492 00851000
+PLCID    DC    C'0000 '       TARGET FOR PLC ID                @VA03492 00852000
+MSGSIZE  EQU   *-VERSION      LENGTH OF LEVEL ID MSG           @VA03492 00853000
+         SPACE                                                          00854000
+SKIPTO1  CCW   X'8B',*-*,CC+SILI,1 MODEL CCW - IMMEDIATE SKIP TO 1      00855000
+SPACE3   CCW   X'1B',*-*,CC+SILI,1 MODEL CCW - SPACE 3 LINES IMMEDIATE  00856000
+SENSECCW CCW   X'04',*-*,SILI+SKIP,1 DUMMY SENSE CCW                    00857000
+PRINTIC  CCW   X'09',12,CC+SILI,132 MODEL CCWS - PRINT AND SPACE 1      00858000
+         DC    AL1(8)              AND TIC                              00859000
+         DC    AL3(144)                                                 00860000
+         SPACE 3                                                        00861000
+PUNCCW   CCW   X'41',PUNEND-PUNCCW,CC+SILI,80 PUNCH CCW 1ST CARD        00862000
+         CCW   X'41',PUNEND-PUNCCW,CC+SILI,80 PUNCH CCW 2ND CARD        00863000
+         CCW   X'41',PUNEND-PUNCCW,CC+SILI,80 PUNCH CCW 3RD CARD        00864000
+         CCW   X'41',PUNEND-PUNCCW,CC+SILI,80 PUNCH CCW 4TH CARD        00865000
+         CCW   X'41',PUNEND-PUNCCW,CC+SILI,80 PUNCH CCW 5TH CARD        00866000
+PUNSNSE  CCW   4,0,SILI+SKIP,1     DUMMY SENSE CCW                      00867000
+PUNEND   EQU   *                                                        00868000
+         SPACE                                                          00869000
+LOADCK   CCW   X'01',23,SILI+CC,1   VERIFY  UCS LOAD-BLOCK DATA LATCH   00870000
+LOADSNS  CCW   X'04',*-*,SILI+SKIP,1 DUMMY SENSE CCW                    00871000
+RSTRCCW1 CCW   X'1B',*-*,CC+SILI,255  SPACE 3                  @V60A6B6 00872000
+         CCW   X'09',56,CC+SILI,132 PRINT AND SPACE 1                   00873000
+RSTRCCW2 CCW   X'09',163,CC+SILI,132 PRINT AND SPACE 1                  00874000
+         CCW   X'09',56,SILI+CC,132 PRINT AND SPACE 1                   00875000
+RSTRCCW3 CCW   X'04',*-*,SILI+SKIP,1 PHONY SENSE                        00876000
+         SPACE                                                          00877000
+         SPACE 2                                                        00878000
+         LTORG                                                          00879000
+         EJECT                                                          00880000
+CONSTANT EQU   *                                                        00881000
+         DC    CL46'**********************************************'     00882000
+         DC    CL46'*                                            *'     00883000
+         DC    CL46'*  IIIIIIIIIIII  BBBBBBBBBBB   MM        MM  *'     00884000
+         DC    CL46'*  IIIIIIIIIIII  BBBBBBBBBBBB  MMM      MMM  *'     00885000
+         DC    CL46'*       II       BB        BB  MMMM    MMMM  *'     00886000
+         DC    CL46'*       II       BB        BB  MM MM  MM MM  *'     00887000
+         DC    CL46'*       II       BB       BB   MM  MMMM  MM  *'     00888000
+         DC    CL46'*       II       BBBBBBBBBB    MM   MM   MM  *'     00889000
+         DC    CL46'*       II       BBBBBBBBBB    MM        MM  *'     00890000
+         DC    CL46'*       II       BB       BB   MM        MM  *'     00891000
+         DC    CL46'*       II       BB        BB  MM        MM  *'     00892000
+         DC    CL46'*       II       BB        BB  MM        MM  *'     00893000
+         DC    CL46'*  IIIIIIIIIIII  BBBBBBBBBBBB  MM        MM  *'     00894000
+         DC    CL46'*  IIIIIIIIIIII  BBBBBBBBBBB   MM        MM  *'     00895000
+         DC    CL46'*                                            *'     00896000
+         DC    CL46'**********************************************'     00897000
+DMKSEPHR DC    CL46' '      SPACE FOR CLASS X PAGE HEADER               00898000
+         EJECT                                                          00899000
+         COPY  VMBLOK                                                   00900000
+         COPY  SAVE                                                     00901000
+         COPY  SPOOL                                                    00902000
+         COPY  RBLOKS                                                   00903000
+         COPY  IOBLOKS                                                  00904000
+         COPY  EQU                                                      00905000
+         COPY  DEVTYPES                                                 00906000
+         PSA                                                            00907000
+         END                                                            00908000

@@ -1,0 +1,776 @@
+PRG      TITLE 'DMKPRG     (CP)        VM/370 - RELEASE 6'              00001000
+         ISEQ  73,80          VALIDATE SEQUENCING OF SYSIN              00002000
+*.                                                                      00003000
+* MODULE NAME -                                                         00004000
+*                                                                       00005000
+*        DMKPRG                                                         00006000
+*                                                                       00007000
+* CONTENTS -                                                            00008000
+*                                                                       00009000
+*        DMKPRGIN - TO HANDLE A HARDWARE PROGRAM INTERRUPT              00010000
+*        DMKPRGRF - TO REFLECT AN SVC INTERRUPT TO A VIRTUAL MACHINE    00011000
+*        DMKPRGSM - TO SIMULATE A VIRTUAL PROGRAM INTERRUPT             00012000
+*                                                                       00013000
+* FUNCTION -                                                            00014000
+*                                                                       00015000
+*        TO PROVIDE THE PROPER HANDLING FOR VARIOUS TYPES OF            00016000
+*        PROGRAM INTERRUPTS WHICH MAY OCCUR.                            00017000
+*                                                                       00018000
+* ATTRIBUTES -                                                          00019000
+*                                                                       00020000
+*        REUSEABLE, RESIDENT, FIRST-LEVEL INTERRUPT HANDLER             00021000
+*                                                                       00022000
+* ENTRY POINTS -                                                        00023000
+*                                                                       00024000
+*        DMKPRGIN -                                                     00025000
+*        DMKPRGRF -                                                     00026000
+*        DMKPRGSM -                                                     00027000
+*                                                                       00028000
+* ENTRY POINTS - NON-EXECUTABLE                                         00029000
+*                                                                       00030000
+*        DMKPRGCT - COUNT OF PROGRAM INTTERUPTS REFLECTED TO USERS      00031000
+*        DMKPRGC8 - CP 'MONITOR' STORAGE, USED BY "MONITOR START"       00032000
+*        DMKPRGMI - CP 'MONITOR' ENTRY POINTER, FILLED IN BY "START"    00033000
+*        DMKPRGMC - CP 'MONITOR' COMM. POINTER, FILLED IN BY "START"    00034000
+*        DMKPRGTI - CP 'MONITOR' TIMER INTERVAL, USED BY DMKMON         00035000
+*                                                                       00036000
+* ENTRY CONDITIONS -                                                    00037000
+*                                                                       00038000
+*        DMKPRGIN - NO ENTRY CONDITIONS OTHER THAN THE PROGRAM OLD PSW  00039000
+*                   AND THE INTERRUPT CODES.                            00040000
+*                                                                       00041000
+*        DMKPRGRF - THE SYSTEM LOCK IS HELD, REFLECTABLE DATA IN REGS:  00042000
+*                   GPR  1 = ADDRESS OF OLD PSW TO BE REFLECTED         00043000
+*                   GPR  3 = ADDRESS OF ILC/INT. CODE WORD IN PAGE 0    00044000
+*                   GPR  4 = SVC OLD PSW (FIRST HALF)                   00045000
+*                   GPR  5 = SVC OLD PSW (LAST HALF)                    00046000
+*                   GPR  6 = EXTENDED SVC INTERRUPT ILC/CODE            00047000
+*                   GPR 11 = ADDRESS OF VIRTUAL MACHINE'S VMBLOK        00048000
+*                   GPR 12 = ADDRESS OF DMKPRGRF                        00049000
+*                                                                       00050000
+*        DMKPRGSM - GPR  0 = PROGRAM INTERRUPT CODE                     00051000
+*                   GPR 11 = ADDRESS OF VMBLOK                          00052000
+*                   GPR 12 = ADDRESS OF DMKPRGSM                        00053000
+*                                                                       00054000
+* EXIT CONDITIONS -                                                     00055000
+*                                                                       00056000
+*        PAGING REQUESTS HAVE BEEN PROCESSED VIA CALL TO DMKPTRAN.      00057000
+*                                                                       00058000
+*        SVC OR PROGRAM INTERRUPTS HAVE BEEN REFLECTED TO THE           00059000
+*        VIRTUAL MACHINE IF NECESSARY.                                  00060000
+*                                                                       00061000
+*        CONTROL TRANSFERS TO DMKPRVLG, DMKVATSX, DMKVATPX, DMKVATPF,   00062000
+*        DMKDSPCH, DMKDSPB, OR DMKDMPDK.                                00063000
+*                                                                       00064000
+         EJECT                                                          00065000
+* CALLS TO OTHER ROUTINES -                                             00066000
+*                                                                       00067000
+*        DMKPTRAN - TO HANDLE PAGING EXCEPTION                          00068000
+*        DMKPRVLG - TO HANDLE PRIVILEGED INSTRUCTIONS                   00069000
+*        DMKDSPCH - TO DISPATCH A USER                                  00070000
+*        DMKCFMBK - TO PLACE A VIRTUAL MACHINE IN CP CONSOLE MODE       00071000
+*        DMKQCNWT - TO TYPE WARNING MESSAGE AT USER TERMINAL            00072000
+*        DMKDMPDK - TO DUMP CORE IF PROGRAM INTERRUPT FROM CP           00073000
+*        DMKVATPX - TO PROCESS PAGING EXCEPTION FOR V370R               00074000
+*        DMKVATSX - TO PROCESS SEGMENT EXCEPTION FOR V370R              00075000
+*        DMKVATPF - TO SIMULATE PSEUDO PAGE FAULT FOR V370R             00076000
+*        DMKDSPB  - TO NEW PSW ENTRY IN DISPATCHER                      00077000
+*        DMKDSPA  - TO (POTENTIALLY) FAST RE-DISPATCH CURRENT USER      00078000
+*        DMKPERIL -                                                     00079000
+*                                                                       00080000
+* EXTERNAL REFERENCES -                                                 00081000
+*                                                                       00082000
+*        NONE.                                                          00083000
+*                                                                       00084000
+* TABLES / WORK AREAS -                                                 00085000
+*                                                                       00086000
+*        TEMPSAVE AREA USED TO SAVE GPR 14-15 UPON ENTRY.               00087000
+*        DUMPSAVE - REGISTERS SAVED ON SUPERVISOR STATE PROGRAM CHECK   00088000
+*        MONREGS  - REGISTERS PASSED TO MONITOR ON MONITOR CALL INT.    00089000
+*                                                                       00090000
+* REGISTER USAGE -                                                      00091000
+*                                                                       00092000
+*        GPR 11 = ADDRESS OF VIRTUAL MACHINE'S VMBLOK                   00093000
+*        GPR 12 = BASE REGISTER                                         00094000
+*                                                                       00095000
+*        GPRS 0-10 AND 13-15 ARE WORK REGISTERS.                        00096000
+*                                                                       00097000
+* NOTES -                                                               00098000
+*                                                                       00099000
+*        NONE                                                           00100000
+*                                                                       00101000
+* OPERATION -                                                           00102000
+*                                                                       00103000
+*        DMKPRGIN DETERMINES THE MODE OF THE MACHINE (PROBLEM OR        00104000
+*        SUPERVISOR STATE), AND THE CAUSE OF THE PROGRAM INTERRUPTION   00105000
+*                                                                       00106000
+*        IF A PROGRAM INTERRUPT OCCURRED WITH THE MACHINE IN THE        00107000
+*        SUPERVISOR STATE, REGISTERS ARE STORED IN THE DMKDMPGR AREA,   00108000
+*        AND CONTROL IS TRANSFERRED TO DMKDMPDK TO DUMP THE             00109000
+*        MACHINE.                                                       00110000
+*                                                                       00111000
+*        IF THE INTERRUPT WAS CAUSED BY A PRIVILEGED OR INVALID         00112000
+*        OPERATION, DMKPRGIN TRANSFERS TO DMKPRVLG FOR SIMULATION.      00113000
+*                                                                       00114000
+*        ANY PROGRAM INTERRUPT RECEIVED WHILE THE VIRTUAL MACHINE       00115000
+*        IS IN PROBLEM STATE IS REFLECTED TO THE VIRTUAL MACHINE.       00116000
+*                                                                       00117000
+*        IF ANY PROGRAM INTERRUPT OCCURRS SUCH THAT THE OLD PSW         00118000
+*        ADDRESS, MINUS THE INSTRUCTION LENGTH CODE, EQUALS THE         00119000
+*        ADDRESS IN THE PROGRAM NEW PSW, A WARNING MESSAGE:             00120000
+*                                                                       00121000
+*            DMKPRG453W CP ENTERED; PROGRAM INTERRUPT LOOP              00122000
+*                                                                       00123000
+*        IS ISSUED, THE PSW'S ARE EXCHANGED AS IF THE INTERRUPT         00124000
+*        WERE TO BE REFLECTED, AND THE VIRTUAL MACHINE IS PLACED        00125000
+*        IN CP CONSOLE FUNCTION MODE VIA A CALL TO DMKCFMBK.            00126000
+*                                                                       00127000
+*        A PAGE EXCEPTION INTERRUPT IS HANDLED VIA A CALL TO            00128000
+*        DMKPTRAN TO BRING IN THE REQUIRED VIRTUAL STORAGE PAGE.        00129000
+*        AN ADDRESSING EXCEPTION IS GENERATED IF THE REFERENCED         00130000
+*        ADDRESS IS OUTSIDE OF VIRTUAL STORAGE. IF THE INTERRUPT        00131000
+*        WAS FOR AN EC-MODE VIRTUAL MACHINE RUNNING IN VIRTUAL          00132000
+*        TRANSLATE MODE, DMKVATPX IS INVOKED VIA GOTO.                  00133000
+*        IF A VIRTUAL ECMODE MACHINE HAS REQUESTED PSEUDO PAGE FAULT    00134000
+*        HANDLING AND IS ENABLED, A PSEUDO PAGE FAULT MAY BE GENER-     00135000
+*        ATED IF THE 2ND LEVEL MEMORY PAGE IS NOT AVAILABLE.  THE PAGE  00136000
+*        FAULT IS HANDLED VIA A GOTO TO DMKVATPF.                       00137000
+*                                                                       00138000
+*        OR AN ECMODE MACHINE RUNNING NON-TRANSLATE IS                  00139000
+*        TREATED IN THE SAME MANNER AS A PAGE EXCEPTION                 00140000
+*        INDICATES A VIRTUAL ADDRESSING ERROR HAS BEEN MADE, AND        00141000
+*        AN ADDRESSING EXCEPTION IS GENERATED FOR THE VIRTUAL           00142000
+*        IF THE VIRTUAL MACHINE IS RUNNING IN VIRTUAL                   00143000
+*        TRANSLATE MODE, DMKVATSX IS INVOKED VIA GOTO TO FIELD THE      00144000
+*        INTERRUPT.                                                     00145000
+*                                                                       00146000
+*        THE DMKPRGRF ENTRY POINT (INVOKED FROM DMKPSASV) PERFORMS      00147000
+*        THE NECESSARY FUNCTIONS TO REFLECT AN SVC-INTERRUPT TO         00148000
+*        THE VIRTUAL MACHINE  (SEE LATER SECTION FOR DETAILS).          00149000
+*                                                                       00150000
+*        THE DMKPRGSM ENTRY POINT IS INVOKED VIA GOTO WHENEVER          00151000
+*        A PROGRAM INTERRUPT MUST BE GENERATED FOR A VIRTUAL            00152000
+*        MACHINE. THE VIRTUAL OLD PSW AND ILC DATA IS CONTAINED         00153000
+*        IN THE VMBLOK - VMPSW AND VMPRGIL FIELDS. EXIT IS VIA          00154000
+*        GOTO DMKDSPB.                                                  00155000
+*.                                                                      00156000
+         EJECT                                                          00157000
+         COPY  OPTIONS                                                  00158000
+         SPACE 2                                                        00159000
+         COPY  LOCAL                                                    00160000
+         SPACE 3                                                        00161000
+DMKPRG   CSECT                PROGRAM NAME.                             00162000
+*                                                                       00163000
+         ENTRY DMKPRGIN       ENTRY POINT - HARDWARE PROGRAM INTERRUPT  00164000
+         ENTRY DMKPRGRF       "REFLECT" ENTRY POINT                     00165000
+         ENTRY DMKPRGSM       "SIMULATE" ENTRY POINT                    00166000
+         ENTRY DMKPRGC8       CR8 VALUE ENABLED, BEFORE START  @V2B2638 00167000
+         ENTRY DMKPRGMI       ADDR OF DMKMON PROG INT HANDLER  @V2B2638 00168000
+         ENTRY DMKPRGMC       ADDR OF MONCOM                   @V2B2638 00169000
+         ENTRY DMKPRGTI       VALUE SET BY 'MONITOR' INT CMD   @V2B2638 00170000
+         SPACE                                                          00171000
+         EXTRN DMKPRVLG                                                 00172000
+         EXTRN DMKDSPB,DMKPERIL                                         00173000
+         EXTRN DMKDSPA                                         @V408246 00174000
+         EXTRN DMKCFMBK                                                 00175000
+         EXTRN DMKSTKDE                                        @V407579 00176000
+         AIF   (NOT &AP).LOKSY4                                         00177000
+         EXTRN DMKLOKSY,DMKDSPRU                               @V407579 00178000
+.LOKSY4   ANOP                                                          00179000
+         EXTRN DMKDMPDK                                        @V407579 00180000
+         EXTRN DMKVATPX,DMKVATSX,DMKVATPF                      @V407579 00181000
+         AIF   (NOT &TRACE(6)).NTR1                             **AIF** 00182000
+         EXTRN DMKTRCPG                                                 00183000
+.NTR1    ANOP                                                           00184000
+         SPACE 2                                                        00185000
+         USING PSA,R0         FOR ALL ENTRY POINTS                      00186000
+*                                                                       00187000
+EQUAL    EQU   B'1000'        CONDITION CODE MASK              @V407579 00188000
+         EJECT                                                          00189000
+*********************************************************************** 00190000
+*                                                                     * 00191000
+*              HERE ON A HARDWARE PROGRAM INTERRUPT                   * 00192000
+*                                                                     * 00193000
+*********************************************************************** 00194000
+         SPACE                                                          00195000
+*.                                                                      00196000
+*********************************************************************** 00197000
+*                                                                       00198000
+*                                                                       00199000
+*        EXPANDED VMA PARTIAL INSTRUCTION EMULATION FUNCTION:           00200000
+*                                                                       00201000
+*        INVOKED BY THESE INSTRUCTIONS WHEN EXECUTED IN PROBLEM STATE   00202000
+*        WITH CONTROL REGISTER 6 BYTE 0 SET TO THE SPECIFIED VALUE:     00203000
+*           LPSW, SIO, SIOF, SSM    - B'10XXXX1X' (X = 0 OR 1)          00204000
+*           SCKC, SPT, STNSM, STOSM - B'10X0XX1X' (X = 0 OR 1)          00205000
+*        AND THE APPROPRIATE INDIVIDUAL CONTROLS IN THE ASSIST          00206000
+*        CONTROL WORD (OFFSET X'14' INTO MICBLOK) SET TO 1:             00207000
+*           BIT 0   LPSW              BIT 2   SCKC/SPT                  00208000
+*           BIT 3   SIO/SIOF          BIT 4   SSM/STNSM/STOSM           00209000
+*                                                                       00210000
+*        REGISTER INPUT:                                                00211000
+*           CR 6 = BITS 0-7 ARE THE ASSIST FLAGS; BITS 8-28 ADDRESS     00212000
+*                  THE MICBLOK (THE VIRTUAL MACHINE POINTER LIST)       00213000
+*                                                                       00214000
+*        SYSTEM DATA AREAS REFERENCED (BY MODULE WHERE APPLICABLE):     00215000
+*           DMKPRV - 'DMKPRVMA' (EQUALS 'VMALIST')                      00216000
+*           DMKPSA - 'AVMALIST', 'PRNPSW', CPCREGS, TIMER FIELDS,       00217000
+*                    TRACING INFORMATION, 'CPSTATUS', 'PROPSW'          00218000
+*           MICBLOK, VCHBLOK, VCUBLOK, VDEVBLOK, VMBLOK                 00219000
+*                                                                       00220000
+*                                                                       00221000
+*        SEE DMKPRV, DMKTMR, OR DMKVSI FOR MORE INFORMATION ON          00222000
+*        INSTRUCTION EMULATION DONE BY THE EXPANDED ASSIST...           00223000
+*                                                                       00224000
+*********************************************************************** 00225000
+*.                                                                      00226000
+         SPACE                                                          00227000
+DMKPRGIN DS    0H             PROGRAM FLIH                     %V4M0144 00228000
+         OI    CPSTATUS,CPSUPER  INDICATE SUPERVISOR STATE     %V4M0144 00229000
+         ST    R14,TEMPR14    SAVE R14 & R15...                %V4M0144 00230000
+         ST    R15,TEMPR15         ...                         %V3M4038 00231000
+         L     R15,PRNPSW+4   OBTAIN BASE REGISTER             %V407579 00232000
+         USING DMKPRGIN,R15                                    %V407579 00233000
+PRG00    EQU   *                                               %V3M4038 00234000
+         L     R14,RUNUSER    GET CURRENT RUNUSER              %V3M4038 00235000
+         USING VMBLOK,R14     TEMPORARY ADDRESSABILITY         %V3M4038 00236000
+         TM    PROPSW+1,PROBMODE TEST FOR PROBLEM MODE         %V408246 00237000
+         BZ    CKMON          NO, CHECK FOR MONITOR CALL       %V408246 00238000
+PRGVRT   DS    0H                                              %V408246 00239000
+         MVC   QUANTUMR,TIMER SAVE INTERVAL TIMER              %V408246 00240000
+         STPT  VMTMOUTQ       STOP CHARGING PROBLEM TIME       %V408246 00241000
+         CHARGE START         START CHARGING SUPERVISOR TIME   %V407579 00242000
+         DROP  R15                                             %V4M0203 00243000
+         STM   R0,R13,VMGPRS  SAVE REGISTERS 0-13              %V408246 00244000
+         L     R12,PRNPSW+4   PROPER BASE REGISTER             %V4M0203 00245000
+         USING DMKPRGIN,R12                                    %V408246 00246000
+         DROP  R14                                             %V408246 00247000
+         LR    R11,R14        AND ACCESS VMBLOK IN R11 AS USUAL%V408246 00248000
+         USING VMBLOK,R11                                      %V408246 00249000
+         L     R14,TEMPR14    GET R14 AND R15                  %V408246 00250000
+         L     R15,TEMPR15    ...                              %V408246 00251000
+         ST    R14,VMGPRS+R14*4 STORE IN VMBLOK                %V408246 00252000
+         ST    R15,VMGPRS+R15*4 ...                            %V408246 00253000
+         COUNT DMKPRGCT       COUNT PROBLEM STATE PROGRAM INTS.%V407579 00254000
+         EJECT                                                          00255000
+*                                                                       00256000
+*        'NORMAL' VIRTUAL PROGRAM INTERRUPT HANDLING                    00257000
+*                                                                       00258000
+PRGSPSW  DS    0H                                              %V408246 00259000
+         LCTL  C8,C8,CPCREG8  HOST SYSTEM'S MC                 %V408246 00260000
+         LCTL  C0,C0,CPCREG0  LOAD STANDARD C-REG 0            %V408246 00261000
+         OI    VMRSTAT,VMEXWAIT FLAG INSTRUCTION WAIT          %V408246 00262000
+         AIF   (NOT &FLOATPT).NOFP1                            %V408246 00263000
+         STD   Y0,VMFPRS      SAVE FLOATING POINT REGISTERS    %V408246 00264000
+         STD   Y2,VMFPRS+8                                     %V408246 00265000
+         STD   Y4,VMFPRS+16                                    %V408246 00266000
+         STD   Y6,VMFPRS+24                                    %V408246 00267000
+.NOFP1   ANOP                                                           00268000
+         AIF   (NOT &TRACE(9)).TR2                             %V408246 00269000
+         TM    TRACFLG1,TRAC03 TRACING ACTIVE?                 %V408246 00270000
+         BZ    NOTRAC2        BRANCH IF NOT                    %V408246 00271000
+         TRACE CODE=TRCPGM,R14,R1,R2                           %V407579 00272000
+         USING TRACETBL,R14                                    %V407579 00273000
+         MVC   TRACEADR,VMPSW TRACE FIRST 3 BYTES OF VIRT. PSW %V407579 00274000
+         L     R1,INTPRL      SAVE INTERRUPT ILC AND CODE      %V408246 00275000
+         ST    R1,TRACECOD                                     %V407579 00276000
+         MVC   TRACEPSW,PROPSW     ACTUAL PROGRAM OLD PSW      %V407579 00277000
+         DROP  R14                                             %V407579 00278000
+NOTRAC2  EQU   *                                               %V408246 00279000
+.TR2     ANOP                                                           00280000
+         L     R1,PROPSW+4    GET INTERRUPTING ADDRESS         %V408246 00281000
+         LH    R2,INTPRL      ...AND ILC HALF-WORD             %V408246 00282000
+         STH   R2,VMPRGIL     SAVE ILC IN VMBLOK               %V408246 00283000
+         LA    R7,PRG01       BRANCH ADDRESS FOR INTERRUPT     %V408246 00284000
+*                             ANALYSIS                                  00285000
+         TM    PROPSW+1,PROBMODE 1-2 PUNCH FOR PER-SVC?        %V408246 00286000
+         BZ    PRGSVCPE       YES - SPECIAL HANDLING           %V408246 00287000
+         TM    VMESTAT,VMEXTCM IS VM IN EXTENDED-CONTROL MODE? %V408246 00288000
+         BZ    PRESTAT        NO                               %V408246 00289000
+         ST    R1,VMPSW+4     SAVE PSW ADDRESS                 %V408246 00290000
+         LH    R1,PROPSW+2    GET CC & PROGRAM MASK            %V408246 00291000
+         STH   R1,VMPSW+2                                      %V408246 00292000
+         B     PRNSTAT        DETERMINE INTERRUPT TYPE         %V408246 00293000
+*                                                                       00294000
+         ENTRY DMKPRGCT                                        @V408246 00295000
+DMKPRGCT DS    F'0'           COUNT OF USER PROGRAM INTERRUPTS @V408246 00296000
+         EJECT                                                          00297000
+PRESTAT  EQU   *              BASIC-CONTROL 360 PSW FORMAT     %V3M4038 00298000
+         ICM   R1,8,PROPSW+2  NO, ADD IN THE CC AND PGM MASK   %V3M4038 00299000
+         ALR   R2,R2          ADJUST ILC CODE FOR INDEXING...  %V3M4038 00300000
+         O     R1,ORTABLE(R2) ...AND ADD CORRECT ILC BITS      %V3M4038 00301000
+         ST    R1,VMPSW+4     STORE NEW CC-PROG/MSK-ADDRESS    %V3M4038 00302000
+PRNSTAT  EQU   *                                               %V3M4038 00303000
+         CLI   INTPR+1,16     PAGING INTERRUPT OR SUCH ?       %V3M4038 00304000
+         BCR   4,R7           BL IF 16, MUST BE VANILLA INT.   %V3M4038 00305000
+         BE    SEGEXCP       BRANCH IF = 16, SEGMENT EXCEPTION          00306000
+         CLI   INTPR+1,X'12'  TRANSLATION EXCEPTION?                    00307000
+         BE    TRANSEX        YES - CHECK IT OUT                        00308000
+         BL    PAGEXCP        NO - PAGING EXCEPTION CODE X'11'          00309000
+         CLI   INTPR+1,X'40'  IF > 16, IS IT A MONITOR CALL ?           00310000
+         BH    CHEKPER        CHECK FOR PER EVENT INCLUDED              00311000
+         BCR   7,R7    <BNE>  IF NOT, SOME SPECIAL INTERRUPT (X'13'?)   00312000
+         SPACE                                                          00313000
+REFMC    EQU   *                                                        00314000
+         TM    VMPSTAT,VMV370R   DOES V. MACH. HAVE EC OPTION?          00315000
+         BZ    FASTEXIT       TAKE FAST-REDISPATCH EXIT        @VA07661 00316000
+         LH    R8,MONCLASS    YES, MONITOR CLASS INTO R8,               00317000
+         L     R9,MONCODE     AND MONITOR CODE INTO R9,                 00318000
+         B     4(0,R7)          AND CONTINUE BELOW.                     00319000
+PRG01    EQU   *                                               %V3M4038 00320000
+         L     R8,FFS         -1 IN R8 = "NOT A MONITOR CALL"  %V3M4038 00321000
+         LH    R6,INTPR       GET INTERRUPT CODE INTO R6       %V3M4038 00322000
+         CLI   INTPR+1,X'02'  PRIVILEGED INTERRUPT ?           %V3M4038 00323000
+         BL    GOTOPRV        NO - OPERATION                   %V3M4038 00324000
+         BH    PRGSIMI        SOME OTHER KIND - REFLECT IT     %V3M4038 00325000
+         TM    VMPSW+1,PROBMODE PRIV OP FROM VIRT PROB MODE ?  %V3M4038 00326000
+         BO    PRGSIMI        YES - REFLECT IT                 %V3M4038 00327000
+GOTOPRV  GOTO  DMKPRVLG       LET DMKPRV HANDLE IT             %V3M4038 00328000
+         SPACE 2                                                        00329000
+PRGSVCPE EQU   *              SVC AND PER INTERRUPTS SEQUENTIALLY       00330000
+         TM    VMTRCTL,VMTRPER     PER TRACING ACTIVE ?                 00331000
+         BO    TRAPSVC        YES - DEFER SVC INTERRUPT                 00332000
+         TM    VMESTAT,VMPERCM     HE BETTER BE USING VIRTUAL PER       00333000
+         BZ    PRG255         NO - HALT AND DISIST PROCESSING           00334000
+         BAL   R9,PRGEVEN     RECORD PER DATA + SET PENDING             00335000
+         SPACE                                                          00336000
+*        THE FOLLOWING CODE RESTORES THE VIRTUAL MACHINE STATUS AND     00337000
+*        SIMULATES A REAL SVC INTERRUPT VIA 'LPSW'. DMKSVCIN WILL       00338000
+*        DECODE FOR ADSTOP AND TRACE SVC'S AND THE PER INTERRUPT WILL   00339000
+*        BE UNSTACKED BY DMKDSPCH (VIRTUAL PER IMPLIES EC-MODE,         00340000
+*        WHICH FORCES THE LONGER REFLECT PATH THROUGH DMKDSPCH).        00341000
+         SPACE                                                          00342000
+         NI    VMRSTAT,255-VMEXWAIT     OUT OF WAIT                     00343000
+         CHARGE STOP          STOP CHARGING SUPERVISOR OVERHEAD@V407579 00344000
+         SPT   VMTMOUTQ       START CHARGING PROBLEM TIME               00345000
+         LM    R0,R15,VMGPRS  RESTORE ALL USER'S REGISTERS              00346000
+         LCTL  C0,C0,RUNCR0   RESTORE VIRTUAL MACHINE'S CR0    @VA04930 00347000
+         LPSW  SVCNPSW        SIMULATE REAL SVC                         00348000
+         EJECT                                                          00349000
+*---------------------------------------------------------------------* 00350000
+*        PROGRAM EVENT RECORDING  -  "PER" INTERRUPT CHECKING         * 00351000
+*                  -------------------------------                    * 00352000
+*        PER INTERRUPTS CAN COME IN CONCURRENTLY, OR'ED WITH OTHER    * 00353000
+*        PROGRAM INTERRUPTS.  BECAUSE OF THIS, THE PER DATA IS SAVED  * 00354000
+*        IN THE VMBLOK EXTENSION FOR LATER REFLECTION (IF REQUIRED),  * 00355000
+*        AND THE PER BIT IN THE PROGRAM INTERRUPT CODE IS TURNED      * 00356000
+*        OFF.  IF THE PER INTERRUPT COMES IN ALONE, THE INTERRUPT     * 00357000
+*        IS REFLECTED TO THE VIRTUAL MACHINE IMMEDIATELY.             * 00358000
+*        OTHERWISE, THE REMAINING INTERRUPT CODE IS DECODED NORMALLY  * 00359000
+*        AND THE PER INTERRUPT REFLECTED AT A LATER TIME.             * 00360000
+*---------------------------------------------------------------------* 00361000
+CHEKPER  EQU   *              SEE IF PER INTERRUPT INCLUDED             00362000
+         TM    INTPR+1,X'80'  IS THE PER BIT ON?                        00363000
+         BZ    PRG01          NO - REFLECT IT ARBITRARILY               00364000
+         NI    VMDSTAT,255-VMDSP NO FAST REDSP                 @V408246 00365000
+         TM    VMTRCTL,VMTRPER     IS PER TRACING ACTIVE ?              00366000
+         BO    TRAPPER        YES - RECORD PER DATA IN 'TREXT'          00367000
+         TM    VMESTAT,VMPERCM     HE BETTER BE USING VIRTUAL PER       00368000
+         BZ    PRG255         NO - WE'RE IN REAL TROUBLE                00369000
+         BAL   R9,PRGEVEN     RECORD PER DATA AND SET PENDING           00370000
+         L     R8,FFS             "NOT A MONITOR CALL"                  00371000
+         LH    R6,INTPR       GET NEEDED INTERRUPT CODE INTO R6         00372000
+         BZ    PRGSIMI        PER BY ITSELF - REFLECT TO USER           00373000
+         B     PRNSTAT        GO ANALYZE OTHER CODE - R7 STILL O.K.     00374000
+         SPACE 2                                                        00375000
+PRGEVEN  EQU   *              SAVE "PROGRAM-EVENT-RECORDING" DATA       00376000
+         L     R10,VMECEXT    EXTENSION BLOCK ADDRESS                   00377000
+         USING ECBLOK,R10                                               00378000
+         LH    R1,PERCODE     REAL PER CODE BITS                        00379000
+         STH   R1,EXTPERCD    ...                                       00380000
+         L     R1,PERADD      ADDRESS OF PER EVENT                      00381000
+         ST    R1,EXTPERAD    ...                                       00382000
+         OI    VMPEND,VMPERPND     SET PER DATA AVAILABLE               00383000
+         NI    INTPR+1,X'FF'-X'80' TURN OFF REAL PER BIT                00384000
+         BR    R9             ...RETURN WITH CONDITION CODE SET         00385000
+         DROP  R10                                                      00386000
+         SPACE 2                                                        00387000
+         ABEND 255            BY - BY                                   00388000
+         EJECT                                                          00389000
+*---------------------------------------------------------------------* 00390000
+*        PROGRAM EVENT RECORDING - FOR VIRTUAL MACHINE TRACING        * 00391000
+*                  -------------------------------                    * 00392000
+*        WHEN A VIRTUAL MACHINE HAS 'VMTRPER' SET IN THE VMBLOK,      * 00393000
+*        PER EVENTS CAN OCCUR FOR BASIC-CONTROL MACHINES. ALL SUCH    * 00394000
+*        EVENTS MUST BE SEPARATED FROM ANY CONCURRENT INTERRUPTS      * 00395000
+*        AND PROCESSED BY THE TRACING MODULE, DMKPERIL. THE SVC-PER   * 00396000
+*        SERIAL INTERRUPT IS HANDLED BY DEFERRING THE SVC INTER-      * 00397000
+*        RUPTION UNTIL AFTER THE PER EVENT IS PROCESSED. ANY CON-     * 00398000
+*        CURRENT PROGRAM INTERRUPTS ARE ALSO DEFERRED, UNLESS THEY    * 00399000
+*        ARE THE RESULT OF A PAGING EXCEPTION. PER EVENTS CONCURRENT  * 00400000
+*        WITH PAGING EXECPTIONS ARE DISCARDED SINCE THEY WILL BE      * 00401000
+*        REPEATED AFTER THE PAGING REQUEST IS SERVICED.               * 00402000
+*---------------------------------------------------------------------* 00403000
+TRAPSVC  EQU   *              SVC-PER SERIAL INTERRUPT W/TRACING        00404000
+         L     R10,VMTREXT    TRACE EXTENSION TO VMBLOK                 00405000
+         USING TREXT,R10                                                00406000
+         L     R1,SVCOPSW     SAVE THE SVC OLD PSW...                   00407000
+         ST    R1,TREXPSW     ...IN THE TREXT BLOCK                     00408000
+         L     R1,SVCOPSW+4   ...SINCE 'VMPSW' IS NOW                   00409000
+         ST    R1,TREXPSW+4   ...INCORRECTLY SET                        00410000
+         L     R1,INTSVCL     GET ILC AND INTRP CODE FOR SVC            00411000
+         ST    R1,TREXINTL    ...ALSO INTO THE TREXT BLOCK              00412000
+         OI    VMPEND,VMSVCPND     SVC INTERRUPT DEFERRED               00413000
+         SPACE                                                          00414000
+TRAPPER  EQU   *              RECORD PER DATA FOR TRACING ROUTINE       00415000
+         L     R10,VMTREXT    TRACE EXTENSION BLOCK                     00416000
+         LH    R1,PERCODE     REAL PER CODE BITS                        00417000
+         STH   R1,TREXPERC    ...                                       00418000
+         L     R1,PERADD      REAL PER INSTRUCTION ADDRESS              00419000
+         ST    R1,TREXPERA    ...                                       00420000
+         OI    VMPEND,VMPERPND     PER DATA AVAILABLE                   00421000
+         NI    INTPR+1,X'FF'-X'80' TURN OFF REAL PER BIT                00422000
+         BZ    TRAPPIT        NO CONCURRENT INTERRUPTS - TRACE EVENT    00423000
+         BAL   R7,PRNSTAT     GO ANALYZE OTHER INTERRUPT                00424000
+         L     R10,VMTREXT    TRACE EXTENSION BLOCK            @VA08576 00425000
+         L     R8,FFS         "NOT A MONITOR CALL"                      00426000
+*    IF IT IS A MONITOR CALL, R8, R9 NOW CONTAIN MC DATA                00427000
+         LH    R1,INTPR       PICK UP PROG. INT. CODE                   00428000
+         STH   R1,TREXINTC    SAVE FOR LATER REFLECT                    00429000
+         OI    VMPEND,VMPRGPND     PROGRAM INTERRUPT DEFERRED           00430000
+TRAPPIT  EQU   *              TRACE THE PER EVENT                       00431000
+         BAL   R10,OBSLOCK    OBTAIN SYSTEM LOCK               @V4M0133 00432000
+         CALL  DMKPERIL                                                 00433000
+         NI    VMPEND,X'FF'-(VMSVCPND+VMPERPND)   REMOVE PENDING FLAGS  00434000
+         TM    VMPEND,VMPRGPND     WAS A PROGRAM INTERRUPT DEFERRED ?   00435000
+         BZ    NRFEXIT        NO - GO TO DISPATCH                       00436000
+         NI    VMPEND,X'FF'-VMPRGPND    PROGRAM INT NO LONGER PENDING   00437000
+         L     R10,VMTREXT    TRACE EXTENSION TO VMBLOK        @V4M0133 00438000
+         LH    R6,TREXINTC    INTERRUPT CODE                            00439000
+*        R8, R9 STILL HAVE MONITOR CALL OR FLAG DATA                    00440000
+         B     PRGSIMLK       SIMULATE PROGRAM INTERRUPT       @V4M0133 00441000
+         DROP  R10                                                      00442000
+         EJECT                                                          00443000
+*---------------------------------------------------------------------* 00444000
+*                                                                     * 00445000
+*        DMKPRGSM  -  ENTRY TO SIMULATE A PROGRAM INTERRUPT           * 00446000
+*                                                                     * 00447000
+*        ON ENTRY -   GPR 0 = PROGRAM INTERRUPT CODE                  * 00448000
+*                     VMPSW, VMPRGIL CONTAIN OLD PSW, ILC DATA        * 00449000
+*---------------------------------------------------------------------* 00450000
+         SPACE                                                          00451000
+DMKPRGSM DS    0D                                                       00452000
+         USING *,R12                                                    00453000
+         L     R12,=A(DMKPRGIN)    COMMON BASE ADDRESS                  00454000
+         USING DMKPRGIN,R12                                             00455000
+         L     R8,FFS         "NOT A MONITOR CALL"                      00456000
+         LR    R6,R0          INTERRUPT CODE TO R6                      00457000
+         AIF   (NOT &AP).APCHK4                                         00458000
+         TM    APSTAT1,APUOPER     TEST AP SYSTEM              @V407579 00459000
+         BZ    PRGSIMLK       SKIP ACCESS OF SYSTEM LOCK       @V4M0133 00460000
+         L     R15,=A(DMKLOKSY+2)  ACCESS THE GLOBAL SYSLOCK   @V407579 00461000
+         CLC   LPUADDR,0(R15) TEST IF CURRENTLY HELD           @V407579 00462000
+         BE    PRGSIMLK       CONTINUE IF ALREADY LOCKED       @V407579 00463000
+         SPACE                                                          00464000
+         AGO   .APCHK5                                                  00465000
+.APCHK4   ANOP                                                          00466000
+         B     PRGSIMLK       SKIP ACCESS OF SYSTEM LOCK       @V4M0133 00467000
+.APCHK5  ANOP                                                           00468000
+PRGSIMI  EQU   *              REFLECT REAL PROGRAM INTERRUPT            00469000
+         BAL   R10,OBSLOCK    SYSTEM LOCKED CODE BEYOND HERE***@V407579 00470000
+PRGSIMLK EQU   *                                               @V407579 00471000
+         LA    R1,PROPSW      OLD PSW ADDRESS                           00472000
+         BAL   R10,PSWTRAN     "TRANS 2,1,OPT=(BRING,DEFER)"            00473000
+         L     R3,VMPSW       MOVE CURRENT VMPSW...                     00474000
+         ST    R3,0(,R2)      INTO USER'S OLD-PSW SLOT                  00475000
+         L     R3,VMPSW+4     ...                                       00476000
+         ST    R3,4(,R2)      ...                                       00477000
+         AIF   (NOT &TRACE(6)).NTR2                             **AIF** 00478000
+         TM    VMTRCTL,VMTRPRG+VMTRBRIN     TRACING PROGRAM INTS ?      00479000
+         BZ    CHKECMD        NO - SKIP TRACE CALL                      00480000
+         LM    R0,R1,0(R2)    OLD PSW INTO R0-R1                        00481000
+         LM    R2,R3,PRNPSW-PROPSW(R2) NEW PSW INTO R2-R3               00482000
+         LR    R4,R6          INTERRUPT CODE INTO R4,                   00483000
+         ICM   R4,B'1100',VMPRGIL WITH ILC FROM INTERRUPT               00484000
+         CALL  DMKTRCPG       TRACE THE PROGRAM INTERRUPT               00485000
+         LA    R1,PROPSW      MUST RE-ISSUE 'TRANS'                     00486000
+         BAL   R10,PSWTRAN     ...TO GET VM'S PAGE ZERO                 00487000
+         L     R3,4(0,R2)     RESTORE ADDRESS PORTION OF OLD PSW        00488000
+CHKECMD  EQU   *              CHECK FOR EC-MODE PSW FORMAT              00489000
+.NTR2    ANOP                                                           00490000
+         TM    VMESTAT,VMEXTCM     IS THE VM IN EC-MODE?                00491000
+         BZ    PRGSM01        NO - FILL IN INTERRUPT CODE               00492000
+         STH   R6,INTPR-PROPSW(,R2)     PASS BACK INTERRUPT CODE        00493000
+         LH    R1,VMPRGIL     PICK UP ILC HALF-WORD...                  00494000
+         STH   R1,INTPRL-PROPSW(,R2)    ...FOR THE USER                 00495000
+         CLC   PRNPSW-PROPSW(2,R2),0(R2) PROG INTERRUPT LOOP ? @VA04506 00496000
+         BNE   CHKPEND        NO..CONTINUE...                  @VA04506 00497000
+         SLR   R3,R1          BACK UP OLD PSW ADDRESS                   00498000
+         CL    R3,PRNPSW+4-PROPSW(,R2)  INTERRUPT LOOP ?                00499000
+         BE    PRGLOOP                  YES - STOP IT NOW               00500000
+CHKPEND  EQU   *              TEST FOR PENDING 'PER' EVENT              00501000
+         TM    VMPEND,VMPERPND     IS THERE PER DATA ALSO?              00502000
+         BZ    PRG04          NO - HANDLE AS USUAL                      00503000
+         L     R10,VMECEXT    EXTENSION BLOCK ADDRESS                   00504000
+         USING ECBLOK,R10                                               00505000
+         LH    R1,EXTPERCD    PER CODE BITS                             00506000
+         STH   R1,PERCODE-PROPSW(,R2)   SET IN USER'S CORE              00507000
+         L     R1,EXTPERAD    PER EVENT ADDRESS                         00508000
+         ST    R1,PERADD-PROPSW(,R2)    ...                             00509000
+         OI    INTPR+1-PROPSW(R2),X'80' SET PER BIT IN CODE             00510000
+         NI    VMPEND,255-VMPERPND EVENT HAS BEEN UNSTACKED             00511000
+         B     PRG04          GO SWAP USER PSW'S                        00512000
+         SPACE 2                                                        00513000
+PRGSM01  EQU   *              NORMAL-MODE 360 PSW                       00514000
+         STH   R6,2(0,R2)     INTERRUPT CODE IS IN OLD PSW              00515000
+         LH    R1,VMPRGIL     ILC FROM INTERRUPT                        00516000
+         CLC   PRNPSW-PROPSW(2,R2),0(R2) LOOP CONDITION ?      @VA04506 00517000
+         BNE   PRG04          NO..CONTINUE...                  @VA04506 00518000
+         SLR   R3,R1          BACK UP TO INSTRUCTION START              00519000
+         CLM   R3,B'0111',PRNPSW+5-PROPSW(R2)     INTERRUPT LOOP ?      00520000
+         BNE   PRG04               NO -- REFLECT PROGRAM INTERRUPT      00521000
+PRGLOOP  EQU   *              PROGRAM INTERRUPT LOOP IN PROGRESS        00522000
+         TM    VMPEND,VMPERPND     IF 'PER' EVENT IS PENDING...         00523000
+         BO    SKIPSWP             ...LET DMKDSPCH UNSTACK IT           00524000
+         LM    R0,R1,PRNPSW-PROPSW(R2)  GET USER'S NEW PSW              00525000
+         STM   R0,R1,VMPSW         STORE IN VMBLOK FOR CLEANLINESS      00526000
+SKIPSWP  EQU   *              WARNING MESSAGE FOR VIRT. MACHINE USER    00527000
+         MSG   'DMKPRG453W CP ENTERED; PROGRAM INTERRUPT LOOP'          00528000
+         CALL  DMKQCNWT,PARM=NORET+ERRMSG                      @VA04506 00529000
+         OI    VMRSTAT,VMCFWAIT    MAKE SURE HE ENTERS CFMODE           00530000
+         NI    VMOSTAT,255-VMCFRUN MAKE SURE HE DOESNT RUN EITHER       00531000
+         CALL  DMKCFMBK       PUT VM IN CONSOLE FUNCTION MODE           00532000
+         B     NRFEXIT        GOTO DMKDSPCH                             00533000
+         SPACE 3                                                        00534000
+OBSLOCK  DC    0H'0'          SUBROUTINE TO OBTAIN SYSTEM LOCK @V407579 00535000
+         LOCK  OBTAIN,TYPE=SYS,SPIN=NO  TRY TO OBTAIN SYSLOCK  @V407579 00536000
+         AIF   (NOT &AP).APCHK6                                         00537000
+         BCR   EQUAL,R10      RETURN IF LOCK OBTAINED          @V407579 00538000
+         L     R15,VMDFTPNT   DEFER BLOCK FOR SYNC EVENTS      @V407579 00539000
+         USING CPEXBLOK,R15                                    @V407579 00540000
+         STM   R0,R15,CPEXREGS     PRESERVE REGS OF CALLER     @V407579 00541000
+         LA    R0,DEFERETN                                     @V407579 00542000
+         ST    R0,CPEXADD     SET KNOWN RETURN POINT           @V407579 00543000
+         DROP  R15                                             @V407579 00544000
+         LR    R1,R15                                          @V407579 00545000
+         CALL  DMKSTKDE       STACK DEFERRED BLOCK             @V407594 00546000
+         LA    R10,0(R10)     ADDRESS ONLY                     @V407594 00547000
+         LA    R2,PAGINTRA+4  RETURN ADDRESS FOR PAGE FAULT    @V407594 00548000
+         CR    R10,R2         IS THIS A PAGE FAULT             @V407594 00549000
+         BNE   EXITRU         NO                               @V407594 00550000
+         TM    VMOSTAT,VMSHR  RUNNING SHARED SYSTEM            @V407594 00551000
+         BZ    EXITRU         NO                               @V407594 00552000
+         L     R15,VMDFTPNT   LOAD CPEXBLOK ADDRESS            @V407594 00553000
+         MVC   CPEXPROC-CPEXBLOK(2,R15),LPUADDR  SET AFFINITY  @V407594 00554000
+*                             TO PREVENT PAGE FAULT THRASHING  @V407594 00555000
+EXITRU   GOTO  DMKDSPRU       GO RUN ANOTHER USER              @V407594 00556000
+*                                                                       00557000
+.APCHK6  ANOP                                                           00558000
+DEFERETN BR    R10            RETURN TO THE ORIGINAL CALLER    @V407579 00559000
+         EJECT                                                          00560000
+*---------------------------------------------------------------------* 00561000
+*.                                                                      00562000
+*        DMKPRGRF -  REFLECT AN SVC INTERRUPT TO A VIRTUAL MACHINE:     00563000
+*                                                                       00564000
+*        DMKPRGRF IS INVOKED VIA 'GOTO' FROM DMKPSASV WHEN A            00565000
+*        FAST REFLECT IS NOT FEASIBLE (I.E. WHEN VIRTUAL PAGE           00566000
+*        ZERO IS NOT IN CORE OR FOR EC-MODE MACHINES).                  00567000
+*        THE SYSTEM LOCK IS HELD ON ENTRY TO DMKPRGRF.                  00568000
+*                                                                       00569000
+*        AT ENTRY, USER'S REGISTERS HAVE ALL BEEN SAVED;                00570000
+*        AND REGISTERS ARE SET UP AS FOLLOWS:                           00571000
+*        R1 = ADDRESS OF SVC-OLD-PSW OR PROGRAM-OLD-PSW                 00572000
+*        R3 = ADDRESS OF SVC OR PROGRAM ILC-INT CODE WORD               00573000
+*        R4 = CONTENTS OF SVC OLD PSW ON INTERRUPT (FIRST HALF)         00574000
+*        R5 = CONTENTS OF SVC OLD PSW ON INTERRUPT (LAST HALF)          00575000
+*        R6 = CONTENTS OF EXTENDED INTERRUPT ILC/CODE                   00576000
+*        R11 = ADDRESS OF USER'S VMBLOK                                 00577000
+*        R12 = A(DMKPRGRF)                                              00578000
+*                                                                       00579000
+*.                                                                      00580000
+*---------------------------------------------------------------------* 00581000
+         SPACE 2                                                        00582000
+DMKPRGRF DS    0D             = OLD "REFLECT" ENTRY POINT               00583000
+         USING *,R12                                                    00584000
+         L     R12,=A(DMKPRGIN) COMMON ADDRESSABILITY.                  00585000
+         USING DMKPRGIN,R12                                             00586000
+         L     R8,FFS         -1 INTO R8 = "NOT A MONITOR CALL"         00587000
+         SPACE 2                                                        00588000
+REFLECT  EQU   *              REFLECT SVC/PROGRAM INTERRUPT TO USER:    00589000
+*           (N.B. - CODE TO 'PRGEXT' OPTIMIZED FOR 145)                 00590000
+*                                                                       00591000
+         BAL   R10,PSWTRAN    GET REAL ADDRESS OF USER'S PAGE ZERO      00592000
+         ST    R5,4(,R2)      STORE 2ND HALF OF OLD PSW                 00593000
+         TM    VMESTAT,VMEXTCM     IS VM IN EXTENDED MODE NOW ?         00594000
+         BZ    PRG03               IF NOT, MAKE A "PLAIN" OLD PSW.      00595000
+         SLR   R3,R1          IF YES, OBTAIN R3 - R1 (A DISPLACEMENT)   00596000
+         ST    R6,0(R3,R2)    STORE ILC/INT-CODE WORD WHERE IT GOES,    00597000
+         STCM  R4,3,2(R2)     STORE CC/PROGRAM MASK,           @V407579 00598000
+         LH    R4,VMPSW       GET 1ST 2 BYTES OF VMPSW,                 00599000
+         STH   R4,0(,R2)      AND STORE IN OLD PSW                      00600000
+         B     PRG04          GO HANDLE NEW PSW AND FINISH UP.          00601000
+         EJECT                                                          00602000
+PRG03    EQU   *                                                        00603000
+         LR    R7,R6          MANIPULATE ILC                   @V407579 00604000
+         SRL   R7,3           PUT IN BITS 16,17                @V407579 00605000
+         OR    R4,R7          COMBINE WITH CC/PGM MASK         @V4M0171 00606000
+         STCM  R4,2,4(R2)     STOR IN BC MODE OLD PSW          @V4M0171 00607000
+         ICM   R6,12,VMPSW    GET VMPSW 1ST TWO BYTES WITH INT-CODE,    00608000
+         ST    R6,0(,R2)      AND STORE FIRST HALF OF OLD PSW.          00609000
+*                                                                       00610000
+PRG04    LTR   R8,R8          CHECK R8 - WAS THIS A MONITOR CALL ?      00611000
+         BM    PRG05          NOPE IF R8 STILL = -1.                    00612000
+*                                                                       00613000
+         STH   R8,MONCLASS-PROPSW(,R2)  IF YES, STORE MONITOR CLASS AND 00614000
+         ST    R9,MONCODE-PROPSW(,R2)   MONITOR CODE IN VM'S PAGE 0.    00615000
+*                                                                       00616000
+PRG05    L     R4,PRNPSW-PROPSW(,R2)    GET CORRECT NEW PSW,            00617000
+         L     R5,PRNPSW-PROPSW+4(,R2)  ...                             00618000
+         ST    R4,VMPSW       AND STORE AS VIRTUAL MACHINE PSW.         00619000
+         ST    R5,VMPSW+4     ...                                       00620000
+*                                                                       00621000
+PRGEXT   NI    VMRSTAT,255-(VMIOWAIT+VMEXWAIT) REMOVE FROM INST. WAIT   00622000
+         GOTO  DMKDSPB        'NEW PSW' ENTRY TO DISPATCH               00623000
+         SPACE                                                          00624000
+* INDEXED TABLE TO OBTAIN APPROPRIATE ILC IN LEFT-MOST TWO BITS:        00625000
+ORTABLE  DC    F'0'           00 (NOT TOO LIKELY)                       00626000
+         DC    X'40000000'    01                                        00627000
+         DC    X'80000000'    10                                        00628000
+         DC    X'C0000000'    11                                        00629000
+         SPACE 1                                                        00630000
+* THE FOLLOWING 4 FIELDS ARE FOR USE BY VM MONITOR.                     00631000
+DMKPRGC8 DC    F'0'           CNTRL REG 8 --ENABLED CLASSES OF MC       00632000
+DMKPRGMI DC    A(0)           ADDR OF DMKMON PROG INT HANDLER  @V2B2638 00633000
+DMKPRGMC DC    A(0)           MONITOR COMMUNICATIONS AREA ADDRESS       00634000
+DMKPRGTI DC    H'0'           TIMER INTERVAL IN SECONDS FOR MONITOR     00635000
+         SPACE 1                                                        00636000
+         EJECT                                                          00637000
+*---------------------------------------------------------------------* 00638000
+*        PAGING EXCEPTION ENCOUNTERED IN PROBLEM MODE                 * 00639000
+*---------------------------------------------------------------------* 00640000
+PAGEXCP  EQU   *              PAGING EXCEPTION INTERRUPT                00641000
+         TM    VMESTAT,VMEXTCM IS IT A VIRTUAL 370R IN EXTENDED MODE ?  00642000
+         BZ    PAGINTR         NO                                       00643000
+         TM    VMPSW,TRANMODE   YES, WITH RELOCATION BIT ON?            00644000
+         BZ    CHEKPPF        NO -- CHECK PSEUDO PAGE FAULTS   @V2A3135 00645000
+         GOTO  DMKVATPX       VIRTUAL PAGING EXCEPTION, MAYBE           00646000
+         SPACE                                                          00647000
+CHEKPPF  EQU   *              TEST FOR PSEUDO PAGE FAULTS ON   @V2A3135 00648000
+         TM    VMPSTAT,VMPAGEX DOES USER WANT THEM ?           @V2A3135 00649000
+         BZ    PAGINTR        NO --                            @V2A3135 00650000
+         TM    VMPSW,VMIOPND  IS HE ENABLED FOR THEM ?         @V2A3135 00651000
+         BZ    PAGINTR        NO --                            @V2A3135 00652000
+         GOTO  DMKVATPF       ALL SET TO GO SIMULATE PAGE FAULT@V2A3135 00653000
+         SPACE                                                          00654000
+*---------------------------------------------------------------------* 00655000
+*        SEGMENT EXCEPTION DETECTED FROM PROBLEM MODE                 * 00656000
+*---------------------------------------------------------------------* 00657000
+SEGEXCP  EQU   *              SEGMENT EXCEPTION                @V407579 00658000
+         TM    VMESTAT,VMEXTCM     TEST FOR EC-MODE MACHINE    @V407579 00659000
+         BZ    PAGINTR        NO, TREAT LIKE PAGING EXC.       @V408246 00660000
+         TM    VMPSW,TRANMODE YES, TEST FOR TRANSLATE MODE     @V407579 00661000
+         BZ    PAGINTR        NO, TREAT LIKE PAGING EXC.       @V408246 00662000
+         GOTO  DMKVATSX       VIRTUAL SEGMENT EXCEPTION        @V407579 00663000
+         SPACE                                                          00664000
+*---------------------------------------------------------------------* 00665000
+*        TRANSLATION EXCEPTION - INTERRUPT CODE X'12'                 * 00666000
+*---------------------------------------------------------------------* 00667000
+TRANSEX  EQU   *                                               @V407579 00668000
+         TM    VMESTAT,VMEXTCM     IN EXTENDED CONTROL MODE?   @V407579 00669000
+         BZ    PAGINTR        NO, TREAT LIKE PAGING EXCP.      @V408246 00670000
+         TM    VMPEND,VMPERPND     IS PER ALSO PENDING ?       @V407579 00671000
+         BCR   1,R7           <BO>  YES - GO TO PROPER ROUTINE @V407579 00672000
+         L     R8,FFS         "NOT A MONITOR CALL"             @V407579 00673000
+         B     PRGSIMI        SIMULATE PROGRAM INTERRUPT       @V407579 00674000
+         EJECT                                                          00675000
+PAGINTR  EQU   *              USER PAGING EXCEPTION                     00676000
+         L     R9,TREXADD     GET INTERRUPTING ADDRESS         @V407579 00677000
+PAGINTRA BAL   R10,OBSLOCK    SYS LOCKED CODE BEYOND HERE      @V407594 00678000
+*                             *********************************         00679000
+         LR    R1,R9          PASS ADDRESS TO PAGER            @V407579 00680000
+         CALL  DMKPTRAN,PARM=BRING+DEFER+VFAULT                @V400141 00681000
+         BC    2,UPPSW        VIRTUAL ADRESSING EXCEPTION               00682000
+         NI    VMPEND,X'FF'-VMPERPND    PER WILL COME IN AGAIN          00683000
+FASTEXIT DS    0H             EXIT TO DSPA ENTRY OF DISPATCHER @VA07661 00684000
+         NI    VMRSTAT,X'FF'-(VMIOWAIT+VMEXWAIT) REMOVE FROM   @V408246 00685000
+*                             WAIT                                      00686000
+         GOTO  DMKDSPA        FAST RE-DISPATCH ON RECLAIM      @V408246 00687000
+         SPACE 2                                                        00688000
+NRFEXIT  EQU   *              EXIT TO NORMAL DISPATCH ENTRY             00689000
+         NI    VMRSTAT,X'FF'-(VMIOWAIT+VMEXWAIT)  REMOVE FROM WAIT      00690000
+         GOTO  DMKDSPCH       EXIT TO DISPATCH                          00691000
+         SPACE 2                                                        00692000
+PSWTRAN  EQU   *              "TRANS 2,1,OPT=(BRING,DEFER)"             00693000
+         TRANS 2,1,OPT=(BRING,DEFER)                                    00694000
+         BR    R10                                                      00695000
+         SPACE                                                          00696000
+UPPSW    EQU   * IF "ADDRESSING EXCEPTION" DUE TO PAGE FAULT, UP PSW    00697000
+         L     R1,VMPSW+4     GET FAILING INSTRUCTION                   00698000
+         LH    R2,VMPRGIL     ILC IN BYTES...                           00699000
+         ALR   R1,R2          (PSW ADDRESS MAY BE NEGATIVE - ILC)       00700000
+         ST    R1,VMPSW+4     UPDATE ..                                 00701000
+         LA    R6,X'05'       ADDRESSING EXCEPTION CODE                 00702000
+         STH   R6,INTPR       RESET INTERRUPT CODE                      00703000
+         TM    VMPEND,VMPERPND     IS PER ALSO PENDING ?                00704000
+         BCR   1,R7           <BO>  YES - GO TO APPROPRIATE ROUTINE     00705000
+         L     R8,FFS         "NOT A MONITOR CALL"                      00706000
+         B     PRGSIMLK       SIMULATE PROGRAM INTERRUPT       @V407579 00707000
+         SPACE                                                          00708000
+         EJECT                                                          00709000
+*********************************************************************** 00710000
+*                                                                     * 00711000
+*              HERE ON A PROGRAM INTERRUPT WITHIN THE CONTROL         * 00712000
+*              PROGRAM INDICATING A CONTROL PROGRAM ERROR.            * 00713000
+*                                                                     * 00714000
+*********************************************************************** 00715000
+         SPACE 2                                                        00716000
+         DROP  R12            DROP NORMAL ADDRESSABILITY,               00717000
+         USING DMKPRGIN,R15                                    @V407579 00718000
+*                                                                       00719000
+*                                                                       00720000
+*        HANDLE VM/370 NUCLEUS MONITOR INTERRUPTS                       00721000
+*                                                                       00722000
+CKMON    DS    0H                                              @V408246 00723000
+         TM    INTPR+1,X'40'  WAS IT A MONITOR CALL?           @V408246 00724000
+         BNZ   CKMONA         YES                              @V408246 00725000
+         CLC   PROPSW(8),SVCNPSW 1-2 PUNCH?                    @V408246 00726000
+         BNE   CKMONA         NO, TRACE AND THEN TAKE CP ABEND @V408246 00727000
+         TM    SVCOPSW+1,PROBMODE PER INTERRUPT?               @V408246 00728000
+         BNZ   PRGVRT         YES                              @V408246 00729000
+CKMONA   DS    0H                                              @V408246 00730000
+         NI    VMDSTAT-VMBLOK(R14),255-VMDSP FORCE LONG DISP.  @VA08236 00731000
+         AIF   (NOT &TRACE(9)).TR1                             @V408246 00732000
+         TM    TRACFLG1,TRAC03 TRACING ACTIVE?                 @V408246 00733000
+         BZ    NOTRAC1        BRANCH IF NOT                    @V408246 00734000
+         STM   R12,R13,TEMPR12     PRESERVE REGS OVER TRACE    @V407579 00735000
+         TRACE CODE=TRCPGM,R14,R12,R13  TRACE PROGRAM CHECK    @V407579 00736000
+         USING TRACETBL,R14                                    @V407579 00737000
+         XC    TRACEADR,TRACEADR   CLEAR                       @V407579 00738000
+         MVC   TRACECOD,INTPRL     SAVE INTERRUPT ILC AND CODE @V407579 00739000
+         MVC   TRACEPSW,PROPSW     SAVE PROGRAM INTERRUPT PSW  @V407579 00740000
+         DROP  R14                                             @V407579 00741000
+         LM    R12,R13,TEMPR12     REFRESH REGS                @V407579 00742000
+NOTRAC1  EQU   *                                               @V408246 00743000
+.TR1     ANOP                                                           00744000
+         TM    INTPR+1,X'40'  RECHECK AFTER TRACE FOR MONITOR  @V408246 00745000
+*                             CALL                                      00746000
+         BZ    CPERROR        NO, ABORT CP                     @V408246 00747000
+         STM   R0,R13,MONREGS PASS REGISTER CONTENTS AT 'MC'   @V4M0114 00748000
+         MVC   MONREGS+R14*4(2*4),TEMPR14                      @V4M0114 00749000
+         L     R12,DMKPRGMI   ADDRESS OF MONITOR INT HANDLER   @V408246 00750000
+         GOTO  (12)           GOTO MONITOR WHO WILL LPSW EXIT  @V4M0114 00751000
+         EJECT                                                          00752000
+CPERROR  DS    0H             PROGRAM INTERRUPT IN TRUE SUPERVISOR MODE 00753000
+         MVC   CPABEND(3),=C'PRG'  MOVE IN THE ABEND CODE ID            00754000
+         MVC   CPABEND+3(1),INTPR+1     AND THE PROGRAN INTERUPT CODE   00755000
+         STM   R0,R13,DUMPSAVE     PRESERVE REGISTERS FOR DUMP @V407579 00756000
+         MVC   DUMPSAVE+R14*4(2*4),TEMPR14                     @V407579 00757000
+         GOTO  DMKDMPDK       INVOKE DUMP ROUTINE              @V407579 00758000
+*                                                                       00759000
+         DROP  R15                                                      00760000
+         SPACE 3                                                        00761000
+         LTORG                                                          00762000
+         SPACE 3                                                        00763000
+TRACETBL DSECT ,              LAYOUT OF SYSTEM TRACE ENTRIES   @V407579 00764000
+TRACETYP DS    X              TRACE TYPE (INCL. PROCESSOR)     @V407579 00765000
+TRACEADR DS    AL3            ADDRESS POINTER                  @V407579 00766000
+TRACECOD DS    F              INTERRUPT CODE                   @V407579 00767000
+TRACEPSW DS    D              OLD PSW                          @V407579 00768000
+TRACELNG EQU   *-TRACETBL     ENTRY LENGTH                     @V407579 00769000
+         EJECT                                                          00770000
+         COPY  EQU                                                      00771000
+         COPY  SAVE                                            @V407579 00772000
+         COPY  VMBLOK         USER MACHINE DEFINITION.                  00773000
+         COPY  TREXT          TRACE EXTENSION BLOCK                     00774000
+         PSA                                                            00775000
+         END                                                            00776000

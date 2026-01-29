@@ -1,0 +1,980 @@
+CCH      TITLE 'DMKCCH     (CP)        VM/370 - RELEASE 6'              00001000
+         ISEQ  73,80          VALIDATE SEQUENCING OF INPUT              00002000
+*.                                                                      00003000
+*MODULE NAME                                                            00004000
+*                                                                       00005000
+*        DMKCCH                                                         00006000
+*                                                                       00007000
+*FUNCTION -                                                             00008000
+*                                                                       00009000
+*        THE CHANNEL CHECK HANDLER FUNCTIONS WITH THE I/O INTERRUPT     00010000
+*        HANDLER TO SCHEDULE A DEVICE DEPENDENT ERROR RECOVERY          00011000
+*        PROCEDURE WHEN A CHANNEL DATA CHECK,A CHANNEL                  00012000
+*        CONTROL CHECK,OR AN INTERFACE CONTROL CHECK IS DETECTED.       00013000
+*                                                                       00014000
+*ATTRIBUTES- RESIDENT,SERIALLY REUSABLE,CALLED BY DMKIOS                00015000
+*                                                                       00016000
+*                                                                       00017000
+*ENTRY POINTS -                                                         00018000
+*        -DMKCCHNT-ENTRY POINT FROM DMKIOINT WHEN A CHANNEL CHECK IS    00019000
+*                  FOUND ON AN I/O INTERRUPT                            00020000
+*                                                                       00021000
+*                                                                       00022000
+*        -DMKCCHIS-ENTRY FROM DMKIOS WHEN A CHANNEL CHECK IS FOUND ON   00023000
+*                  A CSW STORED CONDITION AFTER A SIO                   00024000
+*                                                                       00025000
+*        -DMKCCHRT-ENTRY FROM DMKIOE TO ALLOW ERROR MESSAGES TO BE      00026000
+*                 PRINTED.                                              00027000
+*                                                                       00028000
+*        -DMKCCHRF-ENTRY FROM DMKDSP, DMKVIO AND DMKVSI WHEN REFLECTING 00029000
+*                  A CHANNEL CHECK.                                     00030000
+*                                                                       00031000
+*ENTRY CONDITIONS-                                                      00032000
+*                                                                       00033000
+*        -FROM DMKIOECC-GPR 15 NOT ZERO IF ERROR WAS NOT RECORDED       00034000
+*                                                                       00035000
+*        -FROM DMKINT GPR 7= ADDR OF RCUBLOK                            00036000
+*                                                                       00037000
+*                     GPR 8= ADDR OF RDEVBLOK                           00038000
+*                                                                       00039000
+*                     GRP 6= ADDR OF RCHBLOK                            00040000
+*                                                                       00041000
+*                     GPR 4-5= CSW                                      00042000
+*                                                                       00043000
+*                     GPR 3= INTERRUPTING DEVICE ADDRESS                00044000
+*                                                                       00045000
+*        -FROM DMKIOS GRP 10 = IOBLOK ADDRESS                           00046000
+*                                                                       00047000
+*                                                                       00048000
+*EXIT CONDITIONS -                                                      00049000
+*        TO DMKIOSIN - IF CHANNEL ERROR IS RETRYABLE                    00050000
+*                                                                       00051000
+*         DISABLED WAIT STATE IF ERROR IS CATASTROPHIC                  00052000
+*                                                                       00053000
+*                                                                       00054000
+*CALLS TO OTHER ROUTINES-                                               00055000
+*        -DMKIOECC TO RECORD ERROR                                      00056000
+*        -DMKFREE TO GET STORAGE FOR IOERBLOK AND ERROR RECORD.         00057000
+*        -DMKSCNRU TO GET DEVICE BLOCKS.                                00058000
+*        -DMKQCNWT TO WRITE CONSOLE MESSAGES.                           00059000
+*        -DMKCVTBH TO CONVERT OPERATOR MESSAGES.                        00060000
+*        -DMKFRET TO RETURN ERROR RECORD TO FREE STORAGE                00061000
+*       -DMKSCNRD TO GET REAL DEVICE ADDRESS (CCU)                      00062000
+*                                                                       00063000
+*                                                                       00064000
+*EXTERNAL REFERENECS -                                                  00065000
+*        DMKSYSCK - ADDRESS OF TOD CLOCK FIELD                          00066000
+*                                                                       00067000
+*                                                                       00068000
+*TABLES AND WORK AREAS -                                                00069000
+*        MCHAREA, CCHREC, RCHBLOK, RCUBLOK AND RDEVBLOK                 00070000
+*                                                                       00071000
+*                                                                       00072000
+*REGISTER USEAGE-                                                       00073000
+*        GPR 0= PSA BASE                                                00074000
+*        GPR 0= LENGTH OF CHANNEL CHECK RECORD                          00075000
+*        GPR 1= PARAMETER                                               00076000
+*        GPR 2=SCRATCH                                                  00077000
+*        GPR 3=INTERNAL SWITCHES                                        00078000
+*        GPR 4= IOERBLOK BASE                                           00079000
+*        GPR 5= SCRATCH                                                 00080000
+*        GPR 6= RCHBLOK BASE                                            00081000
+*        GPR 7= RCUBLOK BASE                                            00082000
+*        GPR 8= RDEVBLOK BASE                                           00083000
+*        GPR 9= CHANNEL CHECK RECORD BASE                               00084000
+*        GPR 10= IOBLOK BASE                                            00085000
+*        GPR 12= DMKCCH BASE                                            00086000
+*        GPR 13= SAVEAREA BASE                                          00087000
+*        GPR 14= SCRATCH                                                00088000
+*        GPR 15= SCRATCH                                                00089000
+*                                                                       00090000
+*                                                                       00091000
+*NOTES-                                                                 00092000
+*        WILL SUPPORT SYSTEM/370 MODEL 135, 138, 145, 148, 155-2,       00093000
+*        158, 158-2, 165-2, 168, 3033,3032 AND 3031. THERE IS ALSO      00094100
+*        SUPPORT FOR THE 4331/4341 PROCESSORS.                          00094200
+*                                                                       00095000
+*                                                                       00096000
+*OPERATION - DMKCCHNT AND DMKCCHIS.                                     00097000
+*                                                                       00098000
+*        1.CONTROL IS PASSED TO DMKCCH AFTER EITHER A SIO WITH FAILING  00099000
+*         STATUS STORED, OR AN I/O INTERRUPT THAT REFLECTS CHANNEL      00100000
+*        CONTROL CHECK,INTERFACE CONTROL CHECK, OR CHANNEL DATA         00101000
+*        CHECK HAS OCCURED.                                             00102000
+*                                                                       00103000
+*        2.IF RDEVBLOK AND IOBLOK EXIST -                               00104000
+*        DMKCCH WILL BUILD AN IOERBLOK TO BE USED BY THE DEVICE         00105000
+*        DEPENDENT ERP'S TO DETERMINE IF RECOVERY IS POSSIBLE FOR       00106000
+*        CP INITIATED I/O EVENTS. I/O EVENTS ASSOCIATED WITH A VIRTUAL  00107000
+*        USER THAT RESULT IN A CHANNEL ERROR WILL BE REFLECTED TO       00108000
+*        THAT VIRTUAL MACHINE. THE WILL ENABLE THE VIRTUAL MACHINE      00109000
+*        TO DO ITS OWN RECOVERY FROM CHANNEL CHECKS.                    00110000
+*                                                                       00111000
+*        3 AN EXAMINATION OF THE CHANNEL STATUS WORD AND EXTENDED       00112000
+*        CHANNEL STATUS WORD WILL BE PERFORMED TO DETERMINE IF THE      00113000
+*        CHANNEL HAS BEEN RESET OR IF THE RESET CODES ARE INVALID;      00114000
+*        THE CHANNEL STATUS WORD AND EXTENDED CHANNEL STATUS            00115000
+*        WORD WILL ALSO BE EXAMINED TO SEE IF AN INTERFACE              00116000
+*        HANG-UP (INTERFACE INOPERATIVE) HAS OCCURRED.                  00117000
+*        IF ANY OF THESE CONDITIONS IS PRESENT A MESSAGE IS             00118000
+*        SENT TO THE OPERATOR AND A WAIT STATE IS PSW IS LOADED. IF     00119100
+*        THIS IS A 4331/4341 PROCESSOR, THERE WILL NOT BE AN I/O FIXED  00119200
+*        OR EXTENDED LOGOUT FOR A CHANNEL CHECK. THERE WILL BE A        00119300
+*        LIMITED CHANNEL LOGOUT. THERE ALSO WILL NOT BE AN IOEL         00119400
+*        POINTER(LOCATION 173-175).                                     00119500
+*                                                                       00120000
+*        4.AN ERROR RECORD WILL BE CONSTRUCTED WHICH WILL CONTAIN THE   00121000
+*        EXTENDED CHANNEL STATUS WORD,THE CHANNEL LOGOUT,AND UP         00122000
+*        TO EIGHT ACTIVE UNITS IN USE AT THE TIME OF ERROR ON THE       00123000
+*        DAMAGED CHANNEL.DMKIOECC WILL USE THIS INFORMATION TO          00124000
+*        BUILD THE CHANNEL CHECK RECORD.                                00125000
+*                                                                       00126000
+*        5 THE DEVICE DEPENDENT ERP'S WILL USE THE SEQUENCE             00127000
+*        CODE AND RETRY CODE PORTION OF THE ECSW IN THE IOERBLOK        00128000
+*        TO DETERMINE CORRECT RETRY SEQUENCES.                          00129000
+*                                                                       00130000
+*                                                                       00131000
+*OPERATION - DMKCCHRT.                                                  00132000
+*    1. IF THE ERROR IS A CHANNEL CONTROL CHECK OR INTERFACE            00133000
+*       CONTROL CHECK, CALL DMKQCNWT TO SEND ERROR MESSAGE              00134000
+*       DMKCCH601I OR DMKCCH602I TO THE SYSTEM OPERATOR.                00135000
+*    2. IF THE ERROR WAS ASSOCIATED WITH A VIRTUAL MACHINE, AQUIRE      00136000
+*       STORAGE FOR A NEW IOERBLOK, COPY THE OLD IOERBLOK TO THE NEW    00137000
+*       IOERBLOK AND BUILD THE CCR EXTENTION.                           00138000
+*    3. RETURN TO THE CALLER.                                           00139000
+*                                                                       00140000
+*MESSAGES-                                                              00141000
+*        DMKCCH601I  CHANNEL  CONTROL CHECK DEV XXX; USER USERID..      00142000
+*        DMKCCH602I INTERFACE CONTROL CHECK DEV XXX; USER USERID..      00143000
+*        DMKCCH603W CHANNEL ERROR; RUN SEREP, RESTART SYSTEM            00144000
+*        DMKCCH604I CHANNEL ERROR DEV XXX ; USER XXXXXXXX MACHINE RESET 00145000
+*        DMKCCH605I CHANNEL CHECK RECORDING FAILURE                     00146000
+*                                                                       00147000
+**********************************************************************  00148000
+         EJECT                                                          00149000
+         COPY  OPTIONS                                         @VA01077 00150000
+         EJECT                                                          00151000
+         COPY  LOCAL                                           @VA01077 00152000
+         EJECT                                                          00153000
+DMKCCH   CSECT                                                          00154000
+         SPACE                                                          00155000
+         EXTRN DMKIOECC                                                 00156000
+         EXTRN DMKSCNRU                                                 00157000
+         EXTRN DMKCVTBH                                                 00158000
+         EXTRN DMKSYSCK                                                 00159000
+         ENTRY DMKCCHCF                                                 00160000
+         ENTRY DMKCCHMX                                                 00161000
+         ENTRY DMKCCHSZ                                                 00162000
+         EXTRN DMKSYSRM                                        @VA01337 00163000
+         ENTRY DMKCCH60                                                 00164000
+         EXTRN DMKSCNRD                                        @VA01081 00165000
+         EXTRN DMKQCNWT                                        @V407510 00166000
+         EXTRN DMKMCHST                                        @V407510 00167000
+         SPACE 3                                                        00168000
+         USING PSA,R0                                                   00169000
+         USING RCHBLOK,R6                                               00170000
+         USING RCUBLOK,R7                                               00171000
+         USING RDEVBLOK,R8                                              00172000
+         USING IOBLOK,R10                                               00173000
+         USING SAVEAREA,R13                                             00174000
+         SPACE                                                          00175000
+         SPACE                                                          00176000
+DMKCCHIS RELOC                                                          00177000
+         MVI   ENTSW,SIOCCH   SET ENTRY SWITCH FOR SIO ENTRY            00178000
+         LM    R4,R5,IOBCSW   GET THE FAILING CSW              @VA01068 00179000
+         LH    R3,IOBRADD     GET THE DEVICE ADDRESS           @VA01068 00180000
+         B     FINDBLOK       GO STORE THE DEVICE ADDRESS               00181000
+DMKCCHNT RELOC                                                          00182000
+         MVI   ENTSW,INTERCCH SET ENTRY SWITCH FOR INTERRUPT ENTRY      00183000
+         SR    R10,R10        CLEAR IOB POINTER                @VA01337 00184000
+FINDBLOK EQU   *                                                        00185000
+         STM   R4,R5,CSW      PUT BACK THE CSW                 @VA01068 00186000
+         STH   R3,SIOADDR     SAVE THE DEVICE ADDRESS          @VA01068 00187000
+         TM    CSW,X'04'      IS LOGOUT PENDING ?                       00188000
+         BZ    CCHSCAN        NO, GO GET DEVICE BLOCKS                  00189000
+         OI    ENTSW,TERMSYS  SET SYSTEM TERMINATION FLAG               00190000
+CCHSCAN  EQU   *                                                        00191000
+         CALL  DMKSCNRU       GET THE REAL CHANNEL, CONTROL UNIT AND    00192000
+*                             DEVICE BLOCK ADDRESSES                    00193000
+         STM   R6,R8,RCHSAVE  SAVE THE RCHBLOK, RCUBLOK AND RDEVBLOK    00194000
+         BNZ   BULDREC        GO BUILD RECORD IF ADDRESSES DON'T        00195000
+*                             EXIST                                     00196000
+         OI    ENTSW,DEVCCH   INDICATE THE DEVICE BLOCK ADDRESS EXIST   00197000
+         ICM   R10,15,RDEVAIOB       GET THE I/O BLOCK ADDRESS          00198000
+         BZ    BULDREC        IF THE ADDRESS IS ZERO, GO BUILD          00199000
+*                             CCH RECORD                                00200000
+         OI    ENTSW,IOBCCH   INDICATE THE I/O BLOCK ADDRESS EXIST      00201000
+BULDREC  EQU   *                                                        00202000
+         SR    R0,R0          CLEAR REGISTER                   @VA00881 00203000
+         ICM   R0,3,DMKCCHMX    GET THE LENGTH OF CCH RECORD   @V5088AA 00204000
+         BZ    CPTERM         IF ZERO, GO TERMINATE SYSTEM              00205000
+         A     R0,F7          PUT LENGTH ON A DOUBLEWORD       @VA00881 00206000
+*                             BOUNDARY                                  00207000
+         SRL   R0,3           DIVIDE BY 8                               00208000
+         ST    R0,RECLENTH    SAVE THE LENGTH OF THE CCH RECORD         00209000
+         CALL  DMKFREE        GO GET STORAGE                            00210000
+         ST    R1,RECADDR     SAVE THE ADDRESS OF THE CCH RECORD        00211000
+         STM   R4,R5,CSW      RESTORE THE CSW                  @VA01068 00212000
+         LR    R9,R1          SAVE THE CCH RECORD ADDRESS               00213000
+         USING CCHREC,R9      SETUP ADDRESSABILITY FOR CCH RECORD       00214000
+         XC    CCRECTYP(CCHSIZE*8),CCRECTYP CLEAR CCH RECORD HEADER     00215000
+         MVC   CCHREC(8),CCHCONST    MOVE RECORD HEADER INTO RECORD     00216000
+         MVC   CCCPUID(8),CPUID SAVE CPU ID NUMBER             @V508690 00217000
+         L     R2,CAW         GET CHANNEL ADDRESS WORD         @VA01337 00218000
+         LA    R2,0(,R2)      CLEAR HIGH ORDER BYTE            @VA01337 00219000
+         TM    ENTSW,INTERCCH IS THIS AN I/O INTERRUPT         @VA01337 00220000
+         BZ    CCHBYPAS       NO, GO VALIDATE ADDRESS          @VA01337 00221000
+         ICM   R2,C7,CSW+1    GET THE CCW ADDRESS                       00222000
+         BZ    ADDMOVE        IF ADDRESS IS ZERO, DON'T MOVE DATA       00223000
+         LA    R2,0(R2)       GET THE ADDRESS OF THE LAST CCW PLUS 8    00224000
+         S     R2,F8          GET THE ADDRESS OF THE LAST CCW           00225000
+         BM    ADDMOVE        IF ADDRESS IS NEGATIVE, DON'T MOVE CCW    00226000
+CCHBYPAS EQU   *                                               @VA01337 00227000
+         L     R5,=A(DMKSYSRM) GET ADDRESS OF MAX. STORAGE     @VA01337 00228000
+         L     R5,0(,R5)      GET MAX. SIZE OF REAL STORAGE    @VA01337 00229000
+         CR    R2,R5          IS THIS ADDRESS IN REAL STORAGE  @VA01337 00230000
+         BNL   ADDMOVE        NO, GO MOVE IN FAILING CSW       @VA01337 00231000
+         STC   R2,FAILCSW     SAVE LOW ORDER BYTE              @VA01337 00232000
+         TM    FAILCSW,X'07'  IS THIS ADDR. ON DOUBLEWORD BDY  @VA01337 00233000
+         BNZ   ADDMOVE        NO, GO MOVE IN FAILING CSW       @VA01337 00234000
+         MVC   FAILCCW,0(R2)  SAVE FAILING CCW                 @VA01337 00235000
+ADDMOVE  EQU   *                                               @VA01337 00236000
+         MVC   FAILCSW,CSW    SAVE FAILING CSW                 @VA01337 00237000
+         LH    R2,SIOADDR     GET THE FAILING DEVICE ADDRESS            00238000
+         STCM  R2,7,CCHCUA    SAVE FAILING DEVICE ADDRESS      @VA01068 00239000
+         SRL   R2,8           GET THE CHANNEL NUMBER                    00240000
+         IC    R0,DMKCCHCF(R2)       GET THE CHANNEL TYPE               00241000
+         STC   R0,CCHANID     SAVE THE CHANNEL TYPE IN RECORD           00242000
+         TM    ENTSW,DEVCCH   DOES THE REAL DEVICE BLOCK EXIST ?        00243000
+         BZ    CCHIO          NO, GO CHECK FOR I/O BLOCK                00244000
+         MVC   CCDEVTYP(4),RDEVSTAT MOVE DEVICE DATA TO CCH    @VA01068 00245000
+*                             RECORD                                    00246000
+CCHIO    EQU   *                                                        00247000
+         MVC   CCPROGID,CPEYED MOVE IN CP/370 IDENTIFICATION   @VA01068 00248000
+         TM    ENTSW,IOBCCH   DOES THE I/O BLOCK EXIST ?                00249000
+         BZ    RDEVBSY        NO, GO TEST FAILING DEVICE                00250000
+         TM    IOBFLAG,IOBCP  WAS THIS A CP GENERATED          @VA01077 00251000
+         BNZ   RDEVBSY        YES, GO TEST FAILING DEVICE      @VA00881 00252000
+         L     R14,IOBUSER    GET THE USER'S VMBLOK ADDRESS             00253000
+         MVC   CCPROGID,VMUSER-VMBLOK(R14) SAVE THE USER'S ID.          00254000
+RDEVBSY  EQU   *                                                        00255000
+         SR    R4,R4          CLEAR ADDRESSABILITY REGISTER FOR         00256000
+*                             THE I/O ERROR BLOCK                       00257000
+         TM    ENTSW,DEVCCH+IOBCCH   DOES THE BLOCKS EXIST ?            00258000
+         BNO   CCHDEPND       NO, GO GET DEPENDENT ROUTINE              00259000
+         TM    IOBSPEC,IOBTIO WAS ERROR ON TIO INSTRUCTION ?            00260000
+         BZ    CCHHIOI        NO, GO TEST FOR HIO INSTRUCTION           00261000
+         OI    ENTSW,TIOCCH   SET TIO INDICATOR                         00262000
+CCHHIOI   EQU   *                                                       00263000
+         TM    IOBSPEC,IOBHIO WAS ERROR ON HIO INSTRUCTION ?            00264000
+         BZ    CCHIOERL       NO, GO GET IOERBLOK LENGTH                00265000
+         OI    ENTSW,HIOCCH   SET HIO INDICATOR                         00266000
+CCHIOERL EQU   *                                                        00267000
+         LA    R0,IOERSIZE+1  GET THE DOUBLEWORD LENGTH OF THE I/O      00268000
+*                             ERROR BLOCK                               00269000
+         LM    R4,R5,CSW      GET THE CSW INFORMATION          @VA01068 00270000
+         CALL  DMKFREE        GO GET THE STORAGE                        00271000
+         STM   R4,R5,CSW      RESTORE THE CSW                  @VA01068 00272000
+         LR    R4,R1          SAVE THE I/O ERROR BLOCK ADDRESS          00273000
+         ICM   R1,15,IOBIOER  GET IOERBLOK ADDRESS             @VA01337 00274000
+         ST    R4,IOBIOER     SAVE NEW IOERBLOK ADDRESS        @VA01337 00275000
+         BZ    CCIOERBK       IF ZERO, GO SET UP IOERBLOK      @VA01337 00276000
+         LA    R0,IOERSIZE    GET SIZE IN DOUBLEWORDS          @VA01337 00277000
+         AH    R0,IOEREXT-IOERBLOK(R1) GET EXTENSION           @VA01337 00278000
+         CALL  DMKFRET        FRET IOERBLOK                    @VA01337 00279000
+CCIOERBK EQU   *                                               @VA01337 00280000
+         USING IOERBLOK,R4    SETUP ADDRESSABILITY FOR I/O ERROR BLOCK  00281000
+         XC    IOERBLOK(IOERSIZE*8),IOERBLOK CLEAR THE I/O ERROR BLOCK  00282000
+         MVI   IOEREXT+1,X'01'       PUT IN LENGTH OF EXTENSION         00283000
+         MVC   IOERCSW,FAILCSW SAVE CSW IN I/O ERROR BLOCK     @VA01068 00284000
+         MVC   IOERCCRL(8),RECLENTH  SAVE THE CCH RECORD LENGTH         00285000
+*                             AND ADDRESS                               00286000
+CCHDEPND EQU   *                                                        00287000
+         USING MCHAREA,R5     SETUP ADDRESSABILITY FOR MCH AREA         00288000
+         L     R5,AMCHAREA    GET PTR TO MCH COMMON AREA       @V407510 00289000
+         L     R15,DMK2880    GET THE ADDRESS OF THE 2880 MODULE        00290000
+         LA    R0,CCHSIZE     GET THE SIZE OF THE CCH RECORD IN         00291000
+*                             DOUBLEWORDS                               00292000
+         MVC   IGPRGFLG(1),ENTSW GET THE TYPE OF CONDITION     @VA01068 00293000
+         NI    IGPRGFLG,CCHSIOB+CCHINTB+CCHTIO+CCHHIO CLEAR    @VA01068 00294000
+*                             FLAGS                                     00295000
+         TM    IGPRGFLG,CCHTIO+CCHHIO IS TIO OR HIO INDICATED ?@VA01068 00296000
+         BZ    CCHBEGIN       NO, GO TEST FOR CHANNEL TYPE     @VA01068 00297000
+         NI    IGPRGFLG,X'FF'-CCHSIOB CLEAR THE SIO INDICATOR  @VA01068 00298000
+CCHBEGIN EQU   *                                               @VA01068 00299000
+         OI    IGPRGFLG,CCHSNSB INDICATE THE SENSE DATA IS     @VA01068 00300000
+*                             STORED                                    00301000
+         OI    IGVALIDB,CCHRCV+CCHCAV INDICATE THE RETRY CODE  @VA01068 00302000
+*                             AND CHANNEL ADDRESS ARE VALID             00303000
+         CLI   CCHANID,X'08'  IS THIS A 2880 CHANNEL TYPE ?             00304000
+         MVI   CCHCLOGL+1,X'70' SET UP LOG LENGTH              @V508690 00305000
+         BE    CCHEXIT1       YES, GO GET DEPENDENT MODULE              00306000
+         CLI   CCHANID,X'07'  IS THIS A 2880 CHANNEL TYPE ?             00307000
+         BE    CCHEXIT1       YES, GO GET DEPENDENT MODULE              00308000
+         MVI   CCHCLOGL+1,X'00' SET UP LOG LENGTH              @V508690 00309000
+         TM    FAILCSW+5,IFCC+CCC IS THIS A CHANNEL DATA CHECK @VA01068 00310000
+         BZ    RCUSCN1        YES, GO GET EIGHT BUSY UNITS              00311000
+         CLI   MCHMODEL,MODEL165     IS THIS A MODEL 165 OR 168 ?       00312000
+         BNE   INTEGRAT       NO, GO TO INTEGRATED CHANNEL SUPPORT      00313000
+         MVI   CCHCLOGL+1,X'18' SET UP LOG LENGTH              @V508690 00314000
+         L     R15,DMKCCH60   GET THE ADDRESS OF THE 2880 MODULE        00315000
+         CLI   CCHANID,X'05'  IS THIS A 2860 CHANNEL TYPE ?             00316000
+         BE    CCHEXIT1       YES, GO GET DEPENDENT MODULE              00317000
+         L     R15,DMK2870    GET THE ADDRESS OF THE 2870 MODULE        00318000
+         CLI   CCHANID,X'06'  IS THIS A 2870 CHANNEL TYPE ?             00319000
+         BNE   CCHERROR       NO, GO SET SYSTEM TERMINATION             00320000
+**********************************************************************  00321000
+CCHEXIT1 EQU   *                                                        00322000
+         LTR   R15,R15        IS THERE AN ADDRESS FOR                   00323000
+*                             THE DEPENDENT MODULE ?                    00324000
+         BZ    CPTERM         NO, GO TERMINATE THE OPERATING SYSTEM     00325000
+         BALR  R14,R15        GO TO DEPENDENT MODULE                    00326000
+         TM    ENTSW,TERMSYS  IS SYSTEM TERMINATION ON ?                00327000
+         BO    RCUSCN1        YES, GO GET EIGHT BUSY UNITS              00328000
+         TM    FAILCSW+5,CDC  IS THIS A CHANNEL DATA CHECK ?   @VA01068 00329000
+         BO    RCUSCN1        YES, GET EIGHT BUSY UNITS        @VA01337 00330000
+         TM    IGTERMSQ,COMPSYS IS TERMINATION CODE = 3 FOR    @VA01077 00331000
+*                             SYSTEM RESET                              00332000
+         BO    CCHERROR       YES, GO SET TERMINATION FLAG     @VA01077 00333000
+         LTR   R4,R4          IS THERE AN IOERBLOK ADDRESS ?            00334000
+         BZ    RCUSCN1        NO, GO GET EIGHT BUSY UNITS               00335000
+         MVC   IOERECSW(4),FAILECSW MOVE FAILING ECSW INTO     @VA01077 00336000
+*                             I/O ERROR BLOCK                           00337000
+         B     RCUSCN1        GO GET EIGHT BUSY UNITS                   00338000
+**********************************************************************  00339000
+INTEGRAT EQU   *                                                        00340000
+         SR    R2,R2          CLEAR REG 2 TO USE AS INDICATOR  @VA08513 00340100
+         TM    ECSWLOG,X'80'  IS LIMITED CHANNEL LOGOUT VALID  @VA01337 00341000
+         BO    CCHSYSM        NO, SET SYSTEM TERMINATION FLAG  @VA01337 00342000
+         TM    ECSWLOG+1,X'01' TEST THE 'LOG STORED' BIT IN LCL@VA08513 00342100
+         BZ    CCHRESET       EITHER LOG WAS NOT STORED OR     @VA08513 00342200
+*                             THIS CPU DOES NOT SET BIT 15 IN LCL       00342300
+         LA    R2,1           SET AN INDICATION OF LOG STORED  @VA08513 00342400
+CCHRESET TM    ECSWLOG+3,COMPSYS IS CHANNEL RESET?             @VA08513 00343000
+         BO    CCHSYSM          GO SET SYSTEM TERMINATION      @V5088AA 00344000
+         TM    FAILCSW+5,IFCC   INTERFACE CONTROL CHECK?       @V5088AA 00345000
+         BZ    CCHIOER          NO, TEST FOR IOERBLOK          @V5088AA 00346000
+         TM    ECSWBYT3,CCHIOH  I/O INTERFACE HANG-UP?         @V5088AA 00347000
+         BNO   CCHIOER          NO, TEST FOR IOERBLOK          @V5088AA 00348000
+         TM    RCHSTAT,RCHDED IS THE CHANNEL DEDICATED ??      @V508690 00349000
+         BO    CCHIOER        YES, THEN REFLECT ERROR TO USER  @V508690 00350000
+CCHSYSM  EQU   *                                                        00351000
+         OI    ENTSW,TERMSYS  SET SYSTEM TERMINATION FLAG               00352000
+CCHIOER  EQU   *                                                        00353000
+         MVC   FAILECSW+1(3),ECSWLOG+1 FAILING ECSW INTO       @VA01337 00354000
+*                             CCH RECORD                                00355000
+         LTR   R4,R4          IS THERE AN IOERBLOK ADDRESS              00356000
+         BZ    CCHFAIL        NO, GO GET FAILING ECSW                   00357000
+         MVC   IOERECSW(4),FAILECSW MOVE FAILING ECSW INTO     @VA01068 00358000
+*                             CCH RECORD                                00359000
+CCHFAIL  EQU   *                                                        00360000
+         LA    R0,CCHSIZE1    GET THE SIZE OF CCH RECORD       @VA01068 00361000
+         A     R0,F7          PUT LENGTH IN                    @VA01068 00362000
+         SRL   R0,3           DOUBLEWORDS                      @VA01068 00363000
+         MVC   CCHADDR+2(2),SIOADDR MOVE IN UNIT ADDRESS       @VA01068 00364000
+*                             BY INTEGRATED CHANNEL                     00365000
+         MVI   ECSWLOG,X'FF'  INITIALIZE THE ECSW              @VA01337 00366000
+         CLI   MCHMODEL,MOD4331   MODEL 4331/4341?             @V60A6B6 00366100
+         BE    RCUSCN1        THEN IOELPNTR MAY BE INVALID.    @V60A6B6 00366200
+         ICM   R1,15,IOELPNTR GET ADDRESS OF I/O EXTENDED LOGOUT        00367000
+*                             AREA                                      00368000
+         BZ    RCUSCN1        IF ADDRESS IS ZERO, GO INDICATE           00369000
+*                             SIZE OF CCH RECORD                        00370000
+         LTR   R2,R2          WAS BIT 15 OF LCL (LOG STORED) =1@VA08513 00370100
+         BNZ   GOODIOEL       IF SO, DONT CHECK IOEL FOR X'FF'S@VA08513 00370200
+         CLC   0(4,R1),FFS    IS THE LOGOUT AREA VALID ?                00371000
+         BE    RCUSCN1        NO, GO INDICATE SIZE OF CCH RECORD        00372000
+GOODIOEL SR    R2,R2          CLEAR WORK REGISTER              @VA08513 00373000
+         ICM   R2,3,DMKCCHSZ    GET THE SIZES OF THE I/O EXT.  @V5088AA 00374000
+*                             LOGOUT AREA                               00375000
+         BZ    RCUSCN1        IF ZERO, GO INDICATE CCH RECORD SIZES     00376000
+         CLI   MCHMODEL,MODEL145  IS THIS A MODEL 145/148?     @V386298 00377000
+         BNE   CCHMVC1        NO, GO MOVE LOGOUT AREA INTO RECORD       00378000
+         CLI   CCHANID,X'01'  IS THIS A BYTE MPX CHANNEL ?              00379000
+         BNE   CCHMVC1        NO, GO MOVE LOGOUT AREA INTO RECORD       00380000
+         TM    0(R1),X'80'    DOES LOGOUT APPLIES TO THIS ERROR@VA01068 00381000
+         BZ    RCUSCN1        NO, GO SAVE CCH RECORD LENGTH    @VA01068 00382000
+         LA    R2,76          GET SIZE OF I/O EXTENDED LOGOUT  @VA01068 00383000
+*                             FOR CHANNEL CONTROL CHECK                 00384000
+         TM    FAILCSW+5,IFCC IS THIS INTERFACE CONT CHECK ?   @VA01068 00385000
+         BZ    CCHMVC1        NO, GO GET THE SIZES OF THE CCH RECORD    00386000
+         LA    R2,36          GET SIZE OF I/O EXTENDED LOGOUT  @VA01068 00387000
+*                             FOR INTERFACE CONTROL CHECK               00388000
+CCHMVC1  EQU   *                                                        00389000
+         LA    R0,CCHSIZE1(R2) GET SIZE OF CCH RECORD          @VA01068 00390000
+         A     R0,F7          PUT LENGTH IN                    @VA01068 00391000
+         STCM  R2,B'0011',CCHCLOGL SAVE SIZE OF LOGOUT         @V508690 00392000
+         SRL   R0,3           DOUBLEWORDS                      @VA01068 00393000
+         LR    R14,R4           TEMPORARY SAVE OF IOERBLOK @   @V5088AA 00394000
+         LR    R15,R2           TEMPORARY SAVE OF IOEL LENGTH  @V5088AA 00395000
+         LR    R3,R2            LENGTH TO MOVE                 @V5088AA 00396000
+         LR    R5,R3            LENGTH TO MOVE                 @V5088AA 00397000
+         LR    R4,R1            'FROM' ADDRESS (IOEL)          @V5088AA 00398000
+         LA    R2,CCHLOG45      'TO' ADDRESS (CCH RECORD)      @V5088AA 00399000
+         MVCL  R2,R4            MOVE IOEL TO CCH RECORD        @V5088AA 00400000
+         LR    R2,R1            'TO' ADDRESS (IOEL)            @V5088AA 00401000
+         LR    R3,R15           LENGTH OF IOEL FOR MOVE        @V5088AA 00402000
+         LR    R4,R2            'FROM' ADDRESS                 @V5088AA 00403000
+         L     R5,F255          PAD CHARACTER                  @V5088AA 00404000
+         SLL   R5,24            PAD CHAR. OF X'FF', LENGTH=0   @V5088AA 00405000
+         MVCL  R2,R4            PROPAGATE FF'S THRUOUT IOEL    @V5088AA 00406000
+         LR    R4,R14           RESTORE IOERBLOK BASE ADDRESS  @V5088AA 00407000
+         B     RCUSCN1        GO SAVE THE CCH RECORD LENGTH             00408000
+**********************************************************************  00409000
+CCHERROR EQU   *                                                        00410000
+         OI    ENTSW,TERMSYS  SET SYSTEM TERMINATION FLAG               00411000
+**********************************************************************  00412000
+RCUSCN1  EQU   *                                                        00413000
+         CALL  DMKFREE        GET THE STORAGE FOR THE CCH      @VA00881 00414000
+*                             RECORD                                    00415000
+         LTR   R4,R4          IS THERE AN IOERBLOK ?           @VA00881 00416000
+         BZ    RMSREC         NO, GO COPY CCH RECORD INTO NEW  @VA00881 00417000
+*                             STORAGE                                   00418000
+         STM   R0,R1,IOERCCRL SAVE SIZE AND ADDRESS OF CCH     @VA00881 00419000
+*                             RECORD                                    00420000
+RMSREC   EQU   *                                               @VA00881 00421000
+         LR    R5,R0          GET THE SIZE OF THE CCH RECORD   @VA00881 00422000
+         SLL   R5,3           GET THE LENGTH IN BYTES FOR CCH  @VA00881 00423000
+*                             RECORD                                    00424000
+         LR    R3,R5          GET THE LENGTH OF CCH RECORD     @VA00881 00425000
+         LR    R2,R1          GET THE ADDRESS OF THE NEW CCH   @VA00881 00426000
+*                             RECORD                                    00427000
+         L     R4,RECADDR     GET THE ADDRESS OF THE OLD CCH   @VA00881 00428000
+*                             RECORD                                    00429000
+         MVCL  R2,R4          MOVE THE CCH RECORD TO NEW       @VA00881 00430000
+*                             LOCATION                                  00431000
+         LR    R2,R0          GET THE SIZE OF THE NEW CCH      @VA00881 00432000
+*                             RECORD                                    00433000
+         LR    R3,R1          GET THE ADDRESS OF THE NEW CCH   @VA00881 00434000
+*                             RECORD                                    00435000
+         LR    R9,R3          GET THE ADDRESS OF THE NEW CCH   @VA00881 00436000
+*                             RECORD                                    00437000
+         LM    R0,R1,RECLENTH GET THE SIZE AND ADDRESS OF      @VA00881 00438000
+*                             THE OLD CCH RECORD                        00439000
+         CALL  DMKFRET        RELEASE STORAGE FOR OLD CCH      @VA00881 00440000
+*                             RECORD                                    00441000
+         STM   R2,R3,RECLENTH SAVE THE SIZE AND ADDRESS OF THE @VA00881 00442000
+*                             NEW CCH RECORD                            00443000
+RCUSCN2  EQU   *                                                        00444000
+         SR    R1,R1          CLEAR SWITCH REGISTER                     00445000
+         LTR   R6,R6          IS THERE AN RCHBLOK ADDRESS ?             00446000
+         BM    SCNEND         NO, GO TEST FOR SYSTEM TERMINATION        00447000
+         TM    ENTSW,DEVCCH   DOES THE DEVICE ADDRESS EXIST ?           00448000
+         BZ    RCUSCN         NO, GO SETUP FOR SCAN                     00449000
+         TM    RDEVSTAT,RDEVBUSY     WAS FAILING DEVICE ACTIVE ?        00450000
+         BZ    RCUSCN         NO, GO SETUP FOR SCAN                     00451000
+         MVC   FAILADD(2),SIOADDR    SAVE THE FAILING DEVICE ADDRESS    00452000
+         LA    R1,2           UPDATE THE SAVE AREA FOR UNITS BY 1       00453000
+RCUSCN   EQU   *                                                        00454000
+         LA    R2,2           INITIALIZE THE INCREMENT LENGTH           00455000
+         LR    R4,R2          UPDATE REGISTER 4                         00456000
+         LA    R3,62          INITIALIZE THE COUNT                      00457000
+         ST    R11,FALADDPT   SAVE THE CONTENT OF REGISTER 11           00458000
+         SR    R11,R11        CLEAR REGISTER 11                         00459000
+RCCUSCN  EQU   *                                                        00460000
+         LH    R7,RCHCUTBL(R11)      GET THE CONTROL UNIT ADDRESS       00461000
+         LTR   R7,R7          IS THERE A CONTROL UNIT ADDRESS ?         00462000
+         BM    RCUSCNI        NO, GO GET NEXT CONTROL UNIT              00463000
+         A     R7,ARIOCU      GET ADDRESS OF RCUBLOK                    00464000
+         SR    R14,R14        CLEAR REGISTER 14 FOR INDEX               00465000
+         LA    R5,30          INITIALIZE COUNT REGISTER                 00466000
+RDEVSCN  EQU   *                                                        00467000
+         LH    R8,RCUDVTBL(R14)      GET THE DEVICE ADDRESS             00468000
+         LTR   R8,R8          IS THERE A DEVICE ADDRESS ?               00469000
+         BM    RDVSCNI        NO, GO GET NEXT DEVICE ADDRESS            00470000
+         SLL   R8,3(0)        CONVERT TO BYTE INDEX            @V200820 00471000
+         A     R8,ARIODV      GET ADDRESS OF RDEVBLOK                   00472000
+         C     R8,RDEVSAVE    IS THIS THE FAILING DEVICE ADDRESS        00473000
+         BE    RDVSCNI        YES, DON'T PUT ADDRESS IN RECORD          00474000
+         TM    RDEVSTAT,RDEVBUSY     WAS THE DEVICE BUSY ?              00475000
+         BZ    RDVSCNI        NO, GO GET NEXT DEVICE ADDRESS            00476000
+FOUNDUM  EQU   *                                                        00477000
+         C     R1,F16         ARE THERE EIGHT CONTROL UNITS SAVE ?      00478000
+         BE    SCNEND1        YES, GO GET DEVICE ADDRESS                00479000
+         LH    R0,RDEVADD     GET DEVICE ADDRESS                        00480000
+         LH    R15,RCUADD     GET CONTROL UNIT ADDRESS                  00481000
+         OR    R15,R0         GET THE                                   00482000
+         LH    R0,RCHADD      CONTROL UNIT ADDRESS                      00483000
+         OR    R15,R0         *                                         00484000
+         STH   R15,FAILADD(R1)       SAVE UNIT ADDRESS IN CCH RECORD    00485000
+         LA    R1,2(R1)       UPDATE UNIT ADDRESS COUNT                 00486000
+RDVSCNI  EQU   *                                                        00487000
+         BXLE  R14,R4,RDEVSCN GET THE NEXT DEVICE ADDRESS AND BRANCH    00488000
+RCUSCNI  EQU   *                                                        00489000
+         BXLE  R11,R2,RCCUSCN GET THE NEXT CONTROL UNIT AND BRANCH      00490000
+SCNEND1  EQU   *                                                        00491000
+         L     R11,FALADDPT   RESTORE THE CONTENT OF REGISTER 11        00492000
+SCNEND   EQU   *                                                        00493000
+         TM    ENTSW,TERMSYS  IS SYSTEM TERMINATION INDICATED ?         00494000
+         BO    CCHRESTO       YES, RESTORE I/O EXTENDED LOGOUT AREA     00495000
+*                             FOR SEREP                                 00496000
+         LM    R7,R8,RCUSAVE  GET THE DEVICE AND CONTROL UNIT ADDRS.    00497000
+         TM    ENTSW,DEVCCH+IOBCCH   DOES THE ADDRESSES EXIST ?         00498000
+         BNO   CCHIOE         NO, GO PUT CCH RECORD OUT ON              00499000
+*                             LOGREC                                    00500000
+         LM    R4,R5,FAILCSW  GET THE CSW FOR RESTORE          @VA01068 00501000
+         TM    ENTSW,INTERCCH INTERRUPT ENTRY                  @VA01068 00502000
+         BO    RESTDEV        YES, RESTORE DEVICE AND CSW      @VA01068 00503000
+         B     RESTCSW                                         @VA01068 00504000
+*********************************************************************   00505000
+*********************************************************************   00506000
+         SPACE 2                                                        00507000
+CCHIOE   EQU   * IF NO RDEV OR NO IOBLOK, COME HERE TO RECORD CHL CHK   00508000
+         LM    R4,R5,FAILCSW  GET THE CSW FOR RESTORE          @VA01068 00509000
+         BAL   R3,MESSAGE     GO WRITE THE MESSAGE             @VA01068 00510000
+         L     R7,RECLENTH    GET CCH RECORD LENGTH                     00511000
+         L     R6,RECADDR     GET THE ADDRESS OF THE CCH RECORD AREA    00512000
+         SR    R0,R0          CLEAR RETURN CODE REGISTER       @VA03358 00513000
+         CALL  DMKIOECC,AFFINITY                               @V407510 00514000
+         LTR   R0,R0          WAS THE RECORDING SUCCESSFUL              00515000
+         BZ    MSGGEN         YES, GO PUT OUT MESSAGE                   00516000
+         LA    R0,MSG15L      GET THE LENGTH OF THE MESSAGE             00517000
+         LA    R1,MSG15M      GET THE ADDRESS OF THE ERROR MESSAGE      00518000
+         CALL  DMKQCNWT,PARM=OPERATOR+ALARM+NORET,AFFINITY     @V407510 00519000
+MSGGEN   EQU   *                                                        00520000
+         TM    ENTSW,SIOCCH   START I/O ENTRY                  @VA01068 00521000
+         BO    RESTCSW        YES, JUST RESTORE THE CSW        @VA01068 00522000
+RESTDEV  LH    R2,SIOADDR     GET THE DEVICE ADDRESS           @VA01068 00523000
+         STH   R2,INTTIO      RESTORE IT                       @VA01068 00524000
+RESTCSW  EQU   *                                               @VA01068 00525000
+         STM   R4,R5,CSW      RESTORE THE CSW FOR IOS          @VA01068 00526000
+         EXIT  RETURN TO IOS                                            00527000
+*********************************************************************   00528000
+         EJECT                                                          00529000
+CCHRESTO EQU   *                                                        00530000
+         MVC   ECSWLOG(4),FAILECSW RESTORE ECSW INFORMATION    @VA01337 00531000
+         SR    R2,R2          CLEAR REGISTER 2                          00532000
+         ICM   R2,3,DMKCCHSZ    GET THE I/O EXT. LOGOUT LENGTH @V5088AA 00533000
+         BZ    CPTERM         IF ZERO, GO PUT SYSTEM DOWN               00534000
+         BCTR  R2,R0          SUBTRACT ONE FROM THE LENGTH              00535000
+         ICM   R1,15,IOELPNTR GET THE POINTER TO THE I/O                00536000
+*                             EXTENDED LOGOUT                           00537000
+         BZ    CPTERM         IF ZERO, GO PUT SYSTEM DOWN               00538000
+         SR    R3,R3          CLEAR REGISTER 3 FOR INDEX                00539000
+         L     R5,AMCHAREA    GET PTR TO MCH COMMON AREA       @V407510 00540000
+         ICM   R3,1,MCHMODEL  GET THE MODEL ID.                         00541000
+         B     CCHSEREP(R3)   BRANCH TO THE CORRECT MODEL SUPPORT       00542000
+CCHSEREP EQU   *                                                        00543000
+         B     CPTERM         GO PUT THE SYSTEM DOWN                    00544000
+         B     LOGOUT         RESTORE LOGOUT AREA                       00545000
+         B     LOGOUT         RESTORE LOGOUT AREA FOR 145               00546000
+         B     CPTERM         GO PUT SYSTEM DOWN                        00547000
+         B     CCHCHAN        GO CHECK CHANNEL ID FOR 165/168           00548000
+         B     CPTERM         GO PUT THE SYSTEM DOWN FOR 3031/ @V5088AA 00549000
+*                             3032/3033 PROCESSORS                      00550000
+LOGOUT   EQU   *                                                        00551000
+         EX    R2,MVCLOG      RESTORE I/O EXTENDED LOGOUT AREA          00552000
+         B     CPTERM         GO PUT SYSTEM DOWN                        00553000
+         SPACE 2                                                        00554000
+*********************************************************************   00555000
+MVCLOG   MVC   0(0,R1),CCHLOG45  MOVE I/O EXTENDED LOGOUT               00556000
+*                             INTO STORAGE                              00557000
+MVCLOG1  MVC   0(0,R1),CCHLOG80  MOVE I/O EXTENDED LOGOUT               00558000
+*                             FOR STANDALONE CHANNEL INTO STORAGE       00559000
+*********************************************************************   00560000
+         SPACE 2                                                        00561000
+CCHCHAN  EQU   *                                                        00562000
+         CLI   RECLENTH+3,X'18' IS THIS A 2880 CHANNEL ?       @VA00881 00563000
+         BE    LOGOUT1        YES, GO RESTORE I/O EXTENDED LOGOUT       00564000
+         LA    R1,304         ADDRESS OF THE I/O EXTENDED LOGOUT AREA   00565000
+         LA    R2,23          THE LENGTH OF THE I/O EXTENDED LOGOUT     00566000
+         CLI   RECLENTH+3,X'0D' IS THIS A 2860 OR 2870         @VA00881 00567000
+*                             CHANNEL ?                                 00568000
+         BNE   CPTERM         NO, GO PUT SYSTEM DOWN                    00569000
+LOGOUT1  EQU   *                                                        00570000
+         EX    R2,MVCLOG1     RESTORE I/O EXTENDED LOGOUT AREA          00571000
+         EJECT                                                          00572000
+*********************************************************************   00573000
+*              OPERATOR COMMUNICATION ROUTINE                           00574000
+*********************************************************************   00575000
+         SPACE 2                                                        00576000
+CPTERM   EQU   *                                                        00577000
+         MVI   MCNPSW+3,X'0F' SET FOR SEREP                    @VA08387 00577500
+         LH    R2,SIOADDR     GET THE ADDRESS OF THE DEVICE             00578000
+         STH   R2,IOOPSW+2    SAVE THE DEVICE ADDRESS IN I/O OLD        00579000
+*                             PSW                                       00580000
+         MVC   SAVEWRK2(20),IOOPSW SAVE THE I/O OLD PSW, CSW & CAW      00581000
+         USING VMBLOK,R11     SETUP ADDRESSABILITY FOR VMBLOK           00582000
+         LA    R1,CCMSG       GET THE CHANNEL MESSAGE          @VA01337 00583000
+         LA    R0,CCMSGL      GET LENGTH OF MESSAGE            @VA01337 00584000
+         LA    R2,WAITCCH     WAIT STATE CODE IN R2            @V407510 00585000
+         GOTO  DMKMCHST       BRANCH TO TERMINATE SYSTEM       @V407510 00586000
+         SPACE                                                          00587000
+*********************************************************************   00588000
+         SPACE                                                          00589000
+         DROP  R6                                              @VMD0144 00590000
+         EJECT                                                          00591000
+*******************************************************************     00592000
+*        PRINT THE CHANNEL ERROR MESSAGE FOR DMKIOE.                    00593000
+*********************************************************************   00594000
+         SPACE                                                          00595000
+DMKCCHRT RELOC                                                          00596000
+         LTR   R10,R10        IS THERE AN IOBLOK ?             @VA01077 00597000
+         BNP   CCHEND         NO, DON'T LOOK FOR TROUBLE       @VA01077 00598000
+         L     R4,IOBIOER     GET IOERBLOK ADDRESS                      00599000
+         L     R9,IOERCCRA    GET RECORD ADDRESS                        00600000
+         BAL   R3,MESSAGE     GO SETUP CCH MESSAGE                      00601000
+         LTR   R8,R8          WAS THERE A RDEVBLOK ?                    00602000
+         BNP   CCHEND         NO,EXIT GRACEFULLY                        00603000
+         SPACE                                                          00604000
+         TM    IOBFLAG,IOBCP  WAS THIS A CP GENERATED          @VA01077 00605000
+*                             EVENT ?                                   00606000
+         BNZ   CCHEND         YES, EXIT                        @VA00881 00607000
+         LTR   R4,R4          DO WE HAVE AN IOERBLOK ?         @V508690 00608000
+         BZ    CCHEND         NO,LETS RETURN                   @V508690 00609000
+         LH    R2,CCHCLOGL    GET THE LENGTH OF LOGOUT         @V508690 00610000
+         LA    R2,CCHADDR-CCCPUID(R2) LENGTH OF IOERCCR EXT    @V508690 00611000
+         CLI   CCHANID,X'08'  CHECK FOR STANDALONE CHANNEL     @V508690 00612000
+         BE    LNTHOK         IT IS, DO NOT INCREMENT COUNT    @V508690 00613000
+         TM    CCHANID,X'04'  ONE OF THE OTHER STANDALONES ?   @V508690 00614000
+         BO    LNTHOK         YES, DO NOT INCREMENT COUNT      @V508690 00615000
+         LA    R2,4(,R2)      INCREMENT COUNT,INTEGRAT ADDR    @V508690 00616000
+LNTHOK   A     R2,F7          ROUND UP                         @V508690 00617000
+         SRL   R2,3           CONVERT TO DOUBLEWORDS           @V508690 00618000
+         STH   R2,IOERCCH     SAVE SIZE OF CCH RECORD          @V508690 00619000
+         LA    R0,IOERSIZE(R2) ADD IN THE IOERBLOK SIZE        @V508690 00620000
+         AH    R0,IOEREXT     ADD IOEREXT SIZE (SHOULD BE 1)   @V508690 00621000
+         CALL  DMKFREE        GET STORAGE FOR NEW IOERBLOK     @V508690 00622000
+         ST    R1,IOBIOER     CHAIN NEW IOERBLOK               @V508690 00623000
+         ST    R1,SAVER4      PASS BACK TO DMKIOE THE NEW      @V508690 00624000
+*                             IOERBLOK ADDRESS.                         00625000
+         LR    R2,R1          ADDRESS OF NEW IOERBLOK          @V508690 00626000
+         LA    R3,IOERSIZE+1  SIZE OF OLD IOERBLOK             @V508690 00627000
+         SLL   R3,3           CONVERT TO BYTES                 @V508690 00628000
+         LR    R7,R3          MAKE COUNT REGS EQUAL            @V508690 00629000
+         LR    R6,R4          ADDRESS OF OLD IOERBLOK          @V508690 00630000
+         MVCL  R2,R6          MOVE IT                          @V508690 00631000
+         LH    R3,IOERCCH     LENGTH OF CCH RECORD             @V508690 00632000
+         SLL   R3,3           CONVERT TO BYTES                 @V508690 00633000
+         LR    R7,R3          MAKE COUNT REGS EQUAL            @V508690 00634000
+         LA    R6,CCCPUID     ADDR OF CCHREC TO BE COPIED      @V508690 00635000
+         MVCL  R2,R6          MOVE CCHREC PORTION TO IOERBLOK  @V508690 00636000
+*                             R2 SET FROM PREVIOUS MVCL                 00637000
+         LH    R0,IOERCCH     CCR EXT. SIZE                    @VMD0114 00638000
+         AH    R0,IOEREXT     ADD SIZE OF OLD IOERBLOK EXT.    @VMD0114 00639000
+         STH   R0,IOEREXT-IOERBLOK(R1)  SIZE OF NEW IOERBLOK   @VMD0114 00640000
+*                             EXT. GETS PUT INTO NEW IOERBLOK           00641000
+         LA    R0,IOERSIZE    SET UP TO FRET OLD IOERBLOK      @V508690 00642000
+         AH    R0,IOEREXT     ADD THE EXTENTION SIZE           @V508690 00643000
+         LR    R1,R4          ADDRESS OF OLD IOERBLOK TO FRET  @V508690 00644000
+         CALL  DMKFRET        FRET THE OLD IOERBLOK            @V508690 00645000
+         SPACE                                                          00646000
+CCHEND   EQU   *                                                        00647000
+         EXIT  RETURN TO THE RECORDER (DMKIOE)                          00648000
+         SPACE                                                          00649000
+*********************************************************************   00650000
+         EJECT                                                          00651000
+*********************************************************************   00652000
+MESSAGE  EQU   *                                                        00653000
+         SR    R1,R1          CLEAR REGISTER 1                 @VA01068 00654000
+         ICM   R1,7,CCHCUA    GET FAILING DEVICE ADDRESS       @VA01068 00655000
+         CALL  DMKCVTBH       CONVERT TO PRINT FORM                     00656000
+         LA    R0,CCCMSGL    INSERT MSG LENGTH                          00657000
+         STCM  R1,C7,CCCADDR  MOVE FAILING ADDRESS IN MESSAGE           00658000
+         MVC   CCCUSID(8),CCPROGID     MOVE USERID TO MSG               00659000
+         TM    FAILCSW+5,CCC+IFCC    WAS IT A CHANNEL CONTROL           00660000
+*                             CHECK OR INTERFACE CONTROL CHECK ?        00661000
+         BZ    MSGEXIT        NO, RETURN TO IN LINE CODE                00662000
+         LA    R1,CCCMSG      GET THE BEGINNING ADDRESS OF THE MESSAGE  00663000
+         MVC   CCCMSID(12),CCCCONST MOVE IN CHANNEL CONTROL CHECK ID.   00664000
+         TM    FAILCSW+5,IFCC IS THIS INTERFACE CONTROL CHECK  @VA01068 00665000
+         BZ    MSGOPERA       NO, GO PUT MESSAGE OUT           @VA01068 00666000
+         MVC   CCCMSID(12),ICCCONST MOVE IN INTERFACE CONTROL CHECK     00667000
+*                             IDENTIFICATION                            00668000
+MSGOPERA EQU   *                                                        00669000
+         CALL  DMKQCNWT,PARM=OPERATOR+NORET,AFFINITY           @V407510 00670000
+MSGEXIT  EQU   *                                                        00671000
+         BR    R3             RETURN TO IN LINE CODE                    00672000
+********************************************************************    00673000
+*******************************************************************     00674000
+         EJECT                                                          00675000
+********************************************************************    00676000
+*                                                                       00677000
+* SUBROUTINE NAME                                                       00678000
+*                                                                       00679000
+*        DMKCCHRF                                                       00680000
+*                                                                       00681000
+* FUNCTION -                                                            00682000
+*                                                                       00683000
+*        THIS SUBROUTINE WILL REFLECT CHANNEL LOGOUT INFORMATION        00684000
+*        TO A USERS VIRTUAL MACHINE PAGE ZERO ..                        00685000
+*                                                                       00686000
+* ATTRIBUTES -                                                          00687000
+*                                                                       00688000
+*        RESIDENT,SERIALLY REUSABLE, ENTERED VIA SVC                    00689000
+*                                                                       00690000
+* ENTRY CONDITIONS -                                                    00691000
+*                                                                       00692000
+*        GR  2 = ADDRESSABILITY FOR USER PAGE ZERO                      00693000
+*        GR  8 = ADDRESS OF VDEVBLOK                                    00694000
+*        GR 11 = ADDRESS OF VMBLOK                                      00695000
+*                                                                       00696000
+* EXIT CONDITIONS -                                                     00697000
+*                                                                       00698000
+*        THE CHANNEL CHECK INFORMATION WILL HAVE BEEN REFLECTED         00699000
+*        TO THE USERS PAGE ZERO AND USERS CHANNEL LOGOUT AREA.          00700000
+*                                                                       00701000
+* CALLS TO OTHER ROUTINES -                                             00702000
+*                                                                       00703000
+*        DMKFRET - TO FRET THE IOERBLOK ASSOCIATED WITH THE             00704000
+*                  CHANNEL CHECK.                                       00705000
+*                                                                       00706000
+* EXTERNAL REFERENCES -                                                 00707000
+*                                                                       00708000
+*        NONE                                                           00709000
+*                                                                       00710000
+* TABLES/WORK AREAS -                                                   00711000
+*                                                                       00712000
+*        IOERBLOK EXTENTION CONTAINS THE CHANNEL CHECK                  00713000
+*        INFORMATION TO BE REFLECTED.                                   00714000
+*                                                                       00715000
+* NOTES -                                                               00716000
+*        THE ONLY TIME THIS ROUTINE GETS CONTROL IS WHEN A              00717000
+*        CHANNEL CHECK IS DETECTED WHILE TRYING TO REFLECT              00718000
+*        STATUS TO THE VIRTUAL MACHINE.                                 00719000
+*        THIS ROUTINE IS CALLED BY:                                     00720000
+*                                                                       00721000
+*        DMKVIO                                                         00722000
+*        DMKVSI                                                         00723000
+*        DMKDSP                                                         00724000
+*                                                                       00725000
+* REGISTER USAGE -                                                      00726000
+*                                                                       00727000
+*        GR 14,15 LINKAGE REGISTERS                                     00728000
+*        GR 12 = MODULE BASE REGISTER                                   00729000
+*        GR 11 = VMBLOK ADDRESSABILITY                                  00730000
+*        GR  9 = IOERBLOK ADDRESSABILITY                                00731000
+*        GR  8 = VDEVBLOK ADDRESSABILITY                                00732000
+*        GR  2 = ADDRESSABILITY FOR USER PAGE ZERO AND LOGOUT AREA      00733000
+*        GR 1,3,4,5 AND 7 = WORK REGISTERS                              00734000
+*                                                                       00735000
+* OPERATION -                                                           00736000
+*                                                                       00737000
+*        1. FOR ALL CHANNELS EXCEPT STANDALONE CHANNELS (2860,2870      00738000
+*           2880) MOVE THE ECSW FROM THE IOERBLOK EXTENTION TO USERS    00739000
+*           PAGE ZERO.                                                  00740000
+*                                                                       00741000
+*        2. DETERMINE THE CPU TYPE.                                     00742000
+*                                                                       00743000
+*        3. FOR ALL CPU'S EXCEPT 155/158 OBTAIN THE ADDRESS OF THE      00744000
+*           LOGOUT AREA, IF NECESSARY BRING USER'S PAGE INTO CORE THEN  00745000
+*           MOVE THE CHANNEL LOGOUT INFORMATION FROM THE IOERBLOK       00746000
+*           EXTENTION TO THE VIRTUAL MACHINES LOGOUT AREA.              00747000
+*           BUT FOR CPU'S WITH CHANNELS THAT ALLOW C-REG 14 TO MASK     00748000
+*           OFF THE LOGOUT AND WHICH USE THE LOGOUT POINTER IN LOW      00749000
+*           CORE AT X'AC', WE FIRST CHECK THE USERS C-REG 14 TO SEE     00750000
+*           IF LOGOUT IS PERMITTED.  IF IT IS WE THEN MAKE ONE          00751000
+*           ADDITIONAL CHECK (NOT WANTED BY S/370 ARCHITECTURE, BUT     00752000
+*           IT MAY PREVENT SOMEONE'S LOW CORE FROM BEING WIPED OUT)     00753000
+*           BEFORE PROCEEDING: IF HIS LOGOUT POINTER (AT LOCATION       00754000
+*           X'AC') POINTS TO 0 WE WILL NOT LOGOUT.                      00755000
+*                                                                       00756000
+*        4. FRET THE IOERBLOK.                                          00757000
+*                                                                       00758000
+* ERROR MESSAGES -                                                      00759000
+*                                                                       00760000
+*        NONE                                                           00761000
+*                                                                       00762000
+*********************************************************************   00763000
+         SPACE 3                                                        00764000
+DMKCCHRF RELOC                                                 @V508690 00765000
+         USING VDEVBLOK,R8                                     @V508690 00766000
+         USING IOERBLOK,R9                                     @V508690 00767000
+         SPACE                                                          00768000
+         L     R9,VDEVIOER    PICK UP IOERBLOK ADDR            @V508690 00769000
+         CLI   IOERCCH+1,X'00' DO WE HAVE A CCR EXTENTION      @V508690 00770000
+         BE    FRETCCR        NO,FRET IOERBLOK AND EXIT        @V508690 00771000
+         SLR   R1,R1          SET UP FOR USER PAGE ZERO        @V508690 00772000
+         SL    R8,VMDVSTRT    DEVICE DISPLACEMENT              @V508690 00773000
+         TRANS 2,1,OPT=(BRING,DEFER) GET USER PAGE ZERO        @V508690 00774000
+         AL    R8,VMDVSTRT    RESTORE VDEVBLOK PNTR            @V508690 00775000
+         CLI   IOERCHID,IOER2860 TEST FOR STANDALONE CHANNELS  @V508690 00776000
+         BL    MVECSW         NOT STANDALONE,GO MOVE ECSW      @V508690 00777000
+         CLI   IOERCHID,IOERS80 CHECK HI END OF RANGE          @V508690 00778000
+         BNH   CPUTYP         YES, A STANDALONE , BYPASS MOVE  @V508690 00779000
+MVECSW   MVC   ECSWLOG-PSA(4,R2),IOERZCSW PASS ECSW TO USER    @V508690 00780000
+         SPACE                                                          00781000
+CPUTYP   EQU   *                                               @V508690 00782000
+         L     R5,AMCHAREA    GET MCH AREA POINTER             @V508690 00783000
+         CLI   MCHMODEL,MODEL155 IS THIS A 155/158 ?           @V508690 00784000
+         BE    FRETCCR        YES,ALL DONE,155/158 DO NOT LOG  @V508690 00785000
+         SPACE                                                          00786000
+*        DETERMINE WHETHER THE CHANNEL IS ONE THAT LOGS OUT IN THE      00787000
+*        FIXED LOGOUT AREA IN LOW CORE AND IGNORES THE LOGOUT MASK IN   00788000
+*        C-REG 14, OR ONE THAT USES THE IOEL POINTER (AT X'AC' IN LOW   00789000
+*        CORE) AND HEEDS THE MASK IN C-REG 14.                          00790000
+         TM    IOERCHID,X'04' 2860/2870 CHANNEL?               @VMD0151 00791000
+         BZ    TRY135         NO, DEFINITELY NOT 2860/2870.    @VMD0151 00792000
+         LA    R1,FXDLOG+48   2860/2870 LOW CORE LOGOUT AREA.  @VMD0151 00793000
+         CLI   IOERCHID,IOERB80  2880 SLIPPED THRU ABOVE TEST? @VMD0151 00794000
+         BNE   GETLOGA        NO, SO IT IS TRULY 2860/2870.    @VMD0151 00795000
+TRY135   LA    R1,FXDLOG      135/138 LOW CORE LOGOUT AREA.    @VMD0151 00796000
+         CLI   MCHMODEL,MODEL135  IS IT REALLY 135/138?        @VMD0151 00797000
+         BE    GETLOGA        YES, 135/138.                    @VMD0151 00798000
+         SPACE                                                          00799000
+*        THE CHANNEL USES IOEL POINTER.  (INTEGRATED CHNL OR 2880 CHNL) 00800000
+         L     R1,IOELPNTR(R2)  POINTER TO LOGOUT AREA.        @VMD0151 00801000
+         TM    VMVCR14,VMIOLOG  TEST USERS C-REG 14 I/O LOGOUT @VMD0103 00802000
+*                               MASK.                                   00803000
+         BNO   FRETCCR        DO NOT LOGOUT, C-REG 14 PREVENTS.@VMD0103 00804000
+         LTR   R1,R1          IS HIS LOGOUT POINTER A 0?       @VMD0103 00805000
+         BZ    FRETCCR        DO NOT LOGOUT, IT WOULD KILL HIM.@VMD0103 00806000
+GETLOGA  DS    0H  TRANSLATE VIRT. LOG ADDR (R1) TO REAL (R2). @VMD0151 00807000
+         SL    R8,VMDVSTRT    DEVICE DISPLACEMENT.             @VMD0103 00808000
+         TRANS 2,1,OPT=(BRING,DEFER) GET USER LOG AREA         @V508690 00809000
+         AL    R8,VMDVSTRT    RESTORE DEVICE BLOK PNTR         @V508690 00810000
+*        - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -  00811000
+*        FROM HERE TO NEXT DASHED COMMENT SEPARATOR WE ARE COMPUTING:   00812000
+*        R4 GETS ADDRESS OF LOGOUT DATA IN IOERBLOK.                    00813000
+*        R5 GETS LENGTH OF THIS LOGOUT DATA.  LENGTH IS LESSER OF:      00814000
+*        (1) LENGTH FOUND IN IOERLOGL (=CCHCLOGL); (2) STIDC LENGTH;    00815000
+*        (3) LENGTH OF DATA AFTER X'FF' PAD BYTES HAVE BEEN STRIPPED    00816000
+*        FROM FAR END.                                                  00817000
+         SR    R5,R5                                           @VMD0135 00818000
+         IC    R5,IOERCCUA+1  CHANNEL NUMBER OF FAILING REAL   @VMD0135 00819000
+*                             CHANNEL (2ND BYTE OF 3 BYTE UNITADDR).    00820000
+         AR    R5,R5          DOUBLE IT TO INDEX HALFWORDS.    @VMD0135 00821000
+         A     R5,ARIOCT      ADD ADDR OF CHNL TABLE (HALFWDS).@VMD0135 00822000
+         LH    R5,0(0,R5)     LOAD HALFWD INDEX TO RCHBLOK.    @VMD0135 00823000
+*        AT THIS POINT WE WOULD NORMALLY CHECK FOR MINUS INDEX TO SEE   00824000
+*        IF CHANNEL WAS 'GEN'ED OR NOT, BUT THAT SHOULD NOT BE          00825000
+*        NECESSARY HERE AS WE WOULD NOT BE REFLECTING INTERRUPT IF      00826000
+*        CHANNEL WAS NOT 'GEN'ED.                                       00827000
+         A     R5,ARIOCH      INDEX+BASE GIVES RCHBLOK ADDRESS.@VMD0135 00828000
+         USING RCHBLOK,R5                                      @VMD0135 00829000
+         LH    R5,RCHSTIDC+2  LOAD LENGTH OF LOGOUT.  THIS IS  @VMD0135 00830000
+*                             WHAT REAL CHANNEL SAID IN RESPONSE TO     00831000
+*                             STIDC INSTRUCTION AT CP IPL TIME.         00832000
+         DROP  R5                                              @VMD0135 00833000
+         LTR   R5,R5          IF MINUS, REAL CHNL GAVE CC=3.   @VMD0151 00834000
+*                             IF 0, CHNL GAVE FALSE LENGTH OF 0 TO      00835000
+*                             STIDC.  CHNLS USING FIX-LOG-AREA DO THIS. 00836000
+         BNP   COMPUTLN       USE COMPUTED LENGTH, NOT STIDC.  @VMD0151 00837000
+         CH    R5,IOERLOGL    COMPARE STIDC LENGTH WITH LENGTH @VMD0151 00838000
+*                             COMPUTED FOR THIS PARTICULAR LOGOUT.      00839000
+         BNH   KEEPSTID       USE WHICHEVER LENGTH IS SMALLER. @VMD0151 00840000
+*                             NOTE: FOR THE NEW PROCESSORS, 3031 ETC,   00841000
+*                             COMPUTED LENGTH MAY BE LARGER THAN ACTUAL 00842000
+*                             STIDC LENGTH.                             00843000
+COMPUTLN LH    R5,IOERLOGL    COMPUTED LENGTH IS SMALLER.  ONE @VMD0151 00844000
+*                             EXAMPLE OF THIS IS WHERE THE CHANNEL IS   00845000
+*                             ONE THAT DOES NOT LOGOUT FOR CHANNEL DATA 00846000
+*                             CHECK; THAT WOULD GIVE 0 HERE.            00847000
+KEEPSTID DS    0H                                              @VMD0151 00848000
+         LA    R4,IOERCLOG    ADDRESS OF LOG OUT INFO          @V508690 00849000
+         CLI   IOERCHID,IOERB80 CHECK FOR 2880                 @V508690 00850000
+         BE    ADDROK         YES,DO NOT INCREMENT ADDRESS     @V508690 00851000
+         CLI   IOERCHID,IOERS80 CHECK FOR OTHER 2880           @V508690 00852000
+         BE    ADDROK         YES, DO NOT INCREMENT ADDRESS    @V508690 00853000
+         CLI   IOERCHID,IOER2860  CHECK FOR 2860.              @VMD0151 00854000
+         BE    ADDROK         YES,KEEP NON-INTEGRATED LOG ADDR.@VMD0151 00855000
+         CLI   IOERCHID,IOER2870  CHECK FOR 2870.              @VMD0151 00856000
+         BE    ADDROK         YES,KEEP NON-INTEGRATED LOG ADDR.@VMD0151 00857000
+         LA    R4,IOERLG45    ADDR OF INTEGRATED LOGOUT DATA.  @VMD0151 00858000
+ADDROK   DS    0H                                              @VMD0151 00859000
+         SLR   R0,R0                                           @VMD0151 00860000
+         LA    R5,1(0,R5)     +1 TO COMPENSATE FOR INITL BCT.  @VMD0151 00861000
+         LR    R3,R4          ADDR OF LOGOUT DATA IN IOERBLOK. @VMD0151 00862000
+         BCT   R3,FCHKLPZ     COMPUTE ADDR OF LOGOUT -1.       @VMD0151 00863000
+         SPACE                                                          00864000
+*        LOOK FOR FF BYTES AT THE FAR END OF THE LOGOUT AREA, WHICH     00865000
+*        WILL INDICATE THE LOGOUT WAS SHORTER THAN WE THOUGHT.          00866000
+FCHKLOOP IC    R0,0(R5,R3)    LOAD BYTE FROM END OF LOGOUT.    @VMD0151 00867000
+         C     R0,F255        IS IT X'FF' ?                    @VMD0151 00868000
+         BNE   NOMOREFF       NO,SO IT'S THE TOP OF THE LOGOUT.@VMD0151 00869000
+FCHKLPZ  BCT   R5,FCHKLOOP    STILL FINDING FFS AT END, SO BCT @VMD0151 00870000
+*                             DECREMENTS LOGOUT LENGTH.                 00871000
+NOMOREFF DS    0H                                              @VMD0151 00872000
+*        R4 NOW HAS ADDR OF LOGOUT DATA IN IOERBLOK.                    00873000
+*        R5 NOW HAS LENGTH OF LOGOUT DATA (POSSIBLY 0).                 00874000
+*        - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -  00875000
+         LR    R3,R5          SAVE COPY OF LENGTH IN R3.       @VMD0151 00876000
+         LR    R7,R2          LOAD WORK REG, IOEL POINTER.     @VMD0151 00877000
+         SRL   R7,12          CLEAR OUT LOW ORDER ADDRESS      @V508690 00878000
+         A     R7,F1          ROUND UP TO NEXT PAGE            @V508690 00879000
+         SLL   R7,12          MOVE IT BACK                     @V508690 00880000
+         SR    R7,R2          SUB THE IOEL PNT FROM NEXT PAGE  @V508690 00881000
+         CR    R7,R3          COMPARE REMAINDER W/ IOEL LENGTH.@VMD0135 00882000
+         BNL   MOVELOG        IT WILL FIT, SO MOVE IT          @V508690 00883000
+         LR    R3,R7          LOAD WHAT WILL FIT               @V508690 00884000
+         AR    R1,R7          SET UP LOG OUT AREA POINTER FOR  @V508690 00885000
+*                             THE NEXT TRANS  (ROUND UP)                00886000
+MOVELOG  MVCL  R2,R4          MOVE LOG INFO TO USER            @V508690 00887000
+         BE    FRETCCR        COUNTERS EQUAL, WE ARE FINISHED  @V508690 00888000
+         SL    R8,VMDVSTRT    DEVICE DISPLACEMENT              @V508690 00889000
+         TRANS 2,1,OPT=(BRING,DEFER) GET NEXT LOGOUT PAGE      @V508690 00890000
+         AL    R8,VMDVSTRT    RESTORE DEVICE BLOK PNTER        @V508690 00891000
+         LR    R3,R5          COUNTERS EQUAL RESIDUAL COUNT    @V508690 00892000
+         B     MOVELOG        FINISH MOVING LOG INFO           @V508690 00893000
+         SPACE 3                                                        00894000
+FRETCCR  LA    R0,IOERSIZE    LETS FRET THE IOERBLOK           @V508690 00895000
+         AH    R0,IOEREXT     ADD THE EXTENTION SIZE           @V508690 00896000
+         LR    R1,R9          THE ADDRESS TO FRET              @V508690 00897000
+         CALL  DMKFRET                                         @V508690 00898000
+         MVC   VDEVIOER,ZEROES CLEAR THE POINTER               @V508690 00899000
+         EXIT                                                  @V508690 00900000
+         EJECT                                                          00901000
+WAITCCH  EQU   2              DMKCCH WAIT STATE CODE           @V407510 00902000
+         SPACE                                                          00903000
+         SPACE                                                          00904000
+CCMSG     DC    X'151515'                                               00905000
+         DC    C'DMKCCH603W CHANNEL ERROR; RUN SEREP, RESTART SYSTEM'   00906000
+         DC     X'1515'                                                 00907000
+CCMSGL   EQU   (*-CCMSG)      LENGTH OF MESSAGE                         00908000
+          SPACE                                                         00909000
+CCCMSG    DC    X'151515'                                               00910000
+          DC    C'DMKCCH60'                                             00911000
+CCCMSID   DC    C'1I '                                                  00912000
+CCCTYPE   DC    C' CHANNEL '                                            00913000
+          DC    C' CONTROL CHECK DEV '                                  00914000
+CCCADDR   DC    C'XXX'                                                  00915000
+          DC    C'; USER '                                              00916000
+CCCUSID   DC    C'XXXXXXXX'                                             00917000
+          DC    X'1515'                                                 00918000
+CCCMSGL   EQU   (*-CCCMSG)                                              00919000
+         SPACE                                                          00920000
+MSG15M   DC    X'1515'                                                  00921000
+         DC    C'DMKCCH605I CHANNEL CHECK RECORDING FAILURE',X'1515'    00922000
+MSG15L   EQU   *-MSG15M                                                 00923000
+CCCCONST DC    C'1I  CHANNEL '                                 @VA01337 00924000
+ICCCONST DC    C'2I INTERFACE'                                 @VA01337 00925000
+************************************************************            00926000
+         SPACE                                                          00927000
+CCHCONST DC    X'20'               REC. TYPE                            00928000
+         DC    X'65'            OPERATING SYSTEM AND RELEASE   @V5088AA 00929000
+         DC    X'40'          CONVERT THE TOD FIELD            @VM08856 00930000
+         DC    XL5'00'             MISC. SWITCHES                       00931000
+         SPACE                                                          00932000
+CPEYED   DC    C'  CP/370'                                              00933000
+DMKCCHCF DC    XL16'00'       CHANNEL TYPE TABLE                        00934000
+DMKCCH60 DC    F'0'           ADDRESS OF THE 2860 CHANNEL MODULE        00935000
+DMK2870  DC    F'0'           ADDRESS OF THE 2870 CHANNEL MODULE        00936000
+DMK2880  DC    F'0'           ADDRESS OF THE 2880 CHANNEL MODULE        00937000
+DMKCCHSZ DC    H'0000'          SAVE THE SIZES OF THE IOEL     @V5088AA 00938000
+DMKCCHMX DC    H'0000'          SAVE MAX. SIZE OF CCH RECORD   @V5088AA 00939000
+*********************************************************************   00940000
+         EJECT                                                          00941000
+         LTORG                                                          00942000
+         EJECT                                                          00943000
+         PSA                                                 , @V306638 00944000
+         COPY  CCHREC                                          @V306638 00945000
+         COPY  EQU                                             @V306638 00946000
+         COPY  DEVTYPES                                        @V306638 00947000
+         COPY  VBLOKS                                          @V508690 00948000
+         COPY  IOBLOKS                                         @V306638 00949000
+         COPY  IOER                                            @V306638 00950000
+         COPY  MCHAREA                                         @V306638 00951000
+         COPY  RBLOKS                                          @V306638 00952000
+         COPY  SAVE                                            @V306638 00953000
+         COPY  VMBLOK                                          @V306638 00954000
+         EJECT                                                          00955000
+ENTSW    EQU   SAVEWRK1                                                 00956000
+RCHSAVE  EQU   SAVEWRK2                                                 00957000
+RCUSAVE  EQU   SAVEWRK3                                                 00958000
+RDEVSAVE EQU   SAVEWRK4                                                 00959000
+FALADDPT EQU   SAVEWRK5                                                 00960000
+RECLENTH EQU   SAVEWRK6                                                 00961000
+RECADDR  EQU   SAVEWRK7                                                 00962000
+ADDSAVE  EQU   SAVEWRK8                                                 00963000
+SIOADDR  EQU   SAVEWRK9                                                 00964000
+         END                                                            00965000

@@ -1,0 +1,1089 @@
+TCS      TITLE 'DMKTCS     (CP)        VM/370 - RELEASE 6'              00001000
+         ISEQ  73,80          VALIDATE INPUT SERIALIZATION              00002000
+*.                                                                      00003000
+*                                                                       00004000
+* MODULE NAME -                                                         00005000
+*                                                                       00006000
+*        DMKTCS                                                         00007000
+*                                                                       00008000
+* FUNCTION -                                                            00009000
+*                                                                       00010000
+*        TO SET UP A 3800 PRINTER PRIOR TO ACTUALLY PRINTING A          00011000
+*        SPOOL FILE ON IT.  SETUP INCLUDES LOADING THE FCB,             00012000
+*        TRANSLATE TABLE, GRAPHIC CHARACTER MODIFICATIONS,              00013000
+*        FORMS OVERLAY SEQUENCE CONTROL, WRITABLE CHARACTER             00014000
+*        GENERATION MODULES,COPY MODIFICATION, AND COPY NUMBER OF 1.    00015000
+*                                                                       00016000
+* ATTRIBUTES -                                                          00017000
+*                                                                       00018000
+*        REENTRANT, PAGEABLE, CALLED VIA SVC                            00019000
+*                                                                       00020000
+* ENTRY POINTS -                                                        00021000
+*                                                                       00022000
+*        DMKTCSET - SET UP THE 3800 PRIOR TO PRINTING THE FILE          00023000
+*        DMKTCSSP - SET UP THE 3800 PRIOR TO PRINTING THE SEPARATOR     00024000
+*        DMKTCSCO - SET UP THE ONLY THE FORMS OVERLAY SEQUENCE CTL      00025000
+*                                                                       00026000
+* ENTRY CONDITIONS -                                                    00027000
+*                                                                       00028000
+*        FOR DMKTCSET AND DMKTCSSP -                                    00029000
+*                                                                       00030000
+*        GPR7  = ADDRESS OF SFBLOK FOR FILE BEING PRINTED               00031000
+*        GPR8  = ADDRESS OF RDEVBLOK FOR 3800 PRINTER                   00032000
+*        GPR9  = ADDRESS OF RSPLCTL CONTROL BLOCK FOR PRINTER           00033000
+*        GPR10 = ADDRESS OF IOBLOK FOR PRINTER I/O                      00034000
+*        GPR12 = ADDRESS OF RELEVANT ENTRY POINT                        00035000
+*        GPR13 = ADDRESS OF STANDARD SAVEAREA                           00036000
+*                                                                       00037000
+*        FOR DMKTCSCO -                                                 00038000
+*                                                                       00039000
+*        GENERAL REGISTERS ARE THE SAME AS ABOVE.                       00040000
+*                                                                       00041000
+* EXIT CONDITIONS -                                                     00042000
+*                                                                       00043000
+*        FOR DMKTCSSP AND DMKTCSET -                                    00044000
+*        COND CODE = ZERO     - SETUP COMPLETED                         00045000
+*        COND CODE = NON-ZERO - SETUP DIDN'T COMPLETE                   00046000
+*                IF IOBFATAL SET, REASON IS HARDWARE ERROR              00047000
+*                  OTHERWISE, BAD LOAD MODULE IS THE CAUSE              00048000
+*                                                                       00049000
+*        FOR DMKTCSCO -                                                 00050000
+*        COND CODE = NON-ZERO  - MO MORE COPIES TO DO                   00051000
+*        COND CODE = ZERO  - SFBLOK IS SET UP FOR NEXT COPY             00052000
+*                                                                       00053000
+* CALLS TO OTHER ROUTINES -                                             00054000
+*                                                                       00055000
+*        DMKIOSQR - TO ISSUE START I/O TO REAL 3800                     00056000
+*        DMKPGTVG - GET PAGE OF SYSTEM VIRTUAL STORAGE                  00057000
+*        DMKPGTVR - RELEASE PAGE OF SYSTEM VIRTUAL STORAGE              00058000
+*        DMKRPAGT - READ IN PAGE OF 3800 IMAGE LIBRARY                  00059000
+*        DMKFREE  - OBTAIN FREE STORAGE FOR CCWS                        00060000
+*        DMKFRET  - RETURN FREE STORAGE TO THE POOL                     00061000
+*        DMKSCNVS - FIND RDEVBLOK FOR IMAGE LIBRARY DASD VOL            00062000
+*        DMKERMSG - ISSUE ERROR MESSAGES                                00063000
+*        DMKSCNAU - SEE IF USER IS LOGGED ON                            00064000
+*        DMKCVTBH - CONVERT STUFF FOR MESSAGES                          00065000
+*        DMKSCNRD - GET DEVICE ADDRESS IN PRINTABLE CUU FORM            00066000
+*                                                                       00067000
+* TABLES / WORKAREAS -                                                  00068000
+*                                                                       00069000
+*                                                                       00070000
+*        DMKQNTBL - TABLE OF 3800 NAMED SYSTEMS                         00071000
+*                                                                       00072000
+*        SAVEWRK1 - FLAG INDICATING ENTRY AT DMKTCSCO                   00073000
+*                   X'80' - ENTERED AT DMKTCSCO                         00074000
+*                   X'40' - 'CLEAR PRINTER' HAS BEEN ISSUED             00075000
+*                   X'20' - FCB WAS CALCULATED FROM 6, 8, OR 12         00076000
+*                   X'10' - ENTERED AT DMKTCSSP                         00077000
+*        SAVEWRK1+1 - FLAG FOR SETTING COND CODE UPON EXITING           00078000
+*        SAVEWRK2 - ADDRESS OF HOLDING AREA                             00079000
+*        SAVEWRK3 - VIRTUAL ADDRESS IN SYSTEM SPACE OF PAGE GOTTEN      00080000
+*                   FOR READING IN THE NAMED SYSTEM PARTS               00081000
+*        SAVEWRK4, SAVEWRK5 - 8-CHARACTER NAME OF THE MODULE            00082000
+*                  TO BE LOADED BY SUBROUTINE MEMLOAD                   00083000
+*        SAVEWRK6 - STARTING CCPD (IN MEMLOAD SUBROUTINE)               00084000
+*        SAVEWRK7 - CURRENT CCPD  (IN MEMLOAD SUBROUTINE)               00085000
+*        SAVEWRK8 - RESIDUAL MEMBER BYTE COUNT TO MOVE (MEMLOAD)        00086000
+*                                                                       00087000
+* REGISTER USAGE -                                                      00088000
+*                                                                       00089000
+*        GPR0  =                                                        00090000
+*        GPR1  =                                                        00091000
+*        GPR2  = ADDRESS OF SPLINK AND LOCKED BUFFERS                   00092000
+*        GPR3  = INTERNAL SUBROUTINE RETURN ADDRESS REGISTER            00093000
+*        GPR4  =                                                        00094000
+*        GPR5  = ADDRESS OF HOLDING AREA                                00095000
+*        GPR6  = SCRATCH AND RSPXBLOK ADDRESSIBILITY                    00096000
+*        GPR7  = ADDRESS OF SFBLOK OF FILE BEING PRINTED                00097000
+*        GPR8  = ADDR OF RDEVBLOK FOR 3800 PRINTER                      00098000
+*        GPR9  = ADDR OF RSPLCTL WORK AREA                              00099000
+*        GPR10 = ADDR OF IOBLOK FOR PRINTER I/O                         00100000
+*        GPR11 =                                                        00101000
+*        GPR12 = DMKTCS MODULE BASE                                     00102000
+*        GPR13 = ADDRESS OF STANDARD SAVE AREA                          00103000
+*        GPR14 = BALR RETURN ADDRESS AND SCRATCH REGISTER               00104000
+*        GPR15 = BALR BRANCH ADDRESS AND SCRATCH REGISTER               00105000
+*                                                                       00106000
+* NOTES -                                                               00107000
+*                                                                       00108000
+*        1.  IT IS ASSUMED THAT, UPON ENTRY AT ANY ONE OF THE ABOVE     00109000
+*            ENTRY POINTS, THERE ARE TWO SPOOL FILE BUFFERS ALREADY     00110000
+*            LOCKED IN REAL STORAGE.  THIS SHOULD HAVE BEEN DONE IN     00111000
+*            DMKRSP.                                                    00112000
+*                                                                       00113000
+*        2.  BECAUSE OF THE 2-PAGE MAXIMUM AND THE FACT THAT THE        00114000
+*            MODULE HAS 8 BYTES OF CONTROL INFORMATION AT ITS START,    00115000
+*            THE MAXIMUM AMOUNT OF LOAD DATA ABLE TO BE PROCESSED       00116000
+*            BY THIS ROUTINE IS 8192-8 OR 8184 BYTES.  THIS             00117000
+*            RESTRICTION IS ONLY MEANINGFUL FOR COPY MODIFICATION       00118000
+*            SINCE THE 3800 HARDWARE ALLOWS 8192 BYTES FOR A            00119000
+*            COPY MODIFICATION.                                         00120000
+*                                                                       00121000
+* OPERATION -                                                           00122000
+*                                                                       00123000
+*        1.  DMKTCSET                                                   00124000
+*            CALL DMKFREE TO OBTAIN A WORKAREA FOR HOLDING THE          00125000
+*            INFORMATION WHICH WILL BE REQUIRED FOR THE 3800 SETUP.     00126000
+*            CALL DMKPGTVG, DMKRPAGT TO GET THE FIRST DASD BUFFER.      00127000
+*            TRANSFER ALL INFORMATION REQUIRED INTO THE WORKAREA        00128000
+*            AND RELEASE THE PAGE JUST OBTAINED. THEN GO TO STEP 4.     00129000
+*            IF ENTERED FROM DMKTCSCO, UPDATE THE SFBCOPY AND           00130000
+*            SFBSTCPY FIELDS AND GO TO STEP 8.                          00131000
+*                                                                       00132000
+*        2.  DMKTCSSP                                                   00133000
+*            OBTAIN A WORKAREA VIA DMKFREE AND INITIALIZE IT FOR        00134000
+*            THE SEPARATOR PAGE WITH INFORMATION IN THE                 00135000
+*            3800 PRINTER RDEVBLOK AND OTHER DEFAULT INFORMATION.       00136000
+*            THEN, CONTINUE WITH STEP 4.                                00137000
+*                                                                       00138000
+*        3.  DMKTCSCO                                                   00139000
+*            INDICATE THIS ENTRY AND GO TO STEP 1.                      00140000
+*                                                                       00141000
+*        4.  IF ENTRY WAS VIA DMKTCSET AND IF THE CHARS REQUESTED       00142000
+*            IS THE SAME AS THAT ALREADY LOADED AS INDICATED IN         00143000
+*            THE RSPXCHR FIELD, THEN THERE IS NO NEED TO RELOAD THE     00144000
+*            NEW CHARACTER ARRANGEMENT TABLE.  OTHERWISE,               00145000
+*            CALL INTERNAL SUBROUTINE MEMLOAD TO LOAD THE REQUESTED     00146000
+*            CHARACTER ARRANGEMENT TABLE INTO THE LOCKED BUFFER.        00147000
+*            SET UP TO LOAD THE REQUIRED WCGMS INTO EMPTY POSITIONS.    00148000
+*            IF A WCGM IS ALREADY LOADED AND UNMODIFIED, THERE IS NO    00149000
+*            NEED TO LOAD IT AGAIN.                                     00150000
+*            ALTER THE TRANSLATE TABLE IN STORAGE TO REFLECT CHANGED    00151000
+*            POSITIONS OF THE THE WCGMS AND ISSUE THE FOLLOWING         00152000
+*            CCWS TO THE 3800 PRINTER:  LOAD WCGM, SELECT TRANSLATE     00153000
+*            TABLE 0, LOAD TRANSLATE TABLE, DUMMY SENSE.                00154000
+*            IF A LOAD CHECK OCCURS DUE TO INVALID LOAD DATA,           00155000
+*            ISSUE ERROR MESSAGE DMKTCS241E TO BOTH THE OWNER OF        00156000
+*            THE FILE AND THE OPERATOR AND RETURN WITH IOBFATAL SET.    00157000
+*            IF SUCCESSFUL, UPDATE THE CURRENT CONTENTS OF THE WCGMS.   00158000
+*                                                                       00159000
+*        5.  IF ANY GRAPHIC MODIFICATIONS WERE INDICATED, INVALIDATE    00160000
+*            THE RDEVCRWC FIELDS USED BY THIS TABLE AND CALL MEMLOAD TO 00161000
+*            LOAD EACH GRAPHIC MODIFICATION AND ISSUE A LOAD GRAPHIC    00162000
+*            MODIFICATION TO THE 3800 FOR EACH ONE.                     00163000
+*            LOAD CHECKS CAUSE DMKTCS241E TO BE ISSUED AND RETURN WITH  00164000
+*            IOBFATAL SET.                                              00165000
+*                                                                       00166000
+*        6.  IF NO COPY MODIFICATION WAS SPECIFIED, SET UP A NULL       00167000
+*            COPY MODIFICATION AND LOAD IT VIA THE 'LOAD COPY           00168000
+*            MODIFICATION' CCW.  ELSE CALL MEMLOAD TO LOAD IT IN        00169000
+*            AND THEN LOAD IT INTO THE 3800 VIA THE 'LOAD COPY          00170000
+*            MODIFICATION' CCW.  LOAD CHECKS CAUSE DMKTCS241E TO BE     00171000
+*            ISSUED AND RETURN MADE TO THE CALLER WITH IOBFATAL SET.    00172000
+*            IF THE COPY MODIFICATION TO BE LOADED IS THE SAME AS THAT  00173000
+*            ALREADY IN (RSPXCMOD), NO NEED TO LOAD IT IN AGAIN.        00174000
+*                                                                       00175000
+*        7.  IF THE FCB IS THE SAME AS THAT ALREADY LOADED (RSPXFCB),   00176000
+*            THERE IS NO NEED TO RELOAD IT.  IF NOT, AND IT IS NOT      00177000
+*            6, 8, OR 12, CALL MEMLOAD TO LOAD IT AND THEN ISSUE A      00178000
+*            'LOAD FCB' CCW TO GET IT INTO THE 3800.  ANY ERRORS        00179000
+*            CAUSE DMKTCS241E TO BE ISSUED, EXCEPT FOR AN FCB-FORMS     00180000
+*            MISMATCH WHICH CAUSES DMKTCS240E TO BE ISSUED.             00181000
+*            IF THE FCB IS 6, 8, OR 12, THEN, USING THE CURRENT PAGE    00182000
+*            LENGTH (RDEVCURP), CONSTRUCT AN FCB.  IF THIS RESULTS IN   00183000
+*            A FCB-FORMS MISMATCH, TRY WITH DIFFERENT PAGE LENGTHS      00184000
+*            UNTIL SUCCESSFUL.  STORE THE NEWLY DISCOVERED PAGE         00185000
+*            LENGTH IN RDEVCURP.                                        00186000
+*                                                                       00187000
+*        8.  ISSUE THE 'LOAD COPY NUMBER' CCW FOR COPY MODIFICATION     00188000
+*            CONTROL INFORMATION, AND THE 'LOAD FORMS OVERLAY           00189000
+*            SEQUENCE CONTROL' CCW TO CONTROL THE FLASHING STATUS       00190000
+*            AND NUMBER OF COPIES TO BE PRINTED FOR THE 3800.           00191000
+*                                                                       00192000
+*        9.  IF ENTERED VIA DMKTCSCO AND THERE ARE MORE COPIES TO       00193000
+*            BE PRINTED, ISSUE THE 'END OF TRANSMISSION' CCW.  IF       00194000
+*            NO MORE COPIES REMAIN, ISSUE THE 'MARK FORMS' CCW.         00195000
+*            ALSO, UPDATE SFBCOPY AND SFBSTCPY.                         00196000
+*                                                                       00197000
+*        10. RETURN TO CALLER                                           00198000
+*                                                                       00199000
+* RESPONSE -                                                            00200000
+*                                                                       00201000
+*        NONE                                                           00202000
+*                                                                       00203000
+* ERROR MESSAGES -                                                      00204000
+*                                                                       00205000
+*        DMKTCS240E PRT (CUU), FCB-FORMS MISMATCH, FILEID (SPLID)       00206000
+*        DMKTCS241E PRT (CUU), INVALID LOAD MODULE (NAME) SPECIFIED,    00207000
+*                              FILE (SPLID)  (HELD|PURGED)              00208000
+*                                                                       00209000
+*.                                                                      00210000
+         EJECT                                                          00211000
+         COPY  OPTIONS                                                  00212000
+         COPY  LOCAL               OPTIONS                              00213000
+         EJECT                                                          00214000
+DMKTCS   CSECT LOADER              CONTROL ONLY                @V60B9BA 00215000
+         EXTRN DMKPGTVG                                        @V60B9BA 00216000
+         EXTRN DMKPGTVR                                        @V60B9BA 00217000
+         EXTRN DMKRPAGT                                        @V60B9BA 00218000
+         EXTRN DMKIOSQR                                        @V60B9BA 00219000
+         EXTRN DMKERMSG                                        @V60B9BA 00220000
+         EXTRN DMKSCNVS                                        @V60B9BA 00221000
+         EXTRN DMKQNTBL                                        @V60B9BA 00222000
+         EXTRN DMKSCNAU                                        @V60B9BA 00223000
+         EXTRN DMKCVTBH                                        @V60B9BA 00224000
+         EXTRN DMKCVTBD                                        @VMI0013 00225000
+         EXTRN DMKSCNRD                                        @V60B9BA 00226000
+         SPACE 3                                                        00227000
+         USING PSA,R0                                          @V60B9BA 00228000
+         USING SFBLOK,R7                                       @V60B9BA 00229000
+         USING RSPLCTL,R9                                      @V60B9BA 00230000
+         USING SPLINK,R2                                       @V60B9BA 00231000
+         USING IOBLOK,R10                                      @V60B9BA 00232000
+         USING RDEVBLOK,R8                                     @V60B9BA 00233000
+         USING VMBLOK,R11                                      @V60B9BA 00234000
+         USING SAVEAREA,R13                                    @V60B9BA 00235000
+         SPACE 3                                                        00236000
+         DC    CL8'DMKTCS'         MODULE NAME                 @V60B9BA 00237000
+         SPACE 3                                                        00238000
+DMKTCSET RELOC ,                                               @V60B9BA 00239000
+         XC    SAVEWRK1,SAVEWRK1   CLEAR OUT OUR WORK AREAS    @V60B9BA 00240000
+         XC    SAVEWRK2(32),SAVEWRK2 ....                      @V60B9BA 00241000
+TCSET    LA    R0,HLDSIZE          SIZE OF HOLDING AREA        @V60B9BA 00242000
+         CALL  DMKFREE             GET THE STORAGE             @V60B9BA 00243000
+         LR    R5,R1               ADDRESSIBILITY              @V60B9BA 00244000
+         USING HLDAREA,R5          ...                         @V60B9BA 00245000
+         ST    R5,SAVEWRK2         SAVE ITS ADDRESS            @V60B9BA 00246000
+         XC    HLDAREA(HLDSIZE*8),HLDAREA  CLEAR IT            @V60B9BA 00247000
+         L     R1,RSPVPAGE         GET FIRST LOCKED BUFFER     @V60B9BA 00248000
+         L     R0,SFBSTART         FIRST DASD BUFFER           @V60B9BA 00249000
+         CALL  DMKRPAGT,PARM=(BRING+SYSTEM+LOCK) BRING IT IN   @V60B9BA 00250000
+         ST    R0,RSPDPAGE         SAVE THE DASD ADDRESS       @V60B9BA 00251000
+         ST    R2,RSPRPAGE         SAVE ITS REAL ADDRESS TOO   @V60B9BA 00252000
+         CLI   SPCHAR,X'00'        NOT   SPECIFIED?            @V60B9BA 00253000
+         BE    DFLTCHAR            SET DEFAULT IF SO           @V60B9BA 00254000
+         MVC   HLDCHARS,SPCHAR     SAVE THE CHAR ARR TABLE     @V60B9BA 00255000
+         B     GOTCHAR             FINISHED WITH CHAR          @V60B9BA 00256000
+DFLTCHAR MVC   HLDCHARS,RDEVXSEP   USE THE DEFAULT             @V60B9BA 00257000
+GOTCHAR  CLI   SPCMOD,X'00'        NOT   SPECIFIED?            @V60B9BA 00258000
+         BE    GOTMDFY             XFER IF SO                  @V60B9BA 00259000
+         MVC   HLDMDFY,SPCMOD      SAVE THE COPY MODIFICATION  @V60B9BA 00260000
+GOTMDFY  CLI   SPFCB,X'00'         NEVER SPECIFIED ?           @V60B9BA 00261000
+         BE    DFLTFCB             XFER IF SO                  @V60B9BA 00262000
+         MVC   HLDFCB,SPFCB        SAVE THE SPECIFIED FCB      @V60B9BA 00263000
+         B     GOTFCB              XFER                        @V60B9BA 00264000
+DFLTFCB  MVC   HLDFCB,=C'6   '     ASSUME 6 LPI FCB            @V60B9BA 00265000
+         CLI   RDEVFSEP,6          IS IT ?                     @V60B9BA 00266000
+         BE    GOTFCB              XFER IF SO                  @V60B9BA 00267000
+         MVI   HLDFCB,C'8'         ASSUME 8 LPI FCB            @V60B9BA 00268000
+         CLI   RDEVFSEP,8          IS IT ?                     @V60B9BA 00269000
+         BE    GOTFCB              XFER IF SO                  @V60B9BA 00270000
+         MVC   HLDFCB(2),=C'12'    IT MUST BE 12 LPI           @V60B9BA 00271000
+GOTFCB   MVC   HLDSTCPY,SFBSTCPY   SAVE STARTING COPY NUMBER   @V60B9BA 00272000
+         MVC   HLDFLSHC,SPFLSHC    SAVE THE FLASH COUNT        @V60B9BA 00273000
+         MVC   HLDCPY,SFBCOPY+1    TOTAL NUMBER OF COPIES      @V60B9BA 00274000
+         MVC   HLDFLAG,SPFLAG1     SAVE THE COPY FLAG          @V60B9BA 00275000
+         SR    R0,R0               DUMMY DASD ADDRESS          @V60B9BA 00276000
+         CALL  DMKRPAGT,PARM=SYSTEM GIVE BACK THE DASD PAGE    @V60B9BA 00277000
+         TRANS 2,1,OPT=(BRING,DEFER,SYSTEM,LOCK) LOCK IT       @V60B9BA 00278000
+         ST    R0,RSPDPAGE         ZERO THE DASD ADDRESS       @V60B9BA 00279000
+         ST    R2,RSPRPAGE         SAVE ITS LOCKED REAL ADDR   @V60B9BA 00280000
+         TM    SAVEWRK1,X'80'      ENTERED AT DMKTCSCO ?       @V60B9BA 00281000
+         BZ    TCSCOMN             JOIN COMMON CODE IF NOT     @V60B9BA 00282000
+         TM    HLDFLAG,SPCOPYFG    JUST ONE TRANSMISSION ?     @V60B9BA 00283000
+         BO    MARKFORM            XFER IF SO                  @V60B9BA 00284000
+         CLC   SFBCOPY,=H'1'       FINAL COPY PRINTED ?        @V60B9BA 00285000
+         BE    MARKFORM            XFER IF SO                  @V60B9BA 00286000
+         LH    R1,SFBCOPY          DECREMENT THE COPIES        @V60B9BA 00287000
+         BCTR  R1,0                ...  LEFT TO PRINT          @V60B9BA 00288000
+         STH   R1,SFBCOPY          ... AND SAVE IT             @V60B9BA 00289000
+         STC   R1,HLDCPY           SAVE IT HERE ALSO           @V60B9BA 00290000
+         SR    R1,R1               NOW INCREMENT THE           @V60B9BA 00291000
+         IC    R1,SFBSTCPY         ... STARTING COPY NUMBER    @V60B9BA 00292000
+         LA    R1,1(,R1)           ... AND SAVE IT             @V60B9BA 00293000
+         STC   R1,SFBSTCPY         ... IN THE SFBLOK           @V60B9BA 00294000
+         STC   R1,HLDSTCPY         SAVE IT HERE ALSO           @V60B9BA 00295000
+         SPACE                                                          00296000
+*        ISSUE THE 'END OF TRANSMISSION' CCW                            00297000
+         SPACE                                                          00298000
+         LA    R1,EOTCCW           GET ITS ADDRESS             @V60B9BA 00299000
+         ST    R1,IOBCAW           ADDRESS OF CCW STRING       @V60B9BA 00300000
+         LA    R1,EOTRTN           RETURN ADDRESS              @V60B9BA 00301000
+         ST    R1,IOBIRA           WHERE WE COME BACK          @V60B9BA 00302000
+         ST    R13,IOBMISC         SAVE REGISTER 13            @V60B9BA 00303000
+         B     TCSSIO              DO THE I/O AND WAIT FOR IT  @V60B9BA 00304000
+         SPACE 2                                                        00305000
+EOTRTN   EQU   *                   HERE ON INTERRUPT FROM EOT  @V60B9BA 00306000
+         USING *,R12               TEMPORARY ADDRESSIBILITY    @V60B9BA 00307000
+         S     R12,=A(EOTRTN-DMKTCS) GET OLD VALUE             @V60B9BA 00308000
+         USING DMKTCS,R12          NEW ADDRESSIBILITY          @V60B9BA 00309000
+         L     R13,IOBMISC         RESTORE SAVE AREA ADDRESS   @V60B9BA 00310000
+         LM    R0,R11,SAVEREGS     RESTORE REGISTERS           @V60B9BA 00311000
+         L     R5,SAVEWRK2         ADDRESS OF HOLDING AREA     @V60B9BA 00312000
+         TM    IOBSTAT,IOBFATAL    FATAL I/O ERROR ?           @V60B9BA 00313000
+         BO    EXITFF              EXIT WITH CC=NON-ZERO IF SO @V60B9BA 00314000
+         ST    R5,IOBMISC2         CLEAR OUT 'TCS '            @V60B9BA 00315000
+         B     LDFOSC              SET UP FOR NEXT COPY        @V60B9BA 00316000
+         SPACE 5                                                        00317000
+MARKFORM LA    R1,MKFMCCW          LOAD THE 'MARK FORM' CCWS   @V60B9BA 00318000
+         ST    R1,IOBCAW           SAVE IT IN THE IOB          @V60B9BA 00319000
+         LA    R1,MKFMRTN          INTERRUPT RETURN POINT      @V60B9BA 00320000
+         ST    R1,IOBIRA           SAVE IT                     @V60B9BA 00321000
+         ST    R13,IOBMISC         SAVE REGISTER 13            @V60B9BA 00322000
+         B     TCSSIO              START THE I/O OPERATION     @V60B9BA 00323000
+         SPACE 2                                                        00324000
+MKFMRTN  EQU   *                   HERE IN INT FROM MARK FORM  @V60B9BA 00325000
+         USING *,R12               TEMPORARY ADDRESSIBILITY    @V60B9BA 00326000
+         S     R12,=A(MKFMRTN-DMKTCS)  GET OLD VALUE           @V60B9BA 00327000
+         USING DMKTCS,R12          NEW ADDRESSIBILITY          @V60B9BA 00328000
+         L     R13,IOBMISC         RESTORE SAVE AREA ADDRESS   @V60B9BA 00329000
+         LM    R0,R11,SAVEREGS     RESTORE REGISTERS           @V60B9BA 00330000
+         ST    R12,IOBMISC2        CLEAR OUT 'TCS '            @V60B9BA 00331000
+         B     EXITFF              EXIT CC = NON-ZERO          @V60B9BA 00332000
+*                                  (NO MORE COPIES TO DO)      @V60B9BA 00333000
+         SPACE 5                                                        00334000
+DMKTCSSP RELOC ,                   ENTRY FROM DKMMKSEP         @V60B9BA 00335000
+         XC    SAVEWRK1,SAVEWRK1   CLEAR OUT OUR WORK AREAS    @V60B9BA 00336000
+         XC    SAVEWRK2(32),SAVEWRK2 ....                      @V60B9BA 00337000
+         LA    R0,HLDSIZE          SIZE OF HOLDING AREA        @V60B9BA 00338000
+         CALL  DMKFREE             GET THE STORAGE             @V60B9BA 00339000
+         LR    R5,R1               ADDRESSIBILITY              @V60B9BA 00340000
+         ST    R5,SAVEWRK2         SAVE IT FOR LATER           @V60B9BA 00341000
+         XC    HLDAREA(8*HLDSIZE),HLDAREA  CLEAR IT            @V60B9BA 00342000
+         OI    SAVEWRK1,X'10'      SET ENTERED AT TCSSP FLAG   @V60B9BA 00343000
+         MVC   HLDCHARS,RDEVXSEP   CHAR ARR TABLE              @V60B9BA 00344000
+         MVC   HLDFCB,=C'6   '     ASSUME 6 LPI                @V60B9BA 00345000
+         CLI   RDEVFSEP,6          IS THAT IT  ?               @V60B9BA 00346000
+         BE    GOTFCB2             XFER IF SO                  @V60B9BA 00347000
+         MVI   HLDFCB,C'8'         TRY 8 LPI                   @V60B9BA 00348000
+         CLI   RDEVFSEP,8          IS IT THAT ?                @V60B9BA 00349000
+         BE    GOTFCB2             XFER IF SO                  @V60B9BA 00350000
+         MVC   HLDFCB(2),=C'12'    IT MUST BE 12 LPI           @V60B9BA 00351000
+GOTFCB2  MVI   HLDSTCPY,1          ASSUME STARTING COPY OF 1   @V60B9BA 00352000
+         MVI   HLDFLSHC,0          NO FLASHING ON SEP PAGE     @V60B9BA 00353000
+         MVI   HLDCPY,1            ASSUME 1 COPY               @V60B9BA 00354000
+         B     TCSCOMN             JOIN COMMON CODE            @V60B9BA 00355000
+         SPACE 5                                                        00356000
+DMKTCSCO RELOC ,                   ENTRY FOR MULTIPLE COPIES   @V60B9BA 00357000
+         XC    SAVEWRK1,SAVEWRK1   CLEAR OUT OUR WORK AREAS    @V60B9BA 00358000
+         XC    SAVEWRK2(32),SAVEWRK2  ...                      @V60B9BA 00359000
+         OI    SAVEWRK1,X'80'      INDICATE DMKTCSCO ENTRY     @V60B9BA 00360000
+         B     TCSET               SET UP THE HOLDING AREA     @V60B9BA 00361000
+         EJECT                                                          00362000
+TCSCOMN  EQU   *                   COMMON CODE                 @V60B9BA 00363000
+         CALL  DMKPGTVG            GET A PAGE OF VIRT SPACE    @V60B9BA 00364000
+         ST    R1,SAVEWRK3         SAVE ITS VIRTUAL ADDRESS    @V60B9BA 00365000
+         L     R6,RDEVEXTN         GET ADDR OF RSPXBLOK        @V60B9BA 00366000
+         USING RSPXBLOK,R6         ADDRESSIBILITY              @V60B9BA 00367000
+         CLC   HLDCHARS,RSPXCHR    IS WHAT WE WANT ALREADY IN? @V60B9BA 00368000
+         BE    LDMDFY              YES, TRY COPY MODIFICATION  @V60B9BA 00369000
+         SPACE                                                          00370000
+*        WE MUST NOW LOAD THE CHARACTER ARRANGEMENT TABLE SPECIFIED     00371000
+*        AND ANY GRAPHIC MODIFICATIONS ASSOCIATED WITH IT.              00372000
+         SPACE                                                          00373000
+         MVC   SAVEWRK4,=C'XTB1'   IT'S A CHAR ARR TABLE       @V60B9BA 00374000
+         MVC   SAVEWRK5,HLDCHARS   THIS IS ITS NAME            @V60B9BA 00375000
+         BAL   R3,MEMLOAD          LOAD IT INTO THE LOCKED BFRS@V60B9BA 00376000
+         BNZ   MSG241E             ERROR - BAD MODULE LOAD     @V60B9BA 00377000
+         L     R2,RSPRPAGE         GET ADDRESS OF BUFFER       @V60B9BA 00378000
+         L     R5,SAVEWRK2         ADDR OF HOLDING AREA        @V60B9BA 00379000
+         L     R6,RDEVEXTN         ADDR OF RSPXBLOK            @V60B9BA 00380000
+         USING CATSECT,R2          ADDRESSIBILITY              @V60B9BA 00381000
+         TM    RDEVFTR,FTR4WCGM    IS THE FEATURE INSTALLED?   @V60B9BA 00382000
+         BO    GOT4                XFER IF SO                  V60B9BA 00383000
+         CLI   CATWCGM+4,X'00'     ARE WE USING MORE THAN 2 ?  @V60B9BA 00384000
+         BNE   MSG241E             XFER IF SO                  @V60B9BA 00385000
+GOT4     MVC   HLDGCM1(16),CATGRAF SAVE THE GRAPHIC MODS       @V60B9BA 00386000
+         MVC   CATFINAL(1),CATWCGM SET UP THE WCGMS SPECIFIED  @V60B9BA 00387000
+         MVC   CATFINAL+1(1),CATWCGM+2  ... IN THE CAT FOR A   @V60B9BA 00388000
+         MVC   CATFINAL+2(1),CATWCGM+4  ... LOAD WCGM CCW      @V60B9BA 00389000
+         MVC   CATFINAL+3(1),CATWCGM+6  ...                    @V60B9BA 00390000
+         MVC   HLDCCW1,CLRCCW      CLEAR PRINTER CCW           @V60B9BA 00391000
+         LM    R0,R1,LDWCGCCW      LOAD WCGM CCW               @V60B9BA 00392000
+         ALR   R0,R2               RELOCATE DATA ADDRESS       @V60B9BA 00393000
+         STM   R0,R1,HLDCCW2       OUR SECOND CCW              @V60B9BA 00394000
+         MVC   HLDCCW3,SELTTCCW    SELECT TRANSLATE TABLE 0    @V60B9BA 00395000
+         LM    R0,R1,LTTCCW        LOAD TRANSLATE TABLE CCW    @V60B9BA 00396000
+         ALR   R0,R2               RELOCATE DATA ADDRESS       @V60B9BA 00397000
+         STM   R0,R1,HLDCCW4       OUR FOURTH CCW              @V60B9BA 00398000
+         MVC   HLDCCW5,LOADSNS     DUMMY SENSE CCW             @V60B9BA 00399000
+         LA    R1,HLDCCW1          OUR FIRST CCW               @V60B9BA 00400000
+         ST    R1,IOBCAW           PUT IT IN THE IOBLOCK       @V60B9BA 00401000
+         LA    R1,CATRTN           THE INTERRUPT RETURN ADDR   @V60B9BA 00402000
+         ST    R1,IOBIRA           SAVE IT IN THE IOBLOK       @V60B9BA 00403000
+         ST    R13,IOBMISC         SAVE REGISTER 13            @V60B9BA 00404000
+         B     TCSSIO              DO THE START I/O            @V60B9BA 00405000
+         SPACE                                                          00406000
+CATRTN   EQU   *                   HERE AFTER TRANS TBL I/O    @V60B9BA 00407000
+         USING *,R12               TEMPORARY ADDRESSIBILITY    @V60B9BA 00408000
+         S     R12,=A(CATRTN-DMKTCS)                           @V60B9BA 00409000
+         USING DMKTCS,R12          NEW ADDRESSIBILITY          @V60B9BA 00410000
+         LR    R1,R10              CHECK FOR COPY IOBLOK       @V60B9BA 00411000
+         L     R10,IOBLINK         LOAD ADDRESS OF ORIGINAL    @V60B9BA 00412000
+         CR    R1,R10              COPY IOBLOK PRESENT?        @V60B9BA 00413000
+         BE    OK1                 XFER IF NOT                 @V60B9BA 00414000
+         OI    IOBSTAT,IOBFATAL    INDICATE FATAL ERROR        @V60B9BA 00415000
+         LA    R0,IOBSIZE          LOAD SIZE OF IOBLOK         @V60B9BA 00416000
+         CALL  DMKFRET             RETURN STORAGE              @V60B9BA 00417000
+         B     TCSDSP              WAIT FOR DEVICE END         @V60B9BA 00418000
+OK1      L     R13,IOBMISC         RESTORE REGISTER 13         @V60B9BA 00419000
+         LM    R0,R11,SAVEREGS     RESTORE ENTRY REGISTERS     @V60B9BA 00420000
+         L     R5,SAVEWRK2         ADDR OF HOLDING AREA        @V60B9BA 00421000
+         L     R6,RDEVEXTN         RSPXBLOK ADDRESSIBILITY     @V60B9BA 00422000
+         TM    IOBSTAT,IOBFATAL    FATAL I/O ERROR ?           @V60B9BA 00423000
+         BO    EXITFF              ERROR EXIT IF SO            @V60B9BA 00424000
+         CLC   IOBMISC2(2),=C'LD'  DID A LOAD CHECK OCCUR ?    @V60B9BA 00425000
+         BE    MSG241E             XFER IF SO                  @V60B9BA 00426000
+         ST    R5,IOBMISC2         GET RID OF 'TCS '           @V60B9BA 00427000
+         MVC   RSPXCRWC(4),CATFINAL  NEW WCGM VALUES           @V60B9BA 00428000
+         MVC   RSPXCHR,HLDCHARS    NEW CAT IN THE 3800         @V60B9BA 00429000
+         OI    SAVEWRK1,X'40'      SET CLR PRT ISSUED FLAG     @V60B9BA 00430000
+         SPACE                                                          00431000
+*        NOW WE MUST LOAD THE GRAPHIC MODIFICATIONS                     00432000
+*        ASSOCIATED WITH THIS CHARACTER ARRANGEMENT TABLE               00433000
+*        THE TRANSLATE TABLE HAS BEEN SET UP ALREADY AND THE            00434000
+*        'CLEAR PRINTER' CCW HAS BEEN ISSUED.                           00435000
+         SPACE                                                          00436000
+LDGRMOD  SR    R1,R1               INDEX INTO GRAPHIC MODS     @V60B9BA 00437000
+         MVC   SAVEWRK4,=C'GRAF'   FIRST 4 CHARS OF MEMBER     @V60B9BA 00438000
+LDGLOOP  ST    R1,SAVEWRK9         SAVE IT ACROSS MEMLOAD      @V60B9BA 00439000
+         LA    R3,HLDGCM1(R1)      GCM NAME                    @V60B9BA 00440000
+         CLI   0(R3),C' '          ARE WE DONE ?               @V60B9BA 00441000
+         BE    LDMDFY              XFER IF SO                  @V60B9BA 00442000
+         MVC   SAVEWRK5,0(R3)      MOVE IN THE GCM NAME        @V60B9BA 00443000
+         BAL   R3,MEMLOAD          LOAD IT INTO THE BUFFERS    @V60B9BA 00444000
+         BNZ   MSG241E             ERROR RETURN IF BAD LOAD    @V60B9BA 00445000
+         L     R5,SAVEWRK2         ADDRESS OF HOLDING AREA     @V60B9BA 00446000
+         L     R2,RSPRPAGE         SET UP FOR IDAL ADDRESSING  @V60B9BA 00447000
+         LA    R2,8(R2)            FIRST BYTE OF GRAPH MOD     @V60B9BA 00448000
+         ST    R2,HLDCCW5          PLACE TO PUT FIRST IDAW     @V60B9BA 00449000
+         LA    R2,2040(R2)         NEXT 2048 BYTE BLOCK        @V60B9BA 00450000
+         ST    R2,HLDCCW5+4        2ND IDAW                    @V60B9BA 00451000
+         L     R2,RSPRPAG2         NEXT BUFFER                 @V60B9BA 00452000
+         ST    R2,HLDCCW6          3RD IDAW                    @V60B9BA 00453000
+         LA    R2,2048(R2)         SECOND BLOCK IN BUFFER      @V60B9BA 00454000
+         ST    R2,HLDCCW6+4        4TH IDAW                    @V60B9BA 00455000
+         L     R2,RSPRPAGE         POINT TO 1ST PAGE AGAIN     @V60B9BA 00456000
+         LA    R0,HLDCCW5          POINT TO IDAW LIST          @V60B9BA 00457000
+         ICM   R0,B'1000',LGMCCW   LOAD GRAPHIC MOD CCW        @V60B9BA 00458000
+         LH    R1,6(R2)            LENGTH OF THE GRAPHIC MOD   @V60B9BA 00459000
+         ICM   R1,B'1100',LGMCCW+4 PUT IN THE CCW FLAGS        @V60B9BA 00460000
+         STM   R0,R1,HLDCCW1       FIRST CCW                   @V60B9BA 00461000
+         MVC   HLDCCW2,LOADSNS     DUMMY SENSE CCW             @V60B9BA 00462000
+         LA    R1,HLDCCW1          OUR FIRST CCW               @V60B9BA 00463000
+         ST    R1,IOBCAW           PUT IT IN THE IOBLOCK       @V60B9BA 00464000
+         LA    R1,LGMRTN           THE INTERRUPT RETURN ADDR   @V60B9BA 00465000
+         ST    R1,IOBIRA           SAVE IT IN THE IOBLOK       @V60B9BA 00466000
+         ST    R13,IOBMISC         SAVE REGISTER 13            @V60B9BA 00467000
+         B     TCSSIO              DO THE START I/O            @V60B9BA 00468000
+         SPACE                                                          00469000
+LGMRTN   EQU   *                   HERE AFTER GRAPH MOD I/O    @V60B9BA 00470000
+         USING *,R12               TEMPORARY ADDRESSIBILITY    @V60B9BA 00471000
+         S     R12,=A(LGMRTN-DMKTCS)                           @V60B9BA 00472000
+         USING DMKTCS,R12          NEW ADDRESSIBILITY          @V60B9BA 00473000
+         LR    R1,R10              CHECK FOR COPY IOBLOK       @V60B9BA 00474000
+         L     R10,IOBLINK         LOAD ADDRESS OF ORIGINAL    @V60B9BA 00475000
+         CR    R1,R10              COPY IOBLOK PRESENT?        @V60B9BA 00476000
+         BE    OK2                 XFER IF NOT                 @V60B9BA 00477000
+         OI    IOBSTAT,IOBFATAL    INDICATE FATAL ERROR        @V60B9BA 00478000
+         LA    R0,IOBSIZE          LOAD SIZE OF IOBLOK         @V60B9BA 00479000
+         CALL  DMKFRET             RETURN STORAGE              @V60B9BA 00480000
+         B     TCSDSP              WAIT FOR DEVICE END         @V60B9BA 00481000
+OK2      L     R13,IOBMISC         RESTORE REGISTER 13         @V60B9BA 00482000
+         LM    R0,R11,SAVEREGS     RESTORE ENTRY REGISTERS     @V60B9BA 00483000
+         L     R5,SAVEWRK2         ADDR OF HOLDING AREA        @V60B9BA 00484000
+         TM    IOBSTAT,IOBFATAL    FATAL I/O ERROR ?           @V60B9BA 00485000
+         BO    EXITFF              ERROR EXIT IF SO            @V60B9BA 00486000
+         CLC   IOBMISC2(2),=C'LD'  DID A LOAD CHECK OCCUR ?    @V60B9BA 00487000
+         BE    MSG241E             XFER IF SO                  @V60B9BA 00488000
+         ST    R5,IOBMISC2         GET RID OF 'TCS '           @V60B9BA 00489000
+         L     R1,SAVEWRK9         RESTORE GRAPHIC MOD INDEX   @V60B9BA 00490000
+         LA    R1,4(R1)            POINT TO NEXT ONE           @V60B9BA 00491000
+         CH    R1,=H'16'           FINISHED LAST ONE ?         @V60B9BA 00492000
+         BE    LDMDFY              XFER IF SO                  @V60B9BA 00493000
+         B     LDGLOOP             DO NEXT GRAPHIC MOD         @V60B9BA 00494000
+         SPACE 2                                                        00495000
+*        NOW DO THE COPY MODIFICATION LOAD                              00496000
+         SPACE                                                          00497000
+LDMDFY   L     R6,RDEVEXTN         POINT TO RSPXBLOK           @V60B9BA 00498000
+         CLC   HLDMDFY,RSPXCMOD    IS IT ALREADY THERE ?       @V60B9BA 00499000
+*                                  (INCLUDING NULL CMOD)       @V60B9BA 00500000
+         BE    LDFCB               IF SO, GO ON TO THE FCB     @V60B9BA 00501000
+         MVC   SAVEWRK4,=C'MOD1'   FIRST 4 CHARACTERS          @V60B9BA 00502000
+         L     R2,RSPRPAGE         FIRST BUFFER                @V60B9BA 00503000
+         MVC   0(L'NULLMOD,R2),NULLMOD  MOVE IN A NULL CMOD    @V60B9BA 00504000
+         CLI   HLDMDFY,0           NULL CMOD SPCECIFIED ?      @V60B9BA 00505000
+         BE    LOADIT              GO LOAD IT INTO THE 3800    @V60B9BA 00506000
+         MVC   SAVEWRK5,HLDMDFY    MOVE IN THE CMOD NAME       @V60B9BA 00507000
+         BAL   R3,MEMLOAD          LOAD IT INTO THE BUFFERS    @V60B9BA 00508000
+         BNZ   MSG241E             ERROR RETURN FOR BAD LOAD   @V60B9BA 00509000
+LOADIT   L     R2,RSPRPAGE         SET UP FOR IDAL ADDRESSING  @V60B9BA 00510000
+         L     R5,SAVEWRK2         ADDR OF HOLDING AREA        @V60B9BA 00511000
+         L     R6,RDEVEXTN         RSPXBLOK ADDRESSIBILITY     @V60B9BA 00512000
+         LA    R2,8(R2)            FIRST BYTE OF COPY MOD      @V60B9BA 00513000
+         ST    R2,HLDCCW5          PLACE TO PUT FIRST IDAW     @V60B9BA 00514000
+         LA    R2,2040(R2)         NEXT 2048 BYTE BLOCK        @V60B9BA 00515000
+         ST    R2,HLDCCW5+4        2ND IDAW                    @V60B9BA 00516000
+         L     R2,RSPRPAG2         NEXT BUFFER                 @V60B9BA 00517000
+         ST    R2,HLDCCW6          3RD IDAW                    @V60B9BA 00518000
+         LA    R2,2048(R2)         SECOND BLOCK IN BUFFER      @V60B9BA 00519000
+         ST    R2,HLDCCW6+4        4TH IDAW                    @V60B9BA 00520000
+         L     R2,RSPRPAGE         POINT TO 1ST PAGE AGAIN     @V60B9BA 00521000
+         MVC   HLDCCW1,CLRCCW      SET UP CLEAR PRINTER CCW    @V60B9BA 00522000
+         LA    R0,HLDCCW5          POINT TO IDAW LIST          @V60B9BA 00523000
+         ICM   R0,B'1000',LCMCCW   LOAD COPY MOD CCW           @V60B9BA 00524000
+         LH    R1,6(R2)            LENGTH OF THE COPY MOD      @V60B9BA 00525000
+         ICM   R1,B'1100',LCMCCW+4 PUT IN THE CCW FLAGS        @V60B9BA 00526000
+         STM   R0,R1,HLDCCW2       SECOND CCW                  @V60B9BA 00527000
+         MVC   HLDCCW3,LOADSNS     DUMMY SENSE CCW             @V60B9BA 00528000
+         LA    R1,HLDCCW1          OUR FIRST CCW               @V60B9BA 00529000
+         TM    SAVEWRK1,X'40'      CLEAR PRINTER ISSUED?       @V60B9BA 00530000
+         BZ    *+8                 XFER IF NOT                 @V60B9BA 00531000
+         LA    R1,HLDCCW2          BYPASS CLEAR PRINTER CCW    @V60B9BA 00532000
+         OI    SAVEWRK1,X'40'      CLEAR PRINTER NOW IS DONE   @V60B9BA 00533000
+         ST    R1,IOBCAW           PUT IT IN THE IOBLOCK       @V60B9BA 00534000
+         LA    R1,LCMRTN           THE INTERRUPT RETURN ADDR   @V60B9BA 00535000
+         ST    R1,IOBIRA           SAVE IT IN THE IOBLOK       @V60B9BA 00536000
+         ST    R13,IOBMISC         SAVE REGISTER 13            @V60B9BA 00537000
+         B     TCSSIO              DO THE START I/O            @V60B9BA 00538000
+         SPACE                                                          00539000
+LCMRTN   EQU   *                   HERE AFTER COPY  MOD I/O    @V60B9BA 00540000
+         USING *,R12               TEMPORARY ADDRESSIBILITY    @V60B9BA 00541000
+         S     R12,=A(LCMRTN-DMKTCS)                           @V60B9BA 00542000
+         USING DMKTCS,R12          NEW ADDRESSIBILITY          @V60B9BA 00543000
+         LR    R1,R10              CHECK FOR COPY IOBLOK       @V60B9BA 00544000
+         L     R10,IOBLINK         LOAD ADDRESS OF ORIGINAL    @V60B9BA 00545000
+         CR    R1,R10              COPY IOBLOK PRESENT?        @V60B9BA 00546000
+         BE    OK3                 XFER IF NOT                 @V60B9BA 00547000
+         OI    IOBSTAT,IOBFATAL    INDICATE FATAL ERROR        @V60B9BA 00548000
+         LA    R0,IOBSIZE          LOAD SIZE OF IOBLOK         @V60B9BA 00549000
+         CALL  DMKFRET             RETURN STORAGE              @V60B9BA 00550000
+         B     TCSDSP              WAIT FOR DEVICE END         @V60B9BA 00551000
+OK3      L     R13,IOBMISC         RESTORE REGISTER 13         @V60B9BA 00552000
+         LM    R0,R11,SAVEREGS     RESTORE ENTRY REGISTERS     @V60B9BA 00553000
+         L     R5,SAVEWRK2         ADDR OF HOLDING AREA        @V60B9BA 00554000
+         TM    IOBSTAT,IOBFATAL    FATAL I/O ERROR ?           @V60B9BA 00555000
+         BO    EXITFF              ERROR EXIT IF SO            @V60B9BA 00556000
+         CLC   IOBMISC2(2),=C'LD'  DID A LOAD CHECK OCCUR ?    @V60B9BA 00557000
+         BE    MSG241E             XFER IF SO                  @V60B9BA 00558000
+         ST    R5,IOBMISC2         GET RID OF 'TCS '           @V60B9BA 00559000
+         L     R6,RDEVEXTN         RSPXBLOK ADDRESSIBILITY     @V60B9BA 00560000
+         MVC   RSPXCMOD,HLDMDFY    NEW CMOD IN THE 3800        @V60B9BA 00561000
+         SPACE 2                                                        00562000
+*        NOW WE LOAD THE FCB                                            00563000
+         SPACE                                                          00564000
+LDFCB    MVC   SAVEWRK4,=C'FCB3'   FIRST FOUR CHARACTERS       @V60B9BA 00565000
+         MVC   SAVEWRK5,HLDFCB     THE FCB NAME                @V60B9BA 00566000
+         L     R2,RSPRPAGE         BUFFER POINTER              @V60B9BA 00567000
+         LA    R1,6/2              ASSUME FCB WAS '6   '       @V60B9BA 00568000
+         CLC   HLDFCB,=C'6   '     WAS IT ?                    @V60B9BA 00569000
+         BE    CALCFCB             XFER IF SO                  @V60B9BA 00570000
+         LA    R1,8/2              ASSUME FCB WAS '8   '       @V60B9BA 00571000
+         CLC   HLDFCB,=C'8   '     WAS IT ?                    @V60B9BA 00572000
+         BE    CALCFCB             XFER IF SO                  @V60B9BA 00573000
+         LA    R1,12/2             ASSUME FCB WAS '12  '       @V60B9BA 00574000
+         CLC   HLDFCB,=C'12  '     WAS IT ?                    @V60B9BA 00575000
+         BE    CALCFCB             XFER IF SO                  @V60B9BA 00576000
+         CLC   RSPXFCB,HLDFCB      IS IT ALREADY IN ?          @V60B9BA 00577000
+         BE    LDFOSC              XFER IF SO - DONE           @V60B9BA 00578000
+         BAL   R3,MEMLOAD          LOAD IN THE FCB             @V60B9BA 00579000
+         BNZ   MSG241E             ERROR RETURN IF BAD LOAD    @V60B9BA 00580000
+         LA    R1,6(R2)            GET LENGTH INTO R1          @V60B9BA 00581000
+         B     FCBIO               IT'S IN STORAGE- LOAD IT    @V60B9BA 00582000
+         SPACE                                                          00583000
+CALCFCB  EQU   *    HERE TO CALCULATE THE PROPER FCB                    00584000
+         OI    SAVEWRK1,X'20'      FCB IS CALCULATED           @V60B9BA 00585000
+         LR    R4,R1               NUMBER OF HALF-INCHES       @V60B9BA 00586000
+         S     R4,F3               SUBTRACT 3 TO GET FCB BYTE  @V60B9BA 00587000
+         SLL   R4,4                PUT IT IN POSITION FOR FCB  @V60B9BA 00588000
+         STC   R4,8(R2)            PUT IT IN THE BUFFER AND    @V60B9BA 00589000
+         MVC   9(143,R2),8(R2)     .. PROPOGATE TO MAX LENGTH  @V60B9BA 00590000
+         ST    R1,SAVEWRK7         SAVE THE LPI/2              @V60B9BA 00591000
+         LA    R4,8(R2,R1)         PLACE TO PUT CHANNEL 1 CODE @V60B9BA 00592000
+         OI    0(R4),X'01'         PUT IN SKIP TO CH 1         @V60B9BA 00593000
+         SR    R3,R3               INITIALIZE THE REGISTER     @V60B9BA 00594000
+         IC    R3,RDEVCURP         USER CURRENT PAPER SIZE 1ST @V60B9BA 00595000
+         LA    R4,12               NUMBER OF LINE SIZES TO TRY @V60B9BA 00596000
+         B     FCB2                WE ARE SET UP FIRST TIME    @V60B9BA 00597000
+FCBLOOP  SR    R3,R3               INITIALIZE THE REGISTER     @V60B9BA 00598000
+         IC    R3,LINESIZE-1(R4)   GET A PAPER SIZE IN         @V60B9BA 00599000
+FCB2     STC   R3,SAVEWRK9         SAVE PAPER LENGTH FOR LATER @V60B9BA 00600000
+         SR    R0,R0               INITIALIZE FOR MULTIPLY     @V60B9BA 00601000
+         L     R1,SAVEWRK7         LPI/2 INTO R1               @V60B9BA 00602000
+         MR    R0,R3               MULT BY NUMBER OF HALF-INS  @V60B9BA 00603000
+FCBIO    L     R0,LDFCBCCW         FIRST PART OF LOAD FCB CCW  @V60B9BA 00604000
+         ALR   R0,R2               RELOCATE ADDRESS            @V60B9BA 00605000
+         O     R1,LDFCBCCW+4       LENGTH + FLAGS              @V60B9BA 00606000
+         STM   R0,R1,HLDCCW2       SECOND CCW                  @V60B9BA 00607000
+         MVC   HLDCCW3,LOADSNS     DUMMY SENSE CCW             @V60B9BA 00608000
+         MVC   HLDCCW1,CLRCCW      CLEAR PRINT CCW             @V60B9BA 00609000
+         LA    R1,HLDCCW1          OUR FIRST CCW               @V60B9BA 00610000
+         TM    SAVEWRK1,X'40'      HAS CLR PRT BEEN ISSUED?    @V60B9BA 00611000
+         BZ    *+8                 XFER IF NOT                 @V60B9BA 00612000
+         LA    R1,HLDCCW2          BYPASS THE CLR PRT          @V60B9BA 00613000
+         OI    SAVEWRK1,X'40'      IT NOW HAS BEEN ISSUED      @V60B9BA 00614000
+         ST    R1,IOBCAW           PUT IT IN THE IOBLOCK       @V60B9BA 00615000
+         LA    R1,FCBRTN           THE INTERRUPT RETURN ADDR   @V60B9BA 00616000
+         ST    R1,IOBIRA           SAVE IT IN THE IOBLOK       @V60B9BA 00617000
+         ST    R13,IOBMISC         SAVE REGISTER 13            @V60B9BA 00618000
+         ST    R4,SAVEWRK8         SAVE THE PAPER LENGTH INDEX @V60B9BA 00619000
+         B     TCSSIO              DO THE START I/O            @V60B9BA 00620000
+         SPACE                                                          00621000
+FCBRTN   EQU   *                   HERE AFTER LOAD FCB  I/O    @V60B9BA 00622000
+         USING *,R12               TEMPORARY ADDRESSIBILITY    @V60B9BA 00623000
+         S     R12,=A(FCBRTN-DMKTCS)                           @V60B9BA 00624000
+         USING DMKTCS,R12          NEW ADDRESSIBILITY          @V60B9BA 00625000
+         LR    R1,R10              CHECK FOR COPY IOBLOK       @V60B9BA 00626000
+         L     R10,IOBLINK         LOAD ADDRESS OF ORIGINAL    @V60B9BA 00627000
+         CR    R1,R10              COPY IOBLOK PRESENT?        @V60B9BA 00628000
+         BE    OK4                 XFER IF NOT                 @V60B9BA 00629000
+         OI    IOBSTAT,IOBFATAL    INDICATE FATAL ERROR        @V60B9BA 00630000
+         LA    R0,IOBSIZE          LOAD SIZE OF IOBLOK         @V60B9BA 00631000
+         CALL  DMKFRET             RETURN STORAGE              @V60B9BA 00632000
+         B     TCSDSP              WAIT FOR DEVICE END         @V60B9BA 00633000
+OK4      L     R13,IOBMISC         RESTORE REGISTER 13         @V60B9BA 00634000
+         LM    R0,R11,SAVEREGS     RESTORE ENTRY REGISTERS     @V60B9BA 00635000
+         L     R5,SAVEWRK2         ADDR OF HOLDING AREA        @V60B9BA 00636000
+         L     R4,SAVEWRK8         RESTORE THE PAPER LGTH INDEX@V60B9BA 00637000
+         TM    IOBSTAT,IOBFATAL    FATAL I/O ERROR ?           @V60B9BA 00638000
+         BO    EXITFF              ERROR EXIT IF SO            @V60B9BA 00639000
+         CLC   IOBMISC2(2),=C'LD'  DID A LOAD CHECK OCCUR ?    @V60B9BA 00640000
+         BNE   FCBDONE             NO- THE FCB HAS BEEN LOADED @V60B9BA 00641000
+         TM    IOBMISC2+2,X'08'    WAS IT FCB LENGTH CHECK?    @V60B9BA 00642000
+         BZ    MSG241E             NO-SO BAD MODULE LOAD       @V60B9BA 00643000
+         TM    SAVEWRK1,X'20'      FCB CALCULATED ?            @V60B9BA 00644000
+         BZ    MSG240E             NO- FORMS-FCB MISMATCH      @V60B9BA 00645000
+         BCT   R4,FCBLOOP          TRY NEXT PAPER LENGTH       @V60B9BA 00646000
+         B     MSG241E             RAN OUT OF PAPER LENGTHS    @V60B9BA 00647000
+FCBDONE  ST    R5,IOBMISC2         GET RID OF 'TCS '           @V60B9BA 00648000
+         L     R6,RDEVEXTN         RSPXBLOK ADDRESSIBILITY     @V60B9BA 00649000
+         MVC   RSPXFCB,HLDFCB      NEW FCB LOADED              @V60B9BA 00650000
+         TM    SAVEWRK1,X'20'      FCB CALCULATED ?            @V60B9BA 00651000
+         BZ    LDFOSC              XFER IF NOT                 @V60B9BA 00652000
+         MVC   RDEVCURP,SAVEWRK9   GET CURRENT PAPER LENGTH    @V60B9BA 00653000
+         SPACE 2                                                        00654000
+LDFOSC   LA    R0,HLDSTCPY         GET STARTING COPY NUMBER    @V60B9BA 00655000
+         O     R0,LDCPYCCW         SET UP THE LOAD CPY NO. CCW @V60B9BA 00656000
+         L     R1,LDCPYCCW+4       THE SECOND HALF             @V60B9BA 00657000
+         STM   R0,R1,HLDCCW2       FIRST IS LD COPY NUM CCW    @V60B9BA 00658000
+         MVC   HLDCCW1,CLRCCW      MIGHT NEED A CLR PRT        @V60B9BA 00659000
+         TM    HLDFLAG,SPCOPYFG    1 TRANSMISSION ?            @V60B9BA 00660000
+         BZ    TWOBYTES            XFER IF NOT                 @V60B9BA 00661000
+         CLI   HLDFLSHC,0          ZERO FLASH COUNT ?          @V60B9BA 00662000
+         BE    TWOBYTES            XFER IF SO                  @V60B9BA 00663000
+         CLC   HLDFLSHC,HLDCPY     ALL COPIES FLASHED ?        @V60B9BA 00664000
+         BNL   TWOBYTES            XFER IF SO                  @V60B9BA 00665000
+         SPACE                                                          00666000
+         L     R1,=X'00FF0000'     INITIALIZED FOSC            @V60B9BA 00667000
+         ICM   R1,B'1000',HLDFLSHC NUMBER TO BE FLASHED        @V60B9BA 00668000
+         ICM   R1,B'0010',HLDCPY   TOTAL NUMBER OF COPIES      @V60B9BA 00669000
+         SR    R0,R0               MUST SUBTRACT THE FIRST     @V60B9BA 00670000
+         IC    R0,HLDFLSHC         .. PART TO GET THE SECOND   @V60B9BA 00671000
+         SLL   R0,8                GET IT IN POSITION          @V60B9BA 00672000
+         SLR   R1,R0               GET THE FINAL FOSC          @V60B9BA 00673000
+         ST    R1,SAVEWRK9         PLACE TO PUT IT             @V60B9BA 00674000
+         LA    R1,4                NUMBER OF BYTES FOR THE CCW @V60B9BA 00675000
+         B     FOSCIO              DO THE 3800 I/O             @V60B9BA 00676000
+         SPACE                                                          00677000
+TWOBYTES TM    HLDFLAG,SPCOPYFG    1 TRANSMISSION  ?           @V60B9BA 00678000
+         BZ    MULTXM              XFER IF NOT                 @V60B9BA 00679000
+         SR    R0,R0               GET AN INITIALIZED FOSC     @V60B9BA 00680000
+         CLI   HLDFLSHC,0          ZERO FLASH COUNT ?          @V60B9BA 00681000
+         BE    *+8                 XFER IF SO                  @V60B9BA 00682000
+         ICM   R0,B'0100',=X'FF'   SPECIFY FLAHSING            @V60B9BA 00683000
+         ICM   R0,B'1000',HLDCPY   TOTAL COPIES TO PRINT       @V60B9BA 00684000
+         ST    R0,SAVEWRK9         PLACE TO PUT IT             @V60B9BA 00685000
+         LA    R1,2                NUMBER OF BYTES IN FOSC     @V60B9BA 00686000
+         B     FOSCIO              GO DO THE I/O               @V60B9BA 00687000
+MULTXM   MVI   SAVEWRK9,X'01'      ONE COPY TO PRINT NOW       @V60B9BA 00688000
+         MVI   SAVEWRK9+1,0        ASSUME NO FLASHING          @V60B9BA 00689000
+         CLC   HLDSTCPY,HLDFLSHC   SHOULD WE FLASH THIS ONE?   @V60B9BA 00690000
+         BH    *+8                 XFER IF NOT                 @V60B9BA 00691000
+         MVI   SAVEWRK9+1,X'FF'    SPECIFY FLASHING            @V60B9BA 00692000
+         LA    R1,2                TWO BYTES IN THE FOSC       @V60B9BA 00693000
+         SPACE                                                          00694000
+FOSCIO   LA    R0,SAVEWRK9         WHERE THE FOSC IS           @V60B9BA 00695000
+         ICM   R0,B'1000',LFOSCCCW THE FOSC CCW                @V60B9BA 00696000
+         ICM   R1,B'1100',LFOSCCCW+4  THE FLAGS                @V60B9BA 00697000
+         STM   R0,R1,HLDCCW3       SECOND CCW                  @V60B9BA 00698000
+         MVC   HLDCCW4,LOADSNS     DUMMY SENSE                 @V60B9BA 00699000
+         LA    R1,HLDCCW1          OUR FIRST CCW               @V60B9BA 00700000
+         TM    SAVEWRK1,X'40'      HAS 'CLR PRT' BEEN ISSUED?  @V60B9BA 00701000
+         BZ    *+8                 XFER IF NOT                 @V60B9BA 00702000
+         LA    R1,HLDCCW2          BYPASS THE CLR PRT          @V60B9BA 00703000
+         OI    SAVEWRK1,X'40'      IT NOW HAS BEEN ISSUED      @V60B9BA 00704000
+         ST    R1,IOBCAW           PUT IT IN THE IOBLOCK       @V60B9BA 00705000
+         LA    R1,FOSCRTN          THE INTERRUPT RETURN ADDR   @V60B9BA 00706000
+         ST    R1,IOBIRA           SAVE IT IN THE IOBLOK       @V60B9BA 00707000
+         ST    R13,IOBMISC         SAVE REGISTER 13            @V60B9BA 00708000
+         B     TCSSIO              DO THE START I/O            @V60B9BA 00709000
+         SPACE                                                          00710000
+FOSCRTN  EQU   *                   HERE AFTER LOAD FOSC I/O    @V60B9BA 00711000
+         USING *,R12               TEMPORARY ADDRESSIBILITY    @V60B9BA 00712000
+         S     R12,=A(FOSCRTN-DMKTCS)                          @V60B9BA 00713000
+         USING DMKTCS,R12          NEW ADDRESSIBILITY          @V60B9BA 00714000
+         LR    R1,R10              CHECK FOR COPY IOBLOK       @V60B9BA 00715000
+         L     R10,IOBLINK         LOAD ADDRESS OF ORIGINAL    @V60B9BA 00716000
+         CR    R1,R10              COPY IOBLOK PRESENT?        @V60B9BA 00717000
+         BE    OK5                 XFER IF NOT                 @V60B9BA 00718000
+         OI    IOBSTAT,IOBFATAL    INDICATE FATAL ERROR        @V60B9BA 00719000
+         LA    R0,IOBSIZE          LOAD SIZE OF IOBLOK         @V60B9BA 00720000
+         CALL  DMKFRET             RETURN STORAGE              @V60B9BA 00721000
+         B     TCSDSP              WAIT FOR DEVICE END         @V60B9BA 00722000
+OK5      L     R13,IOBMISC         RESTORE REGISTER 13         @V60B9BA 00723000
+         LM    R0,R11,SAVEREGS     RESTORE ENTRY REGISTERS     @V60B9BA 00724000
+         L     R5,SAVEWRK2         ADDR OF HOLDING AREA        @V60B9BA 00725000
+         TM    IOBSTAT,IOBFATAL    FATAL I/O ERROR ?           @V60B9BA 00726000
+         BO    EXITFF              ERROR EXIT IF SO            @V60B9BA 00727000
+         CLC   IOBMISC2(2),=C'LD'  DID A LOAD CHECK OCCUR ?    @V60B9BA 00728000
+         BNE   FOSCOK              XFER IF NOT                 @V60B9BA 00729000
+         OI    IOBSTAT,IOBFATAL    SET FATAL I/O ERROR         @V60B9BA 00730000
+         B     EXITFF              AND EXIT                    @V60B9BA 00731000
+FOSCOK   ST    R5,IOBMISC2         GET RID OF 'TCS '           @V60B9BA 00732000
+         B     EXIT0               AND LEAVE                   @V60B9BA 00733000
+         SPACE 6                                                        00734000
+TCSSIO   MVC   IOBMISC2(4),=C'TCS '  INDICATE SETUP ENTRY      @V60B9BA 00735000
+         NI    IOBFLAG,X'FF'-IOBRSTRT   CLEAR THE RESTART FLAG @V60B9BA 00736000
+         CALL  DMKIOSQR            ISSUE THE START I/O         @V60B9BA 00737000
+TCSDSP   GOTO  DMKDSPCH            WAIT FOR THE INTERRUPT      @V60B9BA 00738000
+         SPACE 5                                                        00739000
+EXITFF   MVI   SAVEWRK1+1,X'FF'    NON-ZERO CONDITION CODE     @V60B9BA 00740000
+         B     EXIT                GO TO COMMON EXIT           @V60B9BA 00741000
+         SPACE                                                          00742000
+EXIT0    EQU   *                   ITS ZERO CONDITION CODE     @V60B9BA 00743000
+EXIT     L     R1,SAVEWRK3         WAS THERE A SYS VIRT PAGE?  @V60B9BA 00744000
+         LTR   R1,R1               WELL ?                      @V60B9BA 00745000
+         BZ    EXITA               XFER IF NOT                 @V60B9BA 00746000
+         SR    R0,R0               DUMMY DASD ADDRESS          @V60B9BA 00747000
+         CALL  DMKRPAGT,AFFINITY,PARM=SYSTEM   RELEASE IT      @V60B9BA 00748000
+         CALL  DMKPGTVR            GIVE IT BACK                @V60B9BA 00749000
+EXITA    LA    R0,HLDSIZE          LET'S GIVE BACK THE         @V60B9BA 00750000
+         L     R1,SAVEWRK2         HOLDING AREA WE GOT         @V60B9BA 00751000
+         CALL  DMKFRET             GO DO IT                    @V60B9BA 00752000
+EXITB    TM    SAVEWRK1+1,X'FF'    SET THE CONDITION CODE      @V60B9BA 00753000
+         EXIT                                                           00754000
+         SPACE 5                                                        00755000
+MSG240E  LA    R2,240              FCB-FORMS MISMATCH CODE     @V60B9BA 00756000
+         LA    R5,15               MESSAGE DATA LENGTH         @V60B9BA 00757000
+         B     MSGCOMN             JOIN COMMON CODE            @V60B9BA 00758000
+         SPACE                                                          00759000
+MSG241E  LA    R2,241              INVALID LOAD MODULE         @V60B9BA 00760000
+         LA    R5,20               LENGTH OF DATA              @V60B9BA 00761000
+         SPACE                                                          00762000
+MSGCOMN  L     R4,RSPRPAGE         ADDR OF DATA AREA           @V60B9BA 00763000
+         MVI   3(R4),0             DELIMITER BEFOR 2ND FIELD   @V60B9BA 00764000
+         LA    R4,4(R4)            NEXT MESSAGE FIELD          @V60B9BA 00765000
+         CH    R2,=H'240'          MSG ID 240 ?                @V60B9BA 00766000
+         BE    SKIPMOD             XFER IF SO                  @V60B9BA 00767000
+         MVC   0(4,R4),SAVEWRK5    MODULE NAME                 @V60B9BA 00768000
+         MVI   4(R4),0             DELIMITER                   @V60B9BA 00769000
+         LA    R4,5(R4)            NEXT MESSAGE FIELD          @V60B9BA 00770000
+SKIPMOD  LH    R1,SFBFILID         GET SPOOL FILE ID           @V60B9BA 00771000
+         CALL  DMKCVTBD            CONVERT TO DECIMAL          @VMI0013 00772000
+         STCM  R1,B'1111',0(R4)    SPOOLID                     @V60B9BA 00773000
+         MVI   4(R4),0             DELIMITER                   @V60B9BA 00774000
+         LA    R4,5(R4)            NEXT FIELD                  @V60B9BA 00775000
+         MVC   0(6,R4),BLANKS      BLANK THE FIELD             @V60B9BA 00776000
+         TM    SAVEWRK1,X'10'      ENTERED AT DMKTCSSP?        @V60B9BA 00777000
+         BO    MSGCONT             XFER IF SO                  @V60B9BA 00778000
+         MVC   0(6,R4),=C'HELD  '  FILE STATUS                 @V60B9BA 00779000
+         TM    RDEVSTA2,RDEVPURG   IS IT PURGE ?               @V60B9BA 00780000
+         BZ    MSGCONT             XFER IF NOT                 @V60B9BA 00781000
+         MVC   0(6,R4),=C'PURGED'  MOVE THAT                   @V60B9BA 00782000
+         SPACE                                                          00783000
+MSGCONT  L     R4,RSPRPAGE         BEGINNING OF DATA AREA      @V60B9BA 00784000
+         CALL  DMKSCNRD            GET 3800 ADDR IN CUU FORM   @V60B9BA 00785000
+         CALL  DMKCVTBH            CONVERT TO PRINTABLE HEX    @V60B9BA 00786000
+         STCM  R1,B'0111',0(R4)    DATA AREA                   @V60B9BA 00787000
+         LA    R0,8                USERID LENGTH               @V60B9BA 00788000
+         LA    R1,SFBUSER          USERID ADDRESS              @V60B9BA 00789000
+         CALL  DMKSCNAU            GET THE VMBLOK              @V60B9BA 00790000
+         BALR  R6,0                SAVE CONDITION CODE         @V60B9BA 00791000
+         SWTCHVM                   SWITCH TO USER'S VMBLOK     @VMI0081 00792000
+         LR    R0,R5               MESSAGE LENGTH              @V60B9BA 00793000
+         ICM   R0,B'1110',DMKTCS+3 MODULE ID                   @V60B9BA 00794000
+         LR    R1,R4               ADDRESS OF DATA             @V60B9BA 00795000
+         ICM   R2,B'1100',=X'B0C5' OP + ALARM + RETURN         @V60B9BA 00796000
+         CALL  DMKERMSG            SEND MESSAGE TO OPERATOR    @V60B9BA 00797000
+         SPM   R6                  RESTORE CONDITION CODE      @V60B9BA 00798000
+         BNZ   EREXIT              HE'S NOT LOGGED ON          @V60B9BA 00799000
+         ICM   R2,B'1000',=X'90'   ALARM + RETURN              @V60B9BA 00800000
+         CALL   DMKERMSG           SEND USER THE MESSAGE       @V60B9BA 00801000
+         SPACE                                                          00802000
+EREXIT   L     R1,SAVEWRK3         THE SYSTEM VIRTUAL PAGE     @V60B9BA 00803000
+         CALL  DMKPGTVR            GIVE IT BACK                @V60B9BA 00804000
+         LA    R0,HLDSIZE          RETURN THE HOLDING AREA     @V60B9BA 00805000
+         L     R1,SAVEWRK2         ITS ADDRESS                 @V60B9BA 00806000
+         CALL  DMKFRET             RETURN IT                   @V60B9BA 00807000
+         TM    *,X'FF'             NON-ZERO CONDITION CODE     @V60B9BA 00808000
+         L     R1,SAVER11          VMBLOK OF CALLER            @VMI0081 00809000
+         SWTCHVM                   SWITCH TO CALLER'S VMBLOK   @VMI0081 00810000
+         EXIT                                                           00811000
+         EJECT                                                          00812000
+*.                                                                      00813000
+* THIS SUBROUTINE READS MEMBERS OF THE IMAGE LIBRARY SPECIFIED          00814000
+* IN RDEVIMAG INTO THE LOCKED BUFFERS INDICATED IN THE                  00815000
+* RSPLCTL CONTROL BLOCK.  THE DIRECTORY AND DATA ARE INITIALLY          00816000
+* MOVED TO THE BUFFERS POINTED TO BY SAVEWRK3 AND THEN MOVED.           00817000
+* ON ENTRY, THE MEMBER TO LOAD IS CONTAINED IN SAVEWRK4 & SAVEWRK5.     00818000
+*        THE DATA IS MOVED IN 4 SECTIONS: A, B,  C, AND D.              00819000
+*        SINCE ITS MAXIMUM IS 8192 BYTES, IT CAN SPAN 3 PAGES           00820000
+*        IN THE IMAGE LIBRARY, WITH SECTION A IN THE FIRST PAGE,        00821000
+*        SECTIONS B & C IN THE SECOND PAGE, AND SECTION D IN THE        00822000
+*        THIRD PAGE.  THE RESULT CAN SPAN 2 PAGES WITH                  00823000
+*        SECTIONS A AND B LANDING IN THE FIRST PAGE AND                 00824000
+*        SECTIONS C AND D LANDING IN THE SECOND PAGE.                   00825000
+*.                                                                      00826000
+         SPACE                                                          00827000
+MEMLOAD  L     R1,=A(DMKQNTBL)     GET IMAGE LIBRARY ANCHOR    @V60B9BA 00828000
+         LTR   R1,R1               ANY SYSTEMS DEFINED ?       @V60B9BA 00829000
+         BZ    MEMERROR            ERROR RETURN IF NOT         @V60B9BA 00830000
+         TRANS 2,1,OPT=(BRING,DEFER,SYSTEM)  BRING NPRTBL IN   @V60B9BA 00831000
+         USING NPRTBL,R2           ADDRESSIBILITY              @V60B9BA 00832000
+MEMLD1   CLC   NPRNAME,RDEVIMAG    IS THIS THE IMAGE LIBRARY?  @V60B9BA 00833000
+         BE    MEMLD2              XFER IF SO                  @V60B9BA 00834000
+         AL    R2,NPRPNT           NEXT ENTRY                  @V60B9BA 00835000
+         CLC   NPRPNT,ZEROES       DUMMY LAST ENTRY ?          @V60B9BA 00836000
+         BNE   MEMLD1              TRY AGAIN IF NOT            @V60B9BA 00837000
+MEMERROR TM    *,X'FF'             NON-ZERO CONDITION CODE     @V60B9BA 00838000
+         BR    R3                  RETURN TO CALLER            @V60B9BA 00839000
+MEMLD2   LA    R0,6                LENGTH OF VOLSER            @V60B9BA 00840000
+         LA    R1,NPRVOL           ADDRESS OF VOLSER           @V60B9BA 00841000
+         CALL  DMKSCNVS            FIND THE RDEVBLOK           @V60B9BA 00842000
+         BNZR  R3                  ERROR RETURN IF NOT FOUND   @V60B9BA 00843000
+         TM    RDEVFLAG-RDEVBLOK(R1),RDEVOWN  CP-OWNED ?       @V60B9BA 00844000
+         BZ    MEMERROR            ERROR IF NOT                @V60B9BA 00845000
+         LA    R6,32               PAGES/CYL FOR 2314          @V60B9BA 00846000
+         TM    RDEVTYPE-RDEVBLOK(R1),TYP2314   2314?           @V60B9BA 00847000
+         BO    MEMLD3              XFER IF SO                  @V60B9BA 00848000
+         LA    R6,120              PAGES/CYL FOR 3350          @V60B9BA 00849000
+         CLI   RDEVTYPE-RDEVBLOK(R1),TYP3350   IS IT 3350?     @V60B9BA 00850000
+         BE    MEMLD3              XFER IF SO                  @V60B9BA 00851000
+         LA    R6,57               PAGES/CYL FOR 3330          @V60B9BA 00852000
+         TM    RDEVTYPE-RDEVBLOK(R1),TYP3330  IS IT A 3330?    @V60B9BA 00853000
+         BO    MEMLD3              XFER IF SO                  @V60B9BA 00854000
+         LA    R6,24               IT MUST BE A 3340 OR 2305   @V60B9BA 00855000
+MEMLD3   SLL   R6,8                GET IT INTO POSITION        @V60B9BA 00856000
+         MVC   SAVEWRK6,NPRSTART   GET STARTING CCPD           @V60B9BA 00857000
+         MVC   SAVEWRK6+3(1),RDEVCODE+1-RDEVBLOK(R1)  INDEX    @V60B9BA 00858000
+         L     R1,SAVEWRK3         VIRT ADDRESS OF SYSTEM PAGE @V60B9BA 00859000
+         L     R0,SAVEWRK6         STARTING DASD CCPD          @V60B9BA 00860000
+         ST    R0,SAVEWRK7         CURRENT CCPD                @V60B9BA 00861000
+         CALL  DMKRPAGT,PARM=SYSTEM+BRING  BRING IT IN         @V60B9BA 00862000
+         BNZR  R3                  RETURN, PAGING ERROR        @V60B9BA 00863000
+         DROP  R2                  NOT NEEDED FOR NPRTBL       @V60B9BA 00864000
+         USING PDEBLOK,R2          ADDRESSES DIRECTORY ENTRIES @V60B9BA 00865000
+         CLC   PDEIMAG,RDEVIMAG    IS IT THE RIGHT IMAG LIB ?  @V60B9BA 00866000
+         BNER  R3                  ERROR RETURN IF NOT         @V60B9BA 00867000
+         L     R0,PDENUM           NUMBER OF MEMBERS           @V60B9BA 00868000
+         LA    R2,PDESIZE(R2)      FIRST REAL MEMBER           @V60B9BA 00869000
+MEMLD3A  LA    R4,PDESIZE          INCREMENT FOR BXLE          @V60B9BA 00870000
+         LR    R5,R2               SET UP THE                  @V60B9BA 00871000
+         O     R5,F4095            .. COMPARAND TO END OF PAGE @V60B9BA 00872000
+MEMLD4   CLC   PDENAME,SAVEWRK4    IS THIS THE MEMBER TO LOAD? @V60B9BA 00873000
+         BE    MEMLD7              XFER IF SO                  @V60B9BA 00874000
+         BCT   R0,MEMLD5           TRY NEXT MEMBER             @V60B9BA 00875000
+         B     MEMERROR            COULDN'T FIND THE MEMBER    @V60B9BA 00876000
+MEMLD5   BXLE  R2,R4,MEMLD4        POINT TO NEXT ENTRY         @V60B9BA 00877000
+         SPACE                                                          00878000
+*        MUST GET NEXT DIRECTORY PAGE                                   00879000
+         SPACE                                                          00880000
+         LR    R4,R0               SAVE RESIDUAL MEMBER COUNT  @V60B9BA 00881000
+         L     R0,SAVEWRK7         CURRENT CCPD                @V60B9BA 00882000
+         AL    R0,F256             BUMP TO NEXT PAGE           @V60B9BA 00883000
+         LR    R1,R0               TO R1 FOR WORK              @V60B9BA 00884000
+         N     R1,=X'0000FF00'     ISOLATE PAGE NUMBER         @V60B9BA 00885000
+         CR    R1,R6               REACHED MAXIMUM ?           @V60B9BA 00886000
+         BNH   MEMLD6              XFER IF NOT                 @V60B9BA 00887000
+         AL    R0,=X'00010000'     NEXT CYLINDER               @V60B9BA 00888000
+         ICM   R0,B'0010',F1+3     POINT TO PAGE 1             @V60B9BA 00889000
+MEMLD6   ST    R0,SAVEWRK7         SAVE CURRENT CCPD           @V60B9BA 00890000
+         L     R1,SAVEWRK3         VIRTUAL ADDR OF SYSTEM PAGE @V60B9BA 00891000
+         CALL  DMKRPAGT,PARM=BRING+SYSTEM  BRING IT IN         @V60B9BA 00892000
+         BNZR  R3                  PAGING ERROR - RETURN       @V60B9BA 00893000
+         LR    R0,R4               RESTORE RESIDUAL MEMB CNT   @V60B9BA 00894000
+         B     MEMLD3A             CONTINUE THE SEARCH         @V60B9BA 00895000
+         SPACE                                                          00896000
+*        WE FOUND THE DIRECTORY ENTRY                                   00897000
+         SPACE                                                          00898000
+MEMLD7   L     R4,PDEDISP          GET RBA OF MEMBER           @V60B9BA 00899000
+         SRDL  R4,12               DIVIDE BY 4096              @V60B9BA 00900000
+         SRL   R5,20               REMAINDER IN R5             @V60B9BA 00901000
+         SLL   R4,8                GET PAGE DISP INTO POSITION @V60B9BA 00902000
+         CLC   PDELGTH,=F'8192'    GREATER THAN MAXIMUM ?      @V60B9BA 00903000
+         BHR   R3                  ERROR RETURN IF SO          @V60B9BA 00904000
+         MVC   SAVEWRK8,PDELGTH    SAVE LENGTH LOCALLY         @V60B9BA 00905000
+         DROP  R2                  NO LONGER NEEDED FOR DRCTRY @V60B9BA 00906000
+         SR    R0,R0               WE NOW GET THE DISPLACEMENT @V60B9BA 00907000
+         LR    R1,R4               ... INTO CCPD FORMAT        @V60B9BA 00908000
+         DR    R0,R6               DIVIDE BY PAG/CYL           @V60B9BA 00909000
+         SLL   R1,16               GET NUM OF CYLS IN POSITION @V60B9BA 00910000
+         ALR   R0,R1               ADD CYLS TO REMAINDER       @V60B9BA 00911000
+         AL    R0,SAVEWRK6         ADD START TO DISP           @V60B9BA 00912000
+         ST    R0,SAVEWRK7         SAVE IT FOR LATER           @V60B9BA 00913000
+         L     R4,RSPRPAGE         TARGET ADDR FOR 1ST SECTION @V60B9BA 00914000
+         L     R1,SAVEWRK3         VIRT SYSTEM PAGE            @V60B9BA 00915000
+         CALL  DMKRPAGT,PARM=BRING+SYSTEM  BRING IT IN         @V60B9BA 00916000
+         BNZR  R3                  PAGING ERROR - RETURN       @V60B9BA 00917000
+         LR    R1,R2               HOLD REAL ADDR FOR WORK     @V60B9BA 00918000
+         ALR   R2,R5               ADD DISP TO GET START       @V60B9BA 00919000
+         CLC   0(4,R2),SAVEWRK5    NAMES MATCH ?               @V60B9BA 00920000
+         BNER  R3                  ERROR RETURN IF NOT         @V60B9BA 00921000
+         AL    R1,F4096            GET LENGTH OF FIRST SECTION @V60B9BA 00922000
+         SLR   R1,R2               ... OF THE MEMBER TO MOVE   @V60B9BA 00923000
+         L     R0,RSPRPAGE         TARGET ADDRESS (SECT 1)     @V60B9BA 00924000
+         LR    R4,R2               SOURCE ADDRESS (SECT 1)     @V60B9BA 00925000
+         LR    R5,R1               SOURCE LENGTH               @V60B9BA 00926000
+         LR    R2,R1               SAVE THE MVCL LENGTH        @V60B9BA 00927000
+         MVCL  R0,R4               DO THE MOVE FOR SECT 1      @V60B9BA 00928000
+         C     R2,SAVEWRK8         HAVE WE FINISHED?           @V60B9BA 00929000
+         BNL   MEMEXIT             XFER IF SO                  @V60B9BA 00930000
+         SPACE                                                          00931000
+*        SET UP TO MOVE THE SECOND SECTION                              00932000
+         SPACE                                                          00933000
+         S     R2,SAVEWRK8         NEGATIVE OF REMAINING COUNT @V60B9BA 00934000
+         LCR   R2,R2               MAKE IT POSITIVE            @V60B9BA 00935000
+         ST    R2,SAVEWRK8         SAVE IT                     @V60B9BA 00936000
+         LR    R4,R0               SAVE THE NEW TARGET ADDRESS @V60B9BA 00937000
+         L     R0,SAVEWRK7         CURRENT CCPD                @V60B9BA 00938000
+         AL    R0,F256             BUMP TO NEXT PAGE           @V60B9BA 00939000
+         LR    R1,R0               TO R1 FOR WORK              @V60B9BA 00940000
+         N     R1,=X'0000FF00'     ISOLATE PAGE NUMBER         @V60B9BA 00941000
+         CR    R1,R6               REACHED MAX ?               @V60B9BA 00942000
+         BNH   MEMLD11             XFER IF NOT                 @V60B9BA 00943000
+         AL    R0,=X'00010000'     BUMP TO NEXT CYLINDER       @V60B9BA 00944000
+         ICM   R0,B'0010',F1+3     PAGE 1                      @V60B9BA 00945000
+MEMLD11  ST    R0,SAVEWRK7         SAVE CURRENT CCPD           @V60B9BA 00946000
+         L     R1,SAVEWRK3         VIRTUAL ADDR OF SYSTEM PAGE @V60B9BA 00947000
+         CALL  DMKRPAGT,PARM=BRING+SYSTEM  BRING IT IN         @V60B9BA 00948000
+         BNZR  R3                  PAGING ERROR - RETURN       @V60B9BA 00949000
+         LA    R1,4095(R4)         GET COUNT FOR SECTION 2     @V60B9BA 00950000
+         N     R1,XPAGNUM          ROUND DOWN TO A PAGE        @V60B9BA 00951000
+         SLR   R1,R4               GET BYTE COUNT              @V60B9BA 00952000
+         LR    R0,R4               TARGET ADDRESS              @V60B9BA 00953000
+         LR    R5,R1               SOURCE LENGTH               @V60B9BA 00954000
+         LR    R4,R2               SOURCE ADDRESS              @V60B9BA 00955000
+         LR    R2,R1               SAVE MOVE LENGTH            @V60B9BA 00956000
+         MVCL  R0,R4               DO THE MOVE FOR SECTION 2   @V60B9BA 00957000
+         C     R2,SAVEWRK8         HAVE WE FINISHED ?          @V60B9BA 00958000
+         BNL   MEMEXIT             RETURN IF SO                @V60B9BA 00959000
+         SPACE                                                          00960000
+*        SET UP TO MOVE THE THIRD SECTION                               00961000
+         SPACE                                                          00962000
+         S     R2,SAVEWRK8         GET NEGATIVE OF BYTES LEFT  @V60B9BA 00963000
+         LCR   R2,R2               MAKE IT POSITIVE            @V60B9BA 00964000
+         ST    R2,SAVEWRK8         SAVE IT FOR LATER           @V60B9BA 00965000
+         LA    R1,4095(R4)         NOW CALC. MOVE LENGTH       @V60B9BA 00966000
+         N     R1,XPAGNUM          ... FOR SECTION 3           @V60B9BA 00967000
+         SLR   R1,R4               THIS IS THE SOURCE LENGTH   @V60B9BA 00968000
+         LR    R5,R1               SOURCE LGHTH (ADDR SET UP)  @V60B9BA 00969000
+         L     R0,RSPRPAG2         TARGET FOR SECTION 3        @V60B9BA 00970000
+         LR    R2,R1               SAVE THE MOVE LENGTH        @V60B9BA 00971000
+         MVCL  R0,R4               MOVE DATA FOR SECTION 3     @V60B9BA 00972000
+         C     R2,SAVEWRK8         FINISHED ?                  @V60B9BA 00973000
+         BNL   MEMEXIT             XFER IF SO                  @V60B9BA 00974000
+         SPACE                                                          00975000
+*        THIS IS A LONG MEMEBER. MOVE THE LAST SECTION                  00976000
+         SPACE                                                          00977000
+         S     R2,SAVEWRK8         FINAL BYTE COUNT TO         @V60B9BA 00978000
+         LCR   R2,R2               .. MOVE IS NOW CALCULATED   @V60B9BA 00979000
+         ST    R2,SAVEWRK8         .. AND SAVED                @V60B9BA 00980000
+         LR    R4,R0               NEW TARGET ADDRESS          @V60B9BA 00981000
+         L     R0,SAVEWRK7         CURRENT CCPD                @V60B9BA 00982000
+         AL    R0,F256             BUMP TO NEXT PAGE           @V60B9BA 00983000
+         LR    R1,R0               TO R1 FOR WORK              @V60B9BA 00984000
+         N     R1,=X'0000FF00'     ISOLATE PAGE NUMBER         @V60B9BA 00985000
+         CR    R1,R6               REACHED MAXIMUM ?           @V60B9BA 00986000
+         BNH   MEMLD12             XFER IF NOT                 @V60B9BA 00987000
+         AL    R0,=X'00010000'     BUMP TO NEXT CYLINDER       @V60B9BA 00988000
+         ICM   R0,B'0010',F1+3     PAGE 1                      @V60B9BA 00989000
+MEMLD12  ST    R0,SAVEWRK7         SAVE CURRENT CCPD           @V60B9BA 00990000
+         L     R1,SAVEWRK3         VIRTUAL ADDR OF SYSTEM PAGE @V60B9BA 00991000
+         CALL  DMKRPAGT,PARM=BRING+SYSTEM  BRING IT IN         @V60B9BA 00992000
+         BNZR  R3                  PAGING ERROR - RETURN       @V60B9BA 00993000
+         L     R1,SAVEWRK8         TARGET LENGTH               @V60B9BA 00994000
+         LR    R5,R1               SOURCE LENGTH               @V60B9BA 00995000
+         LR    R0,R4               TARGET ADDRESS              @V60B9BA 00996000
+         LR    R4,R2               SOURCE ADDRESS              @V60B9BA 00997000
+         MVCL  R0,R4               MOVE DATA FOR FINAL SECTION @V60B9BA 00998000
+MEMEXIT  TM    *,0                 SET ZERO CONDITION CODE     @V60B9BA 00999000
+         BR    R3                  AND RETURN                  @V60B9BA 01000000
+         EJECT                                                          01001000
+* CONSTANT DATA AREA                                                    01002000
+         SPACE                                                          01003000
+EOTCCW   CCW   X'07',*-*,CC+SILI,1    END OF TRANSMISSION      @V60B9BA 01004000
+LOADSNS  CCW   X'04',*-*,SILI+SKIP,1  DUMMY SENSE CCW          @V60B9BA 01005000
+         SPACE                                                          01006000
+MKFMCCW  CCW   X'8B',*-*,CC+SILI,1 SKIP TO CHANNEL 1           @V60B9BA 01007000
+         CCW   X'17',*-*,CC+SILI,1 MARK FORM CCW               @V60B9BA 01008000
+         CCW   X'8B',*-*,CC+SILI,1 SKIP TO CHANNEL 1           @V60B9BA 01009000
+         CCW   X'04',*-*,SILI+SKIP,1  DUMMY SENSE              @V60B9BA 01010000
+         SPACE                                                          01011000
+CLRCCW   CCW   X'87',*-*,CC+SILI,1  CLEAR PRINTER CCW          @V60B9BA 01012000
+LDWCGCCW CCW   X'53',CATFINAL-CATSECT,CC+SILI,4  LOAD WCGM CCW @V60B9BA 01013000
+SELTTCCW CCW   X'47',*-*,CC+SILI,1  SELECT TRANS TABLE 0       @V60B9BA 01014000
+LTTCCW   CCW   X'83',CATTABLE-CATSECT,CC+SILI,256 LOAD TR TAB  @V60B9BA 01015000
+LGMCCW   CCW   X'25',*-*,CC+SILI+IDA,0   LOAD GRAPHIC MOD      @V60B9BA 01016000
+LCMCCW   CCW   X'35',*-*,CC+SILI+IDA,0   LOAD COPY MOD         @V60B9BA 01017000
+LDFCBCCW CCW   X'63',8,CC+SILI,0   LOAD FCB CCS                @V60B9BA 01018000
+LDCPYCCW CCW   X'23',*-*,CC+SILI,1  LOAD COPY NUMBER           @V60B9BA 01019000
+LFOSCCCW CCW   X'43',*-*,CC+SILI,0  LOAD FOSC CCW              @V60B9BA 01020000
+         SPACE                                                          01021000
+NULLMOD  DC    X'404040400000000700010001010140' NULL COPY MOD @V60B9BA 01022000
+         SPACE 2                                                        01023000
+*                        INCHES    FORMS TYPE                           01024000
+LINESIZE DC    AL1(6)    3         ISO                         @V60B9BA 01025000
+         DC    AL1(7)    3 & HALF  COMMON USE (USA, CANADA)    @V60B9BA 01026000
+         DC    AL1(8)    4         ISO                         @V60B9BA 01027000
+         DC    AL1(11)   5 & HALF  COMMON USE (USA, CANADA)    @V60B9BA 01028000
+         DC    AL1(12)   6         ISO                         @V60B9BA 01029000
+         DC    AL1(14)   7         COMMON USE (USA, CANADA)    @V60B9BA 01030000
+         DC    AL1(16)   8         ISO                         @V60B9BA 01031000
+         DC    AL1(17)   8 & HALF  COMMON USE (USA, CANADA)    @V60B9BA 01032000
+         DC    AL1(20)   10        ISO                         @V60B9BA 01033000
+         DC    AL1(22)   11        COMMON USE (USA, CANADA)    @V60B9BA 01034000
+         DC    AL1(24)   12        ISO                         @V60B9BA 01035000
+         SPACE 4                                                        01036000
+HLDAREA  DSECT                                                          01037000
+HLDCHARS DS    CL4                 CHAR ARR TBL TO LOAD        @V60B9BA 01038000
+HLDGCM1  DS    CL4                 GRAPHIC MOD 1               @V60B9BA 01039000
+HLDGCM2  DS    CL4                 GRAPHIC MOD 2               @V60B9BA 01040000
+HLDGCM3  DS    CL4                 GRAPHIC MOD 3               @V60B9BA 01041000
+HLDGCM4  DS    CL4                 GRAPHIC MOD 4               @V60B9BA 01042000
+HLDMDFY  DS    CL4                 COPY MODIFICATION           @V60B9BA 01043000
+HLDFCB   DS    CL4                 FCB NAME                    @V60B9BA 01044000
+HLDSTCPY DS    1X                  STARTING COPY NUMBER        @V60B9BA 01045000
+HLDFLSHC DS    1X                  FLASH COUNT                 @V60B9BA 01046000
+HLDCPY   DS    1X                  NUMBER OF COPIES TO PRINT   @V60B9BA 01047000
+HLDFLAG  DS    1X                  COPY OF SPFLAG1             @V60B9BA 01048000
+HLDCCW1  DS    1D                  3800 SETUP CCW NUMBER 1     @V60B9BA 01049000
+HLDCCW2  DS    1D                  3800 SETUP CCW NUMBER 2     @V60B9BA 01050000
+HLDCCW3  DS    1D                  3800 SETUP CCW NUMBER 3     @V60B9BA 01051000
+HLDCCW4  DS    1D                  3800 SETUP CCW NUMBER 4     @V60B9BA 01052000
+HLDCCW5  DS    1D                  3800 SETUP CCW NUMBER 5     @V60B9BA 01053000
+HLDCCW6  DS    1D                  3800 SETUP CCW NUMBER 6     @V60B9BA 01054000
+HLDCCW7  DS    1D                  3800 SETUP CCW NUMBER 7     @V60B9BA 01055000
+HLDCCW8  DS    1D                  3800 SETUP CCW NUMBER 8     @V60B9BA 01056000
+HLDSIZE  EQU   (*-HLDAREA)/8       SIZE IN DOUBLEWORDS         @V60B9BA 01057000
+         SPACE 4                                                        01058000
+PDEBLOK  DSECT ,                   IMAGELIB DIRECTORY ENTRY    @V60B9BA 01059000
+PDENAME  DS    CL8                 MEMBER NAME                 @V60B9BA 01060000
+PDEDISP  DS    1F                  RBA OF START OF MEMBER      @V60B9BA 01061000
+PDELGTH  DS    1F                  LENGTH OF MEMBER IN BYTES   @V60B9BA 01062000
+         ORG   PDENAME             FIRST DUMMY ENTRY           @V60B9BA 01063000
+PDEIMAG  DS    CL8                 NAMED SYSTEM NAME           @V60B9BA 01064000
+PDEDIRLN DS    1F                  LENGTH OF DIRECTORY IN BYTES@V60B9BA 01065000
+PDENUM   DS    1F                  NUMBER OF MEMBERS           @V60B9BA 01066000
+PDESIZE  EQU   *-PDEBLOK           SIZE OF ENTRY IN BYTES      @V60B9BA 01067000
+         SPACE 3                                                        01068000
+CATSECT  DSECT ,                   CHARACTER ARRANGEMENT TABLE @V60B9BA 01069000
+CATNAME  DS    CL4                 NAME OF THIS CAT            @V60B9BA 01070000
+         DS    XL2                 RESERVED                    @V60B9BA 01071000
+CATLEN   DS    1H                  LENGTH IN BYTES OF REMAINDER@V60B9BA 01072000
+CATTABLE DS    XL256               TRANSLATE TABLE             @V60B9BA 01073000
+CATWCGM  DS    4XL2                WCGM'S AND THEIR POSITIONS  @V60B9BA 01074000
+CATGRAF  DS    4CL4                NAMES OF THE GRAPHIC MODS   @V60B9BA 01075000
+CATSIZE  EQU   *-CATSECT           LENGTH OF MODULE IN BYTES   @V60B9BA 01076000
+         DS    0D                  WORK AREA IN BUFFER         @V60B9BA 01077000
+CATFINAL DS    4X                  FINAL DATA FOR LOAD WCGM    @V60B9BA 01078000
+         SPACE 3                                                        01079000
+         COPY  VMBLOK                                          @V60B9BA 01080000
+         COPY  SAVE                                            @V60B9BA 01081000
+         COPY  SPOOL                                           @V60B9BA 01082000
+         COPY  RBLOKS                                          @V60B9BA 01083000
+         COPY  IOBLOKS                                         @V60B9BA 01084000
+         COPY  NPRTBL                                          @V60B9BA 01085000
+         COPY  EQU                                             @V60B9BA 01086000
+         COPY  DEVTYPES                                        @V60B9BA 01087000
+         PSA   ,                                               @V60B9BA 01088000
+         END                                                            01089000

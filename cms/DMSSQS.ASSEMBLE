@@ -1,0 +1,835 @@
+SQS      TITLE 'DMSSQS     (CMS)       VM/370 - RELEASE 6'              00001000
+         SPACE 2                                                        00002000
+*.                                                                      00003000
+*                                                                       00004000
+*                                                                       00005000
+* MODULE NAME:                                                          00006000
+*                                                                       00007000
+*        DMSSQS (SOQSAM - QUEUED SEQUENTIAL ACCESS METHOD)              00008000
+*                                                                       00009000
+* FUNCTION:                                                             00010000
+*                                                                       00011000
+*        TO  ANALYZE RECORD  FORMAT  AND  SET UP  THE  BUFFERS          00012000
+*        ACCORDINGLY FOR GET, PUT AND PUTX REQUESTS.                    00013000
+*                                                                       00014000
+* ATTRIBUTES:                                                           00015000
+*                                                                       00016000
+*        REENTRANT, NUCLEUS RESIDENT                                    00017000
+*                                                                       00018000
+* ENTRY POINTS:                                                         00019000
+*        DMSSQSGT - OS GET MACRO                                        00020000
+*        DMSSQSPT - OS PUT MACRO                                        00021000
+*        DMSSQSUP - OS GET AND PUTX MACROES FOR QSAM UPDATE             00022000
+*                                                                       00023000
+* ENTRY CONDITIONS:                                                     00024000
+*                                                                       00025000
+*        MUST BE CALLED BY OS GET, PUT OR PUTX MACRO                    00026000
+*                                                                       00027000
+* EXIT CONDITIONS:                                                      00028000
+*                                                                       00029000
+*        NORMAL  CONTROL IS  RETURNED TO  USER WITH  REGISTERS          00030000
+*        SPECIFIED  AS  IN  THE OS  DATA  MANAGEMENT  SERVICES          00031000
+*        MANUAL                                                         00032000
+*                                                                       00033000
+*        ERRORS:  CONTROL IS PASSED TO DMSSCTCE TO HANDLE ERRORS        00034000
+*                                                                       00035000
+* CALLS TO OTHER ROUTINES:                                              00036000
+*                                                                       00037000
+*        DMSSEB, DMSSCT                                                 00038000
+*                                                                       00039000
+* EXTERNAL REFERENCES:                                                  00040000
+*                                                                       00041000
+*        FCBSECT, OPSECT, NUCON, IHADCB                                 00042000
+*                                                                       00043000
+* TABLES/WORKAREAS:                                                     00044000
+*                                                                       00045000
+*        NONE                                                           00046000
+*                                                                       00047000
+* REGISTER USAGE:                                                       00048000
+*                                                                       00049000
+*        R0,R1,R4-R10,R12,R14,R15 WORK                                  00050000
+*        R2                       DCB                                   00051000
+*        R3                       DMSSQS BASE                           00052000
+*        R13                      SAVE AREA                             00053000
+*                                                                       00054000
+* OPERATION:                                                            00055000
+*                                                                       00056000
+*        INITIALIZATION                                                 00057000
+*                                                                       00058000
+*           OSIOTYPE AND  IOBECBPT ARE SET TO  INDICATE ACCESS          00059000
+*           METHOD  AND  FCB  ADDRESS  RESPECTIVELY.   THEN, IF         00060000
+*           THE DUMMY OPTION IS NOT SPECIFIED IN THE FCB, A             00061000
+*           BRANCH  IS  TAKEN  TO  GETTER,  PUTTER  OR  PUTXER          00062000
+*           DEPENDING ON WHETHER THE REQUEST  IS A GET, PUT OR          00063000
+*           PUTX RESPECTIVELY.  IF DUMMY IS SPECIFIED IN THE FCB,       00064000
+*           CONTROL IS PASSED TO QSAMDUMY.                              00065000
+*                                                                       00066000
+*        GETTER                                                         00067000
+*                                                                       00068000
+*           AFTER  FCBIOSW AND  IOBIOFLG ARE  SET TO  INDICATE          00069000
+*           INPUT IN PROCESS, DCB  FIELDS DCBMACF AND DCBRECFM          00070000
+*           ARE ANALYZED TO DETERMINE THE TYPE OF MODE DESIRED          00071000
+*           - MOVE OR LOCATE - AND  THE RECORD FORMAT.  IF THE          00072000
+*           MODE IS MOVE, THE USER SPECIFIED 'MOVE TO' ADDRESS          00073000
+*           IS  STORED IN  DEBTCBAD.  BOTH  MODES CONTINUE  BY          00074000
+*           DETERMINING  WHETHER  IT  IS   CALLED  FROM  CLOSE          00075000
+*           (DMSSOP).  IF SO,  A CHECK  IS  MADE TO  DETERMINE          00076000
+*           WHETHER THE UPDATE FLAG (IOBUBD) IN THE "IOBIOFLG"          00077000
+*           IS  ON INDICATING  A  "PUTX"  ISSUED ON  THE  LAST          00078000
+*           BLOCK.                                                      00079000
+*                                                                       00080000
+*           IF THE UPDATE FLAG IS  NOT ON, CONTROL IS RETURNED          00081000
+*           TO CLOSE.                                                   00082000
+*                                                                       00083000
+*           IF THE UPDATE FLAG IS ON, CONTROL IS PASSED TO THE          00084000
+*           ROUTINE "GETXER" TO REWRITE  THE LAST BLOCK BEFORE          00085000
+*           RETURNING TO CLOSE. (SEE "GETXER" BELOW).                   00086000
+*                                                                       00087000
+*           IF  NOT  CALLED  BY  CLOSE, A  CHECK  IS  MADE  TO          00088000
+*           DETERMINE  WHETHER  AN "END  OF  BLOCK"  CONDITION          00089000
+*           EXISTS.                                                     00090000
+*                                                                       00091000
+*           IF "END OF  BLOCK" CONDITION DOES EXIST,   A CHECK          00092000
+*           IS MADE OF THE UPDATE  FLAG TO DETERMINE WHETHER A          00093000
+*           RECORD IN  THE JUST  COMPLETED BLOCK  WAS UPDATED.          00094000
+*           IF SO,  "GETXER" RECEIVES  CONTROL TO  REWRITE THE          00095000
+*           LAST BLOCK; (SEE "GETXER" BELOW). ROUTINE "SETEOB"          00096000
+*           THEN RECEIVES CONTROL TO GET  THE NEXT BUFFER FROM          00097000
+*           THE POOL; (SEE "SETEOB" BELOW).                             00098000
+*                                                                       00099000
+*           UPON RETURN  FROM "SETEOB",  THE APPROPRIATE  "FCB"         00100000
+*           FIELDS ARE UPDATED AND A CALL IS MADE TO DMSSEB TO          00101000
+*           FILL THE NEW BUFFER WITH THE NEXT BLOCK.                    00102000
+*                                                                       00103000
+*           UPON RETURN, THE  "FCBITEM" COUNT  IS UPDATED, AND          00104000
+*           THE "ECB" IS CHECKED FOR AN ERROR.  IF ONE EXISTS,          00105000
+*           CONTROL IS PASSED TO DMSSCT (CHECK SIMULATION).             00106000
+*                                                                       00107000
+*           AFTER IT IS DETERMINED THAT THERE IS A RECORD IN THE        00108000
+*           BUFFER, THE RECORD IS DEBLOCKED FROM THE BUFFER AND, IF     00109000
+*           THE RECFM IS VARIABLE OR UNDEFINED, DCBLRECL IS SET TO THE  00110000
+*           LENGTH OF THE RECORD.  IF THE MODE IS LOCATE, CONTROL       00111000
+*           IS RETURNED TO THE USER WITH THE ADDRESS OF THE RECORD. IF  00112000
+*           THE MODE IS MOVE, THE RECORD IS MOVED TO THE ADDRESS        00113000
+*           PROVIDED BY THE USER AND CONTROL IS RETURNED TO THE USER.   00114000
+*                                                                       00115000
+*        PUTTER                                                         00116000
+*                                                                       00117000
+*           RECEIVES  CONTROL  FROM "PUT"  MACRO  INSTRUCTION.          00118000
+*           AFTER "FCBIOSW" AND "IOBIOFLG" ARE SET TO INDICATE          00119000
+*           OUTPUT IN PROGRESS,  A CHECK IS MADE  TO DETERMINE          00120000
+*           WHETHER THIS CALL WAS MADE FROM CLOSE.                      00121000
+*                                                                       00122000
+*           IF NOT CALLED  FROM CLOSE AND THE  MODE IS LOCATE,          00123000
+*           AND THIS IS  THE FIRST "PUT" CALL,  THE ADDRESS OF          00124000
+*           THE  FIRST BUFFER  IS  PLACED  IN REGISTER  1  AND          00125000
+*           CONTROL IS RETURNED TO THE USER.                            00126000
+*                                                                       00127000
+*           IF CALLED FROM CLOSE, A CHECK IS MADE TO SEE IF A PUT       00128000
+*           IS NECESSARY. IF NOT, CONTROL IS RETURNED TO THE USER.      00129000
+*           IF A PUT IS NECESSARY, THE POINTERS ARE SETUP TO WRITE      00130000
+*           A SHORT BLOCK.                                              00131000
+*                                                                       00132000
+*           IF  OTHER  THAN  THE  FIRST   "PUT"  CALL,  IT  IS          00133000
+*           DETERMINED   WHETHER   THE  CURRENT   BUFFER   HAS          00134000
+*           SUFFICIENT SPACE  FOR ANOTHER  RECORD.  IF  IT HAS,         00135000
+*           REGISTER 1 IS UPDATED  TO THE  ADDRESS  OF THE  NEXT        00136000
+*           RECORD WITHIN  THE CURRENT  BUFFER AND  CONTROL IS          00137000
+*           RETURNED TO THE CALLER.  IF  THE CURRENT BUFFER IS          00138000
+*           FULL,  A  CALL IS  MADE  TO  DMSSEB TO  WRITE  THE          00139000
+*           CURRENT BUFFER TO THE FILE.                                 00140000
+*                                                                       00141000
+*           UPON RETURN FROM  DMSSEB THE "ECB" IS  CHECKED FOR          00142000
+*           ERROR  INDICATION AND  IF  ONE  EXISTS CONTROL  IS          00143000
+*           PASSED TO  DMSSCT (CHECK SIMULATION). IF  NO ERROR          00144000
+*           CONDITION EXISTS THE "FCBITEM" COUNT IS UPDATED TO          00145000
+*           REFLECT THE LAST BLOCK WRITTEN.                             00146000
+*                                                                       00147000
+*           ROUTINE "SETEOB" THEN RECEIVES  CONTROL TO GET THE          00148000
+*           NEXT BUFFER FROM THE  POOL;  (SEE "SETEOB" BELOW).          00149000
+*           IF LOCATE IS SPECIFIED, CONTROL IS RETURNED TO THE          00150000
+*           USER. IF MOVE MODE IS SPECIFIED, THE ROUTINE MOVEMODE       00151000
+*           IS USED TO MOVE THE RECORD INTO THE BUFFER AND CONTROL      00152000
+*           IS RETURNED TO THE USER.                                    00153000
+*                                                                       00154000
+*                                                                       00155000
+*        PUTXER                                                         00156000
+*                                                                       00157000
+*           RECEIVES  CONTROL FROM  "PUTX" MACRO  INSTRUCTION.          00158000
+*           SETS THE  UPDATE FLAG ("IOBUPD") IN  THE "IOBIOFLG"         00159000
+*           FIELD  OF THE  IOB TO  INDICATE  THAT THE  CURRENT          00160000
+*           BLOCK  HAS  BEEN  UPDATED AND  THEREFORE  WILL  BE          00161000
+*           REWRITTEN AT "END OF BLOCK" TIME. RETURNS                   00162000
+*           CONTROL TO THE USER.                                        00163000
+*                                                                       00164000
+*        GETXER                                                         00165000
+*                                                                       00166000
+*           RECEIVES CONTROL FROM ROUTINE  "GETTER" AT "CLOSE"          00167000
+*           TIME OR "END  OF BLOCK" TIME WHEN  THE UPDATE FLAG          00168000
+*           (IOBUPD)  HAS BEEN  SET  IN  THE "IOBIOFLG"  BY  A          00169000
+*           PREVIOUS "PUTX" CALL.                                       00170000
+*                                                                       00171000
+*           THE "FCBIOSW"  AND "IOBIOFLG"  ARE CHANGED  FROM A          00172000
+*           "GET" CALL TO  A "PUT" CALL.  THE  "FCBITEM" COUNT          00173000
+*           IS RESET TO THE FIRST RECORD OF THE CURRENT BLOCK.          00174000
+*                                                                       00175000
+*           DMSSEB IS CALLED TO REWRITE THE UPDATED BLOCK.              00176000
+*                                                                       00177000
+*           UPON RETURN,  THE "ECB"  IS CHECKED  FOR AN  ERROR          00178000
+*           CONDITION.   IF ONE  EXISTS,  A  CALL IS  MADE  TO          00179000
+*           DMSSCT (CHECK SIMULATION). IF  NO ERROR INDICATION,         00180000
+*           THE "FCBITEM" COUNT IS RESTORED TO THE NEXT BLOCK,          00181000
+*           THE "FCBIOSW" AND "IOBIOFLG" ARE RESET TO INDICATE          00182000
+*           THE "GET" CALL AND IF NOT "CLOSE" TIME, CONTROL IS          00183000
+*           RETURNED  TO ROUTINE  "GETTER".   IF "CLOSE"  TIME          00184000
+*           CONTROL IS RETURNED TO DMSSOP (CLOSE).                      00185000
+*                                                                       00186000
+*        SETEOB                                                         00187000
+*                                                                       00188000
+*           RECEIVES   CONTROL  FROM   ROUTINES  "GETTER"   OR          00189000
+*           "PUTTER" AT "END OF BLOCK" TIME.                            00190000
+*                                                                       00191000
+*           DCB AND IOB ADDRESSES ARE  UPDATED TO POINT TO THE          00192000
+*           NEXT BUFFER  IN THE POOL AND CONTROL IS  RETURNED TO        00193000
+*           THE CALLING ROUTINE.                                        00194000
+*                                                                       00195000
+*        MOVEMODE                                                       00196000
+*                                                                       00197000
+*           MOVES THE  RECORD  FROM THE                                 00198000
+*           USER BUFFER  TO THE SYSTEM  BUFFER IN THE  CASE OF          00199000
+*           "PUT"  AND FROM  THE  SYSTEM  BUFFER TO  THE  USER          00200000
+*           BUFFER  IN THE  CASE  OF  "GET". IT  THEN  RETURNS          00201000
+*           CONTROL TO THE CALLING ROUTINE.                             00202000
+*                                                                       00203000
+*        QSAMDUMY                                                       00204000
+*                                                                       00205000
+*           QSAMDUMY FIRST CHECKS TO DETERMINE IF A GET OR              00206000
+*           A PUT WAS ISSUED. IF A GET WAS ISSUED, AN END OF FILE       00207000
+*           ERROR CODE IS SET AND CONTROL IS PASSED TO DMSSCTCE.        00208000
+*           IF A PUT WAS ISSUED, CONTROL IS RETURNED TO THE USER        00209000
+*           WITH THE ADDRESS OF THE NEXT RECORD AREA IN REGISTER        00210000
+*           ONE.                                                        00211000
+*.                                                                      00212000
+         EJECT                                                          00213000
+*                                                                       00214000
+DMSSQS   START X'0'                                                     00215000
+         ENTRY DMSSQSGT,DMSSQSPT,DMSSQSUP                               00216000
+         EJECT                                                          00217000
+*********************************************************************** 00218000
+*                                                                     * 00219000
+*   QSAM INPUT/OUTPUT ROUTINES SIMULATORS: GET, PUT                   * 00220000
+*                                                                     * 00221000
+*********************************************************************** 00222000
+         SPACE                                                          00223000
+*   QSAM "GET" ENTRY POINT                                              00224000
+DMSSQSGT EQU   *                  GET ROUTINE ENTRY POINT               00225000
+         USING *,R15                                                    00226000
+         STM   R14,R12,12(R13)     SAVE REGS IN CALLING ROUTINE SAVE    00227000
+         LA    R4,C'G'            IOTYPE = "GET"                        00228000
+         LA    R15,TOGETHER        PLAY GAMES                           00229000
+         BR    R15                                                      00230000
+         DROP  R15                                                      00231000
+*   QSAM "PUT" ENTRY POINT                                              00232000
+DMSSQSPT EQU   *                  PUT ROUTINE ENTRY POINT               00233000
+         USING *,R15                                                    00234000
+         STM   R14,R12,12(R13)     SAVE REGS IN CALLING ROUTINE SAVE TR 00235000
+         LA    R4,C'P'            IOTYPE = "PUT"                        00236000
+         LA    R15,TOGETHER       JOIN FORCES                           00237000
+         BR    R15                                                      00238000
+         DROP  R15                                                      00239000
+*   QSAM UPDATE ENTRY POINT  (GET,PUTX)                                 00240000
+DMSSQSUP EQU   *                                                        00241000
+         USING *,R15                                                    00242000
+         B     GETX               GO TO "GET" UPDATE ENTRY POINT        00243000
+PUTX     STM   R14,R12,12(R13)    SAVE REGISTERS                        00244000
+         LA    R4,C'X'            "PUTX", MAKE IOTYPE = "PUTX"          00245000
+GOTO     LA    R15,TOGETHER                                             00246000
+         BR    R15                GO TO COMMON ROUTINE                  00247000
+GETX     STM   R14,R12,12(R13)    SAVE REGISTERS                        00248000
+         LA    R4,C'G'            IOTYPE = "GET"                        00249000
+         B     GOTO                                                     00250000
+         DROP  R15                                                      00251000
+         SPACE                                                          00252000
+TOGETHER DS    0H                 COMMON INITIALIZATION SEQUENCE        00253000
+         USING *,R15                                                    00254000
+         L     R3,AQSAM           SET COMMON ADDRESSABILITY             00255000
+         DROP  R15                                                      00256000
+         USING DMSSQS,R3                                                00257000
+         USING NUCON,R0                                                 00258000
+         USING IHADCB,R2                                                00259000
+         USING FCBSECT,R11                                              00260000
+         LR    R2,R1              GET V(DCB)                            00261000
+         L     R11,DCBDEBAD       GET ADDR OF DEB                       00262000
+         SH    R11,=AL2(IHADEB-FCBINIT) GET ADDR OF FCB                 00263000
+         L     R15,AOPSECT             POINT TO OPSECT                  00264000
+         USING OPSECT,R15                                               00265000
+         STC   R4,OSIOTYPE        SET METHOD TYPE                       00266000
+         LA    R4,IOBECB          SET QSAM ECB                          00267000
+         ST    R4,IOBECBPT                                              00268000
+         CLI   FCBDEV,0           IS THIS A DUMMY CMSCB                 00269000
+         BE    QSAMDUMY           YES, GO TO DUMMY ROUTINE              00270000
+         CLI   OSIOTYPE,C'G'      "GET" CALL?                           00271000
+         BE    GETTER             YES                                   00272000
+         CLI   OSIOTYPE,C'X'      IS IT "PUTX"?                         00273000
+         BE    PUTXER             YES, GO TO PUTX ROUTINE               00274000
+         B     PUTTER             NO, THEN GO TO PUT ROUTINE            00275000
+         SPACE 3                                                        00276000
+*                                                                       00277000
+*        THIS ROUTINE HANDLES DCB'S WITH DUMMY CMSCB'S                  00278000
+*                                                                       00279000
+QSAMDUMY CLI   OSIOTYPE,C'G'      IS THIS A GET                         00280000
+         BNE   PUTDUMY            NO, THIS IS A DUMMY PUT               00281000
+         MVC   IOBECB(4),=XL4'4200000C' SET EOF CODE IN ECB             00282000
+         B     CKFORERR           GO TO CHECK ROUTINE                   00283000
+PUTDUMY  TM    DCBRECFM,FXD       FIXED OR VAR. ?              @VA04605 00284000
+         BO    SETUPFXD           GO SET UP FOR FIXED          @VA04605 00284070
+         L     R1,DCBBUFCB        GET BUFFER CTRL BLOCK ADDR.  @VA04605 00284140
+         L     R1,0(R1)           ADDR. OF FIRST BUFFER        @VA04605 00284210
+         LA    R1,4(R1)           PLUS RDW                     @VA04605 00284280
+         B     UPDRECAD           UPDATE RECORD ADDR.          @VA04605 00284350
+SETUPFXD L     R1,DCBRECAD        GET ADDR. OF NEXT RECORD AREA@VA04605 00284420
+         L     R7,DCBEOBAD        GET END OF BLOCK ADDR.       @VA04605 00284490
+         CR    R1,R7              RECAD = EOBAD ? (FOR PL/1)   @VA04605 00284560
+         BE    RESETRAD            YES, RESET TO START OF BLOCK@VA04605 00284630
+         AH    R1,DCBLRECL        UPDATE TO NEXT RECORD        @VA04605 00284700
+         TM    DCBMACRF+1,LOC        ARE WE DOING DUMMY LOCATE @VA08068 00284720
+         BO    UPDRECAD              YES THEN UPDT RECAD       @VA08068 00284740
+         CR    R1,R7              NOW AT END OF BLOCK ?        @VA04605 00284770
+         BNL   RESETRAD           YES, RESET TO START OF BLOCK @VA04605 00284840
+UPDRECAD ST    R1,DCBRECAD        STORE NEW RECORD ADDR IN DCB @VA04605 00284910
+         B     RETP               RETURN TO USER                        00285000
+RESETRAD EQU   *                                                        00285100
+         TM    DCBMACRF+1,LOC        ARE WE DOING DUMMY LOCATE @VA08068 00285200
+         BO    RETP                  IF YES THEN NO EOB COND   @VA08068 00285300
+         SH    R1,DCBBLKSI           BACK UP TO START OF BUF   @VA08068 00285400
+         B     UPDRECAD           UPDATE RECORD ADDR AND RETURN@VA04605 00285666
+         DROP  R15                                                      00286000
+         EJECT                                                          00287000
+*   THE FOLLOWING CODE SIMULATES THE QSAM UPDATE (GL,PL) "PUTX" CALL    00289000
+*   BY MARKING THE BUFFER FOR WRITING AT THE NEXT "EOB" CONDITION ON    00290000
+*   A CALL TO "GET".                                                    00291000
+         SPACE                                                          00292000
+PUTXER   OI    DCBOFLGS,PREVIOUS   SET WRITE BIT               @VA04694 00293000
+         OI    IOBIOFLG,IOBUPD    INDICATE "PUTX" AT NEXT "EOB"         00294000
+         B     RETX               GO TO RETURN                          00295000
+         SPACE                                                          00296000
+*    "GETXER" DOES THE ACTUAL REWRITE OF THE BLOCK AT THE NEXT "EOB"    00297000
+*    TIME....AND THEN RETURNS TO NORMAL GET CODE.                       00298000
+         SPACE                                                          00299000
+GETXER   DS    0H                                                       00300000
+         OI    IOBIOFLG,IOBOUT    CHANGE TO OUTPUT                      00301000
+         NI    IOBIOFLG,255-IOBIN                                       00302000
+         OI    FCBIOSW,FCBIOWR    CHANGE TO WRITE                       00303000
+         NI    FCBIOSW,255-FCBIORD                                      00304000
+         LH    R7,FCBITEM         PICK UP FCB ITEM COUNT                00305000
+         N     R7,HALFWORD                                              00306000
+         SH    R7,FCBCOUT         RESET TO 1ST RECORD OF CURRENT BLOCK  00307000
+         STH   R7,FCBITEM         UPDATE ITEM COUNT                     00308000
+         L     R14,DCBBUFCB       GET ADDR. BUF. CONTROL BLOCK          00309000
+         L     R14,0(,R14)        GET ADDR. OF CURRENT BUFFER           00310000
+         LH    R7,DCBLRECL        LENGHT OF CURRENT OR NEXT RECORD      00311000
+         N     R7,HALFWORD                                              00312000
+         LM    R4,R5,DCBEOBAD     ADDR. OF END OF BUFFER                00313000
+         MVC   FCBOP(2),0(R5)     ALLIGN RDW                            00314000
+         TM    FCBIOSW,FCBCLOSE   DURING CLOSE?                         00315000
+         BNO   PUTXLOC            NO                                    00316000
+         SR    R1,R1                                                    00317000
+         SR    R6,R6                                                    00318000
+         LR    R1,R7              GET LRECL IN REG. 1                   00319000
+         LH    R6,FCBOP           GET RDW                               00320000
+         TM    DCBRECFM,FXD       FIXED?                                00321000
+         BO    FXCLOSE            YES                                   00322000
+         AR    R5,R6              ADD LRECL                             00323000
+         SR    R5,R14             GET BYTE SIZE                         00324000
+         CH    R5,=H'4'           IS IT ZERO?                           00325000
+         BE    GETXEND            YES, RETURN                           00326000
+         B     PUTXVB                                                   00327000
+FXCLOSE  EQU   *                                                        00328000
+         AR    R5,R1              ADD LRECL                             00329000
+         SR    R5,R14             GET RECORD LENGHT                     00330000
+         BZ    GETXEND            ZERO, RETURN                          00331000
+         TM    DCBRECFM,UND       UNDEFINED RECORDS?                    00332000
+         BO    PUTXBUF            PUT OUT RECORD                  V0307 00333000
+         CH    R5,DCBBLKSI        IS BUFFER FULL?                       00334000
+         BE    UNDSIZE2           YES                                   00335000
+         LR    R6,R5              SAVE RECORD LENGHT                    00336000
+         SR    R4,R4                                                    00337000
+         DR    R4,R7              GET FCBCOUT                           00338000
+         STH   R5,FCBCOUT         STORE IT                              00339000
+         LR    R7,R6              SET LENGHT                            00340000
+         B     PUTXBUF            GO WRITE IT                           00341000
+PUTXLOC  EQU   *                                                        00342000
+         TM    DCBOFLGS,PREVIOUS  FIRST WRITE?                          00343000
+         BO    PXLOC1             NO                                    00344000
+         OI    DCBOFLGS,PREVIOUS  INDICATE FIRST WRITE DONE             00345000
+         MVC   FCBBYTE+2(2),DCBLRECL   SAVE LENGHT                      00346000
+PXLOC1   EQU   *                                                        00347000
+         TM    DCBRECFM,BLK       BLOCKED RECORDS?                      00348000
+         BO    PXLOCBLK           YES                                   00349000
+UNDSIZE2 EQU   *                                                        00350000
+         L     R7,FCBBYTE         GET LRECL                             00351000
+         TM    DCBRECFM,UND       UNDEFINED?                            00352000
+         BO    PUTXBUF            YES                                   00353000
+         LH    R7,DCBBLKSI        RECFM = UNBLOCKED                     00354000
+         TM    DCBRECFM,FXD       FIXED?                                00355000
+         BO    PUTXBUF            YES                                   00356000
+         MVC   FCBOP+4(2),4(R14)  ALLIGN RDW                            00357000
+         LH    R7,FCBOP+4         GET RDW                               00358000
+         LA    R7,4(R7,R0)        ACCOUNT FOR BLOCK DESCRIPTOR          00359000
+PXLOC4   EQU   *                                                        00360000
+         STH   R7,FCBOP+4         ALLIGN BDW                            00361000
+         MVC   0(2,R14),FCBOP+4 SET BDW                                 00362000
+         XC    2(2,R14),2(R14)     ZERO OUT 2ND HALF OF BDW    @VA04100 00362500
+PUTXBUF  EQU   *                                                        00363000
+         ST    R7,FCBBYTE         SET BLOCK LENGHT                      00364000
+         ST    R14,FCBBUFF        SET BLOCK ADDR.                       00365000
+         L     R15,=V(DMSSEB)     LOAD ADDR. OF EOB ROUT.               00366000
+         BALR  R14,R15                                                  00367000
+         USING *,R14                                                    00368000
+         L     R3,AQSAM                                                 00369000
+         BAL   R15,CKFORERR       GO CHECK FOR ERROR                    00370000
+         DROP  R14                                                      00371000
+         USING DMSSQS,R3                                                00372000
+         LH    R6,FCBITEM         LOAD FCBITEM COUNT                    00373000
+         N     R6,HALFWORD        TO THE NEXT                           00374000
+         AH    R6,FCBCOUT         BLOCK AND                             00375000
+         STH   R6,FCBITEM         STORE IT                              00376000
+GETXEND  EQU   *                                                        00377000
+         TM    FCBIOSW,FCBCLOSE   DURING CLOSE?                         00378000
+         BO    RETP               YES , RETURN TO CLOSE                 00379000
+         OI    FCBIOSW,FCBIORD    RESET FLAGS TO INDICATE THE           00380000
+         OI    IOBIOFLG,IOBIN     "GET" WE'RE REALLY DOING              00381000
+         NI    FCBIOSW,255-FCBIOWR    ...........                       00382000
+         NI    IOBIOFLG,255-IOBOUT-IOBUPD    TURN OFF UPDATE FLAG       00383000
+         B     GET1D              GO FINISH "GET"                       00384000
+PXLOCBLK EQU   *                                                        00385000
+         TM    DCBRECFM,FXD       FIXED OR UNDEFINED?                   00386000
+         BZ    PXLVB              NO, VARIABLE                          00387000
+         AR    R5,R7              ADD LRECL                             00388000
+         LR    R6,R5              SAVE BUFFER ADDR.                     00389000
+         SR    R5,R14             GET ACTUAL LENGHT                     00390000
+         TM    DCBRECFM,UND       IS IT UNDEFUNED?                      00391000
+         BO    UNDSIZE2           YES                                   00392000
+         CH    R5,DCBBLKSI        RECORD LENGHT = TO BLOCK SIZE?        00393000
+         BE    UNDSIZE2           YES                                   00394000
+         MVC   0(4,R6),=XL4'61FFFF61'   SET EOF INDICATOR               00395000
+         CLI   FCBDSMD+1,C'4'     MODE 4?                               00396000
+         BE    UNDSIZE2           YES                                   00397000
+         LR    R6,R5              SAVE LENGHT                           00398000
+         SR    R4,R4                                                    00399000
+         DR    R4,R7              GET FCBCOUT                           00400000
+         STH   R5,FCBCOUT         STORE IT                              00401000
+         LR    R7,R6              GET BUFFER LENGHT                     00402000
+         B     PUTXBUF            GO WRITE IT                           00403000
+PXLVB    EQU   *                                                        00404000
+         AH    R5,FCBOP           ADD RDW FOR EOB                       00405000
+         SR    R5,R14             GET LENGHT                            00406000
+PUTXVB   EQU   *                                                        00407000
+         LR    R7,R5              PUT LENGHT IN REG. 7                  00408000
+         B     PXLOC4             GO PUT IT OUT                         00409000
+         EJECT                                                          00410000
+*                                                                       00411000
+*   PERFORM BOOKKEEPING FOR "GET" EXECUTION                             00412000
+*                                                                       00413000
+GETTER   OI    FCBIOSW,FCBIORD    SIGNAL INPUTTING                      00414000
+         OI    IOBIOFLG,IOBIN     SIGNAL INPUT                          00415000
+         NI    IOBIOFLG,255-IOBOUT   AVOID CONFUSION                    00416000
+         NI    DCBOFLGS,255-PREVIOUS TURN OFF WRITE BIT                 00417000
+GET1A    TM    DCBMACRF,LOC        LOCATE MODE?                      TR 00418000
+         BO    GET1B              YES. LOCATE MODE                      00419000
+         ST    R0,DEBTCBAD        SET USER "MOVE-TO" ADDRESS            00420000
+GET1B    TM    FCBIOSW,FCBCLOSE   DURING CLOSE?                         00421000
+         BNO   GET1C              NO                                    00422000
+         TM    IOBIOFLG,IOBUPD    UPDATE FLAG ON?                       00423000
+         BO    GETXER             YES, GO DO "PUTX"                     00424000
+         B     RETP               NO CLOSE TIME UPDATES, RETURN         00425000
+GET1C    LM    R4,R5,DCBEOBAD     A(END-OF-BLOCK), A(LAST RECORD)       00426000
+         AH    R5,DCBLRECL      A(LAST REC) + L'LAST REC = A(NEXT REC)  00427000
+         CR    R4,R5              IF A(EOB) GT A(NEXT RECD), THEN       00428000
+         BH    GOT                EOB CONDITION DOES NOT EXIST          00429000
+         TM    IOBIOFLG,IOBUPD    UPDATE FLAG ON?                       00430000
+         BO    GETXER             YES, EOB "PUTX"                       00431000
+GET1D    BAL   R14,SETEOB         HANDLE EOB CONDITION                  00432000
+*   FILL UP A BUFFER                                                    00433000
+*   (IF RECFM=V, ALLOW FOR BDW)                                         00434000
+GOGET    EQU   *                  GO GET A FILLED BUFFER                00435000
+         ST    R5,FCBBUFF         SET BUFFER ADDRESS FOR CMS PLIST      00436000
+         LH    R15,DCBBLKSI       GET INTENDED LENGTH OF RECORD         00437000
+         ST    R15,FCBBYTE        SET LENGTH IN CMS PLIST               00438000
+         L     R15,=V(DMSSEB)     GET V(END-OF-BLOCK ROUTINE)           00439000
+         BALR  R14,R15                                                  00440000
+         USING *,R14                                                    00441000
+         L     R3,AQSAM           REGAIN BASE REG                       00442000
+         DROP  R14                                                      00443000
+         USING DMSSQS,R3                                                00444000
+*   VERIFY COMPLETION CODE AND CLEAN ERROR CODE                         00445000
+         LH    R6,FCBITEM         GET FCB ITEM COUNT                    00446000
+         N     R6,HALFWORD                                              00447000
+         AH    R6,FCBCOUT         ADD BLOCK JUST READ                   00448000
+         CLC   DCBFDAD+5(3),=XL3'00FFF8' END OF FILE?          @VA02735 00448100
+         BNE   NOSTR          NO , THEN      STORE ITEM NUMBER @VA02735 00448200
+         TM    DCBCIND2,X'80' IS THIS UPDATE MODE?             @VA05025 00448230
+         BO    NOSTR          YES,THEN NO NEED TO FORCE EOF    @VA05025 00448260
+         MVC   FCBITEM,=XL2'FFF8' SET EOF FOR NEXT READ        @VA02735 00448300
+         B     STOR                                            @VA02735 00448400
+NOSTR    STH   R6,FCBITEM     UPDATE FCB ITEM COUNT            @VA02735 00449000
+STOR     L     R6,FCBREAD     GET NO BYTES READ                @VA02735 00450000
+         AR    R6,R5              ADD THIS TO CURRENT POINTER           00451000
+         ST    R6,FCBOP           ALLIGN THIS NO.                       00452000
+         MVC   DCBEOBAD+1(3),FCBOP+1 UPDATE END OF BUFFER ADDR          00453000
+         L     R5,DCBRECAD        GET ADDR OF RECORD                    00454000
+         LA    R15,GOT            SET RETURN ADDR                       00455000
+CKFORERR EQU   *                                                        00456000
+         L     R6,IOBECBPT        GET V(IOB)                            00457000
+         CLI   3(R6),X'00'        IS ERROR CODE ZERO                    00458000
+         BCR   8,R15              RETURN TO CALLING RTN                 00459000
+         L     R15,=V(DMSSCTCE)   NOT ZERO, TAKE ERROR EXIT             00460000
+         L     R12,=V(DMSSCTCK)   GET BASE REG FOR CHECK RTN            00461000
+         BR    R15                GO TO ERROR RTN                       00462000
+*   PASS RECORD AND COMPUTE SOME VARIABLES                              00463000
+GOT      EQU   *                  EOB CONDITION SATISFIED               00464000
+         TM    DCBRECFM,UND       UNDEFINED RECORD FORMAT?              00465000
+         BO    RUND               YES                                   00466000
+         TM    DCBRECFM,VAR       VARIABLE RECORD FORMAT?               00467000
+         BO    RVAR               YES.                                  00468000
+*   RECORD FORMAT = "FIXED"                                             00469000
+RFXD     DS    0H                                                       00470000
+         B     GIVERECD           (LRECL) HAS BEEN SET                  00471000
+*   RECORD FORMAT = "UNDEFINED"                                         00472000
+RUND     DS    0H                                                       00473000
+         MVC   DCBLRECL(2),FCBREAD+2 SET LRECL = BLOCK READ             00474000
+         B     GIVERECD           GET SIZE FOR MOVE                     00475000
+*   RECORD FORMAT = "VARIABLE"                                          00476000
+RVAR     DS    0H                                                       00477000
+         MVC   DCBLRECL(2),0(R5)  SET LRECL FROM RECORD                 00478000
+GIVERECD EQU   *                  PASS RECORD BACK TO USER PROGRAM      00479000
+         L     R1,IOBECBPT    GET V(IOB)                       @VM03048 00480000
+         LH    R6,DCBLRECL        GET LRECL                    @V201122 00480100
+         LTR   R6,R6              IS IT POSITIVE               @V201122 00480200
+         BP    GETSIZE            YES, CONTINUE                @V201122 00480300
+         MVI   3(R1),8            NO, LENGTH ERROR             @V201122 00480400
+         B     CKFORERR           GO TO ERROR ROUTINE          @V201122 00480500
+GETSIZE  N     R6,HALFWORD        CLEAR FIRST TWO BYTES                 00481000
+         TM    DCBMACRF,LOC       LOCATE MODE?                          00482000
+         LR    R1,R5              SET RECORD LOCATION                   00483000
+         ST    R5,DCBRECAD        RESET VALUES                          00484000
+         BO    RETP               RETURN. LOCATE MODE.                  00485000
+         L     R7,DEBTCBAD        A(USER MOVE-TO LOCATION )             00486000
+         L     R1,FCBBUFF     LOAD WORKAREA ADDR FOR MOVE MODE @VA05991 00486500
+         BAL   R14,MOVEMODE       MOVE THE RECORD TO USER BUFFER        00487000
+         B     RETP               RETURN TO PROCESSING PROGRAM          00488000
+         EJECT                                                          00489000
+*                                                                       00490000
+*   MOVE THE RECORD                                                     00491000
+*                                                                       00492000
+         SPACE                                                          00493000
+*        REGISTER ASSIGNMENTS:                                          00494000
+*   R6=L'RECORD   R7=A("TO")   R5=A("FROM")   R14=A(RETURN)             00495000
+MOVEMODE DS    0H                 HEAD 'EM UP; MOVE 'EM OUT!            00496000
+MV1      SH    R6,HALF256+2      N'BYTES-TO-BE-MOVED GT 256?            00497000
+         BM    LT256              NO                                    00498000
+         MVC   0(256,R7),0(R5)    MOVE 256 BYTES OD THE RECORD          00499000
+         BCR   8,R14              L'RECORD = 256 BYTES                  00500000
+HALF256  LA    R7,256(R7,R0)      INCREMENT "MOVE-TO" LOCATION          00501000
+         LA    R5,256(,R5)        INCREMENT "MOVE-FROM" LOCATION        00502000
+         B     MV1                MOVE ANOTHER CHUNK                    00503000
+LT256    AH    R6,HALF256+2      RESTORE THE TRUTH                      00504000
+         BCTR  R6,0              PLAY GAMES                             00505000
+         EX    R6,MOVEREC        MOVE ALONG                             00506000
+         BR    R14                RETURN                                00507000
+MOVEREC  MVC   0(*-*,R7),0(R5)    MOVE THE RECORD                       00508000
+         SPACE 3                                                        00509000
+*                                                                       00510000
+*   "END-OF-BLOCK" CONDITIONS EXIST. GET NEW BUFFER FROM POOL.          00511000
+*                                                                       00512000
+*   UPON ENTRY:                                                         00513000
+*        C(DCBBUFCB)=A(BUFCB) BUFCB: A(CURRENT BUFFER),H'BUFNO',H'BUFL' 00514000
+*        C(IOBNXTAD)=A(NEXT VALID BUFFER TO-BE-USED)                    00515000
+*        C(IOBSTART)=X'ID OF NEXT BUFFER',AL3(INITIAL BUFFER IN BLOCK)  00516000
+*   DURING:                                                             00517000
+*        THE "NEXT" BUFFER BECOMES THE "CURRENT" BUFFER.                00518000
+*        THE "CURRENT" BUFFER + BUFL = "NEXT" BUFFER.                   00519000
+*        THE ID + 1 = THE ID OF THE "NEXT" BUFFER THAT WILL BE USED.    00520000
+*        IF ID > BUFNO, ID IS SET = 1; AND C(IOBNXTAD)=C(IOBSTART).     00521000
+SETEOB   DS    0H                 GET NEW BUFFER                        00522000
+         L     R7,DCBBUFCB        GET V(BUFFER CONTROL BLOCK)           00523000
+         SR    R10,R10                                                  00526000
+         IC    R10,IOBSTART       GET N'BUFFER TO BE USED               00527000
+         LR    R4,R10             GET NO. OF BUFFER               V0206 00527100
+         BCTR  R4,R0              PREPARE FOR MULTIPLY            V0206 00527200
+         MH    R4,DCBBUFL         GET RELATIVE ADDR OF BUFFER     V0206 00527300
+         L     R5,IOBSTART        GET ADDR OF START OF BUFFER     V0206 00527400
+         LA    R5,0(R4,R5)        GET ACTUAL ADDR OF BUFFER       V0206 00527500
+         ST    R5,DCBRECAD        SET A(NEXT BUFFER AS NEXT RECORD)     00528000
+         ST    R5,0(,R7)          SET A(BUFFER TO BE USED) INTO BUFCB   00529000
+         LR    R0,R5                                                    00530000
+         AH    R0,DCBBUFL         GET A(END BUFF+1)=A(NEXT BUFFER)      00531000
+         LR    R4,R0              SET A(END-OF-BUFFER TO BE USED)       00532000
+         ST    R4,FCBOP                                                 00533000
+         MVC   DCBEOBAD+1(3),FCBOP+1                                    00534000
+HALF1    LA    R10,1(R10,R0)      GET N'NEXT BUFFER IN CHAIN TO BE USED 00536000
+         CH    R10,4(,R7)          HAS BUFNO BEEN EXCCEDED?             00537000
+         BNH   SET1               NO. DO NOT RESET CHAIN OF BUFFERS     00538000
+         LA    R10,1              NEXT BUFF WILL BE FIRST BUFF IN POOL  00539000
+SET1     STC   R10,IOBSTART       SET N'NEXT BUFFER = 1.                00541000
+         TM    DCBRECFM,FXD       RECFM=FXD,UND?                        00542000
+         BCR   1,R14              YES                                   00543000
+         LA    R5,4(,R5)          VAR. SKIP OVER BDW                    00544000
+         ST    R5,DCBRECAD        RESET RECAD                           00545000
+         SH    R5,HALF4+2                                               00546000
+         BR    R14                                                      00547000
+*                                                                       00548000
+*   RETURN TO PROCESSING PROGRAM                                        00549000
+*                                                                       00550000
+RETP     EQU   *                  HATE TO SEE YA GO....                 00551000
+         ST    R1,24(,R13)                                              00552000
+RETX     EQU   *                                                        00553000
+         LM    R14,R12,12(R13)         RESTORE REGISTERS                00554000
+         BR    R14                                                      00555000
+         EJECT                                                          00556000
+*                                                                       00557000
+*   QSAM SIMULATION OF A MARVELOUS "PUT" FUNCTION                       00558000
+*                                                                       00559000
+PUTTER   OI    IOBIOFLG,IOBOUT    SIGNAL OUTPUT                         00560000
+         NI    IOBIOFLG,255-IOBIN   AVOID CONFUSION                     00561000
+         OI    FCBIOSW,FCBIOWR    SIGNAL OUTPUTTING                     00562000
+PUT1A    L     R14,DCBBUFCB       GET A(BUFFER CONTROL BLOCK)           00563000
+         L     R14,0(,R14)        GET A(CURRENT BUFFER)                 00564000
+         LH    R7,DCBLRECL        L'CURRENT OR NEXT RECORD              00565000
+         N     R7,HALFWORD                                              00566000
+         LM    R4,R5,DCBEOBAD     A(END-OF-BUFFER)                      00567000
+         LA    R4,0(,R4)          CLEAR HIGH ORDER BYTE           V0206 00567100
+         MVC   FCBOP(2),0(R5)     ALLIGN RDW                            00568000
+         TM    FCBIOSW,FCBCLOSE   DURING CLOSING?                       00569000
+         BNO   CKMODE             NO, GO CHECK MODE                     00570000
+         SR    R1,R1              ZERO REG 1                            00571000
+         SR    R6,R6              ZERO REG 6                            00572000
+         TM    DCBMACRF+1,LOC     LOCATE MODE?                          00573000
+         BZ    CKRECFM            NO, CHECK RECFM                       00574000
+         TM    DCBRECFM,VAR       RECFM= VAR OR UND?              V0206 00574100
+         BNO   FXDCLOSE           NO, DON'T ADD TO RECAD          V0206 00574200
+         LR    R1,R7              GET LRECL                             00575000
+         LH    R6,FCBOP           GET RDW                               00576000
+CKRECFM  TM    DCBRECFM,FXD       RECFM FIXED?                          00577000
+         BO    FXDCLOSE           YES                                   00578000
+         AR    R5,R6              ADD LRECL IF ANY                      00579000
+         SR    R5,R14             GET BYTE SIZE                         00580000
+         CH    R5,=H'4'           IS SIZE EQUAL TO FOUR                 00581000
+         BE    RETP               YES, THEN RETURN                      00582000
+         B     PUTVB              PUT BLOCK                             00583000
+FXDCLOSE AR    R5,R1              ADD LRECL IF ANY                      00584000
+         LR    R6,R5              SAVE BUFFER ADDR                      00585000
+         SR    R5,R14             GET RECORD LENGTH                     00586000
+         BZ    RETP               IF ZERO RETURN                        00587000
+         TM    DCBRECFM,UND       IF RECFM UNDEFINED, WRITE RECORD      00588000
+         BO    PUTBUF         YES, WRITE RECORD                @VA03362 00589100
+         CH    R5,DCBBLKSI        IS BUFFER FULL                        00590000
+         BE    UNDSIZE            YES, WRITE RECORD                     00591000
+         MVC   0(4,R6),=XL4'61FFFF61' SET EOF INDICATOR                 00592000
+         CLI   FCBDSMD+1,C'4'     IS THIS A P4 FILE                     00593000
+         BE    UNDSIZE            YES, WRITE RECORD                     00594000
+         LR    R6,R5              SAVE LENGTH                           00595000
+         SR    R4,R4              ZERO REG 4                            00596000
+         DR    R4,R7              GET FCBCOUT                           00597000
+         STH   R5,FCBCOUT         FILL IN FCBCOUT                       00598000
+         LR    R7,R6              GET BUFFER LENGTH                     00599000
+         B     PUTBUF             WRITE BUFFER                          00600000
+CKMODE   EQU   *                                                        00601000
+         TM    DCBMACRF+1,LOC     LOCATE MODE?                          00602000
+         BZ    PUTMOVE            NO. MOVE MODE                         00603000
+PUTLOC   EQU   *                  QSAM-PUT-LOCATE. HAVE FUN!            00604000
+         TM    DCBOFLGS,PREVIOUS  IS THIS THE FIRST PUT EVER?           00605000
+         BO    PLOC1              NO. THERE HAVE BEEN OTHERS            00606000
+         OI    DCBOFLGS,PREVIOUS  INDICATE THIS OUTPUT                  00607000
+         CR    R5,R4              IS BUFFER FULL                  V0206 00608000
+         BL   SAVELREC            NO, RETURN TO CALLER            V0206 00608100
+PLOC1    TM    DCBRECFM,BLK       SUBSEQUENT PUTS. BLOCK RECORDS?       00609000
+         BO    PLOCBLK            YES.                                  00610000
+UNDSIZE  L     R7,FCBBYTE         GET LRECL OF UND RECORD               00611000
+PLOCUBLK EQU   *                  UNBLOCKED. EOB EXISTS AFTER EVERY PUT 00612000
+         TM    DCBRECFM,UND       IS RECFM UNDEFINED                    00613000
+         BNO   NOUND          NO, CONTINUE                     @VA03362 00614100
+         LR    R15,R14        GET A(CURRENT BUFFER)            @VA03362 00614200
+         SR    R15,R4         LESS PREV. BUFFER                @VA03362 00614300
+         LTR   R15,R15        CORRECT BUFFER?                  @VA03362 00614400
+         BM    PUTBUF         NO,THEN PUT AS IS                @VA03362 00614500
+         SR    R7,R15         CALCULATE UNDEF. LENGTH          @VA03362 00614600
+         B     PUTBUF         PUT THAT BUFFER                  @VA03362 00614700
+NOUND    LH    R7,DCBBLKSI    FOR RECFM=UNBLOCKED              @VA03362 00614800
+         TM    DCBRECFM,FXD       RECFM=FIXED/UNDEFINED                 00616000
+         BO    PUTBUF             YES. GO OUTPUT PREVIOUS RECORD        00617000
+         XC    BD6(RDRES,R14),BD6(R14) ZERO 2 BYTES OF RDW     @VA06228 00617500
+PLOC3    MVC   FCBOP+4(2),4(R14)  ALLIGN RDW                            00618000
+         LH    R7,FCBOP+4         GET RDW                               00619000
+HALF4    LA    R7,4(R7,R0)        ACCOUNT FOR BLOCK-DESCRIPTOR-WORD     00620000
+PLOC4    STH   R7,FCBOP+4         ALLIGN BDW                            00621000
+         MVC   0(2,R14),FCBOP+4   SET BDW                               00622000
+         XC    2(2,R14),2(R14)     ZERO OUT 2ND HALF OF BDW    @VA04100 00622500
+PUTBUF   EQU   *                  OUTPUT CURRENT FILLED BLOCK           00623000
+         ST    R7,FCBBYTE         SET BLOCK LENGTH FOR CMS PLIST        00624000
+         ST    R14,FCBBUFF        SET BLOCK LOCATION                    00625000
+PUT2     L     R15,=V(DMSSEB)     GET V(END-OF-BLOCK ROUTINE)           00626000
+         BALR  R14,R15                                                  00627000
+         USING *,R14                                                    00628000
+         L     R3,AQSAM           REGAIN ADDRESSABILITY                 00629000
+         BAL   R15,CKFORERR       CHECK FOR ERROR                       00630000
+         DROP  R14                                                      00631000
+         USING DMSSQS,R3                                                00632000
+         LH    R6,FCBITEM         GET FCB ITEM COUNT                    00633000
+         N     R6,HALFWORD                                              00634000
+         AH    R6,FCBCOUT         ADD BLOCK JUST WRITTEN                00635000
+         STH   R6,FCBITEM         UPDATE ITEM COUNT                     00636000
+         TM    FCBIOSW,FCBCLOSE   DURING CLOSING?                       00637000
+         BO    RETP               YES, RETURN                           00638000
+         BAL   R14,SETEOB         GET FRESH BUFFER                      00639000
+SAVELREC MVC   FCBBYTE+2(2),DCBLRECL SAVE LRECL OF THIS PUT             00640000
+         TM    FCBIOSW,FCBPVMB    PUT-MOVE-VAR-BLK?                     00641000
+         BO    PVMB2              YES                                   00642000
+         LR    R1,R5              GET RETURN BUFFER ADDR          V0206 00642050
+         TM    DCBRECFM,VAR       RECFM= VAR OR UND               V0206 00642100
+         BO    PUTRET             RETURN TO CALLER                V0206 00642150
+         TM    DCBMACRF+1,LOC     IS THIS A PUT LOCATE            V0206 00642200
+         BZ    RETP               NO, RETURN TO CALLER            V0206 00642250
+         AH    R5,DCBLRECL        POINT RECAD TO NEXT RECORD ADDR V0206 00642300
+         ST    R5,DCBRECAD        SET RECORD ADDRESS POINTER      V0206 00642350
+         B     RETP               RETURN TO CALLER                V0206 00642400
+PUTRET   EQU   *                  RETURN TO PROCESSING PROGRAM          00643000
+         L     R1,DCBRECAD        GET A(BUFFER FOR NEXT RECORD)         00644000
+         B     RETP                                                     00645000
+PLOCBLK  EQU   *                  BLOCKED. VERIFY EOB CONDITIONS        00646000
+         TM    DCBRECFM,FXD       FIXED/UNDEFINED?                      00647000
+         BZ    PLVB               NO. VARIABLE.                         00648000
+PLFB     EQU   *                  PUT-LOCATE-BLOCKED-FIXED/UNDEFINED    00649000
+         LR    R1,R5              SETUP RETURN REG                V0213 00649100
+         AR    R5,R7              A(LAST REC)+L'LAST REC=A(NEXT REC)    00650000
+         ST    R5,DCBRECAD        SET A(NEXT RECORD)                    00651000
+         CR    R4,R5              VERIFY THAT NEXT REC FITS CURRENT BUF 00653000
+         BNL   RETP               RETURN TO CALLER                V0213 00654000
+PLOC2    LH    R7,DCBBLKSI        USE BLOCK SIZE FOR                    00655000
+         B     PUTBUF             NO. PUT THIS BUFF; THEN EOB           00656000
+PLVB     EQU   *                  PUT-LOCATE-BLOCKED-VARIABLE           00657000
+         XC    RD2(RDRES,R5),RD2(R5) ZERO 2 BYTES OF RDW       @VA06228 00657500
+         AH    R5,FCBOP           ADD RDW                               00658000
+         ST    R5,DCBRECAD        SET A(NEXT RECORD)                    00659000
+         AR    R5,R7           A(NEXT REC)+EST L'NEXT REC=A(NEXT+1 REC) 00660000
+         CR    R4,R5              VERIFY THAT NEXT REC FITS CURR BUF    00661000
+         BNL   PUTRET             YES. NEXT REC WILL FIT                00662000
+         SR    R5,R7              GET A(END-OF-CURRENT BUFFER)          00663000
+         SR    R5,R14             GET L'BUFFER FOR BDW                  00664000
+PUTVB    EQU   *                                                        00665000
+         LR    R7,R5                                                    00666000
+         B     PLOC4              PUT BLOCK / EOB                       00667000
+PUTMOVE  EQU   *                  QSAM-PUT-MOVE                         00668000
+         OI    DCBOFLGS,PREVIOUS  INDICATE LSAT OPERATION OUTPUT        00669000
+         ST    R0,DEBTCBAD        SAVE USERS V(BUFFER)                  00670000
+         TM    DCBRECFM,BLK       BLOCKED?                              00671000
+         BO    PMOVBLK            YES.                                  00672000
+PMOVUBLK EQU   *                  UNBLOCKED. EOB ON EVERY PUT           00673000
+         TM    DCBRECFM,FXD       RECFM=FIXED/UNDEFINED?                00674000
+         BZ    PMVU               NO. VARIABLE.                         00675000
+PMFU     EQU   *                  PUT-MOVE-UNBLOCKED-FIXED/UNDEFINED    00676000
+         LR    R6,R7                                                    00677000
+         LR    R7,R5                                                    00678000
+         LR    R5,R0                                                    00679000
+         LR    R0,R14                                                   00680000
+         BAL   R14,MOVEMODE       MOVE RECORD INTO BUFFER               00681000
+         LR    R14,R0                                                   00682000
+         LH    R7,DCBLRECL        GET LRECL OF RECORD                   00683000
+         TM    DCBRECFM,UND   RECFM=UNDEFINED?                 @VA03362 00684100
+         BO    PUTBUF         YES, THEN PUT BUFFER             @VA03362 00684200
+         B     NOUND          NO, NOT UNDEFINED                @VA03362 00684300
+PMVU     EQU   *                  PUT-MOVE-UNBLOCKED-VARIABLE           00685000
+         LR    R7,R5              R7=A(RECAD)=A("TO")                   00686000
+         LR    R5,R0              A(FROM BUFFER)                        00687000
+         MVC   FCBOP(2),0(R5)     ALLIGN RDW                            00688000
+         LH    R6,FCBOP           GET RDW                               00689000
+         N     R6,HALFWORD                                              00690000
+         LR    R0,R14                                                   00691000
+         BAL   R14,MOVEMODE       MOVE RECORD                           00692000
+         LR    R14,R0                                                   00693000
+         XC    BD6(RDRES,R14),BD6(R14) ZERO 2 BYTES OF RDW     @VA06228 00693500
+         MVC   FCBOP+4(2),4(R14)  ALLIGN RDW                            00694000
+         LH    R6,FCBOP+4         GET RDW                               00695000
+         LA    R6,4(,R6)          ACCOUNT FOR THE BDW                   00696000
+         STH   R6,FCBOP+4         ALLIGN BDW                            00697000
+         MVC   0(2,R14),FCBOP+4   SET BDW                               00698000
+         XC    2(2,R14),2(R14)     ZERO OUT 2ND HALF OF BDW    @VA04100 00698500
+         LR    R7,R6                                                    00699000
+         B     PUTBUF             PUT CURRENT BUFFER/EOB                00700000
+PMOVBLK  EQU   *                  QSAM-PUT-MOVE-BLOCKED                 00701000
+         TM    DCBRECFM,FXD       RECFM=FIXED/UNDEFINED?                00702000
+         BZ    PVMB               NO. VARIABLE.                         00703000
+PFMB     EQU   *                  PUT-MOVE-BLOCKED-FIXED/UNDEFINED      00704000
+         LR    R6,R7             GET L'RECORD (=DCBLRECL)               00705000
+         LR    R7,R5              A(TO) (=DCBRECAD, A OF NEXT REC)      00706000
+         LR    R5,R0              A(FROM)                               00707000
+         LR    R0,R14                                                   00708000
+         BAL   R14,MOVEMODE       MOVE THEE RECORD. IT WILL ALWAYS FIT. 00709000
+         LR    R14,R0                                                   00710000
+         L     R5,DCBRECAD        A(CURRENT RECORD)                     00711000
+         AH    R5,DCBLRECL        A(NEXT RECORD)                        00712000
+         ST    R5,DCBRECAD        FILL IN RECORD ADDR                   00713000
+         AH    R5,DCBLRECL        ADD LRECL                             00714000
+         CR    R4,R5              VERIFY THAT NEXT REC FITS CURR BUF    00715000
+         BNL   PUTRET             YES. BUFF WILL ACCOMMODATE NEXT REC   00716000
+         B     PLOC2              PUT BUFFER/EOB                        00717000
+PVMB     EQU   *                  PUT-MOVE-BLOCKED-VARIABLE             00718000
+         LR    R7,R0              A(USER RECORD, RDW)                   00719000
+         MVC   FCBOP(2),0(R7)     ALLIGN RDW                            00720000
+         AH    R5,FCBOP           ADD RDW                               00721000
+         CR    R4,R5              VERIFY FITAGE INTO CURRENT BUFFER     00722000
+         ST    R5,DCBRECAD        SET A(NEXT RECORD)                    00723000
+         BNL   PVMB1              IT FITS. MOVE INTO BUFFER.            00724000
+         SH    R5,FCBOP           SUBTRACR RDW                          00725000
+         SR    R5,R14             A(END LAST REC)-A(BUFFER)=LL OF BDW   00726000
+         OI    FCBIOSW,FCBPVMB    SIGNAL PUT-MOVE-VAR-BLK               00727000
+         B     PUTVB              PUT BUFFER                            00728000
+PVMB2    NI    FCBIOSW,255-FCBPVMB                                      00729000
+         LA    R7,4(R5)           SKIP OVER BDW                         00730000
+         LR    R14,R7             SAVE RECORD ADDR                      00731000
+         L     R5,DEBTCBAD        GET ADDR OF USER RECORD               00732000
+         MVC   FCBOP(2),0(R5)     ALLIGN RDW                            00733000
+         LH    R6,FCBOP           GET RDW                               00734000
+         AR    R14,R6             GET ADDR FOR NEXT RECORD              00735000
+         LR    R1,R7          GET ADDR OF OUTPUT BUFFER        @VA03887 00735100
+         ST    R14,DCBRECAD       SET ADDR OF NEXT RECORD               00736000
+         BAL   R14,MOVEMODE       MOVE THE RECORD ***                   00737000
+         XC    RD2(RDRES,R1),RD2(R1) ZERO 2 BYTES OF RDW       @VA06228 00737500
+         B     RETP           LEAVE US                         @VA03887 00738100
+PVMB1    EQU   *                  RECORD WILL FIT INTO CURRENT BUFFER   00739000
+         LH    R6,FCBOP           GET RDW                               00740000
+         LR    R7,R5              A(TO) (=DCBRECAD)                     00741000
+         SR    R7,R6              GET RECORD ADDR                       00742000
+         LR    R5,R0              A(FROM)                               00743000
+         LR    R1,R7          GET ADDR OF OUTPUT BUFFER        @VA03887 00743100
+         BAL   R14,MOVEMODE                                             00744000
+         XC    RD2(RDRES,R1),RD2(R1) ZERO 2 BYTES OF RDW       @VA06228 00745000
+         B     RETP           LEAVE US                         @VA03887 00745100
+         EJECT                                                          00746000
+*                                                                       00747000
+*   SOME VALUES FOR THE CAUSE                                           00748000
+*                                                                       00749000
+         SPACE                                                          00750000
+AQSAM    DC    A(DMSSQS)          BASE ADDRESS                          00751000
+HALFWORD DC    F'65535'       CONSTANT X'0000FFFF'             @VA06228 00751200
+RDRES    EQU   2              RESERVED BYTES OF RDW            @VA06228 00751400
+RD2      EQU   2              RDW+2 FOR BLOCKED RECORDS        @VA06228 00751600
+BD6      EQU   6              BDW+6 FOR UNBLOCKED RECORDS      @VA06228 00751800
+         LTORG                                                          00752100
+         EJECT                                                          00753000
+         PRINT GEN                                                      00754000
+*                                                                       00755000
+*   PRESENTING THE DUMMIES ...                                          00756000
+*                                                                       00757000
+         SPACE                                                          00758000
+         IO                                                             00759000
+         EJECT                                                          00760000
+         NUCON                                                          00761000
+         EJECT                                                          00762000
+         DCBD  DSORG=(PS)                                               00763000
+         EJECT                                                          00764000
+         CMSCB                                                          00765000
+         EJECT                                                          00766000
+         EJECT                                                          00767000
+         REGEQU                                                         00768000
+         END                                                            00769000

@@ -1,0 +1,341 @@
+GIO      TITLE 'DMKGIO     (CP)        VM/370 - RELEASE 6'              00001000
+         ISEQ  73,80          VALIDATE SEQUENCING OF INPUT     @V200020 00002000
+*.                                                                      00003000
+* MODULE NAME -                                                         00004000
+*        DMKGIO                                                         00005000
+*                                                                       00006000
+* FUNCTION -                                                            00007000
+*                                                                       00008000
+*        TO ALLOW CP TO DO ERROR RECOVERY FOR I/O OPERATIONS THAT       00009000
+*        WERE INITIATED BY CMS.                                         00010000
+*                                                                       00011000
+* ATTRIBUTES -                                                          00012000
+*        REENTRANT, PAGEABLE, CALLED VIA SVC                            00013000
+*                                                                       00014000
+* ENTRY POINT -                                                         00015000
+*        DMKGIOEX                                                       00016000
+*                                                                       00017000
+* ENTRY CONDITIONS -                                                    00018000
+*        GPR  1=ADDRESS OF USER'S "R1" AND "R2" REGISTERS               00019000
+*        GPR 11=ADDRESS OF USER'S VMBLOK                                00020000
+*        GPR 12=BASE ADDRESS OF DMKGIO                                  00021000
+*                                                                       00022000
+*        USER'S "R1" REGISTER HOLDS THE VIRTUAL DEVICE ADDRESS          00023000
+*        USER'S "R2" REGISTER HOLDS THE VIRTUAL CAW ADDRESS… *          00024000
+* EXIT CONDITIONS -                                                     00025000
+*        THE USER'S CONDITION CODE IN THE VIRTUAL PSW, AND GENERAL      00026000
+*        REGISTER 15 IS CHANGED BASED ON THE FOLLOWING CONDITIONS.      00027000
+*                                                                       00028000
+*        CC=0  I/O COMPLETED SUCCESSFULLY                               00029000
+*                                                                       00030000
+*        CC=1  ERROR CONDITION, REG.15 CONTAINS RETURN CODE:            00031000
+*              R15=1  DEVICE NOT ATTACHED                               00032000
+*                                                                       00033000
+*        CC=2  EXCEPTION CONDITIONS; R15 CONTAINS RETURN CODE           00034000
+*              R15=2  UNIT EXCEPTION BIT IN DEV STATUS BYTE.            00035000
+*              R15=3  WRONG LENGTH RECORD DETECTED.                     00036000
+*                                                                       00037000
+*        CC=3  ERROR CONDITION, REG.15 CONTAINS RETURN CODE             00038000
+*                                                                       00039000
+*               R15=13  A PERMANENT I/O ERROR OCCURRED.                 00040000
+*                       THE 2 LOW ORDER POS. OF THE USER'S CAW          00041000
+*                       REGISTER CONTAINS THE FIRST 2 SENSE BYTES.      00042000
+*                                                                       00043000
+*                                                                       00044000
+* CALLS TO OTHER ROUTINES -                                             00045000
+*        DMKFREE    USED TO OBTAIN STORAGE FOR BUILDING IOBLOK.         00046000
+*        DMKFRET    USED TO RETURN STORGE FOR IOBLOK.                   00047000
+*        DMKIOSQV   TO QUE THE I/O REQUEST.                             00048000
+*        DMKCCWTR   TO BUILD A REAL CHANNEL PROG. FROM VIRTUAL CCW'S.   00049000
+*        DMKDSPCH   TO ALLOW OTHER ROUTINES TO RUN.                     00050000
+*        DMKUNTRN   TO TRANSLATE THE REAL CSW TO A VIRTUAL CSW.         00051000
+*        DMKUNTFR   TO FREE STORAGE USED FOR BUILDING REAL CCW'S.       00052000
+*        DMKSCNVU - TO LOCATE A VIRTUAL DEVICE                          00053000
+*        DMKSCNVD - TO GET THE DEVICE ADDRESS IN CCU FORM               00053500
+*                                                                       00054000
+* EXTERNAL REFERENCES -                                                 00055000
+*        NONE                                                           00056000
+*                                                                       00057000
+*                                                                       00058000
+* TABLES AND WORK AREA'S -                                              00059000
+*        NONE                                                           00060000
+*                                                                       00061000
+*                                                                       00062000
+* REGISTER USAGE -                                                      00063000
+*        GPR  4=VIRTUAL DEVICE                                          00064000
+*        GPR  5=VIRTUAL CAW                                             00065000
+*        GPR  6=ADDRESS OF VDEVBLOK                                     00066000
+*        GPR  7=SCRATCH                                                 00067000
+*        GPR  8=ADDRESS OF VDEVBLOK                                     00068000
+*        GPR  9=SCRATCH                                                 00069000
+*        GPR 10=ADDRESS OF IOBLOK                                       00070000
+*        GPR 11=ADDRESS OF VMBLOK                                       00071000
+*        GPR 12=BASE ADDRESS OF DMKGIO                                  00072000
+*        GPR 13=ADDRESS OF A SAVE AREA                                  00073000
+*                                                                       00074000
+*                                                                       00075000
+* OPERATION -                                                           00076000
+*        DMKGIO IS CALLED BY DMKHVC WHEN A USER HAS ISSUED A            00077000
+*        HYPERVISOR CALL FOR TAPE, UNIT RECORD, OR NON-STANDARD         00078000
+*        DISK I/O CHANNEL PROGRAMS. A CHECK IS MADE TO VALIDATE THAT    00079000
+*        THE DEVICE ADDRESS IS CORRECT AND, FOR MINIDISKS, THAT         00079500
+*        THE DEVICE IS NOT RESERVED BY ANOTHER USER.  IF NO ERROR       00080000
+*        IS DETECTED, DMKGIO                                            00080500
+*        BUILDS AN IOBLOK AND CALLS DMKCCWTR. ON RETURN FROM DMKCCWTR   00081000
+*        A CALL IS MADE TO DMKIOSQV TO SCHEDULE A VIRTUAL DEVICE        00082000
+*        REQUEST. WHEN THE I/O OPERATION COMPLETES DMKGIO REGAINS       00083000
+*        CONTROL AT LABEL "DIAGRTN". THE IOBLOK IS CHECK FOR AN ERROR   00084000
+*        CONDITION AND IF NONE EXISTS,THE IOBLOK IS FRETTED, THE        00085000
+*        CONDITION CODE IS SET AND RETURN IS TO DMKDSPCH.               00086000
+*                                                                       00087000
+*        OTHERWISE DMKUNTRN IS CALLED TO CONVERT THE REAL CSW TO A      00088000
+*        VIRTUAL CSW. THE USER'S PAGE 0 IS THEN READ IN AND THE         00089000
+*        CSW MOVE INTO IT. A RETURN CODE IS LOADED INTO REG.15          00090000
+*        AND THE PSW "CONDITION CODE" IS SET. FREE STORAGE IS           00091000
+*        RETURNED TO THE SYSTEMS POOL AND RETURN IS MADE TO DMKDSPCH.   00092000
+*                                                                       00093000
+*                                                                       00094000
+*                                                                       00095000
+*.                                                                      00096000
+         EJECT                                                          00097000
+         COPY  OPTIONS                                         @V200020 00098000
+         COPY  LOCAL                                           @V200020 00099000
+DMKGIO   START                                                          00100000
+         SPACE                                                          00101000
+         DC    CL8'DMKGIO'    PAGEABLE MODULE IDENTIFIER       @V200020 00102000
+         SPACE                                                          00103000
+         EXTRN DMKCCWTR,DMKIOSQV                               @V200020 00104000
+         EXTRN DMKUNTRN,DMKUNTFR,DMKSCNVU                      @V200020 00105000
+         EXTRN DMKSCNVD                                        @V407438 00105100
+         SPACE                                                          00106000
+         USING *,R12                                                    00107000
+         USING PSA,R0                                                   00108000
+         USING VMBLOK,R11                                               00109000
+         USING SAVEAREA,R13                                             00110000
+DMKGIOEX RELOC ,              VIRTUAL I/O WITHOUT INTERRUPTS   @V200020 00111000
+         NI    VMPSW+2,X'FF'-X'30'      SET CC=0                        00112000
+         NI    VMPSW+4,X'FF'-X'30'      SET CC=0                        00113000
+         SPACE 1                                                        00114000
+         L     R4,0(,R1)      LOAD REG1 W/ VIRTUAL DEV. ADDR.           00115000
+         L     R5,0(,R2)      LOAD REG5. W/ VIRTUAL CAW ADDRESS.        00116000
+GIORST2  LR    R1,R4          LOAD REG1 W/ VIRTUAL I/O ADDRESS @V407438 00117000
+         CALL  DMKSCNVU                                                 00118000
+         BNZ   NOUNIT         BRANCH IF DEVICE NO ATTACHED...CC= 1      00119000
+         LR    R6,R8          SAVE VDEVBLOK ADDR. IN R6                 00120000
+         USING VDEVBLOK,R8                                              00121000
+         TM    VDEVSTAT,VDEVDED    IS DEV. ATTACHED ?                   00122000
+         BO    DEVATTCH       BRANCH IF YES                             00123000
+         TM    VDEVTYPC,CLASDASD   IS DEVICE DASDI ?                    00124000
+         BZ    NOUNIT         DEV MUST BE DASDI IF NOT ATTACHED.        00125000
+DEVATTCH TM    VDEVSTAT,VDEVCHAN+VDEVBUSY+VDEVPEND ANYTHING    @VA01365 00126000
+*                             HAPPENING?                                00127000
+         BNZ   NOPATH         YES, CANT HANDLE THEN            @VA01365 00128000
+         TM    VDEVFLG2,VDEVRRF RES/REL FTR ON THIS MDISK?     @V407438 00128020
+         BZ    DEVFREE        NOPE, BR.                        @V407438 00128040
+         L     R9,VDEVRRB     GET THE ADDRESS OF THE VRRBLOK   @V407438 00128060
+         USING VRRBLOK,R9     ADDRESS THE VRRBLOK              @V407438 00128080
+         TM    VDEVFLG2,VDEVRES MDISK RESERVED FOR THIS USER   @V407438 00128100
+         BO    DEVFREE        YES, LET HIM PASS, BR.           @V407438 00128120
+         TM    VRRSTAT,VRRRES ANYONE ELSE HAVE IT RESERVED?    @V407438 00128140
+         BZ    DEVFREE        NOPE, CONTINUE.                  @V407438 00128160
+         LA    R0,CPEXSIZE    SIZE OF A CPEXBLOK               @V407438 00128180
+         CALL  DMKFREE        GET ONE PLEASE                   @V407438 00128200
+         USING CPEXBLOK,R1    ADDRESS THE CPEXBLOK FROM R1     @V407438 00128220
+         STM   R0,R15,CPEXR0  SAVE EVERYTHING JUST AS IT IS    @V407438 00128240
+         LR    R3,R1          SWITCH CPEXBLOK TO R3            @V407438 00128260
+         DROP  R1             DROP USE OF CPEXBLOK FROM R1     @V407438 00128280
+         USING CPEXBLOK,R3    AND USE R3 INSTEAD               @V407438 00128300
+         CALL  DMKSCNVD       GET DEVICE ADDRESS IN CCU FORM   @V407438 00128320
+         ST    R1,CPEXMISC    SAVE IT IN MISC FOR DMKCFPRD     @V407438 00128340
+         LA    R0,GIORSTRT    ADDRESS TO RESTART WITH PLEASE   @V407438 00128360
+         ST    R0,CPEXADD     ...                              @V407438 00128380
+         L     R1,VRRCPEX     ADDRESS OF THE FIRST QED CPEXBLOK@V407438 00128400
+         ST    R1,CPEXFPNT    PUT THIS CPEXBLOK IN THE CHAIN   @V407438 00128420
+         ST    R3,VRRCPEX     DITTO                            @V407438 00128440
+         OI    VDEVFLG2,VDEVCPEX   FLAG WAITING FOR "RELEASE"  @V407438 00128460
+         OI    VMRSTAT,VMIDLE DROP USER FROM QUEUE             @V407438 00128480
+         GOTO  DMKDSPCH       COME BACK WHEN DEVICE IS FREE    @V407438 00128500
+* DROP FROM QUEUE, LEAVE IN EXECUTION WAIT                     @V407438 00128520
+* IF DEVICE IS RESET, CPEXADD IS SET NEGATIVE, LTR'ED BY DMKDSP@V407438 00128540
+GIORSTRT BM    NOPATH         DEVICE HAS BEEN RESET            @V407438 00128560
+         NI    VMRSTAT,X'FF'-VMIDLE     ALLOW BACK IN QUEUE    @V407438 00128580
+         NI    VDEVFLG2,X'FF'-VDEVCPEX CFPRR - NOT WTNG ON CPEX@V407438 00128600
+         B     GIORST2        NOW GO TRY IT AGAIN SAM          @V407438 00128620
+         DROP  R3,R9          NO MORE CPEXBLOK OR VRRBLOK      @V407438 00128640
+         SPACE                                                          00128660
+DEVFREE  EQU   *              HERE WHEN ACCESS TO MDISK IS FREE@V407438 00128680
+         STH   R4,VMACTDEV    SAVE VIRTUAL DEVICE ADDRESS      @VM01016 00131000
+         LA    R0,IOBSIZE     GET AN IOB FOR THIS EVENT        @VA01365 00132000
+         CALL  DMKFREE        GET STORAGE FOR BUILDING IOBLOK           00133000
+         LR    R10,R1         LOAD REG10 W/ADDRESS OF IOBLOCK           00134000
+         USING IOBLOK,R10      SET UP ADDRESSABLITY FOR IOBLOCK         00135000
+         XC    IOBLOK(IOBSIZE*8),IOBLOK CLEAR IOBLOK TO ZERO            00136000
+         ST    R5,IOBCAW      STORE VIRTUAL CAW ADDR. IN IOBLOK         00137000
+         OI    IOBFLAG,IOBHVC     SET ON IOBHVC BIT IN IOBLOK           00138000
+         LA    R9,DIAGRTN     LOAD REG9 W/ RETURN ADDR. FOR DISPATCHER  00139000
+         ST    R9,IOBIRA      SET RETURN ADDR. IN IRA                   00140000
+         OI    VMRSTAT,VMIOWAIT    FORCE USER TO WAIT FOR I/O TO FINISH 00141000
+         ST    R13,IOBMISC2   HANG ONTO SAVEAREA POINTER       @V200020 00142000
+         L     R2,IOBCAW      CCWTRANS NEEDS CAW+KEY IN GPR2.           00143000
+         LA    R9,0(,R2)      CCWTRANS NEEDS CAW-KEY IN GPR9.           00144000
+         SL    R8,VMDVSTRT    MAKE GPR 8 FOR RELATIVE DISPLACEMENT.     00145000
+         ST    R8,IOBMISC     SAVE IT FOR LATER                         00146000
+         CALL  DMKCCWTR       CALL CCWTR TO BUILD A REAL CCW LIST       00147000
+         AL    R8,VMDVSTRT    MAKE GPR 8 REAL ADDR. OF VDEVBLOK.        00148000
+         TM    IOBSPEC2,IOBCLN TASK ABORTED BY DMKCCW?         @V407438 00148100
+         BZ    TRANSOK        NOPE, CONTINUE                   @V407438 00148200
+         BAL   R9,FRETIOB     RETURN THE IOB                   @V407438 00148300
+         B     NOPATH         AND REFLECT TO USER              @V407438 00148400
+         SPACE                                                          00148500
+TRANSOK  EQU   *              HERE IF CCWTRANS WENT OK         @V407438 00148600
+         ST    R10,VDEVIOB    STORE ADDRESS OF ACTIVE IOBLOK            00149000
+         OI    VDEVSTAT,VDEVBUSY   MAKE VIRTUAL DEVICE BUSY             00150000
+         LA    R15,1          *    ADD 1 TO THE VIRTUAL START I/O COUNT 00151000
+         AL    R15,VMIOCNT    *    FOR ACCOUNTING.                      00152000
+         ST    R15,VMIOCNT    *                                         00153000
+         CALL  DMKIOSQV       CALL IOSQV TO PUT THIS REQUEST ON THE LIS 00154000
+         GOTO  DMKDSPCH       DISPATCHER WILL RETURN WHEN I/O IS FINISH 00155000
+         SPACE 3                                                        00156000
+DIAGRTN  DS    0H                                                       00157000
+         USING *,R12          SET UP ADDRESSABLITY                      00158000
+         SL    R12,=A(DIAGRTN-DMKGIO)   BACK UP TO MODULE START@V200020 00159000
+         USING DMKGIO,R12                                      @V200020 00160000
+         NI    VMQLEVEL,X'FF'-(VMCOMP+VMLOPRI)    UNFLAG COMPUTE BOUND  00161000
+         L     R13,IOBMISC2   RESTORE SAVEAREA BASE ADDRESS    @V200020 00162000
+         CL    R10,IOBLINK    IS THIS THE FINAL INTERRUPT ??            00163000
+         BNE   FRETCOPY       NO -- GO FRET THE COPIED BLOCK            00164000
+         L     R8,IOBMISC     GET DISPLACEMENT TO VDEVBLOK              00165000
+         AL    R8,VMDVSTRT    POINT TO VDEVBLOK                         00166000
+         SR    R0,R0          CLEAR VDEVIOB RIGHT NOW          @VA03384 00167000
+         ST    R0,VDEVIOB     TO AVOID POSSIBLE RESET PROBLEM  @VA03384 00168000
+         TM    IOBSTAT,IOBCC3 REAL CC = 3 ON STARTIO OR DEVICE OFFLINE  00169000
+         BO    GDSTATUS       YES- BRANCH                               00170000
+         ICM   R7,15,IOBIOER  IS THERE AN IOERBLOK             @VA01599 00171000
+         BZ    TESTWLR        NO, CHECK FOR WRONG LENGTH RECORD@VA01599 00172000
+         TM    VDEVTYPC,CLASDASD+CLASTAPE IS THIS A TAPE OR    @VA01599 00173000
+*                             DASD DEVICE                               00174000
+         BZ    GIOCONT        NO, SET ERROR CONDITION          @VA01599 00175000
+         TM    IOBSTAT,IOBFATAL IS THIS AN UNCORRECTABLE ERROR @VA01599 00176000
+         BZ    TESTWLR        NO, TAKE NORMAL PATH             @VA01599 00177000
+GIOCONT  EQU   *                                               @VA01599 00178000
+         LA    R15,13         SET RETURN CODE TO 13.                    00179000
+         BAL   R9,RTNCC3      SET PSW CONDITION CODE =3                 00180000
+         L     R2,SAVER2      RESTORE POINTER TO USER'S 'R2'   @V200020 00181000
+         ST    R7,VDEVIOER    STORE IN VIRTUAL DEV. BLOCK.              00182000
+         OI    VDEVFLAG,VDEVUC     DMKCCW WILL FRET THE IOERBLOK        00183000
+         SR    R1,R1          AND CLEAR IOBIOER                         00184000
+         ST    R1,IOBIOER     (SINCE WE'VE HUNG IT ON ANOTHER HOOK)     00185000
+         USING IOERBLOK,R7                                              00186000
+         MVC   VDEVCSW(8),IOERCSW  MOVE IN THE ERROR CSW                00187000
+         CLC   VDEVTYPC(2),=AL1(CLASDASD,TYP3340) 3340?        @V56BDA8 00187050
+         BNE   NOT3340        NO, RETURN (OR CONTINUE AT       @V56BDA8 00187100
+*                             GETRCAW)                                  00187150
+         TM    IOERDATA+6,CECYL CE CYLINDER?                   @V56BDA8 00187200
+         BO    NOT3340        YES, DONT TOUCH IT               @V56BDA8 00187250
+         SR    R0,R0          CLEAR OUT REGISTER               @V56BDA8 00187300
+         IC    R0,IOERDATA+6  0CCXHHHH                         @V56BDA8 00187350
+         SLL   R0,3           GET C512 + C256                  @V56BDA8 00187400
+         IC    R0,IOERDATA+5  LOW ORDER CC                     @V56BDA8 00187450
+         SH    R0,VDEVRELN    MAKE POSITION VIRTUAL            @V56BDA8 00187500
+         STH   R0,VDEVPOSN    STORE CC                         @V56BDA8 00187550
+         MVN   VDEVPOSN+3(1),IOERDATA+6 COPY H                 @V56BDA8 00187600
+NOT3340  EQU   *                                               @V56BDA8 00187650
+         L     R7,IOERDATA    LOAD UP SENSE BYTES 1-4                   00188000
+         DROP  R7                                                       00189000
+         SRL   R7,16          SHIFT OUT SENSE BYTES 3-4                 00190000
+         ST    R7,0(,R2)      STORE SENSE BYTES 1-2 IN USER'S CAW REG.  00191000
+         B     UNTRAN         GO UNTRANS THE CSW                        00192000
+TESTWLR  TM    IOBCSW+4,UE    DID A UNIT EXCEPTION OCCUR ?              00193000
+         BO    MOVECSW        YES, SAVE THE CSW FOR THE USER            00194000
+         TM    IOBCSW+5,IL    WAS IT A WRONG LENGTH RECORD ?            00195000
+         BZ    GDSTATUS       NO., BRANCH                               00196000
+         LA    R15,3          SET RETURN CODE TO 3                      00197000
+         BAL   R9,RTNCC2      SET PSW CONDITION CODE =2                 00198000
+MOVECSW  MVC   VDEVCSW,IOBCSW MOVE IOBCSW TO VIRTUAL CSW.               00199000
+UNTRAN   EQU   *                                                        00200000
+         CALL  DMKUNTRN       CALL UNTRN TO CONVERT CSW TO VIRTUAL      00201000
+         SL    R8,VMDVSTRT    CONVERT VDEVBLOK ADDR TO DISPL.           00202000
+         SR    R1,R1          SET TO PAGE 0                             00203000
+         TRANS 2,1,OPT=(BRING,DEFER)                                    00204000
+         AL    R8,VMDVSTRT    RESTORE VDEVBLOK ADDRESS                  00205000
+         MVC   CSW-PSA(8,R2),VDEVCSW  MOVE CSW TO VIRTUAL USER'S CSW    00206000
+         SPACE 2                                                        00207000
+GDSTATUS EQU   *  HERE IF STATUS OK --                                  00208000
+         CALL  DMKUNTFR       CALL UNTFR TO FREE STORAGE USED FOR       00209000
+*                             BUILDING CCW STRING.                      00210000
+         TM    IOBCSW+4,UE    DID A UNIT EXCEPTION OCCUR ??             00211000
+         BZ    FREEDEV        NO --                                     00212000
+         LA    R15,2          SET RETURN CODE TO 2                      00213000
+         BAL   R9,RTNCC2      SET CONDITION CODE 2 IN VPSW              00214000
+         SPACE                                                          00215000
+FREEDEV  EQU   *              MARK DEVICE FREE, RELEASE IOBLOK          00216000
+         NI    VDEVSTAT,X'FF'-VDEVBUSY  AND FLAG DEVICE NOT BUSY        00217000
+         TM    IOBSTAT,IOBCC3 WAS THE DEVICE REALLY THERE ?             00218000
+         BO    REALCC3        NO -- RETURN VIRTUAL CC = 3               00219000
+         BAL   R9,FRETIOB     RELEASE THE IOBLOK                        00220000
+         B     GIOEXIT        REMOVE FROM WAIT, EXIT           @V200020 00221000
+         SPACE 2                                                        00222000
+NOPATH   LA    R15,5          PATH NOT FREE, INT. PENDING      @VA01365 00223000
+         LA    R9,GIOEXIT     SET CC1, ERROR 5...              @VA01365 00224000
+         B     RTNCC1         GO SET IT, THEN EXIT             @VA01365 00225000
+         SPACE                                                          00226000
+REALCC3  EQU   *              REAL DEVICE DOES NOT EXIST       @V200020 00227000
+         BAL   R9,FRETIOB     RELEASE IOBLOK, IOERBLOK         @V200020 00228000
+NOUNIT   LA    R15,1          SET RETURN CODE TO 1                      00229000
+         BAL   R9,RTNCC1      SET PSW CONDITION CODE =1                 00230000
+GIOEXIT  EQU   *                                               @V200020 00231000
+         NI    VMRSTAT,X'FF'-(VMIOWAIT+VMEXWAIT)               @V200020 00232000
+         EXIT                                                  @V200020 00233000
+         EJECT                                                          00234000
+FRETCOPY EQU   *              RELEASE COPIED IOBLOK, WAIT FOR LAST      00235000
+         BAL   R9,FRETIOB     FRET IOBLOK, POSSIBLE IOERBLOK   @V200020 00236000
+         GOTO  DMKDSPCH       WAIT FOR FINAL INTERRUPT         @V200020 00237000
+         SPACE                                                          00238000
+RTNCC1   EQU   *              SET CONDITION CODE = ONE         @V200020 00239000
+         LA    R1,X'10'                                        @V200020 00240000
+         B     RTNCCS                                          @V200020 00241000
+RTNCC2   EQU   *              SET CONDITION CODE = TWO         @V200020 00242000
+         LA    R1,X'20'                                        @V200020 00243000
+         B     RTNCCS                                          @V200020 00244000
+RTNCC3   EQU   *              SET CONDITION CODE = THREE       @V200020 00245000
+         LA    R1,X'30'                                        @V200020 00246000
+*        B     RTNCCS                                          @V200020 00247000
+         SPACE                                                          00248000
+RTNCCS   EQU   *              SET VIRTUAL PSW CONDITION CODE   @V200020 00249000
+         ST    R15,VMGPRS+R15*4    RETURN CODE TO VIRTUAL GR15 @V200020 00250000
+         LA    R2,VMPSW+4     BC-MODE COND. CODE LOCATION      @V200020 00251000
+         TM    VMESTAT,VMEXTCM     IN EC-MODE NOW ?            @V200020 00252000
+         BZ    *+8                 NO --                       @V200020 00253000
+         LA    R2,VMPSW+2     EC-MODE COND. CODE LOCATION      @V200020 00254000
+         EX    R1,RTNSCC      SET VIRTUAL CONDITION CODE       @V200020 00255000
+         BR    R9                                              @V200020 00256000
+RTNSCC   OI    0(R2),*-*      . . .                            @V200020 00257000
+         SPACE                                                          00258000
+FRETIOB  EQU   *              RELEASE IOBLOK AND IOERBLOK      @V200020 00259000
+         L     R1,IOBIOER     IS THERE AN IO ERROR BLOCK THERE @V200020 00260000
+         LTR   R1,R1          ...                              @V200020 00261000
+         BZ    FRETIOBL       NOPE - PROCEED TO FRET THE IOBLOK@V200020 00262000
+         LA    R0,IOERSIZE    SIZE OF IOERBLOK                 @V200020 00263000
+         USING IOERBLOK,R1                                     @V200020 00264000
+         AH    R0,IOEREXT     ADD EXTRA SIZE (IF ANY) OF IOERBL@V200020 00265000
+         DROP  R1                                              @V200020 00266000
+         CALL  DMKFRET        GIVE IT BACK (BEFORE IT'S TOO LAT@V200020 00267000
+FRETIOBL LA    R0,IOBSIZE     GET SIZE OF IOBLOK               @V200020 00268000
+         LR    R1,R10         AND ITS ADDRESS                  @V200020 00269000
+         CALL  DMKFRET        RELEASE IT                       @V200020 00270000
+         BR    R9             RETURN INTERNALLY                @V200020 00271000
+         SPACE 1                                                        00271100
+CECYL    EQU   X'10'          CE CYLINDER ON 3340/3344         @V56BDA8 00271200
+         SPACE 2                                                        00272000
+         LTORG                                                          00273000
+         EJECT                                                          00274000
+         COPY  DEVTYPES                                                 00275000
+         COPY  IOER                                                     00276000
+         COPY  SAVE                                            @V200020 00277000
+         COPY  VMBLOK                                                   00278000
+         COPY  IOBLOKS                                                  00279000
+         COPY  RBLOKS                                                   00280000
+         COPY  VBLOKS                                                   00281000
+         COPY  EQU                                                      00282000
+         PSA                                                            00283000
+         END   DMKGIO                                          @V200020 00284000

@@ -1,0 +1,903 @@
+VMI      TITLE 'DMKVMI     (CP)        VM/370 - RELEASE 6'              00001000
+         ISEQ  73,80                                                    00002000
+*.                                                                      00003000
+*                                                                       00004000
+* MODULE NAME -                                                         00005000
+*                                                                       00006000
+*        DMKVMI                                                         00007000
+*                                                                       00008000
+* FUNCTION -                                                            00009000
+*                                                                       00010000
+*        TO SIMULATE A USER'S IPL I/O SEQUENCE                          00011000
+*                                                                       00012000
+* ATTRIBUTES -                                                          00013000
+*                                                                       00014000
+*        RESIDENT IN A PAGE OF THE USER'S VIRTUAL MEMORY, DMKVMI RUNS   00015000
+*        IN THE VIRTUAL MACHINE UNDER CONTROL OF THE USER'S VIRTUAL     00016000
+*        PSW AND IN PROBLEM STATE.  SIO INSTRUCTIONS ISSUED BY THE      00017000
+*        IPL SIMULATOR ARE HANDLED EITHER BY CCW TRANSLATION OR SIMU-   00018000
+*        LATION BY DMKVSPEX.                                            00019000
+*                                                                       00020000
+* ENTRY POINTS -                                                        00021000
+*                                                                       00022000
+*        DMKVMIPL                                                       00023000
+*                                                                       00024000
+* ENTRY CONDITIONS -                                                    00025000
+*                                                                       00026000
+*        THE FOLLOWING LOCATIONS IN THE USER'S VIRTUAL PAGE ZERO WILL   00027000
+*        BE FILLED IN BY THE IPL COMMAND HANDLER DMKCFP BEFORE THE      00028000
+*        USER'S MACHINE IS DISPATCHED -                                 00029000
+*                                                                       00030000
+*              LOCATION 0     VIRTUAL IPL CYLINDER NUMBER               00031000
+*              LOCATION 2     IPL DEVICE ADDRESS                        00032000
+*              LOCATION 8     VMMLEVEL FLAG BYTE FROM USER'S VMBLOK     00033000
+*              LOCATION A     IPL STOP FLAG BYTE                        00034000
+*                                                                       00035000
+* EXIT CONDITIONS -                                                     00036000
+*                                                                       00037000
+*        WHEN DMKVMI HAS COMPLETED PROCESSING, THE ENTIRE IPL CHANNEL   00038000
+*        PROGRAM HAS BEEN INTERPRETED.  THE IPL DEVICE ADDRESS IS       00039000
+*        PLACED IN LOCATION X'2' OF THE USER'S VIRTUAL MEMORY OR        00040000
+*        X'BA' FOR A MACHINE WITH THE EXTENDED MODE BIT ON IN THE       00041000
+*        IPL PSW.  THE IPL PSW AT LOCATION X'0' IS THEN LOADED.         00042000
+*                                                                       00043000
+* CALLS TO OTHER ROUTINES -                                             00044000
+*                                                                       00045000
+*        NONE                                                           00046000
+*                                                                       00047000
+* EXTERNAL REFERENCES -                                                 00048000
+*                                                                       00049000
+*        NONE                                                           00050000
+*                                                                       00051000
+* TABLES / WORKAREAS -                                                  00052000
+*                                                                       00053000
+*        NONE                                                           00054000
+*                                                                       00055000
+* REGISTER USAGE -                                                      00056000
+*                                                                       00057000
+*        GPR0-9 - SCRATCH                                               00058000
+*        GPR10  - ADDRESS OF THE NEXT CCW TO BE VALIDATED               00059000
+*        GPR11  - ADDRESS OF 1ST CCW IN SEQUENCE TO BE EXECUTED         00060000
+*        GPR12  - INTERNAL SUBROUTINE LINKAGE                           00061000
+*        GPR13  - IPL DEVICE ADDRESS                                    00062000
+*        GPR14  - VIRTUAL OPERATOR'S CONSOLE ADDRESS                    00063000
+*        GPR15  - DMKVMIPL BASE REGISTER                                00064000
+*                                                                       00065000
+* NOTES -                                                               00066000
+*                                                                       00067000
+*        NONE                                                           00068000
+*                                                                       00069000
+* OPERATION -                                                           00070000
+*                                                                       00071000
+*        1.  SAVE REGISTERS AND ESTABLISH MODULE BASE REGISTER.         00072000
+*        2.  GET IPL AND CONSOLE DEVICE ADDRESSES.                      00073000
+*        3.  SAVE USER CAW AND IPL DEVICE CLASS AND TYPE.               00074000
+*        4.  IF DEVICE CLASS IS DASD GOTO DISK ROUTINE.                 00075000
+*        5.  IF DEVICE CLASS IS TAPE GOTO TAPE ROUTINE.                 00076000
+*        6.  IF DEVICE CLASS IS EITHER UNIT RECORD INPUT OR SPECIAL     00077000
+*             (CTCA), GO TO READER ROUTINE.                             00078000
+*        7.  IF DEVICE CLASS IS NONE OF THE ABOVE, GIVE MESSAGE         00079000
+*            'INVALID IPL DEVICE TYPE' AND LOAD DISABLED WAIT STATE.    00080000
+*                                                                       00081000
+*        (OPERATION OF THE DISK, TAPE, AND READER ROUTINES BELOW)       00082000
+*                                                                       00083000
+*        7.  EXECUTE THE LAST CCW.                                      00084000
+*        8.  IF THE PSW AT VIRTUAL X'0' HAS THE EXTENDED BIT ON PLACE   00085000
+*            THE IPL DEVICE ADDRESS IN VIRTUAL LOCATION X'BA';          00086000
+*             OTHERWISE PLACE IT IN VIRTUAL LOCATION X'2'.              00087000
+*        9.  RESTORE REGISTERS AND LATEST CAW.                          00088000
+*        9A. FOR IPL STOP OPTION GET THE PSW ADDRESS FROM               00089000
+*        LOCATION 4 AND CONVERT TO AN ADSTOP ADDRESS.                   00090000
+*        ISSUE CP DIAGNOSE 8 TO SET ADSTOP AT PSW LOCATION.             00091000
+*        10. LOAD PSW AT VIRTUAL LOCATION X'0'.                         00092000
+*                                                                       00093000
+* MESSAGES -                                                            00094000
+*                                                                       00095000
+*        DMKVMI022E VADDR MISSING OR INVALID                            00096100
+*        DMKVMI230E IPL SIO ERROR                                       00097100
+*        DMKVMI231E IPL TIO ERROR                                       00098100
+*        DMKVMI232E IPL UNIT ERROR, CSW=XXXXXXXX XXXXXXXX, SENSE=XX     00099100
+*        DMKVMI233E IPL OVERLAY ERROR                                   00100100
+*        DMKVMI234E IPL SENSE ERROR                                     00101100
+*                                                                       00102000
+*.                                                                      00103000
+         EJECT                                                          00104000
+         COPY  OPTIONS                                                  00105000
+         COPY  LOCAL                                                    00106000
+         EJECT                                                          00107000
+         PUNCH 'SPB'                                                   00108000
+DMKVMI   CSECT                                                          00109000
+         ENTRY DMKVMIPL                                                 00110000
+         SPACE 3                                                        00111000
+         USING PSA,R0                                                   00112000
+         SPACE 3                                                        00113000
+DMKVMIPL EQU   *                                                        00114000
+         ST    R15,IPLSAVE    SAVE REGISTER NEEDED FOR BASE             00115000
+         BALR  R15,R0         ESTABLISH ADDRESSABILITY                  00116000
+         USING *,R15          ...                                       00117000
+BASEADD  EQU   *                                                        00118000
+         LA    R15,0(0,R15)   STRIP HIGH-ORDER BYTE FROM BASE REG       00119000
+         SH    R15,=AL2(BASEADD-DMKVMI)                                 00120000
+         USING DMKVMI,R15                                               00121000
+         STM   R0,R14,SAVEREGS     SAVE THE USER'S REGS                 00122000
+         MVC   SAVEREGS+4*R15(4),IPLSAVE     RETRIEVE R15               00123000
+         LA    R15,0(,R15)    STRIP HIGH BYTE (FROM BALR) FROM BASE REG 00124000
+         SLR   R14,R14        SET DIAG REG TO -1               @VM08862 00125000
+         BCTR  R14,0          LOCATE CONSOLE ADDRESS           @VM08862 00126000
+         DC    X'83E10024'    ..                               @VM08862 00127000
+         MVC   SAVECAW(4),CAW SAVE USER'S CAW                           00128000
+         LA    R1,SENSDATA    FILL IN RELOCATED ADDRESS OF "SENSDATA"   00129000
+         STCM  R1,B'0111',SENSE+1  (FOR GENERAL USE)                    00130000
+         MVC   CODEBYTE,IPLERRCD SAVE ERROR LEVEL CODE BYTE    @VM08862 00131000
+         MVC   FLAG2(1),FLAG1 SAVE IPLSTOP FLAG BYTE           @VM08862 00132000
+         LH    R13,IPLADDR    ADDRESS OF IPL'ED DEVICE         @VM08862 00133000
+         DC    X'83D10024'    GET VDEVTYPC,VDEVTPE,RDEVFTR     @VM08862 00134000
+         STCM  R1,B'1100',CLASS SAVE VDEVTYPC AND VDEVTYPE     @VM08862 00135000
+         BC    2,CHKNXT       BRANCH IF NO REAL DEVICE BLOCK   @VM08862 00136000
+         CLC   CLASS(2),=AL1(CLASSPEC,TYPUNSUP) UNSUPPORTED ?? @VM08862 00137000
+         BNE   CHKNXT         NO - PROCESS                     @VM08862 00138000
+         STC   R2,CLASS       SPECIAL CASE USE RDEVFTR         @VM08862 00139000
+         CLI   CLASS,CLASURI  READER CLASS TYPE                @VM08862 00140000
+         BNE   *+8            NO - LEAVE TYPE AS IS            @VM08862 00141000
+         MVI   TYPE,TYPRDR    SET TO READER TYPE               @VM08862 00142000
+CHKNXT   TM    CLASS,CLASDASD DASD DEVICE ??                   @VM08862 00143000
+         BO    DISK           YES --                                    00144000
+         TM    CLASS,CLASTAPE OR TAPE ??                                00145000
+         BO    TAPE           YES --                                    00146000
+         CLC   CLASS(2),=AL1(CLASSPEC,TYPCTCA) OR CTCA ??      @VM08862 00147000
+         BE    READER         YES --                           @VM08862 00148000
+         TM    CLASS,CLASURI  THE ONLY ONE LEFT                         00149000
+         BNO   BADEVICE       NO GOOD IF NOT THIS ONE                   00150000
+         TM    TYPE,TYPRDR    MUST BE A CARD READER                     00151000
+         BO    READER         GO GET IT                                 00152000
+         SPACE                                                          00153000
+BADEVICE EQU   *  HERE IF DEVICE TYPE IS UNSUPPORTED                    00154000
+         LA    R4,ERRTYP      LOAD THE ERROR MSG ADDRESS                00155000
+         LA    R5,L'ERRTYP    LOAD ERROR MSG LENGTH                     00156000
+         B     PRINT          PRINT ERROR AND DIE                       00157000
+         EJECT                                                          00158000
+*.                                                                      00159000
+* OPERATION OF CARD READER IPL SIMULATION -                             00160000
+*                                                                       00161000
+*        1.  READ FIRST 24 BYTES INTO VIRTUAL LOCATION X'0'.            00162000
+*        2.  SET THE CCW POINTER TO THE IPL CCW LOCATED AT VIRTUAL      00163000
+*            X'8'.                                                      00164000
+*        3.  VALIDATE THE DATA ADDRESS OF THE CURRENT CCW TO INSURE     00165000
+*            THAT THE IPL SIMULATOR DOES NOT GET OVERWRITTEN.           00166000
+*        4.  IF THE CURRENT CCW OP-CODE IS A TIC, SET THE               00167000
+*            CURRENT CCW POINTER TO THE DATA ADDRESS AND THEN PROCEED   00168000
+*            TO STEP 3.                                                 00169000
+*        5.  IF THE CHAIN DATA FLAG IN THE CURRENT CCW IS NOT ON        00170000
+*            GO TO STEP 19.                                             00171000
+*        6.  AFTER HAVING SAVED THE OP-CODE IN THE CURRENT CCW          00172000
+*            CHANGE THIS CCW'S OP-CODE TO A X'C2' (READ-BUFFER).        00173000
+*        7.  RESET ALL CHAINING FLAGS IN THE CURRENT CCW.               00174000
+*        8.  VALIDATE THE CCW DATA ADDRESS.                             00175000
+*        9.  EXECUTE THE CCW.                                           00176000
+*        10. IF THE CURRENT CCW WAS OVERLAID PROCEED TO STEP            00177000
+*            11; OTHERWISE RECHAIN THE CCW IN CASE IT                   00178000
+*            GETS RE-EXECUTED VIA A TIC.                                00179000
+*        11. ADVANCE CCW POINTER BY 8.                                  00180000
+*        12. IF THE CHAIN DATA FLAG IS ON GO TO                         00181000
+*            STEP 7; OTHERWISE RESTORE OP-CODE OF FIRST CHAIN           00182000
+*            DATA CCW.                                                  00183000
+*        13. IF THE COMMAND CHAINING FLAG IS NOT ON IN THE              00184000
+*            CURRENT CCW GO TO STEP 24.                                 00185000
+*        14. RESET ALL CHAINING FLAGS.                                  00186000
+*        15. VALIDATE CCW DATA ADDRESS.                                 00187000
+*        16. EXECUTE ALL CCWS SINCE START OF CHAIN DATA.                00188000
+*        17. IF THE CURRENT CCW WAS OVERLAID PROCEED TO STEP            00189000
+*            18; OTHERWISE RECHAIN THE CCW IN CASE IT GETS              00190000
+*            RE-EXECUTED VIA A TIC.                                     00191000
+*        18. ADVANCE CCW POINTER BY 8 AND PROCEED TO STEP 3.            00192000
+*        19. IF THE COMMAND CHAINING FLAG IS NOT ON IN THE              00193000
+*            CURRENT CCW GO TO STEP 24.                                 00194000
+*        20. RESET ALL CHAINING FLAGS.                                  00195000
+*        21. EXECUTE THIS CCW ALONE.                                    00196000
+*        22. IF THE CURRENT CCW WAS OVERLAID PROCEED TO STEP 23;        00197000
+*            OTHERWISE RECHAIN THE CCW IN CASE IT GETS RE-EXECUTED      00198000
+*            VIA A TIC.                                                 00199000
+*        23. ADVANCE CCW POINTER BY 8  AND PROCEED TO STEP 3.           00200000
+*        24. RETURN TO STEP 7 IN MAIN PROLOG.                           00201000
+*                                                                       00202000
+*.                                                                      00203000
+         SPACE 1                                                        00204000
+READER   EQU   *                                                        00205000
+         LA    R11,CARDCCW    SET CCW POINTER TO LOAD-KEY CCW'S         00206000
+         BAL   R12,IO         GET THE 24 BYTES                          00207000
+         LA    R11,IPLCCW1    SET CCW POINTER TO FIRST USER CCW         00208000
+NEXTCARD LR    R10,R11        GIVE CCW ADDRESS TO ADDRTEST              00209000
+         BAL   R12,ADDRTEST   VALIDATE CCW ADDRESS, PREVENT OVERLAY     00210000
+         TM    0(R10),X'08'   IS OPCODE A TIC?                          00211000
+         BZ    *+12           BRANCH IF NOT TIC                         00212000
+         TM    0(R10),X'07'   ARE YOU SURE IT'S A TIC?                  00213000
+         BZ    TICCARD        BRANCH IF IT'S A TIC                      00214000
+         TM    4(R11),CD      IS THE CD FLAG SET?                       00215000
+         BO    CDCARD         BRANCH IF YES                             00216000
+         TM    4(R11),CC      IS THE CC FLAG SET?                       00217000
+         BNO   IPLDONE        BRANCH IF NOT AND EXECUTE LAST CCW        00218000
+         SPACE 1                                                        00219000
+CCCARD   EQU   *  HERE TO PROCESS COMMAND CHAINING FLAG                 00220000
+         NI    4(R11),X'FF'-CC     DECHAIN THE CCW                      00221000
+         MVI   5(R11),HEXFF   FLAG CURRENT CCW                          00222000
+         BAL   R12,IO         EXECUTE THE STAND ALONE CCW               00223000
+         CLI   5(R11),HEXFF   DID CURRENT CCW GET OVERLAID?             00224000
+         BNE   *+8            YES                                       00225000
+         OI    4(R11),CC      RESET COMMAND CHAINING BIT               *00226000
+                              FOR RE-EXECUTION (IF NEEDED)              00227000
+         LA    R11,8(,R11)    ADVANCE CCW POINTER                       00228000
+         B     NEXTCARD       GET NEXT USER CCW                         00229000
+         SPACE 1                                                        00230000
+CDCARD   EQU   *  HERE TO PROCESS DATA CHAINING FLAG                    00231000
+         MVC   OPCODE,0(R11)       SAVE THE VALID OPCODE                00232000
+         MVI   0(R10),X'C2'   SET OPCODE TO A READ-BUFFER               00233000
+CSCATTER NI    4(R10),X'FF'-(CD+CC)     RESET ALL CHAINING FLAGS        00234000
+         OI    4(R10),SILI    PROTECT FROM A PARTIAL READ               00235000
+         MVI   5(R10),HEXFF   FLAG CURRENT CCW                          00236000
+         BAL   R12,ADDRTEST   VALIDATE THE CCW ADDRESS                  00237000
+         CLI   TYPE,TYP2501   IS IT 2501?                      @VA02056 00238000
+         BE    AFTERIO        YES, DON'T ACTUALLY DO ANY I/O   @VA02056 00239000
+         BAL   R12,IO         EXECUTE THE CCW                           00240000
+AFTERIO  CLI   5(R10),HEXFF   DID CURRENT CCW GET OVERLAID?    @VA02056 00241000
+         BNE   *+8            YES                                       00242000
+         OI    4(R10),CD      RESET THE FLAG FOR RE-EXECUTION          *00243000
+                              IF CHAIN GETS RESTARTED VIA TIC           00244000
+         LA    R10,8(,R10)    ADVANCE POINTER TO LAST ATTACHED CCW      00245000
+         TM    4(R10),CD      MORE DATA CHAINING?                       00246000
+         BO    CSCATTER       BRANCH IF YES                             00247000
+         SPACE                                                          00248000
+*        HERE IF SCATTER READ CHAIN HAS ENDED                           00249000
+         BAL   R12,ADDRTEST   VALIDATE THE CCW ADDRESS         @VA02056 00250000
+         MVC   0(1,R11),OPCODE     RESTORE THE OPCODE IN THE FIRST CCW  00251000
+         TM    4(R10),CC      IS THE CC FLAG SET?                       00252000
+         BZ    IPLDONE        BRANCH IF NO, LAST CCW READY FOR EXEC     00253000
+         SPACE                                                          00254000
+*        HERE IF LAST CCW IN DATA CHAIN SEQUENCE HAS CC FLAG            00255000
+         NI    4(R10),X'FF'-CC     RESET THE CC FLAG                    00256000
+         MVI   5(R10),HEXFF   FLAG CURRENT CCW                          00257000
+         BAL   R12,IO         EXECUTE THE ENTIRE CHAIN                  00258000
+         CLI   5(R10),HEXFF   DID CURRENT CCW GET OVERLAID?             00259000
+         BNE   *+8            YES                                       00260000
+         OI    4(R10),CC      RESET THE FLAG FOR RE-EXECUTION          *00261000
+                              IF CHAIN GETS RESTARTED VIA TIC           00262000
+         LA    R11,8(,R10)    SET POINTER TO DECODE NEXT CCW            00263000
+         B     NEXTCARD       PROCESS COMMAND CHAINED CCW               00264000
+         SPACE 1                                                        00265000
+TICCARD  EQU   *  HERE TO PROCESS TIC CCW                               00266000
+         L     R11,0(,R11)    LOAD OPCODE AND DATA ADDRESS              00267000
+         LA    R11,0(,R11)    ISOLATE DATA ADDRESS                      00268000
+         B     NEXTCARD       GET NEXT USER CCW                         00269000
+         EJECT                                                          00270000
+*.                                                                      00271000
+* OPERATION OF DISK IPL SIMULATION -                                    00272000
+*                                                                       00273000
+*        1.  IF DEVICE TYPE IS NOT 2311,2314,3330,3340,3350 OR 2305     00274000
+*            PRINT ERROR MESSAGE "INVALID DEVICE TYPE"                  00275000
+*            AND LOAD DISABLED WAIT STATE PSW.                          00276000
+*        2.  READ FIRST 24 BYTES INTO VIRTUAL LOCATION X'0'.            00277000
+*        3.  SET THE CCW POINTER TO THE IPL CCW LOCATED AT VIRTUAL      00278000
+*            X'8'.                                                      00279000
+*        4.  VALIDATE THE DATA ADDRESS OF THE CURRENT CCW TO            00280000
+*            INSURE THAT THE IPL SIMULATOR DOES NOT GET                 00281000
+*            OVERWRITTEN.                                               00282000
+*        5.  IF THE CURRENT CCW OP-CODE IS A TIC, SET THE               00283000
+*            CURRENT CCW POINTER TO THE DATA ADDRESS AND THEN           00284000
+*            PORCEED TO STEP 4.                                         00285000
+*        6.  IF THE OP-CODE IS NOT A SEARCH GO TO STEP 19.              00286000
+*        7.  IF THE OP-CODE OF THE NEXT CCW IS A TIC GO TO              00287000
+*            STEP 11.                                                   00288000
+*        8.  VALIDATE DATA ADDRESS OF NEXT CCW (CURRENT CCW+8).         00289000
+*        9.  ADVANCE CCW POINTER BY 16.                                 00290000
+*        10. GO TO STEP 4.                                              00291000
+*        11. IF THE DATA ADDRESS OF THE TIC FOLLOWING THE SEARCH        00292000
+*            POINTS BACK TO THE SEARCH GO TO STEP 19.                   00293000
+*        12. SAVE AND CHANGE THE OP-CODE OF THE FIRST AND               00294000
+*            SECOND CCWS AFTER THE SEARCH TO NO-OPS.                    00295000
+*        13. REMOVE ALL CHAINING FLAGS FROM BOTH CCWS AFTER SEARCH.     00296000
+*        14. EXECUTE ALL CCWS TO THIS POINT.                            00297000
+*        15. RESTORE OP-CODES FOR BOTH CCWS AFTER SEARCH.               00298000
+*        16. IF THE SECOND CCW WAS OVERLAID PROCEED TO STEP 17;         00299000
+*            OTHERWISE RECHAIN THIS CCW IN CASE IT GETS                 00300000
+*            RE-EXECUTED VIA A TIC.                                     00301000
+*        17. IF THE SEARCH WAS SUCCESSFULL (LAST CHANNEL PROGRAM        00302000
+*            STOPED WITH CSW POINTING TO SECOND CCW) GO TO STEP 9.      00303000
+*        18. SETCCW POINTER TO DATA ADDRESS OF THE TIC CCW              00304000
+*            AFTER THE SEARCH.                                          00305000
+*        19. IF THE CHAIN DATA FLAG IS NOT ON GO TO STEP 26.            00306000
+*        20. REMOVE ALL CHAINING FLAGS FROM THE CURRENT CCW.            00307000
+*        21. TURN ON THE SILI FLAG TO PREVENT THE CHANNEL PROGRAM       00308000
+*            FROM TERMINATING FROM AN INCORRECT LENGTH INDICATION.      00309000
+*        22. EXECUTE ALL CCWS TO THIS POINT.                            00310000
+*        23. IF THE CURRENT CCW WAS OVERLAID PROCEED TO STEP 24;        00311000
+*            OTHERWISE RECHAIN THIS CCW IN CASE IT GETS RE-             00312000
+*            EXECUTED VIA A TIC.                                        00313000
+*        24. ADVANCE CCW POINTER BY 8.                                  00314000
+*        25. GO TO STEP 4.                                              00315000
+*        26. IF THE COMMAND CHAIN FLAG IS NOT ON IN THE CURRENT CCW     00316000
+*            GO TO STEP 31.                                             00317000
+*        27. REMOVE ALL CHAINING FLAGS.                                 00318000
+*        28. IS THIS CCW HAS BEEN PROCESSED BY THE IPL SIMULATOR        00319000
+*            BEFORE TURN THE SKIP FLAG OFF; OTHERWISE PROCEED.          00320000
+*        29. EXECUTE ALL CCWS TO THIS POINT.                            00321000
+*        30. GO TO STEP 23.                                             00322000
+*        31. RETURN TO STEP 7 IN MAIN PROLOG.                           00323000
+*                                                                       00324000
+*.                                                                      00325000
+         SPACE 1                                                        00326000
+DISK     EQU   *                                                        00327000
+         MVC   CYLAD(2),IPLCYLNO   SET CYLINDER NO                      00328000
+         LA    R1,SEEK        RELOCATE CCW ADDRESSES                    00329000
+         STCM  R1,B'0111',DISKCCW+1     ...                             00330000
+         LA    R1,SEEK+2      ...                                       00331000
+         STCM  R1,B'0111',DISKCCW+9     ...                             00332000
+         LA    R1,DISKCCW+8   ...                                       00333000
+         STCM  R1,B'0111',DISKCCW+17    ...                             00334000
+         LA    R11,DISKCCW    SET CCW POINTER TO LOAD-KEY CCW           00335000
+         BAL   R12,IO         GET THE 24 BYTES                          00336000
+         MVI   READCCW+4,CC+SILI+SKIP   CHAIN TIC CCW TO IPLCCW1        00337000
+         LA    R10,IPLCCW1    SET CCW POINTER TO USER'S CCW             00338000
+NEXTDISK BAL   R12,ADDRTEST   VALIDATE CCW ADDRESS, PREVENT OVERLAY     00339000
+         TM    0(R10),X'08'   IS COMMAND CODE A TIC?                    00340000
+         BNO   *+12           BRANCH IF NOT A TIC                       00341000
+         TM    0(R10),X'07'   ARE YOU SURE IT IS A TIC?                 00342000
+         BZ    TICDISK        BRANCH IF IT IS A TIC                     00343000
+         LA    R1,LIST        SET INDEX TO BEGIN OF LIST                00344000
+         LA    R2,1           SET INCREMENT TO ONE BYTE                 00345000
+         LA    R3,LISTEND     SET COMPARAND TO END OF LIST              00346000
+LOOP1    CLC   0(1,R10),0(R1) IS OP-CODE A SEARCH?                      00347000
+         BE    SEARCH         BRANCH IF YES                             00348000
+         BXLE  R1,R2,LOOP1    TEST NEXT IF NO                           00349000
+         SPACE                                                          00350000
+*        HERE IF OP-CODE IS NOT A SEARCH                                00351000
+         CLI   0(R10),X'07'   SEEK COMMAND ?                            00352000
+         BNE   *+6            NO                                        00353000
+         LR    R11,R10        RESTART CHANNEL PROGRAM FROM HERE         00354000
+         TM    4(R10),CD      IS THE CD FLAG SET                        00355000
+         BO    CDDISK         BRANCH IF YES                             00356000
+         TM    4(R10),CC      IS CC FLAG SET?                           00357000
+         BO    CCDISK         BRANCH IF YES                             00358000
+         B     IPLDONE        EXECUTE THE LAST CCW                      00359000
+         SPACE                                                          00360000
+*        LIST OF ALL STANDARD DISK SEARCH CCW OPCODES                   00361000
+LIST     EQU   *                                                        00362000
+         DC    X'31'          ID EQUAL                                  00363000
+         DC    X'B1'          ID EQUAL - MT                             00364000
+         DC    X'29'          KEY EQUAL                                 00365000
+         DC    X'A9'          KEY EQUAL - MT                            00366000
+         DC    X'39'          HOME ADDRESS EQUAL                        00367000
+         DC    X'B9'          HOME ADDRESS EQUAL - MT                   00368000
+         DC    X'51'          ID HIGH                                   00369000
+         DC    X'D1'          ID HIGH - MT                              00370000
+         DC    X'71'          ID EQUAL OR HIGH                          00371000
+         DC    X'F1'          ID EQUAL OR HIGH - MT                     00372000
+         DC    X'69'          KEY EQUAL OR HIGH                         00373000
+         DC    X'E9'          KEY EQUAL OR HIGH - MT                    00374000
+         DC    X'49'          KEY HIGH                                  00375000
+LISTEND  DC    X'C9'          KEY HIGH - MT                             00376000
+         SPACE 2                                                        00377000
+TICDISK  DS    0H             PROCESS TIC CCW                           00378000
+         L     R10,0(,R10)    LOAD COMMAND CODE AND DATA ADDRESS        00379000
+         LA    R10,0(,R10)    ISOLATE DATA ADDRESS                      00380000
+         B     NEXTDISK       EXAMINE NEXT CCW                          00381000
+         SPACE 1                                                        00382000
+SEARCH   EQU   *              PROCESS SEARCH CCW                        00383000
+         TM    8(R10),X'08'   IS NEXT OP-CODE A TIC                     00384000
+         BZ    SNOTIC         BRANCH IF NOT                             00385000
+         TM    8(R10),X'07'        ARE YOU SURE IT IS A TIC?            00386000
+         BNZ   SNOTIC         BRANCH IF IT IS NOT A TIC                 00387000
+         L     R1,8(,R10)     LOAD COMMAND CODE AND DATA ADDRESS        00388000
+         LA    R1,0(,R1)      ISOLATE DATA ADDRESS                      00389000
+         CR    R1,R10         IS IT A SEARCH-TIC LOOP?                  00390000
+         BE    SUPDATE        BRANCH IF YES                             00391000
+         SPACE                                                          00392000
+*        HERE IF SEARCH IS FOLLOWED BY A TIC WHICH DOES NOT POINT       00393000
+*        BACK TO THE SEARCH.  THE TWO CCWS AFTER THE SEARCH ARE         00394000
+*        CHANGED TO NO-OPS.  ALL CCWS ARE EXECUTED AND THE CSW IS       00395000
+*        EXAMINED TO DETERMINE WHETHER THE SEARCH IS SUCCESSFULL.       00396000
+         MVI   8(R10),NOOP    CHANGE TIC TO NOOP                        00397000
+         NI    12(R10),X'FF'-CC    INSURE NO COMMAND CHAINING           00398000
+         MVC   OPCODE,16(R10) SAVE 2ND CCW OPCODE                       00399000
+         MVI   16(R10),NOOP   CHANGE 2ND CCW TO NOOP                    00400000
+         TM    20(R10),CC     COMMAND CHAINING IN 2ND CCW?              00401000
+         BNO   *+12           BRANCH IF NO                              00402000
+         NI    20(R10),X'FF'-CC    TURN OFF COMMAND CHAINING            00403000
+         MVI   21(R10),HEXFF  FLAG AS HAVING DONE SO                    00404000
+         BAL   R12,IO         EXECUTE CCWS UP TO THIS POINT             00405000
+         MVI   8(R10),TIC     RESTORE TIC OPCODE                        00406000
+         MVC   16(1,R10),OPCODE    RESTORE 2ND CCW OPCODE               00407000
+         CLI   21(R10),HEXFF  DOES CHAINING HAVE TO BE TURNED BACK ON?  00408000
+         BNE   *+12           NO                                        00409000
+         OI    20(R10),CC     TURN COMMAND CHAINING BACK ON             00410000
+         MVI   21(R10),ZERO   AND TURN FLAG OFF IN CASE CHAIN GETS     *00411000
+                              RESTARTED VIA TIC                         00412000
+         L     R2,CSW         GET LAST CCW EXECUTED + 8                *00413000
+                              (NOTING CSW KEY SHOULD BE ZERO)           00414000
+         LA    R3,16(,R10)    GET PTR TO 1ST CCW + 8                    00415000
+         CR    R2,R3          WAS SEARCH UNSUCCESSFULL?                 00416000
+         BNE   SUPDATE        NO  FOLLOW PRIMARY CHAIN                  00417000
+         L     R10,8(,R10)    FOLLOW ALTERNATE CHAIN                    00418000
+         LA    R10,0(,R10)    CLEAR HIGH BYTE                           00419000
+         B     NEXTDISK       ...                                       00420000
+         SPACE                                                          00421000
+SUPDATE  LA    R10,16(,R10)   INCREMENT POINTER BY TWO CCW'S            00422000
+         B     NEXTDISK       EXAMINE NEXT CCW                          00423000
+         SPACE 1                                                        00424000
+SNOTIC   EQU   *  HERE TO PROCESS NON-TIC CCW AFTER SEARCH              00425000
+         LR    R1,R10         SAVE THE CONTENTS OF R10                  00426000
+         LA    R10,8(,R10)         ISOLATE DATA ADDRESS OF NEXT CCW     00427000
+         BAL   R12,ADDRTEST   VALIDATE CCW'S ADDRESS                    00428000
+         LR    R10,R1         RESTORE R10                               00429000
+         B     SUPDATE        BRANCH TO UPDATE CCW ADDRESS              00430000
+         SPACE                                                          00431000
+CCDISK   EQU   *  HERE TO PROCESS COMMAND CHAINING FLAG                 00432000
+         NI    4(R10),X'FF'-CC     DECHAIN CCW                          00433000
+         TS    5(R10)         IPL SIMULATOR FIDDLED?                    00434000
+         BZ    *+8            NO                                        00435000
+         NI    4(R10),X'FF'-SKIP   ASSUME IPL TURNED THE SKIP FLAG ON   00436000
+         BAL   R12,IO         EXECUTE ALL CCW'S UP TO THIS POINT        00437000
+         CLI   5(R10),HEXFF   DID CURRENT CCW GET OVERLAID?             00438000
+         BNE   *+8            YES                                       00439000
+         OI    4(R10),CC+SKIP RECHAIN CCW                               00440000
+         LA    R10,8(,R10)    ADVANCE CCW POINTER                       00441000
+         B     NEXTDISK       EXAMINE NEXT CCW                          00442000
+         SPACE                                                          00443000
+CDDISK   EQU   *              PROCESS DATA CHAINING FLAG                00444000
+         NI    4(R10),X'FF'-(CD+CC)     DECHAIN THE CCW                 00445000
+         OI    4(R10),SILI    PREVENT INCORRECT LENGTH INDICATION      *00446000
+                              CAUSED BY A PARTIAL READ                  00447000
+         MVI   5(R10),HEXFF   FLAG CURRENT CCW                          00448000
+         BAL   R12,IO         EXECUTE ALL CCW'S TO THIS POINT           00449000
+         CLI   5(R10),HEXFF   DID CURRENT CCW GET OVERLAID?             00450000
+         BNE   *+8            YES                                       00451000
+         OI    4(R10),CD      RECHAIN THE CCW                           00452000
+         LA    R10,8(,R10)    ADVANCE THE CCW POINTER                   00453000
+         B     NEXTDISK       EXAMINE THE NEXT CCW                      00454000
+         EJECT                                                          00455000
+*.                                                                      00456000
+* OPERATION OF TAPE IPL SIMULATION -                                    00457000
+*                                                                       00458000
+*        1.  ISSUE A SENSE CCW TO DETERMINE WHETHER THE TAPE IS 7 OR    00459000
+*            9 TRACK.                                                   00460000
+*        2.  IF THE TAPE IS 7 TRACK ISSUE A MODE SET CCW TO SET THE     00461000
+*            DEFAULT CHARACTERISTICS.                                   00462000
+*        3.  READ FIRST 24 BYTES INTO VIRTUAL LOCATION X'0'.            00463000
+*        4.  SET THE CCW POINTER TO START INTERPRETATION OF THE CCW     00464000
+*            LOCATED AT VIRTUAL LOCATION X'8'.                          00465000
+*        5.  VALIDATE THE DATA ADDRESS OF THE CURRENT CCW TO INSURE     00466000
+*            THAT THE IPL SIMULATOR DOES NOT GET OVERWRITTEN.           00467000
+*        6.  IF THE CURRENT CCW OP-CODE IS A TIC, SET THE               00468000
+*            CURRENT CCW POINTER TO THE DATA ADDRESS AND THEN PROCEED   00469000
+*            TO STEP 5.                                                 00470000
+*        7.  IF THE CHAIN DATA FLAG IN THE CURRENT CCW IS NOT ON        00471000
+*            GO TO STEP 17.                                             00472000
+*        8.  RESET ALL CHAINING FLAGS IN THE CURRENT CCW.               00473000
+*        9.  TURN ON THE SILI FLAG TO PREVENT THE CHANNEL               00474000
+*            PROGRAM FROM TERMINATING FROM AN INCORRECT LENGTH          00475000
+*            INDICATION.                                                00476000
+*        10. VALIDATE THE CCW DATA ADDRESS.                             00477000
+*        11. EXECUTE THE CCW STRING.                                    00478000
+*        12. IF THE CURRENT CCW WAS OVERLAID PROCEED TO STEP            00479000
+*            13; OTHERWISE RECHAIN THE CCW IN CASE IT GETS RE-          00480000
+*            EXECUTED VIA A TIC.                                        00481000
+*        13. EXECUTE A BACK SPACE RECORD CCW.                           00482000
+*        14. ADVANCE CCW POINTER BY 8.                                  00483000
+*        15. IF THE CHAIN DATA FLAG IS ON GO TO STEP 8.                 00484000
+*        16. IF THE COMMAND CHAIN FLAG IS NOT ON GO TO STEP 21;         00485000
+*            OTHERWISE GO TO STEP 18.                                   00486000
+*        17. IF THE COMMAND CHAIN FLAG IS NOT ON GO TO STEP 21.         00487000
+*        18. RESET ALL CHAINING FLAGS.                                  00488000
+*        19. EXECUTE CCW STRING.                                        00489000
+*        20. IF THE CURRENT CCW WAS OVERLAID PROCEED TO STEP 21;        00490000
+*            OTHERWISE RECHAIN THE CCW IN CASE IT GETS RE-              00491000
+*            EXECUTED VIA A TIC.                                        00492000
+*        21. RETURN TO STEP 7 IN MAIN PROLOG.                           00493000
+*                                                                       00494000
+*.                                                                      00495000
+         SPACE 1                                                        00496000
+TAPE     EQU   *                                                        00497000
+         LA    R11,SENSE      LOAD IO REG FOR SENSE OPERATION           00498000
+         BAL   R12,IO         EXECUTE A SENSE                           00499000
+         TM    SENSDATA+1,X'10'    IS TAPE A 7 OR 9 TRACK?              00500000
+         BO    SEVENTK        BRANCH IF SEVEN TRACK                     00501000
+         SPACE                                                          00502000
+*        HERE IF UNIT IS A NINE TRACK DRIVE                             00503000
+         LA    R11,TAPE9CCW   SET LOAD-KEY CCW POINTER                  00504000
+         BAL   R12,IO         EXECUTE THE LOAD-KEY CCW                  00505000
+         LA    R10,IPLCCW1    SET POINTER TO FIRST USER CCW             00506000
+         LA    R9,NEXTAPE9    INITIALIZE THE RETURN FROM CC AND CD      00507000
+NEXTAPE9 LR    R11,R10        SET POINTER FOR ADDRESS TEST              00508000
+         BAL   R12,ADDRTEST   VALIDATE THE CCW ADDRESS                  00509000
+         TM    0(R11),X'08'   IS OPCODE A TIC?                          00510000
+         BNO   *+12           BRANCH IF NOT                             00511000
+         TM    0(R11),X'07'        ARE YOU SURE IT IS A TIC?            00512000
+         BZ    TICTAPE        BRANCH IF IT IS A TIC                     00513000
+         TM    4(R11),CD      IS THE CD FLAG SET?                       00514000
+         BO    CDTAPE         BRANCH IF YES                             00515000
+         TM    4(R11),CC      IS THE CC FLAG SET?                       00516000
+         BO    CCTAPE         BRANCH IF YES                             00517000
+         B     IPLDONE        EXECUTE THE LAST CCW                      00518000
+         SPACE                                                          00519000
+SEVENTK  EQU   *  HERE IF UNIT IS A SEVEN TRACK DRIVE                   00520000
+         LA    R2,TAPE9CCW    ADDRESS OF LOAD-KEY CCW                   00521000
+         STCM  R2,B'0111',TTICCCW+1     STORE ADDRESS IN TAPE TIC       00522000
+         LA    R11,TAPE7CCW   ADDRESS OF SET MODE CCW                   00523000
+         BAL   R12,IO         GET LOAD-KEY 24 BYTES                     00524000
+         LA    R9,NEXTAPE7    SAVE EXIT ADDRESS FROM CD AND CC          00525000
+         LA    R10,IPLCCW1    POINTER TO FIRST USER CCW                 00526000
+NEXTAPE7 STCM  R10,B'0111',TTICCCW+1    STORE ADDRESS IN TAPE TIC       00527000
+         BAL   R12,ADDRTEST   VALIDATE THE CCW ADDRESS                  00528000
+         TM    0(R10),X'08'        IS CCW A TIC?                        00529000
+         BNO   *+12           BRANCH IF IT IS NOT                       00530000
+         TM    0(R10),X'07'   ARE YOU SURE IT IS A TIC?                 00531000
+         BZ    TICTAPE        BRANCH IF IT IS A TIC                     00532000
+         TM    4(R10),CD      IS CD FLAG SET?                           00533000
+         BO    CDTAPE         BRANCH IF YES                             00534000
+         TM    4(R10),CC      IS CC FLAG SET?                           00535000
+         BO    CCTAPE         BRANCH IF YES                             00536000
+         B     IPLDONE        EXECUTE THE LAST CCW                      00537000
+         SPACE 1                                                        00538000
+TICTAPE  EQU   *  HERE TO PROCESS TIC CCW                               00539000
+         L     R10,0(,R10)         LOAD OPCODE AND DATA ADDRESS         00540000
+         LA    R10,0(,R10)    ISOLATE DATA ADDRESS                      00541000
+         BR    R9             RETURN TO CALLER                          00542000
+         SPACE 1                                                        00543000
+CDTAPE   EQU   *  HERE TO PROCESS DATA CHAINING CCW                     00544000
+         NI    4(R10),X'FF'-(CD+CC)     DECHAIN CCW                     00545000
+         OI    4(R10),SILI    PROTECT FROM PARTIAL READ                 00546000
+         MVI   5(R10),HEXFF   FLAG CURRENT CCW                          00547000
+         BAL   R12,ADDRTEST   VALIDATE THE CCW ADDRESS                  00548000
+         BAL   R12,IO         EXECUTE CCW'S CONSTRUCTED TO HERE         00549000
+         CLI   5(R10),HEXFF   DID CURRENT CCW GET OVERLAID?             00550000
+         BNE   *+8            YES                                       00551000
+         OI    4(R10),CD      RECHAIN CCW TO OTHERS                     00552000
+         LR    R4,R11         SAVE R11 IN R 4                           00553000
+         LA    R11,BACKSPAC   GET ADDRESS OF BACKSPACE CCW              00554000
+         BAL   R12,IO         EXECUTE A TAPE BACKSPACE                  00555000
+         LR    R11,R4         RESTORE R11                               00556000
+         LA    R10,8(,R10)    ADVANCE POINTER TO NEXT CCW               00557000
+         TM    4(R10),CD      IS CD FLAG SET?                           00558000
+         BO    CDTAPE         BRANCH IF YES                             00559000
+TTESTCC  TM    4(R10),CC      IS CC FLAG SET?                           00560000
+         BZ    IPLDONE        BRANCH IF NOT                             00561000
+         BAL   R12,ADDRTEST   VALIDATE THE CCW ADDRESS                  00562000
+CCTAPE   NI    4(R10),X'FF'-CC     DECHAIN CCW                          00563000
+         MVI   5(R10),HEXFF   FLAG CURRENT CCW                          00564000
+         BAL   R12,IO         EXECUTE THE CHAIN DATA STRING             00565000
+         CLI   5(R10),HEXFF   DID CURRENT CCW GET OVERLAID?             00566000
+         BNE   *+8            YES                                       00567000
+         OI    4(R10),CC      RESET THE FLAG FOR RE-EXECUTION          *00568000
+                              IF CHAIN GETS RESTARTED VIA TIC           00569000
+         LA    R10,8(,R10)    ADVANCE THE CCW POINTER                   00570000
+         BR    R9             RETURN TO CALLER                          00571000
+         EJECT                                                          00572000
+*.                                                                      00573000
+* OPERATION OF THE IO SUBROUTINE -                                      00574000
+*                                                                       00575000
+*        1.  SET CAW WITH CURRENT CCW POINTER.                          00576000
+*        2.  SAVE CSW.                                                  00577000
+*        3.  ISSUE SIO.                                                 00578000
+*        4.  IF THE CONDITION CODE IS 0 GOTO STEP 10.                   00579000
+*        5.  IF THE CONDITION CODE IS 2 OR 3 PRINT "SIO ERROR" MSG.     00580000
+*        6.  SAVE CSW.                                                  00581000
+*        8.  IF UNIT CHECK, GOTO STEP 22.                               00582000
+*        9.  IF CHANNEL END NOT RECEIVED, GO BACK TO STEP 3.            00583000
+*        10. ISSUE TIO.                                                 00584000
+*        11. IF THE CONDITION CODE IS 0 GOTO STEP 18.                   00585000
+*        12. IF THE CONDITION CODE IS 2 GO BACK TO STEP 10.             00586000
+*        13. IF THE CONDITION CODE IS 3 PRINT "IPL TIO ERROR" MSG.      00587000
+*        14. IF THE DEVICE IS BUSY GO BACK TO STEP 10.                  00588000
+*        15. COMBINE CSW WITH PREVIOUSLY SAVED CSW.                     00589000
+*        16. IF THERE ARE ANY CHANNEL ERRORS OR UNEXPECTED STATUS,      00590000
+*            PRINT THE "IPL UNIT ERROR" MSG.                            00591000
+*        17. IF CHAN. END REC'D WITHOUT DEV. END, GO BACK TO STEP 10.   00592000
+*        18. IF UNIT CHECK RECEIVED, GO TO STEP 22.                     00593000
+*        19. RESTORE CSW.                                               00594000
+*        20. IF THE CURRENT CAW WAS OVERLAID DURING THE I/O OPERATION,  00595000
+*            SAVE ITS MOST RECENT VALUE.                                00596000
+*        21. RETURN.                                                    00597000
+*        22. ISSUE SENSE.  IF UNIT CHECK WAS FOR UNUSUAL COMMAND        00598000
+*            SEQUENCE ON 2540 READER, IGNORE IT AND RETURN.  OTHERWISE  00599000
+*            ISSUE APPROPRIATE ERROR MSG.                               00600000
+*                                                                       00601000
+*.                                                                      00602000
+         SPACE 1                                                        00603000
+IO       EQU   *                                                        00604000
+         ST    R11,CAW        STORE CCW ADDRESS IN CAW                  00605000
+         LM    R5,R6,CSW      SAVE CSW                                  00606000
+RESTART  EQU   *                                               @VA02796 00607000
+         XC    CSWSAVE(8),CSWSAVE CLEAR CSW SAVE AREA          @VA02796 00608000
+         SIO   0(R13)         START UP DEVICE                  @VA02796 00609000
+         BC    8,INTTEST      DRAIN INTERRUPT                  @VA02796 00610000
+         BC    3,SIOERR       BUSY OR NOT OPERATIONAL...ERROR  @VA02796 00611000
+         MVC   CSWSAVE(8),CSW SAVE ENTIRE CSW                  @VA02796 00612000
+         TM    CSW+4,UC       UNIT CHECK?                      @VA02796 00613000
+         BO    DOSENSE        YES, GO DO SENSE                 @VA02796 00614000
+         TM    CSW+5,255-IL   ANY CHANNEL ERRORS?              @VA04206 00615000
+         BNZ   UNITERR        YES, ERROR                       @VA04206 00616000
+         TM    CSW+4,CE       CHANNEL END?                     @VA02796 00617000
+         BZ    RESTART        NO, RETRY THE START I/O          @VA02796 00618000
+         SPACE 1                                                        00619000
+INTTEST  EQU   *                                               @VA02796 00620000
+         LM    R5,R6,CSW      SAVE CONTENTS OF CSW             @VA04372 00620500
+         TIO   0(R13)         DRAIN INTERRUPT                  @VA02796 00621000
+         BC    8,UCHKTEST     NO INTERRUPT                     @VA02796 00622000
+         BC    2,INTTEST      BUSY...LOOP BACK                 @VA02796 00623000
+         BC    1,TIOERR       NOT OPERATIONAL...ERROR          @VA02796 00624000
+         TM    CSW+4,BUSY     STILL BUSY?                      @VA02796 00625000
+         BO    INTTEST        YES, RETRY                       @VA02796 00626000
+CSWJOIN  EQU   *                                               @VA04372 00626500
+         OC    CSWSAVE(8),CSW COMBINE CSW WITH PREVIOUS        @VA02796 00627000
+         TM    CSW+5,255-IL   CHANNEL ERRORS?                  @VA02796 00628000
+         BNZ   UNITERR        YES                              @VA02796 00629000
+         TM    CSW+4,ATTN+UE+SM UNEXPECTED STATUS?             @VA02796 00630000
+         BNZ   UNITERR        YES...ERROR                      @VA02796 00631000
+         TM    CSWSAVE+4,CE   HAVE WE GOTTEN CHANNEL END?      @VA02796 00632000
+         BZ    UCHKTEST       NO                               @VA02796 00633000
+         TM    CSW+4,DE       YES - DEVICE END TOO?            @VA02796 00634000
+         BNZ   UCHKTEST       YES                              @VA04372 00634200
+DEVTIO   EQU   *                                               @VA04372 00634400
+         TIO   0(R13)         WAIT FOR DEVICE END              @VA04372 00634600
+         BC    8,UCHKTEST     NO INTERRUPT                     @VA04372 00634800
+         BC    2,DEVTIO       BUSY...HANG IN THERE             @VA04372 00635000
+         BC    1,TIOERR       NOT OPERATIONAL...ERROR          @VA04372 00635200
+         TM    CSW+4,BUSY     STILL BUSY?                      @VA04372 00635400
+         BO    DEVTIO         YES...HANG IN THERE SOME MORE    @VA04372 00635600
+         B     CSWJOIN        JOIN CODE TO TEST STATUS         @VA04372 00635800
+         SPACE 1                                                        00636000
+UCHKTEST EQU   *                                               @VA02796 00637000
+         TM    CSWSAVE+4,UC   UNIT CHECK?                      @VA02796 00638000
+         BO    DOSENSE        YES, GO DO SENSE                 @VA02796 00639000
+         STM   R5,R6,CSW      RESTORE SAVED CSW                         00640000
+         C     R11,CAW        HAS THE CAW BEEN OVERLAYED?               00641000
+         BCR   8,R12 (BER)    BRANCH IF NOT                             00642000
+         MVC   SAVECAW,CAW    SAVE MOST RECENT CAW                      00643000
+         BR    R12            RETURN TO CALLER                          00644000
+         SPACE                                                          00645000
+DOSENSE  EQU   *                                                        00646000
+         C     R11,CAW        HAS THE CAW BEEN OVERLAID?                00647000
+         BE    *+10           NO                                        00648000
+         MVC   SAVECAW,CAW    SAVE MOST RECENT CAW                      00649000
+         LA    R0,SENSE       SET SENSE CCW                             00650000
+         ST    R0,CAW         ...                                       00651000
+         SIO   0(R13)         EXECUTE CCW                               00652000
+         BC    7,SIOERR       BRANCH IF BAD START                       00653000
+         TIO   0(R13)         DRAIN INTERRUPT                           00654000
+         BC    2,*-4          BRANCH IF STILL BUSY                      00655000
+         BC    9,TIOERR       BRANCH IF BAD EXECUTION                   00656000
+         CLI   CSW+4,CE+DE    DID SENSE GET CHANNEL END AND DEVICE END  00657000
+         BNE   SENSERR        BRANCH IF IT DID NOT                      00658000
+         CLI   TYPE,TYP2540R  IS DEVICE READER?                         00659000
+         BNE   UNITERR        NO, GIVE ERROR MESSAGE                    00660000
+         TM    SENSDATA,UNUSUAL    UNUSUAL COMMAND SEQUENCE ?           00661000
+         BNO   UNITERR        NO, GIVE ERROR MESSAGE                    00662000
+         STM   R5,R6,CSW      RESTORE LATEST CSW                        00663000
+         BR    R12            YES, IGNORE                               00664000
+         EJECT                                                          00665000
+*.                                                                      00666000
+* OPERATION OF THE ADDRTEST SUBROUTINE -                                00667000
+*                                                                       00668000
+*        1.  IF CURRENT CCW IS A READ BACKWARD PROCEED TO STEP 6.       00669000
+*        2.  IF THE CURRENT CCW DATA ADDRESS                            00670000
+*            IS GREATER THAN OR EQUAL TO THE                            00671000
+*            ADDRESS OF THE END OF THE IPL SIMULATOR RETURN.            00672000
+*        3.  IF THE CURRENT CCW DATA ADDRESS PLUS THE CURRENT           00673000
+*            CCW COUNT IS LESS THAN OR EQUAL TO THE STARTING            00674000
+*            ADDRESS OF THE IPL SIMULATOR RETURN.                       00675000
+*        4.  PRINT ERROR MESSAGE "DMKVMI233 IPL OVERLAY ERROR".         00676000
+*        5.  LOAD DISABLED WAIT STATE PSW.                              00677000
+*        6.  IF THE CURRENT CCW DATA ADDRESS IS LESS THAN THE START     00678000
+*            OF THE IPL SIMULATOR RETURN.                               00679000
+*        7.  IF THE CURRENT CCW DATA ADDRESS MINUS THE CURRENT CCW      00680000
+*            COUNT IS EQUAL TO OR GREATER THAN THE END OF THE IPL       00681000
+*            SIMULATOR RETURN.                                          00682000
+*        8.  GO TO STEP 4.                                              00683000
+*                                                                       00684000
+*.                                                                      00685000
+         SPACE 1                                                        00686000
+ADDRTEST EQU   *                                                        00687000
+         L     R2,0(,R10)     LOAD COMMAND CODE AND DATA ADDRESS        00688000
+         LA    R2,0(,R2)      ISOLATE DATA ADDRESS                      00689000
+         LA    R3,SIMEND      LOAD HIGHEST SIMULATOR ADDRESS            00690000
+         TM    0(R10),X'0C'   IS CCW A READ BACKWARD?                   00691000
+         BNO   UPTEST         NO                                        00692000
+         TM    0(R10),X'03'   ARE YOU SURE?                             00693000
+         BNZ   UPTEST         YES                                       00694000
+         CR    R2,R15         IS DATA START LOWER THAN IPL START?       00695000
+         BCR   4,R12 (BLR)    BRANCH IF YES (NO OVERLAY)                00696000
+         SLR   R7,R7          CLEAR A REGISTER                 @VA04700 00697100
+         ICM   R7,B'0011',6(R10) GET CCW DATA COUNT            @VA04700 00697200
+         SR    R2,R7          FIND END OF DATA                 @VA04700 00697300
+         CR    R2,R3          IS THE END OF DATA IN THE SIMULATOR?      00698000
+         BL    OVERLAY        YES                                       00699000
+         BR    R12            RETURN TO CALLER                          00700000
+         SPACE                                                          00701000
+UPTEST   CR    R2,R3          IS DATA START HIGHER THAN SIMEND?         00702000
+         BCR   11,R12 (BNLR)  RETURN, NO OVERLAY IF >=         @VA00869 00703000
+         SLR   R7,R7          CLEAR A REGISTER                 @VA04700 00704100
+         ICM   R7,B'0011',6(R10) GET CCW DATA COUNT            @VA04700 00704200
+         AR    R2,R7          ADD COUNT TO START               @VA04700 00704300
+         CR    R2,R15         IS THE END OF DATA IN THE SIMULATOR?      00705000
+         BH    OVERLAY        YES, GO TREAT OVERLAY            @VA00869 00706000
+         BR    R12            RETURN TO CALLER                          00707000
+         EJECT                                                          00708000
+*        ERROR MESSAGES AND PRINT / DIE ROUTINE                         00709000
+         SPACE                                                          00710000
+SIOERR   EQU   *                                                        00711000
+         LA    R4,ERRSIO      LOAD MESSAGE ADDRESS                      00712000
+         LA    R5,L'ERRSIO    LOAD MESSAGE LENGTH                       00713000
+         B     PRINT          PRINT ERROR AND DIE                       00714000
+         SPACE                                                          00715000
+TIOERR   EQU   *                                                        00716000
+         LA    R4,ERRTIO      LOAD MESSAGE ADDRESS                      00717000
+         LA    R5,L'ERRTIO    LOAD MESSAGE LENGTH                       00718000
+         B     PRINT          PRINT ERROR AND DIE                       00719000
+         SPACE                                                          00720000
+UNITERR  EQU   *                                                        00721000
+         LA    R4,ERRMESS     LOAD MESSAGE ADDRESS                      00722000
+         LA    R5,ERRLNTH1    GET MESSAGE LENGTH                       *00723000
+                              (ASSUME SHORT MESSAGE FIRST)              00724000
+         UNPK  ERRCSW(9),CSWSAVE(5)     CONSTRUCT MESSAGE               00725000
+         TR    ERRCSW(8),TRTBL     ...                                  00726000
+         MVI   ERRCSW+8,C' '  ...                                       00727000
+         UNPK  ERRCSW+9(9),CSWSAVE+4(5) ...                             00728000
+         TR    ERRCSW+9(8),TRTBL   ...                                  00729000
+         TM    CSWSAVE+4,UC   UNIT CHECK ON?                            00730000
+         BNO   PRINT          NO, PRINT MESSAGE WITHOUT SENSE INFO      00731000
+         MVI   ERRSENSM,C','  RESTORE COMMA                             00732000
+         UNPK  ERRSENS(13),SENSDATA(7)  ...                             00733000
+         UNPK  ERRSENS+12(13),SENSDATA+6(7)  ...                        00734000
+         UNPK  ERRSENS+24(13),SENSDATA+12(7) ...                        00735000
+         UNPK  ERRSENS+36(13),SENSDATA+18(7) ...                        00736000
+         TR    ERRSENS(48),TRTBL   ...                                  00737000
+         LA    R5,L'ERRSENSM(,R5) SENSE MSG LENGTH             @VM08862 00738000
+         LA    R0,24          MAXIMUN SENSE LENGTH             @VM08862 00739000
+         SH    R0,CSW+6       SUBSTRACT RESIDUAL COUNT         @VM08862 00740000
+         CL    R0,=F'24'      OVER MAXIMUN  ?                  @VM08862 00741000
+         BL    *+8            LESS THAN 24 BYTES BRANCH        @VM08862 00742000
+         L     R0,=F'24'      USE DEFAULT OF 24 BYTES          @VM08862 00743000
+         SLL   R0,1           TIMES 2 FOR BYTE COUNT           @VM08862 00744000
+         AR    R5,R0          ADD TO MESSAGE LENGTH            @VM08862 00745000
+         B     PRINT          GO PRINT SENSE MESSAGE           @VM08862 00746000
+UNITERRT TM    TYPE,TYP2401+TYP2415+TYP2420  2400 TAPE DRIVE ?          00747000
+         BM    PRINT          BRANCH IF YES (6 SENSE BYTES)             00748000
+         LA    R5,36(,R5)     24 SENSE BYTES                            00749000
+         B     PRINT                                                    00750000
+         SPACE                                                          00751000
+OVERLAY  EQU   *                                                        00752000
+         LA    R4,ERRLAY      LOAD MESSAGE ADDRESS                      00753000
+         LA    R5,L'ERRLAY    LOAD MESSAGE LENGTH                       00754000
+         B     PRINT          PRINT ERROR AND DIE                       00755000
+         SPACE                                                          00756000
+SENSERR  EQU   *                                                        00757000
+         LA    R4,SENSMESS    LOAD MESSAGE ADDRESS                      00758000
+         LA    R5,L'SENSMESS  LOAD MESSAGE LENGTH                       00759000
+         B     PRINT          PRINT ERROR AND DIE                       00760000
+         SPACE                                                          00761000
+PRINT    EQU   *                                                        00762000
+         LA    R0,PRINTCCW    GET THE CCW ADDRESS                       00763000
+         ST    R0,CAW         TELL THE CHANNEL WHERE IT IS              00764000
+         TM    CODEBYTE,VMMCODE+VMMTEXT RECEIVING CODE & TEXT ?         00765000
+         BZ    WAITDIE        NO -- NO MSG                              00766000
+         BO    SETCNT         YES -- ALL OF MSG                         00767000
+         TM    CODEBYTE,VMMCODE    CODE ?                               00768000
+         BO    PRCODE         YES --                                    00769000
+         LA    R4,11(,R4)     SET FOR MSG TEXT ONLY            @VA05494 00770100
+         SH    R5,=H'11'      ADJUST LENGTH                    @VA05494 00771100
+         B     SETCNT                                                   00772000
+PRCODE   EQU   *                                                        00773000
+         LA    R5,10          LENGTH FOR MSG CODE ONLY         @VA05494 00774100
+SETCNT   EQU   *                                                        00775000
+         STH   R5,PRINTCCW+6  STORE MSG COUNT IN CCW                    00776000
+         ST    R4,PRINTCCW    STORE MESSAGE ADDRESS IN PRINT CCW        00777000
+         MVI   PRINTCCW,X'09' LOAD CONSOLE OP-CODE                      00778000
+         TIO   0(R14)         CLEAR ANY PENDING INTERRUPTS              00779000
+         BC    4+2,*-4        CC=1, CC=2 CSW STORED OR BUSY             00780000
+         SIO   0(R14)         SEND ERROR TO USER CONSOLE                00781000
+         CNOP  4,8            SET ALLIGNMENT FOR LPSW                   00782000
+         SPACE                                                          00783000
+WAITDIE  LPSW  *+4                                                      00784000
+         DC    XL2'0002'      INTERRUPS OFF, WAIT ON                    00785000
+         DC    XL6'00'                                                  00786000
+         EJECT                                                          00787000
+IPLDONE  EQU   *  HERE IF ALL CCW'S ARE PRESENT AND VALIDATED           00788000
+*        AFTER EXECUTION CONTROL WILL BE PASSED TO THE USER VIA         00789000
+*        THE PSW IN LOCATION 0 (AFTER STORING THE IPL DEVICE            00790000
+*        ADDRESS IN THE INTERRUPT CODE FIELD OF THE IPLPSW)             00791000
+         BAL   R12,IO         EXECUTE THE LAST CCW                      00792000
+         TM    FLAG2,IPLST        IPLSTOP REQUESTED?                    00793000
+         BZ    LOADNOW            NO - DON'T DO IT                      00794000
+         UNPK  CPARG(6+1),IPLPSW+5(3+1) GET PSW ADDR IN EBCDIC @V200930 00795000
+         TR    CPARG(6),TAB-C'0' TANSLATE TO EBCDIC            @V200930 00796000
+         MVI   CPARG+6,C' '   ADD A BLANK AT THE END           @V200930 00797000
+         LA    R0,CPCOM       COMMAND ADDRESS                  @V200930 00798000
+         LA    R1,14          LENGTH OF ADSTOP COMMAND         @V200930 00799000
+         DC    X'83010008'    DIAGNOSE TO ISSUE ADSTOP         @V200930 00800000
+LOADNOW  EQU   *                                                        00801000
+         TM    IPLPSW+1,EXTMODE EXTENDED MODE?                          00802000
+         BO    *+12           YES                                       00803000
+         STH   R13,IPLPSW+2   SET IPL DEVICE ADDRESS                    00804000
+         B     *+8                                                      00805000
+         STH   R13,INTTIO      SET IPL DEVICE ADDRESS IN EXT MODE       00806000
+         MVC   CAW(4),SAVECAW RESTORE USER'S CAW                        00807000
+         LM    R0,R15,SAVEREGS     RESTORE THE USER'S REGISTERS         00808000
+         LPSW  IPLPSW         AND AWAY WE GO                            00809000
+FLAG2    DC    XL1'00'            FLAG TO DETERMINE IF STOP TO BE SET   00810000
+CPCOM    DC    CL7'ADSTOP '                                    @V200930 00811000
+CPARG    DC    CL7'000000 '                                    @V200930 00812000
+TAB      DC    C'0123456789ABCDEF' HEX TRANSLATE TABLE         @V200930 00813000
+         EJECT                                                          00814000
+*        CONSTANTS                                                      00815000
+         SPACE                                                          00816000
+SENSE    CCW   X'04',SENSDATA-DMKVMI,SILI,24 SENSE CCW                  00817000
+         SPACE 1                                                        00818000
+PRINTCCW CCW   X'09',*-*,SILI,0    CONSOLE ERROR MESSAGE CCW            00819000
+         SPACE 1                                                        00820000
+BACKSPAC CCW   X'27',0,SILI,1 TAPE BACKSPACE FOR READ DATA              00821000
+         SPACE 1                                                        00822000
+TAPE7CCW CCW   X'93',0,CC+SILI,1   7 TRACK TAPE MODE-SET CCW            00823000
+TTICCCW  CCW   X'08',*-*,SILI,1    TIC TO 7 TRACK TAPE OPERATION        00824000
+         SPACE 1                                                        00825000
+CARDCCW  EQU   *              LOAD KEY CCW FOR CARD READER              00826000
+TAPE9CCW CCW   X'02',0,SILI,24     LOAD KEY CCW FOR TAPE                00827000
+         SPACE 1                                                        00828000
+DISKCCW  CCW   X'07',SEEK-DMKVMI,CC+SILI,6   SEEK                       00829000
+         CCW   X'31',SEEK+2-DMKVMI,CC+SILI,5 SEARCH                     00830000
+         CCW   X'08',*-8-DMKVMI,0,1     TIC                             00831000
+READCCW  CCW   X'06',0,SILI,24     READ DATA                            00832000
+         CCW   X'08',IPLCCW1-PSA,0,1    TIC TO USER'S IPLCCW1           00833000
+         SPACE 1                                                        00834000
+CSWSAVE  DS    1D             SAVE CSW FOR ERROR ANALYSIS               00835000
+         SPACE                                                          00836000
+         LTORG                                                          00837000
+*        FULLWORDS                                                      00838000
+SAVECAW  DS    F                                                        00839000
+SAVEREGS DS    16F                                                      00840000
+         SPACE                                                          00841000
+*        UNALIGNED DATA GOES AFTER THIS POINT                           00842000
+ERRSIO   DC    C'DMKVMI230E IPL SIO ERROR'                     @VA04551 00843000
+ERRTIO   DC    C'DMKVMI231E IPL TIO ERROR'                     @VA04551 00844000
+ERRMESS  DC    C'DMKVMI232E IPL UNIT ERROR, CSW='              @VA04551 00845000
+ERRCSW   DC    C'XXXXXXXX XXXXXXXX'                                     00846000
+ERRLNTH1 EQU   *-ERRMESS      LENGTH OF SHORT MESSAGE                   00847000
+ERRSENSM DC    C', SENSE='                                              00848000
+ERRSENS  DC    C'XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX'      00849000
+         DS    X                                                        00850000
+ERRLAY   DC    C'DMKVMI233E IPL OVERLAY ERROR'                 @VA04551 00851000
+ERRTYP   DC    C'DMKVMI022E VADDR MISSING OR INVALID'          @VA04551 00852000
+SENSMESS DC    C'DMKVMI234E IPL SENSE ERROR'                   @VA04551 00853000
+SENSDATA DC    XL24'0'        AREA FOR SENSE DATA                       00854000
+SEEK     DC    XL7'1'         BBCCHHR                                   00855000
+CYLAD    EQU   SEEK+2                                                   00856000
+OPCODE   DS    XL1            OPCODE SAVE AREA                          00857000
+CLASS    DS    1X             IPL DEVICE CLASS                          00858000
+TYPE     DS    1X             IPL DEVICE TYPE                           00859000
+CODEBYTE DS    1X             ERROR LEVEL CODE BYTE                     00860000
+TRTBL    EQU   *-C'0'         TRANSLATE TABLE TO CONVERT TO HEX         00861000
+         DC    C'0123456789ABCDEF'                                      00862000
+         SPACE                                                          00863000
+SIMEND   EQU   *              END OF IPL SIMULATOR CODE                 00864000
+         EJECT                                                          00865000
+*        EQUATES                                                        00866000
+ZERO     EQU   X'00'                                                    00867000
+HEXFF    EQU   X'FF'          OVERLAY ANALYSIS FLAG BYTE                00868000
+NOOP     EQU   3              NOOP CCW OPCODE                           00869000
+TIC      EQU   8              TIC CCW OPCODE                            00870000
+UNUSUAL  EQU   X'02'          UNUSUAL SENSE BYTE FROM 2821 CONTROL UNIT 00871000
+         SPACE 2                                                        00872000
+         LTORG                                                          00873000
+         EJECT                                                          00874000
+         COPY  EQU                                                      00875000
+         COPY  DEVTYPES                                                 00876000
+         COPY  VMBLOK                                                   00877000
+         PSA                                                            00878000
+         EJECT                                                          00879000
+         ORG   IPLPSW                                                   00880000
+         SPACE                                                          00881000
+IPLCYLNO DS    H              VIRTUAL IPL CYLINDER NUMBER      @VM08862 00882000
+IPLADDR  DS    H              IPL DEVICE ADDRESS                        00883000
+IPLSAVE  DS    F              SAVE AREA FOR R15 AT ENTRY TO IPL         00884000
+IPLERRCD DS    X              VMMLEVEL BYTE FROM USER'S VMBLOK          00885000
+         DS    XL1                DON'T WANT TO OVERLAY IPL STOP FLAG   00886000
+FLAG1    DS    XL1                FLAG FOR IPLSTOP STORED HERE          00887000
+IPLST    EQU   X'80'              BIT ONE IN THE FLAG BYTE              00888000
+         END                                                            00889000

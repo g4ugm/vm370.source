@@ -1,0 +1,781 @@
+VIO      TITLE 'DMKVIO     (CP)        VM/370 - RELEASE 6'              00001000
+         ISEQ  73,80          VALIDATE SERIALIZATION OF INPUT           00002000
+*.                                                                      00003000
+* MODULE NAME -                                                         00004000
+*                                                                       00005000
+*        DMKVIO                                                         00006000
+*                                                                       00007000
+* FUNCTION -                                                            00008000
+*                                                                       00009000
+*        TO RECORD AND TRANSLATE THE INTERRUPTS AND STATUS ASSOCIATED   00010000
+*        WITH VIRTUAL I/O OPERATIONS                                    00011000
+*                                                                       00012000
+* ATTRIBUTES -                                                          00013000
+*                                                                       00014000
+*        REENTRANT, RESIDENT, ENTERED VIA GOTO FROM DMKDSP WHEN         00015000
+*        AN IOBLOK FOR A VIRTUAL INTERRUPT IS UNSTACKED                 00016000
+*                                                                       00017000
+* ENTRY POINTS -                                                        00018000
+*                                                                       00019000
+*        DMKVIOIN - TRANSLATE A VIRTUAL INTERRUPT                       00020000
+*        DMKVIOC1 - TO PRESENT CONDITION CODE 1 STATUS TO A VIRTUAL     00020200
+*                   MACHINE FOR DEDICATED 3705.                         00020400
+*        DMKVIOMK - ADDRESS OF A TABLE OF INTERRUPT MASKS, INDEXABLE BY 00021000
+*                   DEVICE ADDRESS                                      00022000
+*                                                                       00023000
+* ENTRY CONDITIONS -                                                    00024000
+*                                                                       00025000
+*        FOR DMKVIOIN -                                                 00026000
+*        GPR10 = ADDRESS OF THE IOBLOK THAT WAS UNSTACKED               00027000
+*        GPR12 = DMKVIOIN BASE                                          00028000
+*                                                                       00029000
+*        FOR DMKVIOC1 -                                                 00030000
+*        GPR6  = ADDRESS OF THE VIRTUAL CHANNEL BLOCK                   00031000
+*        GPR7  = ADDRESS OF THE VIRTUAL CONTROL UNIT BLOCK              00032000
+*        GPR8  = ADDRESS OF THE VIRTUAL DEVICE BLOCK                    00033000
+*        GPR10 = ADDRESS OF THE IOBLOK FOR THIS TASK                    00034000
+*        GPR11 = ADDRESS OF THE VMBLOK FOR IOTASK USER                  00035000
+*        GPR12 = ADDRESS OF DMKVIOC1                                    00036000
+*                                                                       00037000
+*        NOTE THAT GPR13 DOES NOT POINT TO A SAVEAREA                   00038000
+*                                                                       00039000
+* EXIT CONDITIONS -                                                     00040000
+*                                                                       00041000
+*        FOR DMKVIOEX - NORMAL                                          00042000
+*        THE CORRECT STATUS AND CONDITION CODES ARE REFLECTED TO THE    00043000
+*        VIRTUAL MACHINE, AND, IF APPROPRIATE, THE I/O IS STARTED       00044000
+*                                                                       00045000
+*        FOR DMKVIOIN - NORMAL                                          00046000
+*        THE REAL INTERRUPT IS TRANSLATED INTO VIRTUAL STATUS TO BE     00047000
+*        STORED IN THE VIRTUAL CHANNEL, CONTROL UNIT AND DEVICE BLOKS   00048000
+*                                                                       00049000
+*        ERROR - NONE                                                   00050000
+*                                                                       00051000
+         EJECT                                                          00052000
+*                                                                       00053000
+* CALLS TO OTHER ROUTINES -                                             00054000
+*                                                                       00055000
+*        DMKPTRAN - LOCATE THE USER'S PAGE 0                            00056000
+*        DMKUNTFR - TO RETURN THE TRANSLATED CHANNEL PROGRAM TO FREE    00057000
+*                   STORAGE                                             00058000
+*        DMKFREE  - TO OBTAIN FREE STORAGE FOR IOBLOKS                  00059000
+*        DMKFRET  - TO RETURN USED IOBLOKS TO FREE STORAGE              00060000
+*        DMKUNTRN - TO UNTRANSLATE THE REAL CSW ADDRESS ASSOCIATED WITH 00061000
+*                   A VIRTUAL INTERRUPT                                 00062000
+*        DMKDSPCH - EXIT VIA GOTO AFTER I/O IS SCHEDULED BY DMKIOSQV    00063000
+*        DMKSCNVU - LOCATE VIRTUAL CHANNEL, CU, AND DEVICE BLOKS        00064000
+*        DMKPTRUL - TO UNLOCK A PAGE                                    00065000
+*        DMKTRDWT - TO SYNCHRONIZE TRACE ACTIVITY                       00066000
+*        DMKTRDSI - TO TRACE AN I/O OPERATION (SIO, TIO, HIO, OR TCH)   00067100
+*        DMKTRCSW - TO TRACE A CSW INTERRUPT                            00068000
+*        DMKCCHRF - TO REFLECT CHANNEL ERROR TO VIRTUAL MACHINE         00068500
+*                                                                       00069000
+* EXTERNAL REFERENCES -                                                 00070000
+*                                                                       00071000
+*        NONE                                                           00072000
+*                                                                       00073000
+* TABLES / WORKAREAS -                                                  00074000
+*                                                                       00075000
+*        VCHBLOK,VCUBLOK, AND VDEVBLOK ARE REFERENCED AND UPDATED       00076000
+*                                                                       00077000
+* REGISTER USAGE -                                                      00078000
+*                                                                       00079000
+*        GPR0  = CONDITION CODE RETURNED FROM DMKSCNVU                  00080000
+*        GPR1  = SCRATCH - OR USED FOR DEDICATED CHANNEL SUPPORT        00081000
+*        GPR2  = SCRATCH - OR USED FOR DEDICATED CHANNEL SUPPORT        00082000
+*        GPR3  = ADDRESS OF VBLOK THAT CONTAINS SUBCHANNEL STATUS       00083000
+*        GPR4  = CSW STATUS TO BE STORED                                00084000
+*        GPR5  = INTERNAL SUBROUTINE LINKAGE                            00085000
+*        GPR6  = VCHBLOK BASE                                           00086000
+*        GPR7  = VCUBLOK BASE                                           00087000
+*        GPR8  = VDEVBLOK BASE                                          00088000
+*        GPR9  = VIRTUAL DEVICE ADDRESS                                 00089000
+*        GPR10 = IOBLOK BASE                                            00090000
+*        GPR11 = VMBLOK BASE                                            00091000
+*        GPR12 = DMKVIO BASE                                            00092000
+*        GPR13   NOT USED                                               00093000
+*        GPR14 = EXTERNAL LINKAGE                                       00094000
+*        GPR15 = EXTERNAL LINKAGE                                       00095000
+         EJECT                                                          00096000
+*                                                                       00097000
+* NOTES -                                                               00098000
+*                                                                       00099000
+* OPERATION -                                                           00100000
+*        1. SET CONDITION CODE IN VIRTUAL PSW TO ZERO                   00101000
+*        2. CALCULATE VIRTUAL UNIT ADDRESS USING REGISTER AND DISPLACE- 00102000
+*           MENT VALUES PASSED BY PRIVILEGED IN VMINST                  00103000
+*        3. CALL DMKSCNVU TO LOCATE VCHBLOK, VCUBLOK, AND VDEVBLOK,     00104000
+*           AND SAVE THE RESULTING CONDITION IN GPR0                    00105000
+*        4. BRANCH TO HANDLE SIO, TIO, TCH, AND HIO, DESCRIBED IN       00106000
+*           SECTIONS A-D RESPECTIVELY                                   00107000
+*.                                                                      00108000
+         EJECT                                                          00109000
+         COPY  OPTIONS                                                  00110000
+         COPY  LOCAL               OPTIONS                              00111000
+         SPACE 2                                                        00112000
+DMKVIO   CSECT                                                          00113000
+         ENTRY DMKVIOIN                                        @VA05037 00114000
+         ENTRY DMKVIOC1                                        @VA05037 00115000
+         ENTRY DMKVIOMK,DMKVIOXK                                        00116000
+         EXTRN DMKUNTFR                                                 00117000
+         EXTRN DMKPTRUL                                                 00118000
+         EXTRN DMKUNTRN                                                 00119000
+         EXTRN DMKCCHRF                                        @V508690 00119500
+         EXTRN DMKSCNVU                                                 00120000
+         EXTRN DMKTRKFP                                        @V56BDA8 00120100
+         AIF   (NOT &TRACE(6)).TRA1                             **AIF** 00121000
+         EXTRN DMKTRDSI,DMKTRCSW                               @V4M0240 00122100
+         EXTRN DMKTRDWT                                        @VA07229 00123100
+.TRA1    ANOP                                                           00124000
+         SPACE 2                                                        00125000
+         USING PSA,R0                                                   00126000
+         USING VCHBLOK,R6                                               00127000
+         USING VCUBLOK,R7                                               00128000
+         USING VDEVBLOK,R8                                              00129000
+         USING IOBLOK,R10                                               00130000
+         USING VMBLOK,R11                                               00131000
+         EJECT                                                          00132000
+*.                                                                      00133000
+*        OPERATION OF VIRTUAL I/O INTERRUPT HANDLER -                   00134000
+*        1. CALL DMKSCNVU TO LOCATE VCH, VCU, AND VDEVBLOKS FOR INTER-  00135000
+*           RUPTING DEVICE                                              00136000
+*        2. IF DMKVIOIN HAS BEEN ENTERED TO PROCESS AND INTERRUPT, GO   00137000
+*           SECTION F BELOW; OTHERWISE CONTINUE                         00138000
+*        3. CONDITION CODE 2 SHOULD NEVER BE RETURNED; IF CONDITION     00139000
+*           CODE 3 IS RETURNED, REFLECT IT TO THE USER AND EXIT;        00140000
+*           OTHERWISE, CONTINUE                                         00141000
+*.                                                                      00142000
+         SPACE                                                          00143000
+         USING DMKVIOIN,R12                                    @VA05037 00144000
+DMKVIOIN DS    0D             VIRTUAL I/O INTERRUPT RETURN     @VM08571 00145000
+         USING *,R12               TEMPORARY ADDRESSABILITY             00146000
+         L     R12,=A(DMKVIO)      COMMON ADDRESSABILITY                00147000
+         USING DMKVIO,R12                                               00148000
+         SPACE                                                          00149000
+         LH    R1,IOBVADD          GET VIRTUAL DEVICE ADDRESS           00150000
+         CALL  DMKSCNVU            AND LOCATE CONTROL BLOKS             00151000
+         BZ    REFLECT        ALL BLOKS FOUND                           00152000
+         TM    IOBSPEC,IOBUNSL IS IT UNSOLICITED?              @VA04788 00153000
+         BO    CHKUNSL        YES - CLEAN UP AND LEAVE         @VA04788 00154000
+         ABEND 2                                                        00155000
+         SPACE 2                                                        00156000
+REFLECT  EQU   *                                                        00157000
+         TM    IOBSPEC2,IOBWRAP TASK FOR AUTOPOLL WRAP LIST?   @V407438 00158000
+         BZ    CKCC           NO -- GO CHECK OUT CONDITION CODE         00159000
+         TM    IOBCSW+5,PCI   DID WE GET THE PCI ??                     00160000
+         BZ    CKCC           NOT THIS TIME --                          00161000
+         NI    IOBCSW+5,X'FF'-PCI  REMOVE CP GENERATED PCI              00162000
+         SLR   R15,R15        GET DISPLACEMENT TO CURRENT CCW  @VA02985 00163000
+         ICM   R15,B'0111',IOBCSW+1 REAL ADDR OF CURRENT CCW   @VA02985 00164000
+         L     R14,IOBCAW     GET CAW                          @VA02137 00165000
+         LA    R14,0(R14)     CLEAR HI BYTE                    @VA02137 00166000
+         SLR   R15,R14        DISPLACEMENT TO CURRENT CCW      @VA02985 00167000
+FINDTIC  EQU   *              TRY TO FIND TIC TO AUTOPOLL CCW  @VA02985 00168000
+         ICM   R14,B'1111',IOBMISC GET ADDRESS OF POLL LIST    @VA01384 00169000
+         BZ    CKCC           BRANCH IF NONE                   @VA01384 00170000
+         ICM   R1,B'1111',IOBMISC2 GET NUMBER OF LIST ENTIES   @VA01384 00171000
+         BZ    CKCC           BRANCH IF NONE OR END OF LIST    @VA01384 00172000
+WRAPLP   C     R15,4(R14)     LIST FOR THIS TIC ?              @VA01384 00173000
+         BE    CKTIC          YES - NOW CHECK FOR TIC          @VA01384 00174000
+         LA    R14,8(,R14)    UPDATE TO NEXT ENTRY             @VA01384 00175000
+         BCT   R1,WRAPLP      BRANCH IF MORE ENTRIES           @VA01384 00176000
+         S     R15,F8         BACK UP ONE CCW                  @VA02985 00177000
+         BNM   FINDTIC        BRANCH IF MORE CCW'S TO CHECK    @VA02985 00178000
+         B     CKCC           NOT THIS TIME                    @VA01384 00179000
+CKTIC    LM    R1,R2,0(R14)   VIRTUAL TIC ADD,REAL TIC DISP    @VA01384 00180000
+         AL    R2,IOBCAW      ADDRESS OF REAL TIC              @VA01384 00181000
+         TM    0(R1),X'07'    VIRTUAL TIC STILL A TIC ?        @VA03585 00182000
+         BNZ   NEWCCW         NO -- GO GET NEW CCW             @VA03585 00183000
+         TM    0(R1),X'08'    MAKE SURE IT'S STILL A TIC       @VA03585 00184000
+         BO    TSTPCIL        IT IS -- CHECK FOR ENDING STATUS @VA03585 00185000
+NEWCCW   EQU   *              VIRTUAL TIC HAS BEEN CHANGED     @VA03585 00186000
+         LM    R14,R15,0(R1)  GET NEW CCW FROM USER            @VA01384 00187000
+         ICM   R14,B'1000',F3+3 MAKE SURE CCW IS A NOP         @VA08336 00188100
+         ST    R15,4(R2)      STORE SECOND HALF FIRST IN CASE  @VA08336 00188250
+*                             CHANNEL ADDRESSING THIS SAME STORAGE      00188400
+*                             LOCATION.                                 00188550
+         ST    R14,0(R2)      NOW STORE THE FIRST HALF         @VA08336 00188700
+         MVI   5(R2),X'00'    ZERO FLAG BYTE IN REAL CCW       @VA04888 00190000
+TSTPCIL  TM    IOBCSW+5,255-(PCI+IL) ANY FATAL-TYPE BITS ON IN CSW+5 ?  00191000
+         BNZ   CKCC           IF YES, GO CHECK OUT THE CONDITION CODE   00192000
+         CLI   IOBCSW+4,0     ANY OTHER STATUS TO REFLECT ??            00193000
+         BE    VIOBFRET       NO -- EXIT                                00194000
+         SPACE                                                          00195000
+CKCC     EQU   *                                                        00196000
+         TM    IOBSTAT,IOBALTSK POSSIBLE RESTART REQUIRED?     @V56BDA8 00196100
+         BZ    NOALTSK        NO, EASY                         @V56BDA8 00196200
+         CALL  DMKTRKFP       RESTART IF NECESSARY             @V56BDA8 00196300
+NOALTSK  EQU   *                                               @V56BDA8 00196400
+         AIF   (NOT &TRACE(6)).NTRV1                            **AIF** 00197000
+         TM    VMTRCTL,VMTRSIO     SIO TRACING WANTED ?                 00198000
+         BZ    REFCC12        NOPE - NO PROBLEM.                        00199000
+         TM    IOBSPEC,IOBTIO WAS IT A TEST I/O REQUEST ?      @VM01157 00200000
+         BO    TRCONDC        YES - WE MUST TRACE IT HERE      @VM01157 00201000
+         TM    IOBSTAT,IOBCC3 WAS THIS AN I/O INTERRUPT ?      @VM01157 00202000
+         BZ    VIOINT         YES - DON'T TRACE AS START I/O   @VM01157 00203000
+TRCONDC  EQU   *              VIRTUAL ADDRESS IN GR1 ALREADY   @VM01157 00204000
+         LH    R1,IOBVADD     RESTORE DEVICE ADDRESS           @VA04161 00205000
+         CALL  DMKTRDSI       CALL TRACER - SIO ENTRY POINT    @V4M0240 00206100
+         CALL  DMKSCNVU       MAKE SURE WE KNOW ADDR OF CONTROL BLOKS   00207000
+REFCC12  EQU   *              CHECK WHERE TO GO NOW            @VM01157 00208000
+.NTRV1   ANOP                                                  @VM01157 00209000
+         TM    IOBSTAT,IOBCC3 INTERRUPT OR CONDITION CODE ?    @VM01157 00210000
+         BZ    VIOINT         INTERRUPT -- PROCESS IT          @VM01157 00211000
+         BM    TESTCC2        CONDITION CODE 1 OR 2            @VM01157 00212000
+*                                                                       00213000
+*        HERE FOR CC 3:                                                 00214000
+         LA    R2,X'30'       SET CONDITION CODE THREE                  00215000
+         NI    VDEVSTAT,255-(VDEVCHBS+VDEVBUSY)   FREE UP THE DEVICE    00216000
+         TM    IOBSPEC,IOBTIO+IOBHIO    WAS THIS A START I/O ?          00217000
+         BNZ   SETCCX                   NO -- JUST SET COND. CODE       00218000
+         NI    VCHSTAT,X'FF'-VCHBUSY CLEAR VIRTUAL CHANNEL              00219000
+         NI    VCUSTAT,X'FF'-(VCUCHBSY+VCUBUSY) CONTROL UNIT,           00220000
+         AIF   (NOT &VIRREAL).NOVR5                             **AIF** 00221000
+         C     R11,AVMREAL    DOES USER HAVE VIRT=REAL AREA             00222000
+         BNE   UNTFR1         NO, RELEASE THE CHANNEL PROGRAM           00223000
+         ICM   R15,15,IOBMISC DID I/O REQUIRE CCW TRANSLATION           00224000
+         BZ    SETCCX         NO, SET COND. CODE = 3 AND EXIT           00225000
+UNTFR1   DS    0H             CONNECTOR                                 00226000
+.NOVR5   ANOP                                                           00227000
+         CALL  DMKUNTFR       RELEASE CHANNEL PROGRAM                   00228000
+         B     SETCCX         EXIT WITH COND. CODE = 3                  00229000
+         SPACE 3                                                        00230000
+TESTCC2  TM    IOBSTAT,IOBCC2      IS IT CC 1 OR 2 ??                   00231000
+         BZ    VIOCC1              CONDITION CODE 1                     00232000
+         SPACE 2                                                        00233000
+         ABEND 3              SHOULD NEVER SEE CC 2                     00234000
+         EJECT                                                          00235000
+*.                                                                      00236000
+*        DMKVIOC1 ENTRY CONDITIONS:                                     00237000
+*                                                                       00238000
+*              R6  - ADDRESS OF THE VIRTUAL CHANNEL BLOCK               00239000
+*              R7  - ADDRESS OF THE VIRTUAL CONTROL UNIT BLOCK          00240000
+*              R8  - ADDRESS OF THE VIRTUAL DEVICE BLOCK                00241000
+*              R10 - ADDRESS OF THE IOBLOK ASSOCIATED WITH THIS TASK    00242000
+*              R11 - ADDRESS OF THE VMBLOK FOR IOTASK USER              00243000
+*              R12 - ADDRESS OF DMKVIOC1                                00244000
+*                                                                       00245000
+*        DMKVIOC1 IS ENTERED VIA GOTO FROM DMKVSI                       00246000
+*                                                                       00247000
+*        4. FOR CC = 1, SAVE THE STATUS FROM THE REAL CSW, TRANS FOR    00248000
+*           THE CALLER'S PAGE 0, AND STORE THE STATUS IN HIS CSW        00249000
+*        4.1  IF THE STATUS WAS THE RESULT OF A TEST I/O OR HALT I/O,   00250000
+*             FREE UP THE DEVICE, SET CC = 1 FOR THE USER, FRET THE     00251000
+*             IOBLOK AND EXIT.                                          00252000
+*        5. IF THE INTERRUPT IS FOR PCI ALONE, OR FOR PCI+IL ONLY,      00253000
+*           SET CC = 1 AND EXIT.                                        00254000
+*        6. OTHERWISE, MARK THE SUB-CHANNEL AS NOT BUSY, AND TEST TO    00255000
+*           SEE IF THE DEVICE IS FREE                                   00256000
+*        7. IF THE DEVICE IS FREE, RELEASE THE REAL CCW LIST VIA A CALL 00257000
+*           TO DMKUNTFR, SET CC = 1, AND EXIT                           00258000
+*.                                                                      00259000
+         SPACE                                                          00260000
+DMKVIOC1 DS    0H             ENTRY FROM DMKVSI TO REFLECT CC1 @VA05037 00261000
+         USING *,R12          TEMPORARY ADDRESSABILITY         @VA05037 00262000
+         L     R12,=A(DMKVIO) STANDARD ADDRESSABILITY          @VA05037 00263000
+         USING DMKVIO,R12     ...                              @VA05037 00264000
+         SPACE                                                          00265000
+VIOCC1   EQU   *                                                        00266000
+         TM    IOBSPEC,IOBSIOF     START I/O FAST RELEASE ?    @VA01382 00267000
+         BO    SIOFCC1             YES - SPECIAL PROCEDURE     @VA01382 00268000
+         LH    R4,IOBCSW+4         GET STATUS FROM THE REAL CSW         00269000
+         STH   R4,VDEVCSW+4        AND SAVE IN THE VIRTUAL ONE          00270000
+         LA    R1,CSW              LOGICAL ADDRESS OF USER'S CSW        00271000
+         SL    R6,VMCHSTRT    CHAN. DISP                       @VA01770 00272000
+         SL    R7,VMCUSTRT    CONT. UNIT DSP.                  @VA01770 00273000
+         SL    R8,VMDVSTRT    DEV. DISP                        @VA01770 00274000
+         TRANS 2,1,OPT=(BRING,DEFER) FETCH USER'S PAGE 0                00275000
+         AL    R6,VMCHSTRT    RESTORE CHANN ADDRESS            @VA01770 00276000
+         AL    R7,VMCUSTRT    RESTORE C. U. ADDRESS            @VA01770 00277000
+         AL    R8,VMDVSTRT    RESTORE DEV. ADDRESS             @VA01770 00278000
+         STH   R4,4(,R2)           STORE STATUS IN USER'S CSW           00279000
+         TM    5(R2),CDC+CCC+IFCC WAS THIS A CHANNEL ERROR ?   @V508690 00279050
+         BZ    NOCHAN         NO, CONTINUE PROCESSING          @V508690 00279100
+         ICM   R1,15,VDEVIOER GET IOERBLOK FOR REFLECT         @V508690 00279150
+         BZ    NOCHAN         NO IOERBLOK, FORGET CALL         @V508690 00279200
+         CALL  DMKCCHRF       GO SET UP USERS CHANNEL CHECK    @V508690 00279250
+*                             INFO.                                     00279300
+NOCHAN   EQU   *                                               @V508690 00279350
+         TM    IOBSPEC,IOBTIO+IOBHIO    WAS THIS A START I/O ?          00280000
+         BZ    CC1SIO         YES, CONTINUE                    @VA01185 00281000
+         NI    VDEVSTAT,255-VDEVBUSY REMOVE TEMP BUSY BIT      @VA01185 00282000
+         B     ERBLOKCK       GO CHECK OUT IOERBLOK            @VA01185 00283000
+CC1SIO   EQU   *                                               @VA01185 00284000
+         CH    R4,=AL1(0,PCI) IS IT PCI ALONE ?                         00285000
+         BE    CKTIO          YES - CHANNEL STILL BUSY.                 00286000
+         CH    R4,=AL1(0,PCI+IL) OR PCI+IL ONLY ?                       00287000
+         BE    CKTIO          YES - SAME HANDLING - CHANNEL STILL BUSY. 00288000
+         NI    VCHSTAT,X'FF'-VCHBUSY FREE UP THE SUB CHANNEL            00289000
+         NI    VCUSTAT,X'FF'-VCUCHBSY ---                               00290000
+         NI    VDEVSTAT,X'FF'-VDEVCHBS --                               00291000
+         C     R4,=A(256*BUSY)     IS IT BUSY ALONE ??                  00292000
+         BNE   CKDEBUSY       CHECK FOR SPECAL BUSYS           @VA05686 00293100
+         AIF   (NOT &VIRREAL).NOVR6                             **AIF** 00294000
+         C     R11,AVMREAL    DOES USER HAVE VIRT=REAL AREA             00295000
+         BNE   UNTFR2         NO, RELEASE THE CHANNEL PROGRAM           00296000
+         ICM   R15,15,IOBMISC WAS CHANNEL PROGRAM TRANSLATED            00297000
+         BZ    SETCC1         NO, EXIT WITH COND. CODE = 1              00298000
+UNTFR2   DS    0H             CONNECTOR                                 00299000
+.NOVR6   ANOP                                                           00300000
+         CALL  DMKUNTFR            FREE UP THE CCW STRING               00301000
+         B     SETCC1         AND GO EXIT                               00302000
+         SPACE 3                                                        00303000
+CKDEBUSY TM    IOBCSW+4,DE+BUSY CE POSSIBLE ALSO               @VA05686 00303100
+         BNO   CKATTN         NO NEW DEVICE STATUS             @VA05686 00303200
+         TM    VDEVSTAT,VDEVDED DEDICATED DEVICE?              @VA05686 00303300
+         BZ    CKATTN         IF NOT, LEAVE STATUS AS IS       @VA05686 00303400
+         NI    VDEVSTAT,255-VDEVNRDY CLEAR POSSIBLE NOT READY  @VA05686 00303500
+         ICM   R1,15,VDEVIOER IOERBLOK?                        @VA05686 00303600
+         BZ    CKATTN         NO, SKIP FRET                    @VA05686 00303700
+         BAL   R2,IOERFRET    CLEAR VDEVUC AND SENSE           @VA05686 00303800
+CKATTN   TM    VDEVCSW+4,DE+ATTN   IS THE DEVICE FREE?                  00304000
+         BNZ   VIODEVFR            YES --                               00305000
+         TM    VDEVCSW+4,CE        IS THE DEVICE FREE ???               00306000
+         BO    SETCC1              NO -- SET CC1 AND LEAVE              00307000
+VIODEVFR EQU   *                                                        00308000
+         NI    VDEVSTAT,X'FF'-VDEVBUSY FREE UP THE DEVICE               00309000
+         AIF   (NOT &VIRREAL).NOVR7                             **AIF** 00310000
+         C     R11,AVMREAL    DOES USER OWN VIRT=REAL AREA              00311000
+         BNE   UNTFR3         NO, RELEASE CHANNEL PROGRAM               00312000
+         ICM   R15,15,IOBMISC WAS CHANNEL PROGRAM TRANSLATED            00313000
+         BZ    NOUNTFR3       NO, CONTINUE                              00314000
+UNTFR3   DS    0H             CONNECTOR                                 00315000
+.NOVR7   ANOP                                                           00316000
+         CALL  DMKUNTFR            FREEUP THE CCW STRING                00317000
+NOUNTFR3 DS    0H             CONNECTOR                                 00318000
+         TM    IOBFLAG,IOBRELCU THIS OPERATION RELEASE CU ?    @VA04278 00319000
+         BNZ   ERBLOKCK       YES..BEWARE OF BMPX CHANNEL      @VA04278 00320000
+         NI    VCUSTAT,X'FF'-VCUBUSY FREE UP THE CONTROL UNIT           00321000
+ERBLOKCK BAL   R2,CHKIOERB    CHECK FOR POSSABLE IOERBLOK      @VA01185 00322000
+         TM    IOBSTAT,IOBFATAL DID SENSE FAIL?                @VA03443 00323000
+         BZ    SETCC1         NO...CONTINUE                    @VA03443 00324000
+         ICM   R1,15,VDEVIOER DOES IOERBLOK EXIST?             @VA03443 00325000
+         BZ    SETCC1         NO...CONTINUE                    @VA03443 00326000
+         BAL   R2,IOERFRET    GO FRET IOERBLOK                 @VA03443 00327000
+         B     SETCC1              AND EXIT                             00328000
+         SPACE                                                          00329000
+SIOFCC1  EQU   *              GIVE DEFERRED CC = 1             @VA01382 00330000
+         L     R1,IOBCAW      CHANNEL ADDRESS WORD             @VA01382 00331000
+         MVC   IOBCSW+6(2),6(R1)   MOVE IN RESIDUAL COUNT      @VA01382 00332000
+         AL    R1,F8          POINT PAST FIRST CCW (KEEP KEY)  @VA01382 00333000
+         ST    R1,IOBCSW      SET ADDRESS IN THE CSW           @VA01382 00334000
+         OI    IOBCSW,X'01'   DEFERRED CONDITION CODE ONE      @VA01382 00335000
+*        B     VIOINT         TREAT THIS AS AN INTERRUPT       @VA01382 00336000
+         EJECT                                                          00337000
+*.                                                                      00338000
+*    F. HANDLING VIRTUAL INTERRUPTS -                                   00339000
+*        1. IF THE INTERRUPT IS A CHANNEL CLASS INTERRUPT, SAVE THE     00340000
+*           CSW IN THE VDEVBLOK AND SAVE THE ADDRESS OF THE INTERRUPT-  00341000
+*           ING UNIT                                                    00342000
+*        2. CALL DMKUNTRN TO UNTRANSLATE THE ADDRESS IN THE REAL CSW    00343000
+*        3. IF THE DEVICE IS FREE ALSO, CALL DMKUNTFR TO RELEASE THE    00344000
+*           REAL CCW LIST, AND STACK THE PENDING INTERRUPT FOR THE      00345000
+*           VIRTUAL MACHINE                                             00346000
+*        4. IF THE INTERRUPT WAS DUE TO DEVICE END ALONE, SAVE THE INT- 00347000
+*           ERRUPT STATUS IN THE VIRTUAL DEVICE BLOK, AND EXIT          00348000
+*        5. SAVE ANY SENSE BYTES ASSOCIATED WITH THE OPERATION          00349000
+*        6. EXIT VIA A GOTO TO DMKDSPCH                                 00350000
+*                                                                       00351000
+*.                                                                      00352000
+         SPACE                                                          00353000
+VIOINT   DS    0H             HANDLE VIRTUAL I/O INTERRUPT:             00354000
+         CL    R10,IOBLINK    IS THIS THE FINAL INTERRUPT ?             00355000
+         BNE   VIOINT1             NOPE - NOT YET              @VM08571 00356000
+         SLR   R15,R15        YES - CLEAR VDEVIOB RIGHT NOW             00357000
+         ST    R15,VDEVIOB    TO AVOID POSSIBLE ''RESET'' PROBLEMS ETC  00358000
+VIOINT1  EQU   *              PERHAPS TRACING SYNCHRONIZATION  @VM08571 00359000
+         AIF   (NOT &TRACE(6)).TRA4                             **AIF** 00360000
+         TM    VMTRCTL,VMTRIO+VMTRSIO   I/O TRACING ACTIVE ?   @VM08571 00361000
+         BZ    VIOINT2             NO -- CONTINUE              @VM08571 00362000
+         L     R15,PREFIXA    GET PREFIX VALUE TO ADDRESS PSA  @V4M0132 00363100
+*                             AT ABSOLUTE ZERO                 @V4M0132 00363200
+         CLI   XTNDLOCK-PSA(R15),X'FF' IS SYSTEM EXTENDING?    @V4M0132 00363300
+         BO    VIOINT2        BYPASS TRACING.                  @VA03758 00364000
+         CALL  DMKTRDWT       ENQUEUE ON DMKTRD AND TREXBLOK   @VA07229 00365100
+         LH    R1,IOBVADD     VIRTUAL DEVICE ADDRESS           @VM08571 00366000
+         CALL  DMKSCNVU       RE-SCAN JUST IN CASE             @VM08571 00367000
+         BZ    VIOINT2        ALL'S WELL                       @VA01255 00368000
+         B     CHKUNSL        CHK ON UNSOLICITED INTERR.       @VA01255 00369000
+.TRA4    ANOP                                                  @VM08571 00370000
+         SPACE                                                          00371000
+VIOINT2  LM    R1,R2,IOBCSW   GET THE REAL CSW (FROM THE IOBLOK)        00372000
+         LTR   R1,R1          IS IT A CHANNEL CLASS INTERRUPT ?         00373000
+         BZ    DEVICEND       NO - IT MUST BE A DEVICE CLASS INTERRUPT. 00374000
+         EJECT                                                          00375000
+CHANLEND TM    VDEVCSW+5,PCI       IS PCI ALREADY IN THE CSW ??         00376000
+         STM   R1,R2,VDEVCSW  SAVE CSW FOR USER                         00377000
+         BZ    *+8                 NO PCI IN CSW                        00378000
+         OI    VDEVCSW+5,PCI       REPLACE PCI                          00379000
+         SPACE                                                          00380000
+SETCE    TM    VCHTYPE,VCHSEL IS IT A SELECTOR CHANNEL ?       @VA01771 00381000
+         BZ    TESTVCU        NO --                                     00382000
+         LH    R3,IOBVADD          GET DEVICE ADDRESS                   00383000
+         STH   R3,VCHCEDEV         AND SAVE IN CHANNEL BLOK             00384000
+         OI    VCHSTAT,VCHCEPND    SET PENDING FLAG IN CHANNEL BLOK     00385000
+         B     SETDEV         AND GO FLAG DEVICE                        00386000
+         SPACE                                                          00387000
+TESTVCU  TM    VCUTYPE,VCUSHRD+VCUCTCA  SHARED SUB-CHANNEL ?            00388000
+         BZ    SETDEV         NO --                                     00389000
+SETVCU   OI    VCUSTAT,VCUCEPND    SET CE PENDING FLAG                  00390000
+         SPACE                                                          00391000
+SETDEV   OI    VDEVSTAT,VDEVCHAN   SET CHANNEL END PENDING              00392000
+         SPACE 3                                                        00393000
+UNTRAN   DS    0H             CONNECTOR                                 00394000
+         AIF   (NOT &VIRREAL).NOVR9                             **AIF** 00395000
+         C     R11,AVMREAL    DOES USER OWN VIRT=REAL AREA              00396000
+         BNE   UNTRN1         NO, UNTRANS THE CSW ADDRESS               00397000
+         ICM   R15,15,IOBMISC WAS CHANNEL PROGRAM TRANSLATED            00398000
+         BZ    NOUNTRN1       NO, CONTINUE                              00399000
+UNTRN1   DS    0H             CONNECTOR                                 00400000
+.NOVR9   ANOP                                                           00401000
+         CALL  DMKUNTRN       UNTRANSLATE THE CSW ADDRESS               00402000
+NOUNTRN1 DS    0H             CONNECTOR                                 00403000
+         TM    VDEVCSW+5,PCI  PCI PRESENT IN CSW ?                      00404000
+         BZ    VIOCLRCH       NO -- GO CLEAR CHANNEL                    00405000
+         TM    VDEVCSW+5,255-(PCI+IL) ANY FATAL-TYPE BITS ON IN CSW+5 ? 00406000
+         BNZ   VIOCLRCH       YES - CHANNEL IS THRU - GO CLEAR IT.      00407000
+         CLI   VDEVCSW+4,00   NO (JUST PCI OR PCI+IL) - IS CSW+4 = 00 ? 00408000
+         BE    STAKPEND       IF YES, THE CHANNEL IS STILL BUSY.        00409000
+VIOCLRCH EQU   *  HERE TO FLAG SUBCHANNEL NOT BUSY                      00410000
+         NI    VCHSTAT,X'FF'-VCHBUSY    NO - MARK SUBCHANNEL            00411000
+         NI    VCUSTAT,X'FF'-VCUCHBSY   NOT BUSY                        00412000
+         NI    VDEVSTAT,X'FF'-VDEVCHBS  ..                              00413000
+         SPACE                                                          00414000
+         CL    R10,IOBLINK         IS THIS THE FINAL INTERRUPT ?        00415000
+         BE    FREEDEV             YES                                  00416000
+         B     STAKPEND            NO -- GO STACK THE PENDING INTERRUPT 00417000
+         EJECT                                                          00418000
+DEVICEND EQU   *  HERE TO HANDLE DEVICE END TYPE INTERRUPTS             00419000
+         TM    IOBSPEC,IOBTIO      WAS THIS A TEST I/O ?                00420000
+         BO    VIOFREDV            YES -- IT WAS NOT AN INTERRUPT       00421000
+         TM    VCUSTAT,VCUCUEPN    CUE REQUESTED ??                     00422000
+         BZ    DEVSTAT             NO -- CONTINUE                       00423000
+         NI    VCUSTAT,X'FF'-VCUCUEPN   UNFLAG PENDING STATUS MOD.      00424000
+         TM    VCUINTS,CUE         CUE ALREADY PENDING ??               00425000
+         BO    DEVSTAT             YES --                               00426000
+         OI    VCUINTS,CUE         AND SET CUE                          00427000
+         OI    VDEVSTAT,VDEVCUE    MARK DEVICE CAUSING THE CUE          00428000
+         SPACE 2                                                        00429000
+DEVSTAT  LH    R3,IOBCSW+4         GET CSW STATUS                       00430000
+         TM    IOBCSW+4,ATTN  ATTENTION INTERRUPT              @VA01653 00431000
+         BZ    SAVESTAT       NO - OR IN OTHER STATUS          @VA01653 00432000
+         TM    IOBCSW+4,X'FF'-(ATTN+UC) ANYTHING ELSE ?        @VA01653 00433000
+         BZ    SAVESTAT       NO - ADD TO OLD STATUS           @VA01653 00434000
+         OI    VDEVFLAG,VDEVPOST FLAG AS SINGLE INTERRUPT      @VA01653 00435000
+SAVESTAT O     R3,VDEVINTS-2  ADD TO EXISTING STATUS, IF ANY   @VA01653 00436000
+         STH   R3,VDEVINTS         AND STORE IN DEVICE BLOCK            00437000
+         OI    VDEVSTAT,VDEVPEND   INDICATE DEVICE CLASS INTERRUPT PEND 00438000
+         TM    IOBSPEC,IOBUNSL     UNSOLICITED INTERRUPT ?     @VA04115 00439000
+         BO    FREEDEV             YES - LEAVE IT ALONE        @VA04115 00440000
+         CLI   VDEVTYPC,CLASGRAF IS IT A GRAPHICS DEVICE?      @VA04456 00441000
+         BNE   FREEDEV        NO - CNTRL UNIT END OK           @VA04456 00442000
+         NI    VDEVINTS,X'FF'-CUE  3272 GIVES FALSE 'CUE+DE'   @VA04115 00443000
+         SPACE 2                                                        00444000
+FREEDEV  NI    VDEVSTAT,255-VDEVBUSY FREE UP DEVICE            @VA08747 00445100
+         TM    IOBFLAG,IOBRELCU THIS OPERATION RELEASE CU ?    @VA04278 00446000
+         BNZ   *+8            YES..DON'T RESET CU BUSY (BMPX   @VA04278 00447000
+*                             CHANNEL)                                  00448000
+         NI    VCUSTAT,255-VCUBUSY FREE UP CONTORL UNIT IF BUSY@VA01700 00449000
+         NI    VDEVFLAG,X'FF'-VDEVSAS   DONE WITH SEEK, IF ANY          00450000
+         LA    R2,GETRCAW     SET R2 TO CONTINUE AT "GETRCAW" AND ...   00452000
+         SPACE                                                          00453000
+CHKIOERB EQU   *   CHECK FOR POSSIBLE IO ERROR BLOCK (R2 = RETURN REG): 00454000
+         L     R1,IOBIOER     GET ADDRESS OF IOERBLOK                   00455000
+         LTR   R1,R1          IS THERE ONE ?                            00456000
+         BCR   8,R2   <BZ>    NO - RETURN  (OR CONTINUE AT GETRCAW)     00457000
+         USING IOERBLOK,R1    ADDRESSABILITY                            00458000
+         TM    IOERCSW+5,CDC+CCC+IFCC WAS THIS A CHANNEL       @V508690 00458050
+*                             ERROR ?                                   00458100
+         BZ    NOCHAN01       NO, CONTINUE PROCESSING          @V508690 00458150
+         L     R15,VDEVIOER   GET OLD(SENSE) IOERBLOK POINTER  @V508690 00458200
+         ST    R1,VDEVIOER    SAVE (CHANNEL CHECK) IOERBLOK    @V508690 00458250
+*                             FOR REFLECTION                            00458300
+         SR    R1,R1          CLEAR IT                         @V508690 00458350
+         ST    R1,IOBIOER     WIPE OUT IOERBLOK IN THE IOBLOK  @V508690 00458400
+         LTR   R1,R15         DID WE HAVE AN OLD IOERBLOK ?    @V508690 00458450
+         BZR   R2             NO, RETURN                       @V508690 00458500
+         B     IOERFRET       WE DID, BETTER FRET IT FIRST.    @V508690 00458550
+NOCHAN01 EQU   *                                               @V508690 00458600
+         TM    IOERCSW+4,UC   UNIT CHECK PRESENT ?                      00459000
+         BO    CKIOER         .....CONTINUE                    @VA07884 00460100
+         LA    R0,IOERSIZE    IF NOT, RELEASE THE BLOK                  00461000
+         AH    R0,IOEREXT     ADD EXTRA SIZE (IF ANY) OF IOERBLOK       00462000
+         CALL  DMKFRET        ...                                       00463000
+         XC    IOBIOER,IOBIOER CLEAR IOERBLOK POINTER          @VA03443 00464000
+         BR    R2             RETURN  (OR CONTINUE AT GETRCAW)          00465000
+         EJECT                                                          00466000
+CKIOER   L     R0,VDEVIOER    ANY OLD SENSE BYTES HANGING AROUND ?      00472000
+         LTR   R0,R0          ??                                        00473000
+         BZ    SAVEIOER       NO --                                     00474000
+         LR    R1,R0          OLD IOERBLOK STILL THERE,                 00475000
+         LA    R0,IOERSIZE    GET RID OF IT                             00476000
+         AH    R0,IOEREXT     ADD EXTRA SIZE (IF ANY) OF IOERBLOK       00477000
+         CALL  DMKFRET        ...                                       00478000
+         L     R1,IOBIOER     AND KEEP THE NEW ONE ...                  00479000
+SAVEIOER ST    R1,VDEVIOER    SAVE NEW SENSE INFORMATION                00480000
+         XC    IOBIOER,IOBIOER CLEAR IOERBLOK POINTER          @VA03443 00481000
+         OI    VDEVFLAG,VDEVUC     AND SET FLAG NOTING THEIR PRESENSE   00482000
+         CLC   VDEVTYPC(2),=AL1(CLASDASD,TYP3340) 3340?        @V56BDA8 00482050
+         BNER  R2             NO, RETURN (OR CONTINUE AT       @V56BDA8 00482100
+*                             GETRCAW)                                  00482150
+         TM    IOERDATA+6,CECYL CE CYLINDER?                   @V56BDA8 00482200
+         BOR   R2             YES, DONT TOUCH IT               @V56BDA8 00482250
+         SR    R0,R0          CLEAR OUT REGISTER               @V56BDA8 00482300
+         IC    R0,IOERDATA+6  0CCXHHHH                         @V56BDA8 00482350
+         SLL   R0,3           GET C512 + C256                  @V56BDA8 00482400
+         IC    R0,IOERDATA+5  LOW ORDER CC                     @V56BDA8 00482450
+         SH    R0,VDEVRELN    MAKE POSITION VIRTUAL            @V56BDA8 00482500
+         STH   R0,VDEVPOSN    STORE CC                         @V56BDA8 00482550
+         MVN   VDEVPOSN+3(1),IOERDATA+6 COPY H                 @V56BDA8 00482600
+         BR    R2             RETURN  (OR CONTINUE AT GETRCAW)          00483000
+         SPACE                                                          00484000
+GETRCAW  L     R1,IOBCAW           GET ADDRESS OF REAL CCW LIST         00485000
+         LTR   R1,R1               IS THERE ONE ??                      00486000
+         BNZ   CKVR           YES...GO TEST FOR V=R USER       @VA03443 00487000
+         ICM   R1,15,IOBIOER  IS THERE AN IOERBLOK?            @VA03443 00488000
+         BZ    CKDE           NO...GO TEST FOR UNSOL. DEV. END.@VA03443 00489000
+         TM    IOBSTAT,IOBFATAL DID SENSE FAIL?                @VA03443 00490000
+         BZ    CKDE           NO...CONTINUE                    @VA03443 00491000
+         LA    R2,IOERGONE    SET RETURN ADDRESS               @VA03443 00492000
+         B     IOERFRET       YES...GET RID OF IOERBLOK        @VA03443 00493000
+CKVR     EQU   *                                               @VA03443 00494000
+         AIF   (NOT &VIRREAL).NOVR11                            **AIF** 00495000
+         C     R11,AVMREAL    DOES USER OWN VIRT=REAL AREA              00496000
+         BNE   UNTFR4         NO, RELEASE THE CHANNEL PROGRAM           00497000
+         ICM   R15,15,IOBMISC WAS CHANNEL PROGRAM TRANSLATED            00498000
+         BZ    NOUNTFR4       NO, CONTINUE                              00499000
+UNTFR4   DS    0H             CONNECTOR                                 00500000
+.NOVR11  ANOP                                                           00501000
+         CALL  DMKUNTFR            FREE  THE CCW LIST                   00502000
+NOUNTFR4 DS    0H             CONNECTOR                                 00503000
+         TM    IOBSTAT,IOBFATAL DID SENSE FAIL?                @VA03443 00504000
+         BZ    STAKPEND       NO...CONTINUE                    @VA03443 00505000
+         ICM   R1,15,VDEVIOER IS THERE AN IOERBLOK?            @VA03443 00506000
+         BZ    STAKPEND       NO...CONTINUE                    @VA03443 00507000
+         BAL   R2,IOERFRET    GO FRET IOERBLOK                 @VA03443 00508000
+IOERGONE EQU   *                                               @VA03443 00509000
+         B     STAKPEND       GO STACK THE INTERRUPT                    00510000
+         SPACE                                                          00511000
+CKDE     CLI   IOBCSW+4,DE    STANDALONE DEVICE END ?                   00512000
+         BNE   STAKPEND       NO --                                     00513000
+         NI    VDEVSTAT,X'FF'-VDEVNRDY  UNFLAG POSSIBLE NOT READY       00514000
+         SPACE                                                          00515000
+         L     R1,VDEVIOER    MIGHT BE SOME OLD SENSE BYTES             00516000
+         LTR   R1,R1          ARE THERE ANY ?                           00517000
+         BZ    STAKPEND       NOPE - NOT TODAY.                         00518000
+         USING IOERBLOK,R1                                              00519000
+         TM    VDEVSTAT,VDEVDED   IOERBLOK OR SENSE                     00520000
+         BZ    NOTDED         BR, MUST BE SENSE DATA                    00521000
+         B     STAKPEND       ALLOW ERROR TO CLEAR             @VA05978 00522500
+         EJECT                                                          00524000
+NOTDED   EQU   *                                                        00525000
+         TM    VDEVTYPC,CLASURI+CLASURO  SPPOOL DEVICE                  00526000
+         BZ    NIINTREQ         NO                                      00527000
+CLRPTR   EQU   *                                                        00528000
+         SR    R1,R1                                                    00529000
+         ST    R1,VDEVIOER        CLEAR SENSE INFO.                     00530000
+         B     STAKPEND           GO STACK IT                           00531000
+NIINTREQ NI    IOERDATA,255-INTREQ  RESET INT. REQ.                     00532000
+         DROP  R1                                                       00533000
+         SPACE                                                          00534000
+STAKPEND EQU   *  HERE TO STACK ALL PENDING INTERRUPTS                  00535000
+         LH    R3,VDEVADD          GET DEVICE ADDRESS (0-F)             00536000
+         AR    R3,R3               AND MULTIPLY BY 2                    00537000
+         LH    R3,DMKVIOMK(R3)     CORRECT INTERRUPT MASK BIT           00538000
+         O     R3,VCUDVINT-2  ADD TO PENDING INTERRUPTS                 00539000
+         STH   R3,VCUDVINT    ...                                       00540000
+         SPACE                                                          00541000
+         LH    R3,VCUADD           GET CU ADDRESS (00-F0)               00542000
+         SRL   R3,3                CU ADDRESS TIMES 2                   00543000
+         LH    R3,DMKVIOMK(R3)     CORRECT INTERRUPT MASK BITS          00544000
+         O     R3,VCHCUINT-2  ADD TO PENDING INTERRUPTS                 00545000
+         STH   R3,VCHCUINT    ...                                       00546000
+         SPACE                                                          00547000
+         LH    R3,VCHADD           GET CHANNEL  ADDRESS (000-600)       00548000
+         SRL   R3,7                TIMES 2 --                           00549000
+         LH    R3,DMKVIOMK(R3)     CORRECT INTERRUPT MASK BIT           00550000
+         O     R3,VMIOINT-2   ADD TO PENDING INTERRUPTS                 00551000
+         STH   R3,VMIOINT     ...                                       00552000
+         SPACE                                                          00553000
+         OI    VMPEND,VMIOPND FLAG SUMMARY PENDING BIT                  00554000
+         AIF   (NOT &TRACE(6)).TRA5                             **AIF** 00555000
+         TM    VMTRCTL,VMTRIO+VMTRBRIN  TRACE I/O'S OR ALL INSTR ?      00556000
+         BZ    VIRAXIT        NO -- EXIT                                00557000
+         L     R15,VMTREXT                                              00558000
+         USING TREXT,R15                                                00559000
+         TM    TREXCTL2,TREXCSW CSW-TRACING WANTED FOR I/O INTERRUPTS ? 00560000
+         BZ    VIRAXIT        NO -- EXIT                                00561000
+         DROP  R15                                                      00562000
+         CALL  DMKTRCSW       TRACE VIRTUAL AND REAL CSW       @V200820 00563000
+         LH    R1,IOBVADD     VIRTUAL DEVICE ADDRESS           @V200820 00564000
+         CALL  DMKSCNVU       RE-SCAN FOR DEVICE BLOCKS        @V200820 00565000
+         BZ    VIRAXIT        STILL OK.                        @VA01255 00566000
+         EJECT                                                          00567000
+CHKUNSL  EQU   *                                               @VA01255 00568000
+         ICM   R1,15,IOBIOER  YES - ANY ERRORS?                @VA01255 00569000
+         BZ    VIOBFRET       NO - JUST RETURN THE IOBLOK      @VA01255 00570000
+         LA    R0,IOERSIZE    YES - FIGURE OUT THE SIZE        @VA01255 00571000
+         AH    R0,IOEREXT-IOERBLOK(R1)  . . .                  @VA01255 00572000
+         CALL  DMKFRET        RETURN THE ERROR BLOCK           @VA01255 00573000
+         B     VIOBFRET       & THE IOBLOK                     @VA01255 00574000
+.TRA5    ANOP                                                  @V200820 00575000
+         B     VIRAXIT        ---                                       00576000
+         SPACE                                                          00577000
+VIOFREDV EQU   *              FREE UP DEVICE, EXIT CC = 0               00578000
+         NI    VDEVSTAT,255-VDEVBUSY    REMOVE TEMPORARY BUSY BIT       00579000
+         NI    VMRSTAT,255-VMIOWAIT     TAKE USER OUT OF IOWAIT@VM01157 00580000
+         B     VIOFRET                  FRET IOBLOK, EXIT               00581000
+         SPACE                                                          00582000
+SETCC1   EQU   *                                                        00583000
+         LA    R2,X'10'            SET CONDITION CODE ONE               00584000
+         SPACE 1                                                        00585000
+SETCCX   EQU   *  HERE TO SET CONDITION CODE                            00586000
+         TM    VMESTAT,VMEXTCM     EXTENDED MACHINE ??                  00587000
+         BZ    *+12                NO --                                00588000
+         EX    R2,SETECC      SET EC-MODE CONDITION CODE                00589000
+         B     *+8                                                      00590000
+         EX    R2,SETCC                                                 00591000
+         NI    VMRSTAT,X'FF'-(VMEXWAIT+VMIOWAIT) NOT IN WAIT   @VA04305 00592000
+         EJECT                                                          00593000
+VIRAXIT  DS    0H                                                       00594000
+         TM    VCHSTAT,VCHBUSY     IS THE CHANNEL STILL ACTIVE ??       00595000
+         BO    CKTIO          YES --                                    00596000
+         TM    VDEVFLAG,VDEVSAS    DASD EXECUTING A STAND ALONE SEEK ?  00597000
+         BO    CKTIO          YES -- LEAVE CHANNEL FLAGGED ACTIVE       00598000
+         SPACE                                                          00599000
+         LH    R3,VCHADD      GET CHANNEL ADDRESS                       00600000
+         SRL   R3,7           TIMES 2                                   00601000
+         LH    R3,DMKVIOXK(R3)     CORRECT UNFLAGGING MASK              00602000
+         N     R3,VMIOACTV-2  UNFLAG ACTIVE I/O                         00603000
+         STH   R3,VMIOACTV    ...                                       00604000
+         TM    VCHTYPE,VCHBMX BMX CHANNEL?                     @VA03150 00605000
+         BNO   *+8            NO, SKIP CALL TO SCAN            @VA03150 00606000
+         BAL   R14,SCANALL    ANYTHING ELSE GOING ON ?         @VA03150 00607000
+         SPACE                                                          00608000
+CKTIO    EQU   *                                                        00609000
+         TM    VMDSTAT,VMTIO  WAS USER IN TIO BUSY LOOP ?               00610000
+         BZ    CKTERM         NO- BRANCH                                00611000
+         CLI   VDEVTYPC,CLASTERM   SLOW SPEED TERMINAL DEVICE           00612000
+         BNE   *+8                 NO- BRANCH                           00613000
+         NI    VMRSTAT,X'FF'-VMIDLE     YES- LET THE USER ENTER Q       00614000
+         NI    VMRSTAT,X'FF'-VMEXWAIT   TAKE OUT OF WAIT --             00615000
+CKTERM   EQU   *                                               @V200820 00616000
+         CL    R10,IOBLINK    IS THIS THE FINAL INTERRUPT ??            00620000
+         BNE   VIOBFRET       NO -- DO NOT CLEAR THE VDEVBLOK           00621000
+VIOFRET  EQU   *              FRET THE IOBLOK AND EXIT                  00622000
+         TM    VDEVTYPC,CLASTERM+CLASGRAF TERMINAL DEVICE?     @V408246 00622100
+         BNZ   QONE           YES, ELGIBLE FOR Q1              @VA07264 00622350
+         TM    VDEVTYPC,CLASSPEC IS IT SPECIAL CLASS ?         @VA07264 00622400
+         BZ    QTWO           NO, Q2 DISPATCHING               @VA07264 00622450
+         TM    VDEVTYPE,TYP3704 D/T 3704 OR 3705 ?             @VA07264 00622500
+         BZ    QTWO           NO, Q2 DISPATCHING               @VA07264 00622550
+QONE     OI    VMQSTAT,VMPRIDSP Q1 SWITCH                      @VA07264 00622600
+QTWO     EQU   *                                               @VA07264 00622650
+         SLR   R0,R0          ZERO OUT                                  00623000
+         ST    R0,VDEVIOB     THE ACTIVE IOBLOK POINTER                 00624000
+         TM    IOBSPEC2,IOBWRAP WAS THIS AN AUTOPOLL TASK?     @V407438 00625000
+         BZ    VIOBFRET       NO --                                     00626000
+         ICM   R1,B'1111',IOBMISC GET AUTO POLL LIST           @VA01384 00627000
+         BZ    VIOBFRET       BRANCH IF NONE                   @VA01384 00628000
+         L     R0,IOBMISC2    GET NUMBER OF ENTIES             @VA01384 00629000
+WRAPLIST L     R2,0(R1)       GET ADDRESS OF VIRTUAL TIC       @VA01384 00630000
+         CALL  DMKPTRUL       AND UNLOCK ITS PAGE FRAME                 00631000
+         LA    R1,8(,R1)      UPDATE TO NEXT ENTRY             @VA01384 00632000
+         BCT   R0,WRAPLIST    BRANCH IF MORE ENTIES            @VA01384 00633000
+         L     R1,IOBMISC     ADDRESS OF POLL LIST             @VA01384 00634000
+         ST    R0,IOBMISC     CLEAR ADDRESS                    @VA01384 00635000
+         L     R0,IOBMISC2    GET SIZE OF POLL LIST            @VA01384 00636000
+         CALL  DMKFRET        RELEASE IT                       @VA01384 00637000
+         SPACE                                                          00638000
+VIOBFRET LR    R1,R10         GET IOBLOK ADDRESS IN R1         @VA07464 00639051
+         LA    R0,IOBSIZE     AND ITS SIZE                              00640000
+         CALL  DMKFRET        RELEASE IT                                00641000
+         EJECT                                                          00642000
+VIOEXIT2 EQU   *                                               @VA03443 00643000
+         GOTO  DMKDSPCH       AND GO DISPATCH                  @VA03443 00644000
+         USING IOERBLOK,R1                                     @VA03443 00645000
+IOERFRET EQU   *                                               @V508690 00646100
+         SR    R0,R0          CLEAR IT                         @V508690 00646200
+         CL    R1,VDEVIOER    REG 1 THE ACTIVE IOERBLOK ?      @V508690 00646300
+         BNE   FRET01         NO ,DONT CLEAR POINTER           @V508690 00646400
+         ST    R0,VDEVIOER    CLEAR THE POINTER                @V508690 00646500
+FRET01   LA    R0,IOERSIZE    GET SIZE OF IOERBLOK             @V508690 00646600
+         AH    R0,IOEREXT     AND THE EXTRA (IF ANY)           @VA03443 00647000
+         CALL  DMKFRET        AND RELEASE IT                   @VA03443 00648000
+         NI    VDEVFLAG,255-VDEVUC RESET UNIT CHECK FLAG       @VA03443 00651000
+         BR    R2             AND RETURN                       @VA03443 00652000
+         SPACE                                                          00653000
+SCANALL  STM   R7,R8,TEMPSAVE SAVE THESE REGS                  @VA03150 00654000
+         NI    VCUSTAT,255-VCUACTV RESET CU ACTIVE FLAG        @VA03150 00655000
+         LA    R4,2           LOAD INDEX INCREMENT             @VA03150 00656000
+         LA    R5,30          LOAD INDEX COMPARAND VALUE       @VA03150 00657000
+         SR    R3,R3          ZERO VCUDVTBL INDEX              @VA03150 00658000
+RESNDV   LH    R8,VCUDVTBL(R3) LOAD NEXT VDEVBLOK INDEX        @VA03150 00659000
+         LTR   R8,R8          DOES DEVICE EXIST ?              @VA03150 00660000
+         BM    RESXDV         NO, INDEX TO NEXT ONE            @VA03150 00661000
+         A     R8,VMDVSTRT    POINT TO VDEVBLOK                @VA03150 00662000
+         TM    VDEVSTAT,VDEVBUSY IS DEVICE BUSY ?              @VA03150 00663000
+         BNO   RESXDV         NO, INDEX TO NEXT ONE            @VA03150 00664000
+         TM    VDEVTYPC,CLASTERM IS THIS A TERMINAL?           @VA03150 00665000
+         BO    RESXDV         YES, SKIP IT AND CHECK NEXT DEV  @VA03150 00666000
+         OI    VCUSTAT,VCUACTV C U STILL ACTIVE THEN           @VA03150 00667000
+REACTIVE LH    R1,VCHADD      GET CHANNEL ADDRESS              @VA03150 00668000
+         SRL   R1,7           TIMES 2                          @VA03150 00669000
+         LH    R1,DMKVIOMK(R1) PICK UP TURN ON MASK            @VA03150 00670000
+         O     R1,VMIOACTV-2  ADD IT BACK                      @VA03150 00671000
+         STH   R1,VMIOACTV    CHANNEL STILL ACTIVE             @VA03150 00672000
+         LM    R7,R8,TEMPSAVE RESTORE REGS                     @VA03150 00673000
+         BR    R14            RETURN                           @VA03150 00674000
+RESNCU   LH    R7,VCHCUTBL(R2) LOAD NEXT VCUBLOK INDEX         @VA03150 00675000
+         LTR   R7,R7          DOES C U EXIST ?                 @VA03150 00676000
+         BM    RESXCU         NO - GET NEXT ONE                @VA03150 00677000
+         A     R7,VMCUSTRT    POINT TO VCUBLOK                 @VA03150 00678000
+         TM    VCUSTAT,VCUACTV IS C U ACTIVE ?                 @VA03150 00679000
+         BO    REACTIVE       RESET CHANNEL ACTIVE             @VA03150 00680000
+         B     RESXCU         CONTINUE WITH NEXT CU            @VA03150 00681000
+RESXDV   BXLE  R3,R4,RESNDV   BRANCH IF MORE DEVICES ON C U    @VA03150 00682000
+         SR    R2,R2          ZERO VCHCUTBL INDEX              @VA03150 00683000
+RESXCU   BXLE  R2,R4,RESNCU   BRANCH IF MORE CONTROL UNITS     @VA03150 00684000
+         LM    R7,R8,TEMPSAVE RESTORE REGS                     @VA03150 00685000
+         BR    R14            RETURN                           @VA03150 00686000
+         EJECT                                                          00687000
+SETCC    OI    VMPSW+4,0      EXECUTED TO SET BC MODE COND CODE@VA05037 00688000
+SETECC   OI    VMPSW+2,0      EXECUTED TO SET EC MODE COND CODE@VA05037 00689000
+         SPACE                                                          00690000
+DMKVIOCT DC    F'0'           COUNT OF TOTAL I/O INSTRUCTIONS           00691000
+DMKVIOCW DC    F'0'           COUNT OF CALLS TO DMKCCWTR                00692000
+DMKVIOSI DC    F'0'           COUNT OF VIRT. SIO'S             @V2B2638 00693000
+DMKVIOSF DC    F'0'           COUNT OF VIRT. SIOF'S            @V2B2638 00694000
+DMKVIOTI DC    F'0'           COUNT OF VIRT. TIO'S             @V2B2638 00695000
+DMKVIOCI DC    F'0'           COUNT OF VIRT. CLRIO'S           @V2B2638 00696000
+DMKVIOHI DC    F'0'           COUNT OF VIRT. HIO'S             @V2B2638 00697000
+DMKVIOHD DC    F'0'           COUNT OF VIRT. HDV'S             @V2B2638 00698000
+DMKVIOTC DC    F'0'           COUNT OF VIRT. TCH'S             @V2B2638 00699000
+         SPACE                                                          00700000
+DMKVIOMK DS    0H             MASKS TO SET INTRPT PENDING IN VMBLOK     00701000
+         DC    X'8000400020001000'                                      00702000
+         DC    X'0800040002000100'                                      00703000
+         DC    X'0080004000200010'                                      00704000
+         DC    X'0008000400020001'                                      00705000
+         SPACE                                                          00706000
+DMKVIOXK DS    0H             MASKS TO RESET INTRPT PENDING IN VMBLOK   00707000
+         DC    X'7FFFBFFFDFFFEFFF'                                      00708000
+         DC    X'F7FFFBFFFDFFFEFF'                                      00709000
+         DC    X'FF7FFFBFFFDFFFEF'                                      00710000
+         DC    X'FFF7FFFBFFFDFFFE'                                      00711000
+         SPACE 1                                                        00711100
+CECYL    EQU   X'10'          3340/44 CE CYLINDER              @V56BDA8 00711200
+         SPACE                                                          00712000
+         LTORG                                                          00713000
+         EJECT                                                          00714000
+         COPY  VBLOKS                                          @VA04320 00715000
+         COPY  VCTCA                                           @VA04320 00716000
+         COPY  RBLOKS                                          @VA04320 00717000
+         COPY  VMBLOK                                          @VA04320 00718000
+         COPY  TREXT                                           @VA04320 00719000
+         COPY  IOBLOKS                                         @VA04320 00720000
+         COPY  IOER                                            @VA04320 00721000
+         PSA                                                   @VA04320 00722000
+         COPY  DEVTYPES                                        @VA04320 00723000
+         COPY  EQU                                             @VA04320 00724000
+         END   DMKVIO                                          @VA04320 00725000

@@ -1,0 +1,628 @@
+CFH      TITLE 'DMKCFH     (CP)        VM/370 - RELEASE 6'              00001000
+         ISEQ  73,80          VALIDATE SEQUENCING OF INPUT              00002000
+*.                                                                      00003000
+* MODULE NAME -                                                         00004000
+*                                                                       00005000
+*        DMKCFHSV                                                       00006000
+*                                                                       00007000
+* FUNCTION -                                                            00008000
+*                                                                       00009000
+*        TO SAVE A PAGE FORM VERSION OF A SYSTEM'S VIRTUAL STORAGE SPAC 00010000
+*        INCLUDING REGISTERS AND PSW AS THEY CURRENTLY EXIST.  THE NAME 00011000
+*        OF THE SYSTEM AND THE DASD LOCATION AT WHICH IT IS TO BE SAVED 00012000
+*        IS DEFINED IN THE CP MODULE DMKSNT.                            00013000
+*                                                                       00014000
+* ATTRIBUTES -                                                          00015000
+*                                                                       00016000
+*        REENTRANT, PAGEABLE, CALLED VIA SVC                            00017000
+*                                                                       00018000
+* COMMAND LINE FORMAT -                                                 00019000
+*                                                                       00020000
+*        +---------+-------------+                                      00021000
+*        |         |             |                                      00022000
+*        | SAVESYS | SYSTEM-NAME |                                      00023000
+*        |         |             |                                      00024000
+*        +---------+-------------+                                      00025000
+*                                                                       00026000
+* ENTRY CONDITIONS  -                                                   00027000
+*                                                                       00028000
+*        GPR9  = ADDRESS OF COMMAND LINE BUFFER                         00029000
+*        GPR11 = ADDRESS OF CALLER'S VMBLOK                             00030000
+*        GPR12 = ADDRESS OF ENTRY POINT                                 00031000
+*        GPR13 = ADDRESS OF SAVEAREA                                    00032000
+*                                                                       00033000
+* EXIT CONDITIONS                                                       00034000
+*                                                                       00035000
+*       NORMAL -                                                       00036000
+*        GPR2 = 0                                                       00037000
+*                                                                       00038000
+*        ERROR -                                                        00039000
+*        GPR2 = ERROR MESSAGE CODE NUMBER                               00040000
+*                                                                       00041000
+* CALLS TO OTHER ROUTINES -                                             00042000
+*                                                                       00043000
+*        DMKCVTBH - TO CONVERT BINARY TO HEX                            00044000
+*        DMKERMSG - TO SEND ERROR MESSAGES TO TERMINAL                  00045000
+*        DMKFREE  - TO OBATIN BUFFER SPACE FOR STORAGE KEYS             00046000
+*        DMKFRET  - TO RETURN FREE STORAGE USED FOR BUFFER SPACE        00047000
+*        DMKPTRAN - LOCATE AND FETCH A PAGE OF VIRTUAL STORAGE          00048000
+*        DMKPTRLK - TO LOCK A PAGE IN CORE                              00049000
+*        DMKPTRUL - TO UNLOCK A PAGE                                    00050000
+*        DMKQCNRD - TO READ RESPONSE FROM A CONSOLE                     00051000
+*        DMKQCNWT - TO WRITE A MESSAGE TO CONSOLE                       00052000
+*        DMKRPAGT - TO GET A PAGE FROM BACKING DEVICE                   00053000
+*        DMKRPAPT - TO WRITE A PAGE TO BACKING DEVICE                   00054000
+*        DMKSCNFD - LOCATE THE NEXT ARGUMENT ON THE COMMAND LINE        00055000
+*        DMKSCNVS - TO FIND A VOLUME                                    00056000
+*        DMKSCNVU - TO FIND A VIRTUAL UNIT                              00057000
+*                                                                       00058000
+* EXTERNAL REFERENCES -                                                 00059000
+*                                                                       00060000
+*        DMKVMAS1 - ANCHOR FOR SHARED SYSTEMS (SHRTABLE POINTER)        00061000
+*                                                                       00062000
+* TABLES / WORKAREAS -                                                  00063000
+*                                                                       00064000
+*        DMKSNTBL - SYSTEM NAME TABLE                                   00065000
+*                                                                       00066000
+* MACROS -                                                              00067000
+*                                                                       00068000
+*        CALL  - TO TRANSFER CONTROL TO OTHER SYSTEM ROUTINES           00069000
+*        ENTRY - TO ESTABLISH ENTRY CONVENTIONS AND ADDRESSIBILITY      00070000
+*        EXIT  - TO RETURN CONTROL TO CALLING ROUTINE                   00071000
+*        MSG   - TO SEND MESSAGES TO THE CALLERS CONSOLE                00072000
+*        TRANS - TO BRING PAGEABLE PAGES BACK INTO MAIN STORAGE         00073000
+*                                                                       00074000
+* REGISTER USAGE -                                                      00075000
+*                                                                       00076000
+*        GPR0  = LENGTH OF ARGUMENT (RETURNED BY DMKSCNFD)              00077000
+*        GPR1  = ADDRESS OF ARGUMENT (RETURNED BY DMKSCNFD)             00078000
+*        GPR2  = PARMS PASSED TO CALLED ROUTINES                        00079000
+*        GPR3  = LENGTH FOR EXECUTED MOVES AND COMPARES                 00080000
+*        GPR4  = INTERNAL LINKAGE (2ND LEVEL)                           00081000
+*        GPR5  = INTERNAL LINKAGE (2ND LEVEL)                           00082000
+*        GPR6-8  NOT USED                                               00083000
+*        GPR9  = ADDRESS OF COMMAND LINE BUFFER                         00084000
+*        GPR10 = IOBLOK BASE                                            00085000
+*        GPR11 = VMBLOK BASE                                            00086000
+*        GPR12 = MODULE BASE                                            00087000
+*        GPR13 = SAVEAREA BASE                                          00088000
+*        GPR14 = EXTERNAL LINKAGE                                       00089000
+*        GPR15 = EXTERNAL LINKAGE                                       00090000
+*                                                                       00091000
+* OPERATION -                                                           00092000
+*                                                                       00093000
+*        1. CALL DMKSCNFD TO GET THE SYSTEM-NAME ARGUMENT. IF           00094000
+*           NONE IS FOUND, CALL DMKERMSG TO SEND ERROR MESSAGE          00095000
+*           DMKCFH026E.                                                 00096000
+*        2. TRANS IN AND LOCK THE SYSTBL. THEN SCAN THE SYSTBL TO       00097000
+*           FIND THE ENTRY FOR THE SPECIFIED NAME. IF NONE IS FOUND,    00098000
+*           CALL DMKERMSG TO SEND ERROR MESSAGE DMKCFH044E.             00099000
+*        3. IF THE VIRTUALSTORAGE IS NOT LARGE ENOUGH TO CONTAIN        00100000
+*           THE NAMED SYSTEM, CALL DMKERMSG TO SEND ERROR MESSAGE       00101000
+*           DMKCFH170E.                                                 00102000
+*        4. CALL DMKSCNVS TO FIND THE VOLUME CONTAINING THE VIRTUAL     00103000
+*           SYSRES. IF NOT FOUND, CALL DMKERMSG TO SEND ERROR MESSAGE   00104000
+*           DMKCFH171E.                                                 00105000
+*        5. CALL DMKSCNVU TO GET THE VIRTUAL DEVICE BLOKS FOR THE       00106000
+*           VIRTUAL SYSRES. IF NOT FOUND, CALL DMKERMSG TO SEND ERROR   00107000
+*           MESSAGE DMKCFH173E. IF HAVE THE DEVICE BLOKS, BUT THE       00108000
+*           MINI DISK IS NOT AT THE CYLINDER SPECIFIED IN THE SYSTBL,   00109000
+*           CALL DMKERMSG TO SEND ERROR MESSAGE DMKCFH172E.             00110000
+*        6. CALL DMKSCNVS TO FIND THE VOLUME THAT IS TO CONTAIN THE     00111000
+*           SAVED SYSTEM. IF NOT FOUND, CALL DMKERMSG TO SEND ERROR     00112000
+*           MESSAGE DMKCFH171E. IF THIS VOLUME IS NOT A CP OWNED        00113000
+*           VOLUME, CALL DMKERMSG TO SEND ERROR MESSAGE                 00114000
+*           DMKCFH179E. IF ALL OK, CHECK FOR ANY                        00115000
+*           PENDING INTERRUPTS IN THE VIRTUAL MACHINE. IF NONE ARE      00116000
+*           FOUND, GO TO STEP 9.                                        00117000
+*        7. CALL DMKQCNWT TO SEND THE INTERRUPT PENDING MESSAGE.        00118000
+*           THEN CALL DMKQCNRD TO READ THE REPLY.                       00119000
+*        8. IF THE REPLY WAS YES, CONTINUE - ELSE GO TO STEP 13.        00120000
+*        9. SET UP THE NEXT GROUP OF PAGES (SPECIFIED IN THE SYSTBL)    00121000
+*           TO BE SAVED. CALL DMKFREE TO OBTAIN FREE STORAGE            00122000
+*           FOR A STORAGE KEY BUFFER.                                   00123000
+*        10.TRANS IN THE NEXT PAGE TO BE SAVED. CALL DMKRPAPT TO        00124000
+*           WRITE THE PAGE TO THE SYSVOL. SAVE THE STORAGE KEYS FOR     00125000
+*           THIS PAGE.                                                  00126000
+*        11.IF ALL THE PAGES IN THIS GROUP HAVE BEEN PROCESSED, GO TO   00127000
+*           STEP 12. ELSE - BUMP TO THE NEXT PAGE AND GO BACK TO        00128000
+*           STEP 10.                                                    00129000
+*        12.IF THERE ARE MORE PAGE GROUPS TO PROCESS, GO BACK TO        00130000
+*           STEP 9. IF NOT, TRANS IN USER PAGE ZERO. STORE THE VIRTUAL  00131000
+*           PSW,REGISTERS, AND KEYS IN THIS PAGE. THEN CALL DMKRPAPT    00132000
+*           TO WRITE THIS PAGE OUT TO THE SYSVOL.                       00133000
+*        13.CALL DMKPTRUL TO UNLOCK THE SYSTBL. IF THE SAVE WAS NOT     00134000
+*           COMPLETED DUE TO AN ERROR - EXIT. IF IT WAS A GOOD          00135000
+*           SAVE, CALL DMKQCNWT TO SEND THE 'SYSTEM SAVED' MESSAGE      00136000
+*           AND EXIT.                                                   00137000
+*                                                                       00138000
+* RESPONSES -                                                           00139000
+*        SYSTEM SAVED                                                   00140000
+*                                                                       00141000
+* ERROR MESSAGES -                                                      00142000
+*        DMKCFH026E OPERAND MISSING OR INVALID                          00143000
+*        DMKCFH044E SYSTEM (NAME) DOES NOT EXIST                        00144000
+*        DMKCFH170E SYSTEM (NAME) EXCEEDS STORAGE                       00145000
+*        DMKCFH171E SYSTEM (NAME) VOLID (VOLID) NOT MOUNTED             00146000
+*        DMKCFH172E SYSTEM (NAME) DASD (VADDR) INCOMPATIBLE SYSRES      00147000
+*        DMKCFH173E SYSTEM (NAME) REQUIRES DASD (VADDR)                 00148000
+*        DMKCFH179E SYSTEM (NAME) VOLID (VOLID) NOT CP-OWNED            00149000
+*        DMKCFH300E SAVE REQUEST BEYOND VIRTUAL MACHINE SIZE            00150000
+*        DMKCFH435E PAGING ERROR WRITING SAVED SYSTEM                   00151000
+*                                                                       00152000
+*.                                                                      00153000
+         EJECT                                                          00154000
+         COPY  OPTIONS                                                  00155000
+         COPY  LOCAL                                                    00156000
+DMKCFH   CSECT                                                          00157000
+MODID    DC    CL8'DMKCFH'    MODULE NAME                      @VM03098 00158000
+         SPACE 3                                                        00159000
+         USING PSA,R0                                                   00160000
+         USING VMBLOK,R11                                               00161000
+         USING SAVEAREA,R13                                             00162000
+         SPACE 2                                                        00163000
+         EXTRN DMKSCNFD                                                 00164000
+         EXTRN DMKPTRUL                                                 00165000
+         EXTRN DMKCVTBH                                                 00166000
+         EXTRN DMKSNTBL                                                 00167000
+         EXTRN DMKSCNVS                                                 00168000
+         EXTRN DMKSCNVU                                                 00169000
+         EXTRN DMKQCNRD,DMKQCNWT                                        00170000
+         EXTRN DMKRPAPT                                                 00171000
+         EXTRN DMKRPAGT                                                 00172000
+         EXTRN DMKERMSG                                                 00173000
+         EXTRN DMKVMAS1                                                 00174000
+         EJECT                                                          00175000
+         SPACE                                                          00176000
+DMKCFHSV RELOC                                                          00177000
+         XC    SAVEWRK1,SAVEWRK1 CLEAR FLAG BYTES              @V304635 00178000
+         XC    SAVEWRK2(SAVEWRK9-SAVEWRK2+4),SAVEWRK2 CLEAR    @VM03100 00179000
+*                             SAVEWRK2-9                                00180000
+         MVC   SAVEWRK2(L'SAVEWRK2+L'SAVEWRK3),BLANKS BLANKS   @VM03100 00181000
+*                             TO SAVEWRK2/3                             00182000
+         CALL  DMKSCNFD       LOCATE SYSTEM NAME                        00183000
+         BNZ   CFH026         MISSING ARGUMENT                          00184000
+         LR    R3,R0          LENGTH OF NAME TO R3                      00185000
+         CL    R3,F8          MORE THAN EIGHT CHARACTERS                00186000
+         BH    CFH026         INVALID ARGUMENT                          00187000
+         BCTR  R3,0           MINUS ONE                                 00188000
+         EX    R3,SAVENAME    SAVE NAME IN SAVEWRK2/3                   00189000
+         TM    VMRSTAT,VMLOGOFF OTHER ACTIVITY STARTED?        @V408246 00190000
+         BO    CFHEXIT        YES, GET OUT AS FAST AS POSSIBLE @V408246 00191000
+         BAL   R5,GETSNTBL    GET SYSNAME TABLE                @V304635 00192000
+         SPACE                                                          00193000
+         USING SYSTBL,R4                                                00194000
+         SPACE                                                          00195000
+NAMECHEK CLC   SAVEWRK2(L'SYSNAME),SYSNAME IS THIS CORRECT     @VM03100 00196000
+*                             ENTRY ?                                   00197000
+         BE    SIZECHK        BRANCH IF YES                             00198000
+         L     R3,SYSPNT      LOAD DISPLACEMENT TO NEXT ENTRY           00199000
+         AR    R4,R3          ADDRESS OF NEXT ENTRY TO R4               00200000
+         LTR   R3,R3          LAST ENTRY ???                            00201000
+         BNZ   NAMECHEK       BRANCH IF NOT                             00202000
+         B     CFH044         INVALID NAME                              00203000
+         SPACE                                                          00204000
+SIZECHK  L     R0,VMSTOR      GET VIRTUAL STORAGE SIZE         @V304635 00205000
+         CL    R0,SYSSIZE     WILL THE SYSTEM FIT IN THIS MACHINE       00206000
+         BL    CFH170         NOPE !!!!                                 00207000
+         SPACE                                                          00208000
+         LH    R1,SYSVADDR    GET VIRTUAL ADDRESS              @V304635 00209000
+         LTR   R1,R1          IS NAMESYS FLAGGED 'IGNORE'      @V304635 00210000
+         BM    NOVOLCHK       IF YES - SKIP FOR MOUNT CHECK.   @V304635 00211000
+         LA    R1,VSYSRES     ADDRESS OF VOL. SER. FOR VIRT.   @V304635 00212000
+*                             SYSRES.                                   00213000
+         LA    R0,L'VSYSRES   LENGTH OF 6 BYTES                @VM03100 00214000
+         CALL  DMKSCNVS       SEARCH FOR THIS VOLUME                    00215000
+         BNZ   NOSYSRES       BRANCH IF NOT FOUND                       00216000
+         SPACE                                                          00217000
+         LR    R5,R1          RDEVBLOK ADDRESS TO R5                    00218000
+         LH    R1,SYSVADDR    LOAD VIRTUAL ADDRESS FROM SYSTABLE        00219000
+         CALL  DMKSCNVU       SEE IF THERE                              00220000
+         BNZ   BLD173         NOT PROPER ADR.                           00221000
+         USING VDEVBLOK,R8                                              00222000
+         SPACE                                                          00223000
+         CL    R5,VDEVREAL    PROPER LINK-UP ???                        00224000
+         BNE   BLD172         NO - NO                                   00225000
+         SPACE                                                          00226000
+         CLC   VDEVRELN(L'SYSCYL),SYSCYL PROPER CYLINDER ON    @VM03100 00227000
+*                             DISK ??                                   00228000
+         BNE   BLD172         NOT PROPER CYLINDER                       00229000
+         SPACE                                                          00230000
+NOVOLCHK LA    R0,L'SYSVOL    VOLUME SERIAL LENGTH             @VM03100 00231000
+         LA    R1,SYSVOL      NOW LET US SEE IF RIGHT SYSVOL SPECIFIED  00232000
+         CALL  DMKSCNVS       ...                                       00233000
+         BNZ   NOSYSVOL       CAN'T SAVE A SYSTEM WITHOUT A DISK        00234000
+         SPACE                                                          00235000
+         LR    R10,R1         RDEVBLOK TO R10                           00236000
+         USING RDEVBLOK,R10                                             00237000
+         TM    RDEVFLAG,RDEVOWN    OWNED VOLUME ????                    00238000
+         BZ    NOSYSOWN       ALMOST MADE IT -- NOT CP OWNED   @V200820 00239000
+         LA    R0,PAGE2314    MAXIMUM PAGES/CYL ON 2314        @VM03100 00240000
+         TM    RDEVTYPE,TYP2314    IS THIS A 2314 ????                  00241000
+         BO    STOMAXPG       YES -----                                 00242000
+         LA    R0,PAGE3330    MAXIMUM PAGES/CYL ON 3330        @VM03100 00243000
+         TM    RDEVTYPE,TYP3330    IS IT ????                           00244000
+         BO    STOMAXPG       YES ----                                  00245000
+         LA    R0,PAGE3350    MAXIMUM PAGES/CYL ON 3350        @VM03100 00246000
+         CLI   RDEVTYPE,TYP3350 IS IT ????                     @V304498 00247000
+         BE    STOMAXPG       YES -----                        @V304498 00248000
+         LA    R0,PAGE2305    MAXIMUM PAGES/CYL ON 3340/2305   @VM03100 00249000
+         TM    RDEVTYPE,TYP2305+TYP3340 2305 OR 3340 ?         @V2A2029 00250000
+         BNZ   STOMAXPG       YES -                            @V2A2029 00251000
+         LA    R2,EMSG006     LOAD ERROR CODE FOR WRONG        @VM03100 00252000
+*                             DEVICE TYPE                               00253000
+         B     NOVAR          GO SEND ERROR MESSAGE                     00254000
+         SPACE                                                          00255000
+STOMAXPG SLL   R0,8           SHIFT UP EIGHT                            00256000
+         ST    R0,SAVEWRK7    SAVE FOR LATER USE                        00257000
+         SPACE                                                          00258000
+******************************************************************      00259000
+*        NOW CHEK FOR PENDING INTERUPTS - IF ANY FOUND - GIVE           00260000
+*        REQUESTOR A CHANCE TO BACK OUT...                              00261000
+******************************************************************      00262000
+         TM    VMPEND,X'FF'-EXTMASK CHECK ALL BUT EXTERNAL     @VM03100 00263000
+         BZ    DOSAVE         BRANCH IF NONE FOUND                      00264000
+         SPACE                                                          00265000
+INTPEND  MSG   'DMKCFH436E INTERRUPT PENDING. TO PROCEED TYPE YES, TO EX00266000
+               ND TYPE NO.'                                    @VM08919 00267000
+         L     R2,=A(NOTRESP) SIGNAL NOT A COMMAND RESPONSE    @V60C2B8 00268100
+         CALL  DMKQCNWT,PARM=NORET+ERRMSG(,R2)                 @V60C2B8 00268120
+         LA    R1,SAVEWRK4    READ IT INTO HERE                @V304635 00269000
+         LA    R0,3           MAXIMUM LENGTH                            00270000
+         CALL  DMKQCNRD,PARM=UCASE+EDIT                                 00271000
+         BNZ   CFHEXIT        SOMETHING HAPPENED -FORGET IT    @V304635 00272000
+         CH    R0,F2+2            2 CHARACTERS IN?             @VM08919 00273000
+         BH    CHKYES             MORE, MAYBE YES.             @VM08919 00274000
+         BL    INTPEND            LESS, BAD NEWS, TRY AGAIN.   @VM08919 00275000
+         CLC   =C'NO',SAVEWRK4 WAS IT NO ?                     @VM03100 00276000
+         BNE   INTPEND            NOPE, BAD NEWS, TRY AGAIN.   @VM08919 00277000
+         BE    CFHEXIT        IT WAS NO - SO FORGET IT.        @V304635 00278000
+         SPACE 1                                                        00279000
+CHKYES   CH    R0,F3+2            ENTER 3 CHARACTERS?          @VM08919 00280000
+         BNE   INTPEND            NOPE, THEN CAN'T BE YES      @VM08919 00281000
+         CLC   =C'YES',SAVEWRK4 WAS IT YES ?                   @VM03100 00282000
+         BNE   INTPEND            NOPE, SO SAD, TRY AGAIN.     @VM08919 00283000
+         SPACE                                                          00284000
+DOSAVE   XC    SAVEWRK4(L'SAVEWRK4+L'SAVEWRK5),SAVEWRK4 CLEAR  @VM03100 00285000
+*                             SAVEWRK4/5                                00286000
+         L     R0,SYSPAGCT    LOAD NUMBER OF PAGES SAVED                00287000
+         SRL   R0,2                DIVIDE NUM. OF PAGES BY 4            00288000
+         AH    R0,F1+2             ADD ONE TO ADJUST FOR LOST BITS      00289000
+         ST    R0,SAVEWRK9    SAVE SIZE FOR FRET                        00290000
+         CALL  DMKFREE        ...                                       00291000
+         ST    R1,SAVEWRK4    SAVE BUFFER ADDRESS                       00292000
+         L     R5,SYSSTART    LOAD CCPD FROM SYSTABLE                   00293000
+         IC    R5,RDEVCODE+1  INSERT DEVICE CODE                        00294000
+         ST    R5,SAVEWRK2    SAVE STARTING CCPD FOR FUTURE USE         00295000
+         L     R10,F4096      LOAD CONSTANT FOR BUMPING PAGES           00296000
+         L     R7,F256        LOAD CONSTANT FOR BUMPING CCPD            00297000
+         LH    R6,SYSPAGLN    LOAD NUMBER OF SAVEPAG ENTRIES            00298000
+         AR    R5,R7          POINT TO DASD ADDRESS OF FIRST VIRT PAGE  00299000
+         SR    R3,R3          ZERO GPR3                                 00300000
+****************************************************************        00301000
+*        REGISTER USAGE DURING SAVE LOOP                                00302000
+*        R3 - INDEX COUNT TO STEP THRU SYSPAGNM OF SYSTABLE ENTRY.      00303000
+*        R4 - ADDRESS OF SYSTABLE ENTRY.                                00304000
+*        R5 - CCPD OF CURRENT PAGE ON SYSVOL.                           00305000
+*        R6 - COUNT OF NUMBER OF SYSPAGNM ENTRIES LEFT TO PROCESS.      00306000
+*        R7 - CONSTANT USED TO INCREMENT CCPD IN R5.                    00307000
+*        R8 - CURRENT PAGE ADDRESS.                                     00308000
+*        R9 - ENDING ADDRESS OF THE SYSPAGNM ENTRY BEING PROCESSED.     00309000
+*        R10- CONSTANT USED TO INCREMENT ADDRESS IN R8.                 00310000
+*                                                                       00311000
+*******************************************************************     00312000
+SAVELOOP L     R8,SYSPAGNM(R3)     LOAD ENTRY                           00313000
+         SRDL  R8,16          LOW PAGE NUM TO LOW ORDER OF R8           00314000
+         SRL   R9,16          HIGH PAG NUM TO LOW ORDER OF R9           00315000
+         SLL   R8,12          FORM ADDRESS OF CURRENT PAGE              00316000
+         SLL   R9,12          FORM ADDRESS OF HIGH PAGE                 00317000
+         CL    R9,VMSIZE      GREATER THAN VIRTUAL MACH SIZE   @VA02004 00318000
+         BNL   CFH300         YES, WRITE ERROR MSG             @VA02004 00319000
+         SPACE                                                          00320000
+TRANLOOP LR    R1,R8          ADDRESS OF PAGE TO R1                     00321000
+         TRANS 2,1,OPT=(BRING,DEFER)    BRING PAGE INTO STORAGE         00322000
+         LR    R1,R8          LOAD ADDRESS                              00323000
+         LR    R0,R5          LOAD CCPD                                 00324000
+         ST    R2,SAVEWRK1    SAVE THE REAL ADDRESS FOR LATER           00325000
+         SLR   R2,R2          ZIP THE PARM REG                          00326000
+         CALL  DMKRPAPT       WRITE PAGE OUT TO SYSVOL                  00327000
+         BNZ   CFH435         GET OUT ON ERROR FROM WRITE               00328000
+*                                                                       00329000
+*        NOW GET KEYS FOR PAGE AND SAVE IN BUFFER                       00330000
+*                                                                       00331000
+RSTRT    DS    0H                                                       00332000
+         L     R15,SAVEWRK1   LOAD THE REAL ADDRESS                     00333000
+         L     R2,VMSEG       GET SEGTABLE ADDRESS                      00334000
+         LR     R0,R8         LOAD VIRT ADDRESS                         00335000
+         SRDL  R0,16          SEGMENT TO LOW ORDER OF R0, PAG TO R1     00336000
+         SLL   R0,2           INDEX INTO SEGTABLE                       00337000
+         AR    R2,R0          R2 NOW POINTS TO ADDRESS OF PAGETABLE     00338000
+         TM    3(R2),SEGINV   VALID SEGMENT                    @V408246 00339000
+         BZ    SEGVAL         YES                              @V408246 00340000
+         TRANS 2,8,OPT=DEFER  CLEAR SEQMENT INVALID            @V408246 00341000
+         B     RSTRT          START AGAIN                      @V408246 00342000
+SEGVAL   DS    0H                                                       00343000
+         L     R2,0(,R2)      NOW CONTAINS ADDRESS OF PAGTABLE          00344000
+         SRL   R1,28          SHIFT PAGE TO LOWORDER OF R1              00345000
+         SLL   R1,3           INDEX INTO SWPTABLE                       00346000
+         LA    R2,16*2+8(R1,R2) NOW POINT TO CORRECT SWAPTABLE @V408246 00347000
+         LH    R0,SWPKEY1-SWPFLAG(,R2) LOAD KEYS FOR PAGE      @VM03100 00348000
+         SLR   R14,R14        ZIP THE KEY REG                           00349000
+         ISK   R14,R15        GET THE PRESENT KEY                       00350000
+         SLL   R14,8          SHIFT IT DOWN THE LINE                    00351000
+         A     R15,=F'2048'   GET ADDRESS OF SECOND HALF OF PAGE        00352000
+         ISK   R14,R15        GET PRESENT KEY FOR THAT HALF             00353000
+         OR    R0,R14         'OR' THE OLD AND THE NEW                  00354000
+         LM    R1,R2,SAVEWRK4 LOAD ADDRESS OF BUFFER AND NO. KEYS SAVED 00355000
+         STH   R0,0(R2,R1)    STORE KEYS IN BUFFER                      00356000
+         A     R2,F2          BUMP COUNT OF KEYS(ALSO INDEXINTO BUFFER) 00357000
+         ST    R2,SAVEWRK5    STORE IT                                  00358000
+         SPACE                                                          00359000
+         AR    R5,R7          BUMP CCPD TO NEXT DASD PAGE               00360000
+         LR    R1,R5          CCPD TO R1                                00361000
+         N     R1,=X'0000FF00' SAVE PAGE NUMBER                         00362000
+         CL    R1,SAVEWRK7    CHECK IT AGAINST MAXIMUM PER CYL          00363000
+         BNH   PAGBUMP        BRANCH IF STILL ON SAME CYLINDER          00364000
+         A     R5,=X'00010000' ADD ONE TO 'CC'                          00365000
+         ICM   R5,B'0010',F1+3 RESET 'P' TO ONE                @VM03100 00366000
+         SPACE                                                          00367000
+PAGBUMP  EQU   *              . . .                                     00368000
+         AR    R8,R10         BUMP PAGE                                 00369000
+         CR    R8,R9          END OF THIS ENTRY                         00370000
+         BH    CHKPAGLN       YES - GO SEE IF ANY MORE ENTRIES          00371000
+         B     TRANLOOP       NO - GO PROCESS NEXT PAGE                 00372000
+         SPACE                                                          00373000
+CHKPAGLN A     R3,F4          BUMP R3 TO NEXT PAGNM ENTRY               00374000
+         BCT   R6,SAVELOOP    BRANCH IF MORE ENTRIES                    00375000
+         SPACE                                                          00376000
+         L     R5,SAVEWRK2    RESTORE ORIGINAL CCPD                     00377000
+         LH    R1,SYSPAGNM    FIRST PAGE SAVED                 @V408246 00378000
+         SLL   R1,12          VIRT. ADDRESS OF FIRST PAGE SAVED@V408246 00379000
+         TRANS 2,1,OPT=(BRING,DEFER)                           @V408246 00380000
+         USING SAVTABLE,R2                                              00381000
+         MVC   SAVPSW,VMPSW   SAVE PSW                                  00382000
+         MVC   SAVGREGS(L'SAVGREGS*16),VMGPRS SAVE GENERAL     @VM03100 00383000
+*                             PURPOSE REGS.                             00384000
+         MVC   SAVFPRES(L'SAVFPRES*4),VMFPRS SAVE FLOATING     @VM03100 00385000
+*                             POINT REGS                                00386000
+         SPACE                                                          00387000
+         TM    VMPSTAT,VMV370R  IS THIS AN EC MACHINE?                  00388000
+         BO    SAVECRS        BR., WE HAVE EC MACH.                     00389000
+         XC    SAVCREGS(L'SAVCREGS*16),SAVCREGS SET THE CREGS  @VM03100 00390000
+*                             ...                                       00391000
+         MVC   SAVCREGS,VMVCR0 .... TO CORRECT                 @VM03100 00392000
+         MVC   SAVCREGS+C2*4(L'SAVCREGS*2),FFS ... VALUES      @VM03100 00393000
+         MVI   SAVCREGS+C14*4,HEXC4 SET CR14                   @VM03100 00394000
+         MVI   SAVCREGS+C15*4+2,HEX02 SET SAVCR15              @VM03100 00395000
+         B     KEYSAVE        NOW GO SAVE THE KEYS.                     00396000
+SAVECRS  EQU   *                                                        00397000
+         L     R10,VMECEXT    ADDRESS OF ECBLOK                         00398000
+         USING ECBLOK,R10                                               00399000
+         MVC   SAVCREGS(L'SAVCREGS*16),EXTCR0 SAVE CREGS       @VM03100 00400000
+         DROP  R10                                                      00401000
+         SPACE                                                          00402000
+KEYSAVE  EQU   *                                                        00403000
+         LM    R8,R9,SAVEWRK4 ADDRESS AND LENGTH OF KEY FIELD           00404000
+         LR    R7,R8          SAVE THE BUFFER ADDRESS                   00405000
+         LR    R3,R9          LENGTH TO R3 FOR LONG MOVE                00406000
+         LA    R2,SAVKEYS     ADDRESS OF KEYS IN THE SAVETABLE          00407000
+         MVCL  R2,R8          MOVE THE KEYS                             00408000
+         LR    R0,R5          LOAD CCPD FOR FIRST DASD PAGE             00409000
+         LH    R1,SYSPAGNM    STARTING PAGE NO.                @V408246 00410000
+         SLL   R1,12          STARTING VIRTUAL ADDRESS         @V408246 00411000
+         CALL  DMKRPAPT,PARM=0                                 @V408246 00412000
+         L     R0,SAVEWRK9    LOAD SIZE OF BUFFER                       00413000
+         LR    R1,R7          ADDRESS OF BUFFER                         00414000
+         CALL  DMKFRET        RELEASE BUFFER                            00415000
+         LH    R1,SYSPAGNM    FIRST PAGE SAVED                 @V408246 00416000
+         SLL   R1,12          VIRT. ADDRESS OF FIRST PAGE SAVE @V408246 00417000
+         LR    R0,R5          CCPD OF FIRST SAVED              @V408246 00418000
+*                             PAGE (SAVETABLE)                 @V408246 00419000
+         A     R0,F256        BUMP TO WHAT SHOULD BE SAVED     @V408246 00420000
+*                             PAGE 0                           @V408246 00421000
+         CALL  DMKRPAGT,PARM=0                                 @V408246 00422000
+         SPACE 1                                                        00423000
+SAVEFINI MSG   'SYSTEM SAVED' SEND CONFIRMATION MESSAGE                 00424000
+         CALL  DMKQCNWT,PARM=NORET SEND THE MSG                         00425000
+         SPACE 1                                                        00426000
+*  CHECK IF NAMED SYSTEM IS ALREADY ACTIVE                              00427000
+         L     R2,=A(DMKVMAS1) GET ANCHOR OF SHARED SYSTEMS    @VM03171 00428000
+         L     R5,0(,R2)      GET FIRST SHRTABLE (IF ANY)      @V304735 00429000
+         USING SHRTABLE,R5    ADDRESSABILITY                   @V304735 00430000
+EXAMSHR  CR    R5,R2          IS IT END OF THE CHAIN ?         @V304735 00431000
+         BE    CFHEXIT        IF YES - SHRTABLE NOT BEING USED @V304735 00432000
+         CLC   SYSNAME,SHRNAME DO NAMES MATCH ?                @VM03100 00433000
+         BE    EXAMSHR1       YES                              @V304735 00434000
+         L     R5,SHRFPNT     GET NEXT ONE IN CHAIN            @V304735 00435000
+         LA    R5,0(,R5)      CLEAR FLAG BYTE                  @V60BC11 00435100
+         B     EXAMSHR        KEEP SEARCHING                   @V304735 00436000
+EXAMSHR1 LM    R1,R2,SHRFPNT  UNCHAIN THE SHRTABLE             @V304735 00437000
+         STCM  R1,B'0111',SHRFPNT+1-SHRTABLE(R2) FROM THE      @V60BC11 00438000
+         ST    R2,SHRBPNT-SHRTABLE(,R1) ACTIVE LIST            @V304735 00439000
+         STCM  R5,B'0111',SHRFPNT+1  CHAIN THIS ONE            @V60BC11 00440000
+         ST    R5,SHRBPNT     TO ITSELF......                  @V304735 00441000
+         B     CFHEXIT        EXIT                             @V304735 00442000
+         DROP  R5                                              @V304735 00443000
+         EJECT                                                          00444000
+NOSYSOWN EQU   *              VOLID NOT CP OWNED               @V200820 00445000
+         MVC   SAVEWRK4+1(L'SYSVOL),SYSVOL MOVE IN VOLID       @VM03100 00446000
+         MVI   SAVEWRK4,SEP00 MOVE IN FIELD DELIMITER          @VM03100 00447000
+         LA    R0,LEN15       LOAD LENGTH OF ERROR MSG PARM    @VM03100 00448000
+         LA    R1,SAVEWRK2    LOAD PARM REG WITH ADDRESS OF MSG@VM03100 00449000
+         B     CFH179         GO WRITE ERROR MSG DMKCFH179     @VM03100 00450000
+NOSYSVOL MVC   SAVEWRK4+1(L'SYSVOL),SYSVOL VOL SER FOR ERR MSG @VM03100 00451000
+         B     LOADLEN        GO SET UP LENGTH PARM REG        @VM03100 00452000
+NOSYSRES MVC   SAVEWRK4+1(L'VSYSRES),VSYSRES VIRT SYSRES VOL   @VM03100 00453000
+*                             SER FOR MSG                               00454000
+LOADLEN  MVI   SAVEWRK4,SEP00 MOVE IN FIELD SEPARATOR          @VM03100 00455000
+         LA    R0,LEN15       LOAD PARM REG LENGTH OF PARMS    @VM03100 00456000
+         LA    R1,SAVEWRK2    LOAD ADDRESS OF ERROR MSG PARMS  @VM03100 00457000
+         B     CFH171         GO TO WRITE ERROR MSG ROUTINE    @VM03100 00458000
+BLD172   EQU   *              INCOMPATIBLE VSYSRES                      00459000
+         BAL   R10,GETVADDR   BUILD VADDR                               00460000
+         B     CFH172         GO TO WRITE ERROR MSG ROUTINE    @VM03100 00461000
+         SPACE                                                          00462000
+BLD173   EQU   *              VADDR REQUIRED                            00463000
+         BAL   R10,GETVADDR   BUILD VADDR                               00464000
+         B     CFH173         GO TO WRITE ERROR MSG ROUTINE    @VM03100 00465000
+         SPACE                                                          00466000
+GETVADDR LH    R1,SYSVADDR    LOAD VADDR FROM SYSTBL                    00467000
+         CALL  DMKCVTBH       CONVERT IT                                00468000
+         ICM   R1,8,F0        INSERT THE SEPARATER                      00469000
+         ST    R1,SAVEWRK4    STORE DEV ADDRESS IN MSG TEXT             00470000
+         LA    R0,12          FIELD LENGTH                              00471000
+         LA    R1,SAVEWRK2    FIELD ADDRESS                             00472000
+         BR    R10            RETURN                                    00473000
+         DROP  R2,R4,R8                                                 00474000
+         EJECT                                                          00475000
+CFHEXIT  BAL   R10,SYSTUNLC   UNLOCK SYSTEM NAME TABLE(DMKSNT) @V304635 00476000
+         EXIT                 RETURN TO CALLER                 @V304635 00477000
+         SPACE 2                                                        00478000
+         SPACE                                                          00479000
+GETSNTBL L     R4,SAVEWRK6    IS SYSNAME TABLE ALLREADY IN     @V304635 00480000
+*                             STORAGE                                   00481000
+         LTR   R4,R4          .....                            @V304635 00482000
+         BNZR  R5             IF IT IS - RETURN TO CALLER      @V304635 00483000
+         L     R1,=A(DMKSNTBL) ADDRESS OF SYSNAME TABLE        @V304635 00484000
+         TRANS 2,1,OPT=(BRING,DEFER,LOCK,SYSTEM)               @V304635 00485000
+         LR    R4,R2          ADDRESS OF SYSTABLE TO R4        @V304635 00486000
+         ST    R2,SAVEWRK6    SAVE ADDRESS OF SYSNAME TABLE    @V304635 00487000
+         BR    R5             RETURN TO CALLER                 @V304635 00488000
+         EJECT                                                          00489000
+SYSTUNLC ST    R2,SAVEWRK9    SAVE ERROR CODE REGISTER         @V304635 00490000
+         L     R2,SAVEWRK6    TEST IF DMKSNT TABLE IN STORAGE  @V304635 00491000
+         LTR   R2,R2          IS IT ?                          @V304635 00492000
+         BNZ   PTRUL          IF IS - UNLOCK IT.               @V304635 00493000
+         L     R2,SAVEWRK9    RESTORE R2                       @V304635 00494000
+         BR    R10            RETURN TO CALLER                 @V304635 00495000
+PTRUL    CALL  DMKPTRUL       UNLOCK THE SYSNAME TABLE         @V304635 00496000
+         XC    SAVEWRK6,SAVEWRK6 ZERO OUT ADDRESS OF SYSNAME   @V304635 00497000
+*                             TABLE                                     00498000
+         L     R2,SAVEWRK9    RESTORE ERROR CODE REGISTER      @V304635 00499000
+         BR    R10            RETURN TO CALLER                 @V304635 00500000
+         SPACE 2                                                        00501000
+FREEKBUF L     R0,SAVEWRK9    BUFFER LENGTH                             00502000
+         L     R1,SAVEWRK4    BUFFER ADDRESS                            00503000
+         CALL  DMKFRET        FRET THE BUFFER                           00504000
+         BR    R10            RETURN                                    00505000
+         SPACE 2                                                        00506000
+SAVENAME MVC   SAVEWRK2(0),0(R1)                               @V304635 00507000
+         EJECT                                                          00508000
+CFH026   LA  R2,EMSG026       LOAD ERROR CODE                           00509000
+         B   NOVAR            GO SET UP ERROR MSG DMKCFH026             00510000
+CFH044   LA  R0,L'SYSNAME     LOAD LENGTH OF FIELD                      00511000
+         LA  R1,SAVEWRK2      FIELD ADDRESS                             00512000
+         LA    R2,EMSG044     LOAD ERROR CODE                  @VM03100 00513000
+         B     CALLERM        GO SET UP ERROR MSG DMKCFH044    @VM03099 00514000
+         SPACE 1                                                        00515000
+         SPACE                                                          00516000
+CFH170   LA    R0,L'SYSNAME   LOAD LENGTH OF FIELD             @VM03201 00517000
+         LA    R1,SAVEWRK2    FIELD ADDRESS                    @VM03201 00518000
+         LA    R2,EMSG170     LOAD ERROR CODE                  @VM03201 00519000
+         B     CALLERM        .....                                     00520000
+         SPACE                                                          00521000
+CFH171   LA    R2,EMSG171     LOAD ERROR CODE                  @VM03100 00522000
+         B     CALLERM        GO SET UP ERROR MSG DMKCFH171    @VM03099 00523000
+         SPACE                                                          00524000
+CFH172   LA    R2,EMSG172     LOAD ERROR CODE                  @VM03100 00525000
+         B     CALLERM        GO SET UP ERROR MSG DMKCFH172    @VM03099 00526000
+         SPACE                                                          00527000
+CFH173   LA    R2,EMSG173     LOAD ERROR CODE                  @VM03100 00528000
+         B     CALLERM        GO SET UP ERROR MSG DMKCFH173    @VM03099 00529000
+         SPACE 1                                                        00530000
+CFH179   LA    R2,EMSG179     LOAD ERROR CODE                  @VM03100 00531000
+         B     CALLERM        GO SET UP ERROR MSG DMKCFH179    @VM03099 00532000
+         SPACE 1                                                        00533000
+CFH300   LA    R2,EMSG300     LOAD ERROR CODE                  @VM03100 00534000
+         BAL   R10,FREEKBUF   GO RELEASE THE KEY BUFFER        @VA04160 00535000
+         B     CALLERM        GO SET UP ERROR MSG DMKCFH300    @VM03099 00536000
+         SPACE                                                          00537000
+CFH435   LA    R2,EMSG435     LOAD ERROR CODE                  @VM03100 00538000
+         BAL   R10,FREEKBUF   GO RELEASE THE KEY BUFFER        @VA04160 00539000
+         SPACE 3                                                        00540000
+NOVAR    SLR   R1,R1          ZIP THE PARM REG                          00541000
+CALLERM  BAL   R10,SYSTUNLC   UNLOCK SYSNAME TABLE             @V304635 00542000
+         ICM   R0,B'1110',MODID+3 INSERT MODULE IDENT.         @VM03100 00543000
+ERMSG    CALL  DMKERMSG       SEND THE ERROR MESSAGE           @V304635 00544000
+*****************************************************************       00545000
+*        ERMSG WILL RETURN DIRECTLY TO DMKCFM -- NOT HERE --            00546000
+*****************************************************************       00547000
+         EJECT                                                          00548000
+**********************************************************              00549000
+*                                                        *              00550000
+*     MODULE EQUATES                                     *              00551000
+**********************************************************              00552000
+         SPACE 1                                                        00553000
+PAGE2314 EQU   32             NUMBER OF PAGES PER CYLINDER     @VM03100 00554000
+*                             (2314/2319).                              00555000
+PAGE3330 EQU   57             NUMBER OF PAGES PER CYLINDER     @VM03100 00556000
+*                             (3330).                                   00557000
+PAGE3350 EQU   120            NUMBER OF PAGES PER CYLINDER     @VM03100 00558000
+*                             (3350).                                   00559000
+PAGE2305 EQU   24             NUMBER OF PAGES PER CYLINDER     @VM03100 00560000
+*                             (2305/3340).                              00561000
+*                                                                       00562000
+LEN0     EQU   0              LENGTH VALUE OF 0                @VM03100 00563000
+LEN3     EQU   3              LENGTH VALUE OF 3                @VM03100 00564000
+LEN4     EQU   4              LENGTH VALUE OF 4                @VM03100 00565000
+LEN15    EQU   15             LENGTH VALUE OF 15               @VM03100 00566000
+*                                                                       00567000
+CC0      EQU   X'00'          VALUE FOR CONDITION CODE 0       @VM03100 00568000
+CC1      EQU   X'10'          VALUE FOR CONDITION CODE 1       @VM03100 00569000
+CC2      EQU   X'20'          VALUE FOR CONDITION CODE 2       @VM03100 00570000
+CC3      EQU   X'30'          VALUE FOR CONDITION CODE 3       @VM03100 00571000
+*                                                                       00572000
+ONE      EQU   1              VALUE OF ONE                     @VM03100 00573000
+*                                                                       00574000
+SEGINDEX EQU   1              SEGMENT INDEX VALUE OF 1         @VM03100 00575000
+*                                                                       00576000
+INDEX1   EQU   1              INDEXING BY 1                    @VM03100 00577000
+INDEX4   EQU   4              INDEXING BY 4                    @VM03100 00578000
+*                                                                       00579000
+RETPLUS4 EQU   4              VALUE USED FOR RETURNING PLUS 4  @VM03100 00580000
+*                                                                       00581000
+SEP00    EQU   X'00'          SEPARATOR CHARACTER              @VM03100 00582000
+*                                                                       00583000
+HEX00    EQU   X'00'          VALUE OF X'00'                   @VM03100 00584000
+HEXC4    EQU   X'C4'          HEX VALUE OF X'C4'               @VM03100 00585000
+HEX02    EQU   X'02'          HEX VALUE OF X'02'               @VM03100 00586000
+*                                                                       00587000
+PAGHDR   EQU   2              LENGTH OF PAGHDR                 @VM03100 00588000
+SWPHDR   EQU   8              LENGTH OF SWPHDR                 @VM03100 00589000
+*                                                                       00590000
+EMSG006  EQU   6              ERROR MESSAGE NUMBER 006         @VM03100 00591000
+EMSG026  EQU   26             ERROR MESSAGE NUMBER 026         @VM03100 00592000
+EMSG044  EQU   44             ERROR MESSAGE NUMBER 044         @VM03100 00593000
+EMSG170  EQU   170            ERROR MESSAGE NUMBER 170         @VM03100 00594000
+EMSG171  EQU   171            ERROR MESSAGE NUMBER 171         @VM03100 00595000
+EMSG172  EQU   172            ERROR MESSAGE NUMBER 172         @VM03100 00596000
+EMSG173  EQU   173            ERROR MESSAGE NUMBER 173         @VM03100 00597000
+EMSG179  EQU   179            ERROR MESSAGE NUMBER 179         @VM03100 00598000
+EMSG300  EQU   300            ERROR MESSAGE NUMBER 300         @VM03100 00599000
+EMSG435  EQU   435            ERROR MESSAGE NUMBER 435         @VM03100 00600000
+         SPACE 2                                                        00601000
+         LTORG *                                               @VM03100 00602000
+         SPACE                                                          00603000
+USERSTOR DSECT                                                 @VM03100 00604000
+CYLAREA  DS    XL2            FILLER                           @VM03100 00605000
+DEVAREA  DS    XL2            PLACE FOR DEVICE ADDRESS         @VM03100 00606000
+         DS    4X             FILLER                           @VM03100 00607000
+MSGBYTE  DS    XL2            PLACE FOR MESSAGE INFORMATION    @VM03100 00608000
+STOPBYTE DS    1X             STOP FLAG                        @VM03100 00609000
+*                                                                       00610000
+*        BITS DEFINED IN STOPBYTE                                       00611000
+NOSTOP   EQU   X'00'          NO STOP ON IPL                   @VM03100 00612000
+IPLSTOP  EQU   X'80'          STOP ON IPL                      @VM03100 00613000
+         SPACE                                                          00614000
+         COPY  SHRTABLE                                        @VM03100 00615000
+         PSA                                                 , @V306638 00616000
+         COPY  CORE                                            @V306638 00617000
+         COPY  DEVTYPES                                        @V306638 00618000
+         COPY  EQU                                             @V306638 00619000
+         COPY  RBLOKS                                          @V306638 00620000
+         COPY  SAVE                                            @V306638 00621000
+         COPY  SAVTABLE                                        @V306638 00622000
+         COPY  SYSTBL                                          @V306638 00623000
+         COPY  VBLOKS                                          @V306638 00624000
+         COPY  VMBLOK                                          @V306638 00625000
+         END                                                            00626000

@@ -1,0 +1,1702 @@
+IOE      TITLE 'DMKIOE     (CP)        VM/370 - RELEASE 6'              00001000
+*******************************************************************     00002000
+*                                                                       00003000
+* MODULE NAME -                                                         00004000
+*                                                                       00005000
+*        DMKIOE                                                         00006000
+*                                                                       00007000
+* CONTENTS -                                                            00008000
+*                                                                       00009000
+*        DMKIOERR - FORMAT UNIT CHECKS AND CHANNEL ERRORS               00010000
+*        DMKIOESD - FORMAT HARDWARE ENVIRONMENTAL COUNTERS              00011000
+*        DMKIOERN - FORMAT 3270 REMOTE AND 3705 STATION ERRORS          00012000
+*        DMKIOEVR - HANDLE SVC 76 REQUEST FROM THE VIRTUAL MACHINE      00013000
+*        DMKIOECC - HANDLE CHANNEL CHECK RECORDS PASS FROM CCH HANDLER  00014000
+*        DMKIOEMC - HANDLE MACHINE CHECK RECORDS PASS FROM MCH HANDLER  00015000
+*        DMKIOEFM - CLEAR AND FORMAT THE RECORDING CYLINDERS            00016000
+*        DMKIOEFL - FORMAT PAGES ON THE RECORDING CYLINDERS             00017000
+*        DMKIOESR - HANDLE OBR RECORD REQUESTS SYNCHRONOUSLY            00018000
+*        DMKIOEST - TO CAUSE THE UPDATE OF STATISTICAL COUNTERS         00019000
+*                                                                       00020000
+* FUNCTION -                                                            00021000
+*                                                                       00022000
+*        THIS MODULE WILL BUILD AN ERRBLOK TO PASS TO THE PAGEABLE      00023000
+*        RECORDER. THE ERRBLOK WILL CONTAIN THE INFORMATION NEEDED      00024000
+*        BY THE PAGEABLE RECORDER TO BUILD AND FORMAT THE OBR/MDR       00025000
+*        RECORD. CONTROL WILL BE PASSED TO THE PAGEABLE RECORDER IF     00026000
+*        RECORDING IS NOT IN PROGRESS. IF A PREVIOUS REQUEST FOR ERROR  00027000
+*        RECORDING IS IN PROGRESS, THE CURRENT REQUEST IS QUED ON       00028000
+*        THE APPROPRIATE QUE, FOR RECORDING AT A LATER TIME.            00029000
+*        THE MODULE ALSO INITIALIZES AND FORMAT THE ERROR RECORDING     00030000
+*        CYLINDERS.                                                     00031000
+*                                                                       00032000
+         SPACE 2                                                        00033000
+DMKIOE   CSECT                                                 @VA03358 00034000
+         SPACE 1                                                        00035000
+         ENTRY DMKIOENQ,DMKIOEVQ,DMKIOERR,DMKIOEIR             @VA03358 00036000
+         ENTRY DMKIOEMQ,DMKIOECQ,DMKIOERQ,DMKIOEIQ             @VA03358 00037000
+         ENTRY DMKIOEES,DMKIOERP,DMKIOEMX                      @V5088AA 00038000
+         ENTRY DMKIOESQ,DMKIOENI,DMKIOETY                      @V5088AA 00039000
+         ENTRY DMKIOEHS,DMKIOEFR,DMKIOEEP,DMKIOECT             @V5088AA 00040000
+         EXTRN DMKIOFOB,DMKIOFVR,DMKIOFM1,DMKIOFIN             @VA03358 00041000
+         EXTRN DMKIOFC1,DMKCCHRT,DMKCFMBK,DMKCFPRR             @VA03358 00042000
+         EXTRN DMKDSPCH,DMKSTKCP,DMKIOGF1,DMKIOGF2             @VA03358 00043000
+         EXTRN DMKSYSTZ,DMKIOFST                               @VA03757 00044000
+         EXTRN DMKCVTAB                                        @VA04301 00045000
+         SPACE 2                                                        00046000
+         USING VMBLOK,R11     SETUP ADDRESSABILITY FOR VMBLOK  @VA03358 00047000
+         USING IOBLOK,R10     SETUP ADDRESSABILITY FOR IOBLOK  @VA03358 00048000
+         USING IOERBLOK,R4    SETUP ADDRESSABILITY FOR IOERBLOK@VA03358 00049000
+         USING RDEVBLOK,R8    SETUP ADDRESSABILITY FOR RDEVBLOK@VA03358 00050000
+         USING SAVEAREA,R13   SETUP ADDRESSABILITY FOR SAVEAREA@VA03358 00051000
+         USING PSA,R0         SETUP ADDRESSABILITY FOR LOWCORE @VA03358 00052000
+         EJECT                                                          00053000
+**********************************************************************  00054000
+*                                                                       00055000
+* SUBROUTINE NAME -                                                     00056000
+*                                                                       00057000
+*        DMKIOERR                                                       00058000
+*                                                                       00059000
+* FUNCTION -                                                            00060000
+*                                                                       00061000
+*        BUILD AN ERRBLOK AND GIVE CONTROL TO THE RECORDER FOR          00062000
+*        RECORDING OUTBOARD (OBR), INBOARD (CCH) AND MISCELLANEOUS      00063000
+*        DATA (MDR) RECORDS. RECORDING IS HANDLED ASYNCHRONOUS TO       00064000
+*        ERROR CONDITION.                                               00065000
+*                                                                       00066000
+* ATTRIBUTES -                                                          00067000
+*                                                                       00068000
+*        SERIALLY REUSEABLE, RESIDENT, ENTERED VIA SVC                  00069000
+*                                                                       00070000
+* ENTRY CONDITIONS -                                                    00071000
+*                                                                       00072000
+*        GR  8 = ADDRESS OF RDEVBLOK                                    00073000
+*        GR 10 = ADDRESS OF IOBLOK                                      00074000
+*        GR 11 = ADDRESS OF VMBLOK                                      00075000
+*        GR 12 = ADDRESS OF DMKIOERR                                    00076000
+*        GR 13 = ADDRESS OF SAVE AREA                                   00077000
+*                                                                       00078000
+* EXIT CONDITIONS -                                                     00079000
+*                                                                       00080000
+*        IF NO RECORDING IS IN PROGRESS, ACTIVATE RECORDER AND          00081000
+*        RETURN TO CALLER. IF RECORDING IS IN PROGRESS, QUE REQUEST     00082000
+*        AND RETURN TO CALLER.                                          00083000
+*                                                                       00084000
+*        REGISTER CONTENTS                                              00085000
+*        GR  6 = ADDRESS OF OBR/MDR/CCH RECORD                          00086000
+*        GR  7 = SIZE OF RECORD IN DOUBLEWORDS                          00087000
+*                                                                       00088000
+* CALL TO OTHER ROUTINES -                                              00089000
+*                                                                       00090000
+*        DMKFREE - TO ALLOCATE FREE STORAGE FOR RECORD                  00091000
+*        DMKFRET - TO RETURN ALLOCATED STORAGE FOR RECORD/IOERBLOK      00092000
+*        DMKQCNWT - WRITE ERROR MESSAGE TO OPERATOR FOR CHANNEL ERROR   00093000
+*        DMKCCHRT - ISSUE ERROR MESSAGE FOR CHANNEL ERROR               00094000
+*        DMKCFPRR - RESET THE VIRTUAL MACHINE ON CHANNEL ERROR          00095000
+*        DMKCFMBK - PUT THE VIRTUAL MACHINE IN CONSOLE FUNCTION         00096000
+*        DMKDSPCH - EXIT TO DISPATCHER AFTER RETURNING FROM RECORDER    00097000
+*        DMKSTKCP - STACK CPEXBLOK TO ACTIVATE RECORDER                 00098000
+*        DMKIOFOB - GO RECORD OBR/MDR RECORDS                           00099000
+*        DMKIOFC1 - GO RECORD CCH RECORD                                00100000
+*                                                                       00101000
+* EXTERNAL REFERENCES -                                                 00102000
+*                                                                       00103000
+*        DMKSYSTZ - GET ADDRESS OF GMT DIFFERENCE                       00104000
+*        DMKIOERP - RECORDING IN PROGRESS FLAG                          00105000
+*        DMKIOEMX - NUMBER OF PAGES (MAXIMUM) ON A CYLINDER             00106000
+*        DMKIOEES - OBR/MDR RECORD CYLINDER FULL FLAG                   00107000
+*        DMKIOEMS - MCH/CCH RECORD CYLINDER FULL FLAG                   00108000
+*                                                                       00109000
+* TABLES /WORK AREAS -                                                  00110000
+*                                                                       00111000
+*        DMKIOEIQ FIELD IS USED TO QUE OBR/MDR RECORD REQUESTS.         00112000
+*        DMKIOESQ FIELD IS USED TO QUE UPDATE REQUESTS.                 00113000
+*        DMKIOECQ IS USED TO QUE CCH RECORDS.                           00114000
+*        BITABL - THE MASK TABLE IS USE FOR INTENSIVE RECORDING.        00115000
+*                                                                       00116000
+* NOTES -                                                               00117000
+*                                                                       00118000
+*        THE ONLY TIME THIS SUBROUTINE GETS CONTROL IS WHEN             00119000
+*        A UNIT CHECK OR CHANNEL ERROR HAS OCCURRED. THE FOLLOWING      00120000
+*        MODULES GIVE CONTROL TO THIS SUBROUTINE:                       00121000
+*                                                                       00122000
+*        DMKIOS - ON A UNIT CHECK OR CHANNEL ERROR                      00123000
+*        DMKCNS - WHEN AN I/O ERROR OCCURS AT A TERMINAL                00124000
+*        DMKGRF - WHEN AN I/O ERROR OCCURS AT A GRAPHIC DEVICE          00125000
+*                                                                       00126000
+* REGISTER USAGE -                                                      00127000
+*                                                                       00128000
+*        GR14,15 LINKAGE REGISTERS                                      00129000
+*        GR12 = MODULE BASE REGISTER                                    00130000
+*        GR11 = VMBLOK ADDRESSABILITY                                   00131000
+*        GR10 = IOBLOK ADDRESSABILITY                                   00132000
+*        GR 9 = WORK REGISTER                                           00133000
+*        GR 8 = RDEVBLOK ADDRESSABILITY                                 00134000
+*        GR 7 = SIZE OF THE RECORD IN DOUBLEWORDS                       00135000
+*        GR 6 = ADDRESS OF THE RECORD                                   00136000
+*        GR 5 = SUBROUTINE BAL REGISTER                                 00137000
+*        GR 4 = IOERBLOK ADDRESSABILITY                                 00138000
+*        GR0-3= WORK REGISTERS                                          00139000
+*                                                                       00140000
+* OPERATION -                                                           00141000
+*                                                                       00142000
+*        I. BUILD AN ERRBLOK FOR THE ERROR CONDITION                    00143000
+*                                                                       00144000
+*              1. IF THE IOERBLOK ADDRESS DOESN'T EXIST, RETURN         00145000
+*                 TO CALLER.                                            00146000
+*                                                                       00147000
+*              2. IF A CHANNEL ERROR IS INDICATED IN THE CSW, DO        00148000
+*                 THE FOLLOWING:                                        00149000
+*                                                                       00150000
+*                 . WRITE A CHANNEL ERROR MESSAGE TO THE OPERATOR       00151000
+*                   (DMKCCH604I) AND RELEASE THE IOERBLOK.              00152000
+*                 . IF THIS IS AN UNCORRECTABLE CHANNEL ERROR, WRITE    00153000
+*                   A PERMANENT ERROR MSG. TO THE OPERATOR (DMKCCH606I) 00154000
+*                   AND RESET THE VIRTUAL MACHINE BEFORE GOING TO THE   00155000
+*                   RECORDER.                                           00156000
+*                 . PUT THE DATE AND TIME IN THE CCH RECORD.            00157000
+*                 . ANALYSE THE MCH/CCH CYLINDER AND THE RECORDING      00158000
+*                   IN PROGRESS FLAG.                                   00159000
+*                                                                       00160000
+*                             * IF CYLINDER IS FULL OR NOT INITIALIZED, 00161000
+*                               RELEASE THE CCH RECORD AND RETURN TO    00162000
+*                               CALLER WITH A NON-ZERO RETURN CODE.     00163000
+*                             * IF RECORDING IS IN PROGRESS, QUE CCH    00164000
+*                               REQUEST AND RETURN TO CALLER.           00165000
+*                             * IF RECORDING IS NOT IN PROGRESS, CALL   00166000
+*                               THE RECORDER (DMKIOFC1) AND RECORD      00167000
+*                               CCH RECORD.                             00168000
+*                                                                       00169000
+*              3. DETERMINE IF INTENSIVE RECORDING IS ACTIVATED FOR A   00170000
+*                 CLASS 'F' USER.                                       00171000
+*                                                                       00172000
+*              4. IF THIS IS NOT A CP OR DIAGNOSE GENERATED REQUEST,    00173000
+*                 RETURN TO CALLER.                                     00174000
+*                                                                       00175000
+*              5. DETERMINE IF ENVIRONMENTAL DATA IS PRESENT            00176000
+*                 IN THE SENSE DATA FOR A DASD DEVICE. IF PRESENT,      00177000
+*                 BUILD AND FORMAT A MISCELLANEOUS DATA RECORD (MDR)    00178000
+*                 FOR THE DASD'S HARDWARE COUNTERS BEFORE GOING TO      00179000
+*                 STEP 8.                                               00180000
+*                                                                       00181000
+*              6. IF THIS IS NOT A PERMANENT I/O ERROR, RELEASE THE     00182000
+*                 IOERBLOK AND RETURN TO THE CALLER.                    00183000
+*                                                                       00184000
+*              7. BUILD AND FORMAT OUTBOARD RECORD (OBR) FOR UNIT       00185000
+*                 CHECK CONDITION.                                      00186000
+*                                                                       00187000
+*              8. RELEASE THE IOERBLOK AND SETUP THE INTERFACE TO       00188000
+*                 THE RECORDER.                                         00189000
+*                                                                       00190000
+*              9. ANALYSE THE ERROR RECORDING CYLINDERS AND             00191000
+*                 THE RECORDING IN PROGRESS FLAG.                       00192000
+*                                                                       00193000
+*                 . IF THE CYLINDERS ARE FULL OR NOT INITIALIZED,       00194000
+*                   RELEASE THE OBR/MDR RECORD AND RETURN TO CALLER.    00195000
+*                 . IF RECORDING IS IN PROGRESS, QUE REQUEST AND        00196000
+*                   RETURN TO CALLER.                                   00197000
+*                 . IF RECORDING IS NOT IN PROGRESS, QUE CPEXBLOK TO    00198000
+*                   ACTIVATE RECORDER AND RETURN TO CALLER.             00199000
+*                                                                       00200000
+* ERROR MESSAGES - NONE                                                 00201000
+*                                                                       00202000
+**********************************************************************  00203000
+         COPY  OPTIONS                                         @V407510 00204000
+         EJECT                                                          00205000
+DMKIOERR EQU   *              HANDLE ASYNCHRONOUS RECORDING    @VA03358 00206000
+         USING *,R12          SETUP ADDRESSABILITY             @VA03358 00207000
+         STM   R0,R11,SAVEREGS SAVE CALLER'S REGISTERS         @VA03358 00208000
+         ICM   R4,15,IOBIOER  GET IOERBLOK POINTER FROM IOBLOK @VA03358 00209000
+         BZ    COMEXIT        IF ZERO, RETURN TO CALLER        @VA03358 00210000
+         TM    IOERCSW+5,CDC+CCC+IFCC IS THIS A CHANNEL ERROR  @VA03358 00211000
+         BNZ   CCHIOENT       YES, GO TO CHANNEL ERROR SECTION @VA03358 00212000
+         BAL   R5,INTREC      CHECK INTENSIVE RECORDING FLAG   @VA03358 00213000
+         TM    IOERFLG2,IOERCEMD HAS ERROR BEEN RECORDED       @VA03358 00214000
+         BO    NREXIT         YES, GO FRET IOERBLOK AND EXIT   @VA03358 00215000
+         TM    IOBFLAG,IOBCP  CP I/O ?                         @VA03186 00216000
+         BNZ   OBRDAS         OK..CONTINUE...                  @VA03186 00217000
+         TM    IOBFLAG,IOBHVC DIAGNOSED I/O ?                  @VA03186 00218000
+         BZ    COMEXIT        NO..SHOULDN'T BE HERE..          @VA03186 00219000
+         TM    IOERCSW+4,UC   UNIT CHECK ?                     @VA03186 00220000
+         BZ    COMEXIT        NO..SKIP ERROR RECORDING         @VA03186 00221000
+OBRDAS   EQU   *                                               @VA03186 00222000
+         BAL   R5,DASDSEN     CHECK DASD SENSE INFORMATION     @VA03358 00223000
+         TM    IOBSTAT,IOBFATAL IS THIS A PERMANENT I/O ERROR  @VA03358 00224000
+         BO    OBRRECD        YES, NEED TO BUILD ERRBLOK       @VA03757 00225000
+         BAL   R5,CKTEMP      GO CHECK DASD TEMPORARY ERRORS   @VA03757 00226000
+OBRRECD  EQU   *              BUILD ERRBLOK FOR OBR PROCESSING @VA03757 00227000
+         BAL   R5,ERRBLD      BUILD ERRBLOK RECORD             @VA03757 00228000
+OBRSECT  EQU   *              ANALYZE ERROR RECORDING CYLS     @V5088AA 00229000
+         LR    R6,R1          GET ADDRESS OF OBR RECORD        @VA03358 00230000
+         LR    R7,R0          LENGTH OF RECORD IN DOUBLEWORDS  @VA03358 00231000
+         BAL   R5,FRETIOER    RELEASE IOERBLOK FOR CP REQUEST  @VA03358 00232000
+OBRANAL  EQU   *              SET UP TO RECORD OBR/MDR RECORD  @VA03358 00233000
+         BAL   R5,ANALRECD    ANALYZE ERROR RECORDING CYLS     @V5088AA 00234000
+         B     FRETRECD       RELEASE THE OBR RECORD SPACE     @VA03358 00235000
+         B     QUEOBR         QUE OBR OFF RECORDING QUE        @VA03358 00236000
+*        NO RECORDING IS IN PROGESS                                     00237000
+         LA    R4,IOFR1       SET UP RETURN ADDR FOR CPEXBLOK  @VA03358 00238000
+         BAL   R5,STKCPEX     STACK CPEXBLOK OFF CPEXBLOK QUE  @VA03358 00239000
+         SPACE 1                                                        00240000
+IOFR1    EQU   *              RETURN HERE WHEN CPEX IS UNSTACK @VA03358 00241000
+         CALL  DMKIOFOB       GO RECORD OBR/MDR RECORDS        @VA03358 00242000
+         GOTO  DMKDSPCH       GO TO THE DISPATCHER             @VA03358 00243000
+         SPACE 1                                                        00244000
+QUEOBR   EQU   *              QUE OBR RECORD OFF RECORDING QUE @VA03358 00245000
+         BAL   R5,GETCPEX     GET SPACE FOR CPEXBLOK           @VA03358 00246000
+         LA    R3,DMKIOEIQ    GET POINTER TO OBR/MDR QUE       @VA03358 00247000
+         LA    R5,COMEXIT     RETURN TO CALLER                 @VA03358 00248000
+         BAL   R4,QUECPEX     STACK REQUEST OFF RECORDING QUE  @VA03358 00249000
+         SPACE 4                                                        00250000
+*        SUBROUTINE TO DETERMINE WHETHER OR NOT ENVIRONMENTAL DATA      00251000
+*        IS INDICATED IN THE SENSE BYTE FOR DASD ERROR.                 00252000
+         SPACE 1                                                        00253000
+DASDSEN  EQU   *              ANALYSE SENSE INFORM. FOR DASD   @VA03358 00254000
+         CLI   RDEVTYPC,CLASDASD IS THIS A DASD DEVICE CLASS   @VA03358 00255000
+         BNER  R5             NO, RETURN TO IN LINE CODE       @VA03358 00256000
+         TM    RDEVTYPE,TYP3330+TYP3340+TYP3350 IS DASD UNIT A @V304498 00257000
+*                             3330, 3340, OR 3350 ?            @V304498 00258000
+         BZ    DASD2305       NO, CHECK FOR 2305 DEVICE        @VA03358 00259000
+         TM    IOERDATA+2,X'10' IS ENVIRONMENTAL DATA PRESENT  @VA03358 00260000
+         BO    MDRRECD        YES, GO BUILD MDR RECORD         @VA03358 00261000
+         BR    R5             RETURN TO IN LINE CODE           @VA03358 00262000
+DASD2305 EQU   *              ANALYSE SENSE INFORM. FOR 2305   @VA03358 00263000
+         CLI   RDEVTYPE,TYP2305 IS THIS A 2305 DEVICE TYPE     @VA03358 00264000
+         BNER  R5             NO, RETURN TO IN LINE CODE       @VA03358 00265000
+         TM    IOERDATA+2,X'80' IS ENVIRONMENTAL DATA PRESENT  @VA03358 00266000
+         BZR   R5             NO, RETURN TO IN LINE CODE       @VA03358 00267000
+MDRRECD  EQU   *              FORMAT MISCELLANEOUS DATA RECORD @VA03358 00268000
+         BAL   R5,MDRBLD      GO BUILD ERRBLOK RECORD          @VA03757 00269000
+         BAL   R5,OBRSECT     GO TO OBR RECORD SECTION         @VA03358 00270000
+         SPACE 2                                                        00271000
+*        SUBROUTINE TO DETERMINE IF A TEMPORARY OBR RECORD IS TO        00272000
+*        BE CREATED FOR SELECTED TEMPORARY DASD ERRORS .....            00273000
+         SPACE                                                          00274000
+CKTEMP   EQU   *              TEST SPECIFIED TEMPORARY ERRORS  @VA03757 00275000
+         CLI   RDEVTYPC,CLASDASD IS THIS A DASD DEVICE ???     @VA03757 00276000
+         BNE   NREXIT         NO, GO FRET IOERBLOK AND EXIT.   @VA03757 00277000
+         TM    RDEVFTR,FTREXTSN EXTENED SENSE TYPE DASD  ??    @VA03757 00278000
+         BZ    NREXIT         NO, GO FRET IOERBLOK AND EXIT    @VA03757 00279000
+         TM    IOERDATA,X'3D' TEMPORARY ERROR TO BE LOGGED ??  @VA03757 00280000
+         BZ    NREXIT         NO, GO FRET IOERBLOK AND EXIT    @VA03757 00281000
+         TM    IOERDATA,X'08' LOOK CLOSER, IS IT A DATA CHECK ?@VA03757 00282000
+         BZR   R5             NO, GO SET UP FOR TEMPORARY ERROR@VA03757 00283000
+         CLI   RDEVTYPE,TYP3340 IS THIS A 3340 ??              @VA03757 00284000
+         BER   R5             YES, SET UP FOR TEMP ERROR RECORD@VA03757 00285000
+         CLI   RDEVTYPE,TYP3330 IS THIS A 3330 TYPE            @VA03757 00286000
+         BE    NREXIT         YES, DONT RECORD TEMP ERROR -EXIT@VA03757 00287000
+         TM    IOERDATA+3,X'01' IS ERROR CORRECTABLE ??        @VA03757 00288000
+         BOR   R5             YES, SET UP FOR TEMP ERROR RECORD@VA03757 00289000
+         B     NREXIT         ITS NOT RIGHT TYPE OF ERROR -EXIT@VA03757 00290000
+         EJECT                                                          00291000
+**********************************************************************  00292000
+*                                                                       00293000
+* SUBROUTINE NAME -                                                     00294000
+*                                                                       00295000
+*        DMKIOESD                                                       00296000
+*                                                                       00297000
+* FUNCTION -                                                            00298000
+*                                                                       00299000
+*        BUILD, FORMAT AND GIVE CONTROL TO THE RECORDER FOR RECORDING   00300000
+*        MISCELLANEOUS DATA RECORD (MDR) FOR HARDWARE COUNTERS.         00301000
+*        RECORDING IS HANDLE SYNCHRONOUS FOR HARDWARE STATISTICAL       00302000
+*        COUNTERS.                                                      00303000
+*                                                                       00304000
+* ATTRIBUTES -                                                          00305000
+*                                                                       00306000
+*        SERIALLY REUSEABLE, RESIDENT, ENTERED VIA SVC                  00307000
+*                                                                       00308000
+* ENTRY CONDITIONS -                                                    00309000
+*                                                                       00310000
+*        GR  8 = ADDRESS OF RDEVBLOK                                    00311000
+*        GR 10 = ADDRESS OF IOBLOK                                      00312000
+*        GR 11 = ADDRESS OF VMBLOK                                      00313000
+*        GR 12 = ADDRESS OF DMKIOESD                                    00314000
+*        GR 13 = ADDRESS OF SAVE AREA                                   00315000
+*                                                                       00316000
+* EXIT CONDITIONS -                                                     00317000
+*                                                                       00318000
+*        IF NO RECORDING IS IN PROGRESS, GIVE CONTROL TO THE RECORDER   00319000
+*        AND RETURN TO THE CALLER UPON COMPLETION. IF RECORDING IS IN   00320000
+*        PROGRESS, QUE RECORDING REQUEST AND EXIT TO DISPATCHER UNTIL   00321000
+*        RECORD IS RECORDED.                                            00322000
+*                                                                       00323000
+*        REGISTER CONTENTS                                              00324000
+*        GR  6 = ADDRESS OF MDR RECORD                                  00325000
+*        GR  7 = SIZE OF RECORD IN DOUBLEWORDS                          00326000
+*                                                                       00327000
+* CALL TO OTHER ROUTINES -                                              00328000
+*                                                                       00329000
+*        DMKFREE - TO ALLOCATE FREE STORAGE FOR RECORD                  00330000
+*        DMKFRET - TO RETURN ALLOCATED STORAGE FOR RECORD/IOERBLOK      00331000
+*        DMKDSPCH - EXIT TO DISPATCHER IF RECORDING IS ACTIVE           00332000
+*        DMKSTKCP - STACK CPEXBLOK FOR RECORDER                         00333000
+*        DMKIOFOB - GO RECORD MDR RECORDS                               00334000
+*                                                                       00335000
+* EXTERNAL REFERENCES -                                                 00336000
+*                                                                       00337000
+*        DMKSYSTZ - GET ADDRESS OF GMT DIFFERENCE                       00338000
+*        DMKIOERP - RECORDING IN PROGRESS FLAG                          00339000
+*        DMKIOEMX - NUMBER OF PAGES (MAXIMUM) ON A CYLINDER             00340000
+*        DMKIOEES - OBR/MDR RECORD CYLINDER FULL FLAG                   00341000
+*                                                                       00342000
+* TABLES /WORK AREAS -                                                  00343000
+*                                                                       00344000
+*        DMKIOENQ FIELD IS USED TO QUE MDR RECORDS.                     00345000
+*                                                                       00346000
+* NOTES -                                                               00347000
+*                                                                       00348000
+*        THE ONLY TIME THIS SUBROUTINE GETS CONTROL IS WHEN THE         00349000
+*        SHUTDOWN COMMAND IS ISSUED OR WHEN A BUFFER LOGGED DEVICE      00350000
+*        IS BEING MOUNTED OR DEMOUNTED OR WHEN A BUFFER LOGGED          00351000
+*        DEVICE GETS THE ERROR LOG FULL CONDITION.                      00352000
+*        THE FOLLOWING MODULES GIVE CONTROL TO THIS ROUTINE:            00353000
+*                                                                       00354000
+*        DMKDAS - WHEN THE BUFFER LOG IS UNLOADED FROM THE DEVICE       00355000
+*        DMKRSE - WHEN THE BUFFER LOG IS UNLOADED FROM A 3800           00356000
+*                                                                       00357000
+* REGISTER USAGE -                                                      00358000
+*                                                                       00359000
+*        GR14,15 LINKAGE REGISTERS                                      00360000
+*        GR12 = MODULE BASE REGISTER                                    00361000
+*        GR11 = VMBLOK ADDRESSABILITY                                   00362000
+*        GR10 = IOBLOK ADDRESSABILITY                                   00363000
+*        GR 9 = WORK REGISTER                                           00364000
+*        GR 8 = RDEVBLOK ADDRESSABILITY                                 00365000
+*        GR 7 = SIZE OF THE RECORD IN DOUBLEWORDS                       00366000
+*        GR 6 = ADDRESS OF THE RECORD                                   00367000
+*        GR 5 = SUBROUTINE BAL REGISTER                                 00368000
+*        GR 4 = IOERBLOK ADDRESSABILITY                                 00369000
+*        GR0-3= WORK REGISTERS                                          00370000
+*                                                                       00371000
+* OPERATION -                                                           00372000
+*                                                                       00373000
+*        I. BUILD AND FORMAT A MISCELLANEOUS DATA RECORD FOR COUNTERS   00374000
+*                                                                       00375000
+*              1. IF THE IOERBLOK ADDRESS DOESN'T EXIST, RETURN         00376000
+*                 TO CALLER.                                            00377000
+*                                                                       00378000
+*              2. BUILD AND FORMAT A MISCELLANEOUS DATA RECORD (MDR)    00379000
+*                 FOR THE DASD'S HARDWARE COUNTERS.                     00380000
+*                                                                       00381000
+*              3. RELEASE THE IOERBLOK AND SETUP INTERFACE TO           00382000
+*                 THE RECORDER.                                         00383000
+*                                                                       00384000
+*              4. ANALYSE THE OBR/MDR RECORDING CYLINDER AND            00385000
+*                 THE RECORDING IN PROGRESS FLAG.                       00386000
+*                                                                       00387000
+*                 . IF THE CYLINDER IS FULL OR NOT INITIALIZED, RELEASE 00388000
+*                   THE OBR/MDR RECORD AND RETURN TO CALLER.            00389000
+*                 . IF RECORDING IS IN PROGRESS, QUE REQUEST AND        00390000
+*                   EXIT TO THE DISPATCHER UNTIL THE RECORDER STACKS    00391000
+*                   THE CPEXBLOK FOR THIS REQUEST.                      00392000
+*                 . IF RECORDING IS NOT IN PROGRESS, GIVE CONTROL       00393000
+*                   TO THE RECORDER TO RECORD THE MDR RECORD.           00394000
+*                                                                       00395000
+**********************************************************************  00396000
+         EJECT                                                          00397000
+DMKIOESD RELOC HANDLE         SYNCHRONOUS RECORDING            @VA03358 00398000
+         ICM   R4,15,IOBIOER  GET POINTER TO IOERBLOK          @VA03358 00399000
+         BNP   COMEXIT        IF ZERO, RETURN TO CALLER        @VA03358 00400000
+         BAL   R5,MDRBLD      GO BUILD ERRBLOK RECORD          @VA03757 00401000
+         LR    R6,R1          GET ADDRESS OF MDR RECORD        @VA03358 00402000
+         LR    R7,R0          LENGTH OF RECORD IN DOUBLEWORDS  @VA03358 00403000
+         BAL   R5,FRETIOER    RELEASE IOERBLOK FOR CP GENERATED@VA03358 00404000
+         BAL   R5,ANALRECD    ANALYZE THE ERROR RECORDING CYLS @V5088AA 00405000
+         B     FRETRECD       RELEASE THE MDR RECORD SPACE     @VA03358 00406000
+         B     QUEMDR         QUE MDR RECORD OFF RECORDING QUE @VA03358 00407000
+*        NO RECORDING IS IN PROGRESS                                    00408000
+IOFE1    EQU   *              SET UP TO CALL RECORDER FOR MDR  @VA03358 00409000
+         CALL  DMKIOFOB       GO RECORD MDR RECORDS            @VA03358 00410000
+         BAL   R5,COMEXIT     RETURN TO CALLER                 @VA03358 00411000
+         SPACE 1                                                        00412000
+QUEMDR   EQU   *              QUE MDR RECORD OFF RECORDING QUE @VA03358 00413000
+         LA    R4,IOFE1       SET UP RETURN ADDR FOR CPEXBLOK  @VA03358 00414000
+         BAL   R5,GETCPEX     GET SPACE FOR CPEXBLOK           @VA03358 00415000
+         LA    R3,DMKIOENQ    GET POINTER TO MDR QUE           @VA03358 00416000
+         LA    R5,DISPTH      RETURN TO THE DISPATCHER         @VA03358 00417000
+         BAL   R4,QUECPEX     STACK REQUEST OFF RECORDING QUE  @VA03358 00418000
+         EJECT                                                          00419000
+**********************************************************************  00420000
+*                                                                       00421000
+*  SUBROUTINE  NAME -                                                   00422000
+*                                                                       00423000
+*        DMKIOESR                                                       00424000
+*                                                                       00425000
+*  FUNCTION -                                                           00426000
+*                                                                       00427000
+*        BUILD ERRBLOK AND GIVE CONTROL TO THE RECORDER TO BUILD AND    00428000
+*        FORMAT OUTBOARD RECORDS. THE OBR RECORD WILL BE WRITTEN        00429000
+*        SYNCHRONOUSLY...                                               00430000
+*                                                                       00431000
+*  ATTRIBUTES _                                                         00432000
+*                                                                       00433000
+*        SERIALLY REUSABLE, RESIDENT, ENTERED VIA SVC                   00434000
+*                                                                       00435000
+*  ENTRY CONDITIONS _                                                   00436000
+*                                                                       00437000
+*        GR  8 = ADDRESS OF RDEVBLOK                                    00438000
+*                                                                       00439000
+*  EXIT CONDITIONS -                                                    00440000
+*                                                                       00441000
+*        IF NO RECORDING IS IN PROGRESS, GIVE CONTROL TO THE RECORDER   00442000
+*        AND RETURN TO THE CALLER UPON COMPLETION. IF RECORDING IS IN   00443000
+*        PROGRESS, QUE RECORDING REQUEST AND EXIT TO DISPATCHER UNTIL   00444000
+*        RECORD IS RECORDED. IF THE ERROR CYLINDER IS FULL OR NOT       00445000
+*        INITIALIZED, RELEASE THE RECORD AND RETURN TO THE CALLER ...   00446000
+*                                                                       00447000
+*  CALLS TO OTHER ROUTINES -                                            00448000
+*                                                                       00449000
+*        DMKFREE  -  TO ALLOCATE FREE STORAGE FOR ERRBLOK               00450000
+*        DMKFRET  -  TO RETURN ALLOCATED STORAGE FOR THE                00451000
+*                    ERRBLOK/SDRBLOK                                    00452000
+*        DMKDSPCH -  EXIT TO DISPATCHER IF RECORDING IS ACTIVE          00453000
+*        DMKSTKCP -  STACK CPEXBLOK FOR RECORDER                        00454000
+*        DMKIOFOB -  GO RECORD OBR RECORD                               00455000
+*                                                                       00456000
+*  EXTERNAL REFERENCES -                                                00457000
+*                                                                       00458000
+*        DMKSYSTZ - GET ADDRESS OF GMT DIFFERENCE                       00459000
+*        DMKIOERP - RECORDING IN PROGRESS FLAG                          00460000
+*        DMKIOEMX - NUMBER OF PAGES (MAXIMUM) ON A CYLINDER             00461000
+*        DMKIOEES - OBR/MDR RECORD CYLINDER FULL FLAG                   00462000
+*                                                                       00463000
+*  TABLES/WORK AREAS -                                                  00464000
+*                                                                       00465000
+*        DMKIOENQ FIELD IS USED TO QUE OBR RECORDS                      00466000
+*                                                                       00467000
+*  NOTES -                                                              00468000
+*                                                                       00469000
+*        THIS SUBROUTINE GETS CONTROL WHEN THE SHUTDOWN, VARY OFFLINE,  00470000
+*        NETWORK SHUTDOWN OR NETWORK VARY OFFLINE COMMANDS ARE ISSUED   00471000
+*        AND IF SDR COUNTERS EXIST FOR THE DEVICE OR DEVICES ADDRESSED. 00472000
+*        THE FOLLOWING MODULES GIVE CONTROL TO THIS SUBROUTINE...       00473000
+*                                                                       00474000
+*              DMKCPV                                                   00475000
+*              DMKNET                                                   00476000
+*              DMKNES                                                   00477000
+*                                                                       00478000
+*  REGISTER USAGE -                                                     00479000
+*                                                                       00480000
+*        GR  0-3 WORK REGS                                              00481000
+*        GR  5   SUBROUTINE BAL REG                                     00482000
+*        GR  6   ADDRESS OF RECORD                                      00483000
+*        GR  7   SIZE OF RECORD                                         00484000
+*        GR  8   RDEVBLOK                                               00485000
+*        GR  9   SDRBLOK                                                00486000
+*                                                                       00487000
+*  OPERATION -                                                          00488000
+*                                                                       00489000
+*        BUILD AN ERRBLOK, WHICH WILL BE USED TO BUILD AND FORMAT AN    00490000
+*        OUTBOARD RECORD FOR STATISTICAL COUNTERS...                    00491000
+*                                                                       00492000
+*              1. IF THE SDRBLOK DOESNT EXIST,RETURN TO CALLER          00493000
+*                                                                       00494000
+*              2. IF THE SDR COUNTERS ARE ALL ZERO, FRET THE SDRBLOK    00495000
+*                 AND RETURN TO THE CALLER..                            00496000
+*                                                                       00497000
+*              3. BUILD AN ERRBLOK                                      00498000
+*                                                                       00499000
+*                                                                       00500000
+*              4. ANALYZE THE ERROR RECORDING CYLINDER AND THE          00501000
+*                 RECORDING IN PROGRESS FLAG.                           00502000
+*                                                                       00503000
+*                 . IF THE CYLINDER IS FULL OR NOT INITIALIZED, RELEASE 00504000
+*                   THE ERRBLOK AND RETURN TO CALLER ..                 00505000
+*                 . IF RECORDING IS IN PROGRESS, QUE THE REQUEST AND    00506000
+*                   EXIT TO THE DISPATCHER UNTIL THE RECORDER STACKS    00507000
+*                   THE CPEXBLOK FOR THIS REQUEST..                     00508000
+*                 . IF RECORDING IS NOT IN PROGRESS, GIVE CONTROL TO    00509000
+*                   THE RECORDER TO FORMAT AND WRITE THE OBR RECORD..   00510000
+*                                                                       00511000
+*              5. RELEASE THE STORAGE USED BY THE SDRBLOK               00512000
+*                                                                       00513000
+*                                                                       00514000
+*********************************************************************** 00515000
+         EJECT                                                          00516000
+DMKIOESR RELOC HANDLE                                          @VA03757 00517000
+         USING SDRBLOK,R9     ADDRESSABILITY FOR SDRBLOK       @VA03757 00518000
+         ICM   R9,15,RDEVCTRS GET SDRBLOK ADDRESS              @VA03757 00519000
+         BZ    COMEXIT        NO SDRBLOK, GO BACK TO CALLER    @VA03757 00520000
+         CLI   RDEVTYPC,CLASTAPE IS THIS MAG TAPE ?            @VA08055 00521000
+         BNE   SHRTREC        NO BRANCH                        @VA08055 00522000
+         TM    RDEVTYPE,TYP3420+TYP3410 IS THIS A 3400 TAPE ?  @VA08055 00523000
+         BNZ   TAPETEST       YES, BRANCH                      @VA08055 00524000
+SHRTREC  EQU   *                                               @VA08055 00525000
+         OI    SDRFLAGS,SDRSHRT TURN ON SHORT OBR FLAG         @VA08055 00526000
+TAPETEST EQU   *                                               @VA08055 00527000
+         SLR   R1,R1          CLEAR WORK REG                   @VA08055 00528000
+         IC    R1,SDRLNGTH    GET LENGTH OF SDR COUNTERS       @VA03757 00529000
+         BCTR  R1,R0          SUBTRACT ONE FOR EXECUTE INST.   @VA03757 00530000
+         EX    R1,CHKCOUNT    GO CHECK THE COUNTERS            @VA03757 00531000
+         BNE   GETOBR         BR IF NOT ZERO TO BUILD RECORD   @VA03757 00532000
+         BAL   R5,FRETSDR     COUNTERS ARE ZERO,FORGET         @VA03757 00533000
+         B     COMEXIT        RECORDING, FRET SDRBLOK AND EXIT @VA03757 00534000
+         SPACE 1                                                        00535000
+CHKCOUNT CLC   SDRCTRS(0),ZEROES                               @VA03757 00536000
+         SPACE 2                                                        00537000
+GETOBR   EQU   *                                               @VA03757 00538000
+         BAL   R5,ERRBLD      GO BUILD ERRBLOK RECORD          @VA03757 00539000
+         LR    R6,R1          SAVE ADDRESS OF RECORD           @VA03757 00540000
+         LR    R7,R0          SAVE LENGTH, IN DOUBLEWORDS      @VA03757 00541000
+         BAL   R5,ANALRECD    ANALYZE THE ERROR RECORDING CYLS @V5088AA 00542000
+         B     FRETRECD       RELEASE THE OBR RECORD SPACE     @VA03757 00543000
+         B     QUEOBR1        QUE OBR RECORD OFF RECORDING QUE @VA03757 00544000
+         SPACE 1                                                        00545000
+**** NO RECORDING IS IN PROGRESS ****                                   00546000
+         SPACE 1                                                        00547000
+IOFE2    EQU   *                                               @VA03757 00548000
+         CALL  DMKIOFOB       GO BUILD AND RECORD OBR RECORD   @VA03757 00549000
+         BAL   R5,FRETSDR     FRET SDRBLOK                     @VA03757 00550000
+         B     COMEXIT        RETURN TO CALLER                 @VA03757 00551000
+         SPACE 1                                                        00552000
+**** QUE OBR RECORD OFF RECORDING QUEUE ****                            00553000
+         SPACE 1                                                        00554000
+QUEOBR1  EQU   *                                               @VA03757 00555000
+         LA    R4,IOFE2       SET UP RETURN ADDR FOR CPEXBLOK  @VA03757 00556000
+         BAL   R5,GETCPEX     GET SPACE FOR CPEXBLOK           @VA03757 00557000
+         LA    R3,DMKIOENQ    GET POINTER TO QUEUE             @VA03757 00558000
+         LA    R5,DISPTH      RETURN TO THE DISPATCHER         @VA03757 00559000
+         BAL   R4,QUECPEX     STACK REQUEST OFF RECORDING QUEUE@VA03757 00560000
+         EJECT                                                          00561000
+**********************************************************************  00562000
+*                                                                       00563000
+* SUBROUTINE NAME -                                                     00564000
+*                                                                       00565000
+*        DMKIOERN                                                       00566000
+*                                                                       00567000
+* FUNCTION -                                                            00568000
+*                                                                       00569000
+*        BUILD, FORMAT AND GIVE CONTROL TO THE RECORDER FOR RECORDING   00570000
+*        MISCELLANEOUS DATA RECORDS (MDR) FOR 3270 REMOTE AND 3705      00571000
+*        STATIONS. RECORDING IS HANDLED ASYNCHRONOUS TO THE ERROR       00572000
+*        CONDITION.                                                     00573000
+*                                                                       00574000
+* ATTRIBUTES -                                                          00575000
+*                                                                       00576000
+*        SERIALLY REUSEABLE, RESIDENT, ENTERED VIA SVC                  00577000
+*                                                                       00578000
+* ENTRY CONDITIONS -                                                    00579000
+*                                                                       00580000
+*        GR  1 = ADDRESS OF CONTASK                                     00581000
+*        GR  8 = ADDRESS OF RDEVBLOK                                    00582000
+*        GR 11 = ADDRESS OF VMBLOK                                      00583000
+*        GR 12 = ADDRESS OF DMKIOERN                                    00584000
+*        GR 13 = ADDRESS OF SAVE AREA                                   00585000
+*                                                                       00586000
+* EXIT CONDITIONS -                                                     00587000
+*                                                                       00588000
+*        IF NO RECORDING IS IN PROGRESS, ACTIVATE RECORDER AND          00589000
+*        RETURN TO CALLER. IF RECORDING IS IN PROGRESS, QUE REQUEST     00590000
+*        AND RETURN TO CALLER.                                          00591000
+*                                                                       00592000
+*        REGISTER CONTENTS                                              00593000
+*        GR  6 = ADDRESS OF MDR RECORD                                  00594000
+*        GR  7 = SIZE OF RECORD IN DOUBLEWORDS                          00595000
+*                                                                       00596000
+* CALL TO OTHER ROUTINES -                                              00597000
+*                                                                       00598000
+*        DMKFREE - TO ALLOCATE FREE STORAGE FOR RECORD                  00599000
+*        DMKFRET - TO RETURN ALLOCATED STORAGE FOR RECORD/CONTASK       00600000
+*        DMKDSPCH - EXIT TO DISPATCHER AFTER RETURNING FROM RECORDER    00601000
+*        DMKSTKCP - STACK CPEXBLOK TO ACTIVATE RECORDER                 00602000
+*        DMKIOFOB - GO RECORD OBR/MDR RECORDS                           00603000
+*                                                                       00604000
+* EXTERNAL REFERENCES -                                                 00605000
+*                                                                       00606000
+*        DMKSYSTZ - GET ADDRESS OF GMT DIFFERENCE                       00607000
+*        DMKIOERP - RECORDING IN PROGRESS FLAG                          00608000
+*        DMKIOEMX - NUMBER OF PAGES (MAXIMUM) ON A CYLINDER             00609000
+*        DMKIOEES - OBR/MDR RECORD CYLINDER FULL FLAG                   00610000
+*                                                                       00611000
+* TABLES /WORK AREAS -                                                  00612000
+*                                                                       00613000
+*        DMKIOEIQ FIELD IS USED TO QUE MDR RECORDS.                     00614000
+*                                                                       00615000
+* NOTES -                                                               00616000
+*                                                                       00617000
+*        THIS SUBROUTINE IS CALL ONLY FOR 3270 REMOTE AND 3705          00618000
+*        STATION ERRORS. THE FOLLOWING MODULES GIVE CONTROL TO THIS     00619000
+*        SUBROUTINE:                                                    00620000
+*                                                                       00621000
+*        DMKRGF - WHEN A 3270 REMOTE STATION ERROR OCCURS               00622000
+*        DMKRNH - WHEN A 3705 STATION ERROR OCCURS                      00623000
+*                                                                       00624000
+* REGISTER USAGE -                                                      00625000
+*                                                                       00626000
+*        GR14,15 LINKAGE REGISTERS                                      00627000
+*        GR12 = MODULE BASE REGISTER                                    00628000
+*        GR11 = VMBLOK ADDRESSABILITY                                   00629000
+*        GR10 = IOBLOK ADDRESSABILITY                                   00630000
+*        GR 9 = CONTASK ADDRESSABILITY                                  00631000
+*        GR 8 = RDEVBLOK ADDRESSABILITY                                 00632000
+*        GR 7 = SIZE OF THE RECORD IN DOUBLEWORDS                       00633000
+*        GR 6 = ADDRESS OF THE RECORD                                   00634000
+*        GR 5 = SUBROUTINE BAL REGISTER                                 00635000
+*        GR0-4= WORK REGISTERS                                          00636000
+*                                                                       00637000
+* OPERATION -                                                           00638000
+*                                                                       00639000
+*        I. BUILDING AND FORMATTING OF ERROR CONDITION                  00640000
+*                                                                       00641000
+*              1. BUILD AND FORMAT A MISCELLANEOUS DATA RECORD (MDR)    00642000
+*                 FOR THE 3270 REMOTE AND 3705 STATION ERROR.           00643000
+*                                                                       00644000
+*              2. RELEASE THE CONTASK AND SETUP THE INTERFACE TO        00645000
+*                 THE RECORDER.                                         00646000
+*                                                                       00647000
+*              3. ANALYSE THE OBR/MDR RECORDING CYLINDER AND            00648000
+*                 THE RECORDING IN PROGRESS FLAG.                       00649000
+*                                                                       00650000
+*                 . IF THE CYLINDER IS FULL OR NOT INITIALIZED, RELEASE 00651000
+*                   THE OBR/MDR RECORD AND RETURN TO CALLER.            00652000
+*                 . IF RECORDING IS IN PROGRESS, QUE REQUEST AND        00653000
+*                   RETURN TO CALLER.                                   00654000
+*                 . IF RECORDING IS NOT IN PROGRESS, QUE CPEXBLOK TO    00655000
+*                   ACTIVATE RECORDER AND RETURN TO CALLER.             00656000
+*                                                                       00657000
+**********************************************************************  00658000
+         EJECT                                                          00659000
+         ENTRY DMKIOERN                                        @VA03358 00660000
+         USING DMKIOERN,R12   SETUP ADDRESSABILITY             @VA03358 00661000
+DMKIOERN DS    0H             HANDLE ASYNCHRONOUS RECORDING    @VA03358 00662000
+         ENTER                                                 @VA03358 00663000
+         L     R12,=A(DMKIOE) SETUP ADDRESSABILITY FOR MODULE  @VA03358 00664000
+         USING DMKIOE,R12     ...                              @VA03358 00665000
+         BAL   R5,MDRBLD      GO BUILD ERRBLOK RECORD          @VA03757 00666000
+         LR    R7,R0          LENGTH OF RECORD IN DOUBLEWORDS  @VA03358 00667000
+         LR    R6,R1          GET ADDRESS OF MDR RECORD        @VA03358 00668000
+         BAL   R5,FRETCON     RELEASE THE CONTASK              @VA03358 00669000
+         BAL   R5,OBRANAL     GO ANALYZE ERROR RECORDING CYLS  @V5088AA 00670000
+         EJECT                                                          00671000
+**********************************************************************  00672000
+*                                                                       00673000
+* SUBROUTINE NAME -                                                     00674000
+*                                                                       00675000
+*        DMKIOEVR                                                       00676000
+*                                                                       00677000
+* FUNCTION -                                                            00678000
+*                                                                       00679000
+*        GIVE CONTROL TO THE RECORDER FOR RECORDING SVC 76 REQUESTS.    00680000
+*        RECORDING IS HANDLED ASYNCHRONOUS TO THE REQUEST.              00681000
+*                                                                       00682000
+* ATTRIBUTES -                                                          00683000
+*                                                                       00684000
+*        SERIALLY REUSEABLE, RESIDENT, ENTERED VIA SVC                  00685000
+*                                                                       00686000
+* ENTRY CONDITIONS -                                                    00687000
+*                                                                       00688000
+*        GR  0 = SIZE OF SVC 76 RECORD IN DOUBLEWORDS                   00689000
+*        GR  1 = ADDRESS OF SVC 76 RECORD                               00690000
+*        GR 11 = ADDRESS OF VMBLOK                                      00691000
+*        GR 12 = ADDRESS OF DMKIOEVR                                    00692000
+*        GR 13 = ADDRESS OF SAVE AREA                                   00693000
+*                                                                       00694000
+* EXIT CONDITIONS -                                                     00695000
+*                                                                       00696000
+*        IF NO RECORDING IS IN PROGRESS, ACTIVATE RECORDER AND          00697000
+*        RETURN TO CALLER. IF RECORDING IS IN PROGRESS, QUE REQUEST     00698000
+*        AND RETURN TO CALLER.                                          00699000
+*                                                                       00700000
+*        REGISTER CONTENTS                                              00701000
+*        GR  6 = ADDRESS OF SVC 76 RECORD                               00702000
+*        GR  7 = SIZE OF RECORD IN DOUBLEWORDS                          00703000
+*                                                                       00704000
+* CALL TO OTHER ROUTINES -                                              00705000
+*                                                                       00706000
+*        DMKFREE - TO ALLOCATE FREE STORAGE FOR CPEXBLOK                00707000
+*        DMKFRET - TO RETURN ALLOCATED STORAGE FOR RECORD               00708000
+*        DMKDSPCH - EXIT TO DISPATCHER AFTER RETURNING FROM RECORDER    00709000
+*        DMKSTKCP - STACK CPEXBLOK TO ACTIVATE RECORDER                 00710000
+*        DMKIOFVR - GO RECORD SVC 76 RECORDS                            00711000
+*                                                                       00712000
+* EXTERNAL REFERENCES -                                                 00713000
+*                                                                       00714000
+*        DMKSYSTZ - GET ADDRESS OF GMT DIFFERENCE                       00715000
+*        DMKIOERP - RECORDING IN PROGRESS FLAG                          00716000
+*        DMKIOEMX - NUMBER OF PAGES (MAXIMUM) ON A CYLINDER             00717000
+*        DMKIOEES - OBR/MDR RECORD CYLINDER FULL FLAG                   00718000
+*                                                                       00719000
+* TABLES /WORK AREAS -                                                  00720000
+*                                                                       00721000
+*        DMKIOEVQ FIELD IS USED TO QUE SVC 76 REQUESTS.                 00722000
+*                                                                       00723000
+* NOTES -                                                               00724000
+*                                                                       00725000
+*        THE ONLY TIME THIS SUBROUTINE GETS CONTROL IS WHEN A           00726000
+*        VITUAL MACHINE REQUESTS THAT A RECORD BE RECORDED. THE         00727000
+*        FOLLOWING MODULE GIVE CONTROL TO THIS SUBROUTINE:              00728000
+*                                                                       00729000
+*        DMKVER - WHEN A VIRTUAL ERROR RECORD IS CONVERTED TO A         00730000
+*                 REAL ERROR RECORD.                                    00731000
+*                                                                       00732000
+* REGISTER USAGE -                                                      00733000
+*                                                                       00734000
+*        GR14,15 LINKAGE REGISTERS                                      00735000
+*        GR12 = MODULE BASE REGISTER                                    00736000
+*        GR11 = VMBLOK ADDRESSABILITY                                   00737000
+*        GR 7 = SIZE OF THE RECORD IN DOUBLEWORDS                       00738000
+*        GR 6 = ADDRESS OF THE RECORD                                   00739000
+*        GR 5 = SUBROUTINE BAL REGISTER                                 00740000
+*        GR0-4= WORK REGISTERS                                          00741000
+*                                                                       00742000
+* OPERATION -                                                           00743000
+*                                                                       00744000
+*        I. FORMAT SVC 76 RECORD                                        00745000
+*                                                                       00746000
+*              1. MOVE THE DATE AND TIME RECORD WAS CREATED IN THE      00747000
+*                 SVC 76 RECORD.                                        00748000
+*                                                                       00749000
+*              2. SET UP THE INTERFACE REGISTERS FOR THE RECORDER.      00750000
+*                                                                       00751000
+*              3. ANALYSE THE OBR/MDR RECORDING CYLINDER AND            00752000
+*                 THE RECORDING IN PROGRESS FLAG.                       00753000
+*                                                                       00754000
+*                 . IF THE CYLINDER IS FULL OR NOT INITIALIZED, RELEASE 00755000
+*                   THE SVC 76 RECORD AND RETURN TO CALLER.             00756000
+*                 . IF RECORDING IS IN PROGRESS, QUE REQUEST AND        00757000
+*                   RETURN TO CALLER.                                   00758000
+*                 . IF RECORDING IS NOT IN PROGRESS, QUE CPEXBLOK TO    00759000
+*                   ACTIVATE RECORDER AND RETURN TO CALLER.             00760000
+*                                                                       00761000
+**********************************************************************  00762000
+         EJECT                                                          00763000
+DMKIOEVR RELOC HANDLE         ASYNCHRONOUS RECORDING           @VA03358 00764000
+         LA    R6,4(,R1)      GET ADDRESS OF RECORD AREA       @VA03358 00765000
+         LR    R7,R0          GET LENGTH OF RECORD             @VA03358 00766000
+         BAL   R9,GETDATE     GET DATE & TIME RECORD WAS MADE  @VA03358 00767000
+         S     R6,F4          ADDR. OF LENGTH FIELD & RECORD   @VA03358 00768000
+         BAL   R5,ANALRECD    ANALYZE THE ERROR RECORDING CYLS @V5088AA 00769000
+         B     FRETRECD       RELEASE OBR/MDR RECORD           @VA03358 00770000
+         B     QUEVRM         QUE OBR/MDR RECORD OFF REC QUE   @VA03358 00771000
+*        NO RECORDING IN PROGRESS                                       00772000
+         LA    R4,IOFVR       SET UP RETURN ADDR FOR CPEXBLOK  @VA03358 00773000
+         BAL   R5,STKCPEX     STACK CPEXBLOK OFF CPEXBLOK QUE  @VA03358 00774000
+         SPACE 1                                                        00775000
+IOFVR    EQU   *              CALL RECORDER FOR OBR/MDR RECORD @VA03358 00776000
+         CALL  DMKIOFVR       GO RECORD OBR/MDR RECORDS        @VA03358 00777000
+         GOTO  DMKDSPCH       GO TO THE DISPATCHER             @VA03358 00778000
+         SPACE 1                                                        00779000
+QUEVRM   EQU   *              QUE OBR/MDR RECORD OFF REC. QUE  @VA03358 00780000
+         BAL   R5,GETCPEX     GET SPACE FOR CPEXBLOK           @VA03358 00781000
+         LA    R3,DMKIOEVQ    GET POINTER TO SVC 76 QUE        @VA03358 00782000
+         LA    R5,COMEXIT     RETURN TO CALLER AFTER STACK     @VA03358 00783000
+         BAL   R4,QUECPEX     STACK REQUEST OFF RECORDING QUE  @VA03358 00784000
+         EJECT                                                          00785000
+**********************************************************************  00786000
+*                                                                       00787000
+* SUBROUTINE NAME -                                                     00788000
+*                                                                       00789000
+*        DMKIOECC                                                       00790000
+*                                                                       00791000
+* FUNCTION -                                                            00792000
+*                                                                       00793000
+*        GIVE CONTROL TO THE RECORDER FOR RECORDING CHANNEL CHECK (CCH) 00794000
+*        RECORDS. RECORDING IS HANDLED ASYNCHRONOUS TO THE CHANNEL      00795000
+*        ERROR.                                                         00796000
+*                                                                       00797000
+* ATTRIBUTES -                                                          00798000
+*                                                                       00799000
+*        SERIALLY REUSEABLE, RESIDENT, ENTERED VIA SVC                  00800000
+*                                                                       00801000
+* ENTRY CONDITIONS -                                                    00802000
+*                                                                       00803000
+*        GR  6 = ADDRESS OF CHANNEL CHECK RECORD                        00804000
+*        GR  7 = SIZE OF CHANNEL CHECK RECORD IN DOUBLEWORDS            00805000
+*        GR  8 = ADDRESS OF RDEVBLOK                                    00806000
+*        GR 10 = ADDRESS OF IOBLOK                                      00807000
+*        GR 11 = ADDRESS OF VMBLOK                                      00808000
+*        GR 12 = ADDRESS OF DMKIOECC                                    00809000
+*        GR 13 = ADDRESS OF SAVE AREA                                   00810000
+*                                                                       00811000
+* EXIT CONDITIONS -                                                     00812000
+*                                                                       00813000
+*        IF NO RECORDING IS IN PROGRESS, ACTIVATE RECORDER AND          00814000
+*        RETURN TO CALLER. IF RECORDING IS IN PROGRESS, QUE REQUEST     00815000
+*        AND RETURN TO CALLER.                                          00816000
+*                                                                       00817000
+*        REGISTER CONTENTS                                              00818000
+*        GR  6 = ADDRESS OF OBR/MDR/CCH RECORD                          00819000
+*        GR  7 = SIZE OF RECORD IN DOUBLEWORDS                          00820000
+*                                                                       00821000
+* CALL TO OTHER ROUTINES -                                              00822000
+*                                                                       00823000
+*        DMKFREE - TO ALLOCATE FREE STORAGE FOR CPEXBLOK                00824000
+*        DMKFRET - TO RETURN ALLOCATED STORAGE FOR RECORD               00825000
+*        DMKDSPCH - EXIT TO DISPATCHER AFTER RETURNING FROM RECORDER    00826000
+*        DMKSTKCP - STACK CPEXBLOK TO ACTIVATE RECORDER                 00827000
+*        DMKIOFC1 - GO RECORD CCH RECORD                                00828000
+*                                                                       00829000
+* EXTERNAL REFERENCES -                                                 00830000
+*                                                                       00831000
+*        DMKSYSTZ - GET ADDRESS OF GMT DIFFERENCE                       00832000
+*        DMKIOERP - RECORDING IN PROGRESS FLAG                          00833000
+*        DMKIOEMX - NUMBER OF PAGES (MAXIMUM) ON A CYLINDER             00834000
+*        DMKIOEMS - MCH/CCH RECORD CYLINDER FULL FLAG                   00835000
+*                                                                       00836000
+* TABLES /WORK AREAS -                                                  00837000
+*                                                                       00838000
+*        DMKIOECQ FIELD IS USED TO QUE CCH RECORDS.                     00839000
+*                                                                       00840000
+* NOTES -                                                               00841000
+*                                                                       00842000
+*        THE ONLY TIME THIS SUBROUTINE GETS CONTROL IS WHEN             00843000
+*        A CHANNEL ERROR HAS OCCURRED. THE FOLLOWING                    00844000
+*        MODULE GIVE CONTROL TO THIS SUBROUTINE:                        00845000
+*                                                                       00846000
+*        DMKCCH - ON A CHANNEL ERROR                                    00847000
+*                                                                       00848000
+* REGISTER USAGE -                                                      00849000
+*                                                                       00850000
+*        GR14,15 LINKAGE REGISTERS                                      00851000
+*        GR12 = MODULE BASE REGISTER                                    00852000
+*        GR11 = VMBLOK ADDRESSABILITY                                   00853000
+*        GR10 = IOBLOK ADDRESSABILITY                                   00854000
+*        GR 9 = WORK REGISTER                                           00855000
+*        GR 8 = RDEVBLOK ADDRESSABILITY                                 00856000
+*        GR 7 = SIZE OF THE RECORD IN DOUBLEWORDS                       00857000
+*        GR 6 = ADDRESS OF THE RECORD                                   00858000
+*        GR 5 = SUBROUTINE BAL REGISTER                                 00859000
+*        GR0-4= WORK REGISTERS                                          00860000
+*                                                                       00861000
+* OPERATION -                                                           00862000
+*                                                                       00863000
+*        I. FORMAT CHANNEL CHECK RECORD                                 00864000
+*                                                                       00865000
+*              1. MOVE THE DATE AND TIME RECORD WAS CREATED IN THE      00866000
+*                 CHANNEL CHECK RECORD.                                 00867000
+*                                                                       00868000
+*              2. SET UP THE INTERFACE'S REGISTERS FOR THE RECORDER.    00869000
+*                                                                       00870000
+*              3. ANALYSE THE MCH/CCH RECORDING CYLINDER AND            00871000
+*                 THE RECORDING IN PROGRESS FLAG.                       00872000
+*                                                                       00873000
+*                 . IF THE CYLINDER IS FULL OR NOT INITIALIZED, SET A   00874000
+*                   NON-ZERO RETURN CODE, RELEASE THE CCH RECORD AND    00875000
+*                   RETURN TO CALLER.                                   00876000
+*                 . IF RECORDING IS IN PROGRESS, QUE REQUEST AND        00877000
+*                   RETURN TO CALLER.                                   00878000
+*                 . IF RECORDING IS NOT IN PROGRESS, QUE CPEXBLOK TO    00879000
+*                   ACTIVATE RECORDER AND RETURN TO CALLER.             00880000
+*                                                                       00881000
+**********************************************************************  00882000
+         EJECT                                                          00883000
+DMKIOECC RELOC HANDLE         ASYNCHRONOUS RECORDING           @VA03358 00884000
+CCHIOS   EQU   *              ENTRY FROM I/O SUPERVICOR        @VA03358 00885000
+         BAL   R9,GETDATE     GET DATE & TIME RECORD WAS MADE  @VA03358 00886000
+         BAL   R5,ANALRECD    ANALYZE THE ERROR RECORDING CYLS @V5088AA 00887000
+         B     CCHFRECD       RELEASE CCH RECORD SPACE         @VA03358 00888000
+         B     QUECCH         QUE CCH RECORD OFF RECORDING QUE @VA03358 00889000
+*        NO RECORDING IN PROGRESS                                       00890000
+         LA    R4,IOFC1       SET UP RETURN ADDR FOR CPEXBLOK  @VA03358 00891000
+         BAL   R5,STKCPEX     STACK CPEXBLOK OFF CPEXBLOK QUE  @VA03358 00892000
+         SPACE 1                                                        00893000
+IOFC1    EQU   *              CALL RECORDER FOR CCH RECORD     @VA03358 00894000
+         CALL  DMKIOFC1       GO RECORD CCH RECORDS            @VA03358 00895000
+         GOTO  DMKDSPCH       GO TO THE DISPATCHER             @VA03358 00896000
+         SPACE 1                                                        00897000
+QUECCH   EQU   *              QUE CCH RECORD OFF RECORDING QUE @VA03358 00898000
+         BAL   R5,GETCPEX     GET SPACE FOR CPEXBLOK           @VA03358 00899000
+         LA    R3,DMKIOECQ    GET POINTER TO CCH QUE           @VA03358 00900000
+         LA    R5,COMEXIT     RETURN TO CALLER AFTER STACK     @VA03358 00901000
+         BAL   R4,QUECPEX     STACK REQUEST OFF RECORDING QUE  @VA03358 00902000
+         SPACE 2                                                        00903000
+CCHIOENT EQU   *              HANDLE CCH ERROR FROM I/O SUPVER.@VA03358 00904000
+         CALL  DMKCCHRT       WRITE ERROR MESSAGE TO OPERATOR  @VA03358 00905000
+         L     R7,IOERCCRL    LENG OF CCH REC IN DOUBLEWORDS   @V508690 00906000
+         L     R6,IOERCCRA    ADDR OF THE CCH RECORD           @V508690 00907000
+         SR    R5,R5          CLEAR WORK REGISTER              @VA03358 00908000
+         ST    R5,IOERCCRA    CLEAR ADDRESS OD CCH RECORD      @V508690 00909000
+         BAL   R5,FRETIOER    RELEASE STORAGE FOR IOERBLOK     @VA03358 00910000
+         B     CCHIOS         GO SET UP FOR RECORDING          @V508690 00911000
+         SPACE 2                                                        00912000
+DISPTH   EQU   *              RETURN TO DISPATCHER             @VA03358 00913000
+         GOTO  DMKDSPCH       GO TO THE DISPATCHER             @VA03358 00914000
+         EJECT                                                          00915000
+**********************************************************************  00916000
+*                                                                       00917000
+* SUBROUTINE NAME -                                                     00918000
+*                                                                       00919000
+*        DMKIOEMC                                                       00920000
+*                                                                       00921000
+* FUNCTION -                                                            00922000
+*                                                                       00923000
+*        GIVE CONTROL TO THE RECORDER FOR RECORDING MACHINE CHECK (MCH) 00924000
+*        RECORDS. RECORDING IS HANDLE SYNCHRONOUS FOR MACHINE CHECK     00925000
+*        CONDITIONS.                                                    00926000
+*                                                                       00927000
+* ATTRIBUTES -                                                          00928000
+*                                                                       00929000
+*        SERIALLY REUSEABLE, RESIDENT, ENTERED VIA SVC                  00930000
+*                                                                       00931000
+* ENTRY CONDITIONS -                                                    00932000
+*                                                                       00933000
+*        GR  6 = ADDRESS OF MACHINE CHECK RECORD                        00934000
+*        GR  7 = SIZE OF MACHINE CHECK RECORD IN DOUBLEWORDS            00935000
+*        GR 11 = ADDRESS OF VMBLOK                                      00936000
+*        GR 12 = ADDRESS OF DMKIOEMC                                    00937000
+*        GR 13 = ADDRESS OF SAVE AREA                                   00938000
+*                                                                       00939000
+* EXIT CONDITIONS -                                                     00940000
+*                                                                       00941000
+*        IF NO RECORDING IS IN PROGRESS, ACTIVATE RECORDER AND          00942000
+*        RETURN TO CALLER. IF RECORDING IS IN PROGRESS, QUE REQUEST     00943000
+*        AND RETURN TO CALLER.                                          00944000
+*                                                                       00945000
+*        REGISTER CONTENTS                                              00946000
+*        GR  6 = ADDRESS OF OBR/MDR/CCH RECORD                          00947000
+*        GR  7 = SIZE OF RECORD IN DOUBLEWORDS                          00948000
+*                                                                       00949000
+* CALL TO OTHER ROUTINES -                                              00950000
+*                                                                       00951000
+*        DMKFREE - TO ALLOCATE FREE STORAGE FOR CPEXBLOK                00952000
+*        DMKDSPCH - EXIT TO DISPATCHER UNTIL RECORD IS RECORDED         00953000
+*        DMKSTKCP - STACK CPEXBLOK WHEN THE RECORDER IS ACTIVE          00954000
+*        DMKIOFM1 - GO RECORD MCH RECORD                                00955000
+*                                                                       00956000
+* EXTERNAL REFERENCES -                                                 00957000
+*                                                                       00958000
+*        DMKSYSTZ - GET ADDRESS OF GMT DIFFERENCE                       00959000
+*        DMKIOERP - RECORDING IN PROGRESS FLAG                          00960000
+*        DMKIOEMX - NUMBER OF PAGES (MAXIMUM) ON A CYLINDER             00961000
+*        DMKIOEMS - MCH/CCH RECORD CYLINDER FULL FLAG                   00962000
+*                                                                       00963000
+* TABLES /WORK AREAS -                                                  00964000
+*                                                                       00965000
+*        DMKIOEMQ FIELD IS USED TO QUE MCH RECORDS.                     00966000
+*                                                                       00967000
+* NOTES -                                                               00968000
+*                                                                       00969000
+*        THE ONLY TIME THIS SUBROUTINE GETS CONTROL, IS WHEN            00970000
+*        A MACHINE CHECK HAS OCCURRED. THE FOLLOWING                    00971000
+*        MODULE GIVE CONTROL TO THIS SUBROUTINE:                        00972000
+*                                                                       00973000
+*        DMKMCH - ON A MACHINE CHECK CONDITION                          00974000
+*                                                                       00975000
+* REGISTER USAGE -                                                      00976000
+*                                                                       00977000
+*        GR14,15 LINKAGE REGISTERS                                      00978000
+*        GR12 = MODULE BASE REGISTER                                    00979000
+*        GR11 = VMBLOK ADDRESSABILITY                                   00980000
+*        GR10 = IOBLOK ADDRESSABILITY                                   00981000
+*        GR 9 = WORK REGISTER                                           00982000
+*        GR 7 = SIZE OF THE RECORD IN DOUBLEWORDS                       00983000
+*        GR 6 = ADDRESS OF THE RECORD                                   00984000
+*        GR 5 = SUBROUTINE BAL REGISTER                                 00985000
+*        GR0-4= WORK REGISTERS                                          00986000
+*                                                                       00987000
+* OPERATION -                                                           00988000
+*                                                                       00989000
+*        I. FORMAT MACHINE CHECK RECORD                                 00990000
+*                                                                       00991000
+*              1. MOVE DATE AND TIME RECORD WAS CREATED IN THE          00992000
+*                 MACHINE CHECK RECORD.                                 00993000
+*                                                                       00994000
+*              2. SET UP THE INTERFACE'S REGISTERS FOR THE RECORDER.    00995000
+*                                                                       00996000
+*              3. ANALYSE THE MCH/CCH RECORDING CYLINDER AND            00997000
+*                 THE RECORDING IN PROGRESS FLAG.                       00998000
+*                                                                       00999000
+*                 . IF THE CYLINDER IS FULL OR NOT INITIALIZED, SET A   01000000
+*                   NON-ZERO RETURN CODE AND RETURN TO CALLER.          01001000
+*                 . IF RECORDING IS IN PROGRESS, QUE REQUEST AND        01002000
+*                   EXIT TO THE DISPATCHER, UNTIL THE RECORDER STACKS   01003000
+*                   THE CPEXBLOK FOR THIS REQUEST.                      01004000
+*                 . IF RECORDING IS NOT IN PROGRESS, GIVE CONTROL       01005000
+*                   TO THE RECORDER TO RECORD THE MCH RECORD.           01006000
+*                                                                       01007000
+**********************************************************************  01008000
+         EJECT                                                          01009000
+DMKIOEMC RELOC HANDLE         SYNCHRONOUS RECORDING            @VA03358 01010000
+         BAL   R9,GETDATE     GET DATE & TIME RECORD WAS MADE  @VA03358 01011000
+         BAL   R5,ANALRECD    ANALYZE THE ERROR RECORDING CYLS @V5088AA 01012000
+         B     MCHCCH         SET A NON-ZERO RETURN CODE       @VA03358 01013000
+         B     QUEMCH         QUE MCH RECORD OFF RECORDING QUE @VA03358 01014000
+*        NO RECORDING IN PROGRESS                                       01015000
+IOFM1    EQU   *              PROCESS MCH REQUEST -SYNCHRONOUS @VA03358 01016000
+         CALL  DMKIOFM1       GO RECORD MCH RECORDS            @VA03358 01017000
+         BAL   R5,COMEXIT     RETURN TO CALLER                 @VA03358 01018000
+         SPACE 1                                                        01019000
+QUEMCH   EQU   *              QUE MCH RECORD OFF RECORDING QUE @VA03358 01020000
+         LA    R4,IOFM1       RETURN ADDRESS FOR CPEXBLOK      @VA03358 01021000
+         BAL   R5,GETCPEX     GET SPACE FOR CPEXBLOK           @VA03358 01022000
+         LA    R3,DMKIOEMQ    GET POINTER TO MCH QUE           @VA03358 01023000
+         LA    R5,DISPTH      RETURN TO THE DISPATCHER         @VA03358 01024000
+         BAL   R4,QUECPEX     STACK REQUEST OFF RECORDING QUE  @VA03358 01025000
+         SPACE 1                                                        01026000
+CCHFRECD EQU   *              HANDLE 'NOT INITIALIZE'/FULL CYL @VA03358 01027000
+         SR    R5,R5          CLEAR FLAG REGISTER              @VA03358 01028000
+         BAL   R4,FRETRECD    RELEASE SPACE FOR CCH RECORD     @VA03358 01029000
+MCHCCH   EQU   *              SET RETURN CODE FOR CALLER       @VA03358 01030000
+         LA    R0,255         SET NON-ZERO RETURN CODE         @VA03358 01031000
+         LM    R1,R11,SAVEREGS+4 RESTORE CALLER'S REGISTERS    @VA03358 01032000
+         SVC   12             RETURN TO USER                   @VA03358 01033000
+         EJECT                                                          01034000
+**********************************************************************  01035000
+*                                                                       01036000
+* SUBROUTINE NAME -                                                     01037000
+*                                                                       01038000
+*        DMKIOEFM                                                       01039000
+*                                                                       01040000
+* FUNCTION -                                                            01041000
+*                                                                       01042000
+*        THIS SUBROUTINE IS GIVEN CONTROL TO RESET OR CLEAR THE         01043000
+*        ERROR RECORDING CYLINDERS AND UPDATE THE INCORE POINTERS       01044000
+*        TO THE START OF THE RECORDING AREA.                            01045000
+*                                                                       01046000
+* ATTRIBUTES -                                                          01047000
+*                                                                       01048000
+*        SERIALLY REUSEABLE, RESIDENT, ENTERED VIA SVC                  01049000
+*                                                                       01050000
+* ENTRY CONDITIONS -                                                    01051000
+*                                                                       01052000
+*        GR  2 = PARAMETER REGISTER                                     01053000
+*                                                                       01054000
+*        PARAMETER                                                      01055000
+*        GR2 = 01 - CLEAR OBR/MDR RECORDING CYLINDER                    01056000
+*        GR2 = 02 - CLEAR MCH/CCH RECORDING CYLINDER                    01057000
+*        GR2 = 03 - CLEAR BOTH RECORDING CYLINDERS                      01058000
+*                                                                       01059000
+*        GR 11 = ADDRESS OF VMBLOK                                      01060000
+*        GR 12 = ADDRESS OF DMKIOEFM                                    01061000
+*        GR 13 = ADDRESS OF SAVE AREA                                   01062000
+*                                                                       01063000
+* EXIT CONDITIONS -                                                     01064000
+*                                                                       01065000
+*        IF NO RECORDING IS IN PROGRESS, CLEAR THE ERROR RECORDING      01066000
+*        CYLINDERS AND INITIALIZE THE INCORE POINTERS. IF RECORDING IS  01067000
+*        IN PROGRESS, QUE ERASE REQUEST AND EXIT TO THE DISPATCHER.     01068000
+*                                                                       01069000
+* CALL TO OTHER ROUTINES -                                              01070000
+*                                                                       01071000
+*        DMKFREE - TO ALLOCATE FREE STORAGE FOR CPEXBLOK                01072000
+*        DMKDSPCH - EXIT TO DISPATCHER AFTER  STACKING CPEXBLOK         01073000
+*        DMKSTKCP - STACK CPEXBLOK FOR RECORDER                         01074000
+*        DMKIOFIN - GO INITIALIZE THE INCORE POINTERS                   01075000
+*        DMKIOGF2 - ERASE THE ERROR RECORDING CYLINDERS                 01076000
+*                                                                       01077000
+* EXTERNAL REFERENCES -                                                 01078000
+*                                                                       01079000
+*        DMKIOERP - RECORDING IN PROGRESS FLAG                          01080000
+*                                                                       01081000
+* TABLES /WORK AREAS -                                                  01082000
+*                                                                       01083000
+*        DMKIOERQ FIELD IS USED TO QUE ERASE REQUESTS.                  01084000
+*                                                                       01085000
+* NOTES -                                                               01086000
+*                                                                       01087000
+*        THE ONLY TIME THIS SUBROUTINE GETS CONTROL IS WHEN             01088000
+*        THE CPEREP COMMAND IS ISSUE TO CLEAR OR RESET ERROR            01089000
+*        RECORDING CYLINDERS. THE FOLLOWING MODULE GIVE CONTROL         01090000
+*        TO THIS SUBROUTINE:                                            01091000
+*                                                                       01092000
+*        DMKHVC - TO CLEAR ERROR RECORDING CYLINDERS                    01093000
+*                                                                       01094000
+* REGISTER USAGE -                                                      01095000
+*                                                                       01096000
+*        GR14,15 LINKAGE REGISTERS                                      01097000
+*        GR12 = MODULE BASE REGISTER                                    01098000
+*        GR11 = VMBLOK ADDRESSABILITY                                   01099000
+*        GR 9 = WORK REGISTER                                           01100000
+*        GR 5 = SUBROUTINE BAL REGISTER                                 01101000
+*        GR0-4= WORK REGISTERS                                          01102000
+*                                                                       01103000
+* OPERATION -                                                           01104000
+*                                                                       01105000
+*        I. CLEAR AND FORMAT THE RECORDING AREA ON DISK                 01106000
+*                                                                       01107000
+*              1. ANALYSE THE RECORDING IN PROGRESS FLAG.               01108000
+*                                                                       01109000
+*                 . IF RECORDING IS IN PROGRESS, QUE REQUEST AND        01110000
+*                   EXIT TO DISPATCHER.                                 01111000
+*                 . IF RECORDING IS NOT IN PROGRESS, GIVE CONTROL TO    01112000
+*                   DMKIOGF2 TO CLEAR RECORDING CYLINDERS AND           01113000
+*                   AFTERWARD, GIVE CONTROL TO THE RECORDER TO          01114000
+*                   INITIALIZE THE INCORE POINTERS.                     01115000
+*                                                                       01116000
+**********************************************************************  01117000
+         EJECT                                                          01118000
+DMKIOEFM RELOC PROVIDE        SYNCHRONOUS HANDLING             @VA03358 01119000
+         BAL   R5,ANALRECD    CHECK RECORDING IN PROGRESS FLAG @VA03358 01120000
+         B     *+8            IGNORE FULL/NOT INITIALIZE BRANCH@VA03358 01121000
+         B     QUERASE        QUE ERASE REQUEST OFF REC. QUE   @VA03358 01122000
+*        NO RECORDING IN PROGRESS                                       01123000
+IOFIN    EQU   *              PROCESS ERASE REQUEST SYNCH.     @VA03358 01124000
+         MVI   DMKIOERP,X'FF' SET RECORDING IN PROGRESS FLAG   @VA03358 01125000
+         CALL  DMKIOGF2                                        @VA03358 01126000
+         CALL  DMKIOFIN       INITIALIZE OBR/MDR & MCH/CCH CYL @VA03358 01127000
+         BAL   R5,COMEXIT     RETURN TO CALLER                 @VA03358 01128000
+         SPACE 1                                                        01129000
+QUERASE  EQU   *              QUE ERASE REQUEST OFF REC. QUE   @VA03358 01130000
+         LA    R4,IOFIN       SET UP RETURN ADDRESS            @VA03358 01131000
+         BAL   R5,GETCPEX     GET SPACE FOR CPEXBLOK           @VA03358 01132000
+         LA    R3,DMKIOERQ    GET POINTER TO ERASE REQUEST QUE @VA03358 01133000
+         LA    R5,DISPTH      RETURN TO THE DISPATCHER         @VA03358 01134000
+         BAL   R4,QUECPEX     STACK REQUEST OFF RECORDING QUE  @VA03358 01135000
+         EJECT                                                          01136000
+**********************************************************************  01137000
+*                                                                       01138000
+* SUBROUTINE NAME -                                                     01139000
+*                                                                       01140000
+*        DMKIOEFL                                                       01141000
+*                                                                       01142000
+* FUNCTION -                                                            01143000
+*                                                                       01144000
+*        THIS SUBROUTINE FORMAT EVERY PAGE ON THE ERROR RECORDING       01145000
+*        CYLINDERS AND INITIALIZE THE INCORE POINTERS.                  01146000
+*                                                                       01147000
+* ATTRIBUTES -                                                          01148000
+*                                                                       01149000
+*        SERIALLY REUSEABLE, RESIDENT, ENTERED VIA SVC                  01150000
+*                                                                       01151000
+* ENTRY CONDITIONS -                                                    01152000
+*                                                                       01153000
+*        GR 12 = ADDRESS OF DMKIOEFL                                    01154000
+*        GR 13 = ADDRESS OF SAVE AREA                                   01155000
+*                                                                       01156000
+* EXIT CONDITIONS -                                                     01157000
+*                                                                       01158000
+*        NONE                                                           01159000
+*                                                                       01160000
+* CALL TO OTHER ROUTINES -                                              01161000
+*                                                                       01162000
+*        DMKIOFIN - TO INITIALIZE INCORE POINTERS AFTER IPL OR CLEAR    01163000
+*        DMKIOGF1 - FORMAT PAGES IN THE ERROR RECORDING CYLINDERS       01164000
+*                                                                       01165000
+* EXTERNAL REFERENCES -                                                 01166000
+*                                                                       01167000
+*        DMKIOERP - RECORDING IN PROGRESS FLAG                          01168000
+*                                                                       01169000
+* TABLES /WORK AREAS -                                                  01170000
+*                                                                       01171000
+*        NONE                                                           01172000
+*                                                                       01173000
+* NOTES -                                                               01174000
+*                                                                       01175000
+*        THE ONLY TIME THIS SUBROUTINE GETS CONTROL IS WHEN             01176000
+*        THE SYSTEM IS IPL. THE FOLLOWING MODULE GIVE CONTROL           01177000
+*        TO THIS SUBROUTINE:                                            01178000
+*                                                                       01179000
+*        DMKCPI - WHEN THE SYSTEM IS IPL                                01180000
+*                                                                       01181000
+* REGISTER USAGE -                                                      01182000
+*                                                                       01183000
+*        GR14,15 LINKAGE REGISTERS                                      01184000
+*        GR12  = MODULE BASE REGISTER                                   01185000
+*        GR0-11= WORK REGISTERS                                         01186000
+*                                                                       01187000
+* OPERATION -                                                           01188000
+*                                                                       01189000
+*        I. FORMAT AND INITIALIZE PAGES ON RECORDING CYLINDERS          01190000
+*                                                                       01191000
+*              1. FORMAT AND INITIALIZE PAGES ON ERROR RECORDING        01192000
+*                 CYLINDERS.                                            01193000
+*                                                                       01194000
+*              2. INITIALIZE THE INCORE POINTERS IN THE RECORDER.       01195000
+*                                                                       01196000
+**********************************************************************  01197000
+         EJECT                                                          01198000
+DMKIOEFL RELOC INITIALIZE     RECORDING CYLINDERS              @VA03358 01199000
+         MVI   DMKIOERP,X'FF' SET RECORDING IN PROGRESS FLAG   @VA03358 01200000
+         CALL  DMKIOGF1       FORMAT ERROR RECORDING CYLINDERS @VA03358 01201000
+         CALL  DMKIOFIN       INITIALIZE INCORE POINTERS       @VA03358 01202000
+         BAL   R5,COMEXIT     RETURN TO CALLER                 @VA03358 01203000
+         EJECT                                                          01204000
+*******************************************************************     01205000
+*                                                                       01206000
+*  SUBROUTINE  NAME                                                     01207000
+*                                                                       01208000
+*        DMKIOEST                                                       01209000
+*                                                                       01210000
+*  FUNCTION                                                             01211000
+*                                                                       01212000
+*        GET STORAGE AND BUILD ERRBLOK. QUEUE THE ERRBLOK               01213000
+*        FOR ASYNCHRONOUS PROCESSING.                                   01214000
+*                                                                       01215000
+*  ATTRIBUTES                                                           01216000
+*                                                                       01217000
+*        SERIALLY REUSABLE, RESIDENT, ENTERED VIA SVC                   01218000
+*                                                                       01219000
+*  ENTRY CONDITIONS                                                     01220000
+*                                                                       01221000
+*        GR  8 = ADDRESS OF RDEVBLOK                                    01222000
+*        GR 10 = ADDRESS OF IOBLOK                                      01223000
+*                                                                       01224000
+*  EXIT CONDITIONS                                                      01225000
+*                                                                       01226000
+*        RETURN TO THE CALLING ERP                                      01227000
+*                                                                       01228000
+*                                                                       01229000
+*  CALLS TO OTHER ROUTINES                                              01230000
+*        DMKFREE _ TO ALLOCATE FREE STORAGE FOR ERRBLOK                 01231000
+*                                                                       01232000
+*  NOTES:                                                               01233000
+*                                                                       01234000
+*        THIS MODULE GETS CONTROL FOR THE PURPOSE OF UPDATING           01235000
+*        THE SDR COUNTERS. THE FOLLOWING MODULES CALL THIS              01236000
+*        SUBROUTINE.                                                    01237000
+*                                                                       01238000
+*        DMKBSC                                                         01239000
+*        DMKCNS                                                         01240000
+*        DMKDAS                                                         01241000
+*        DMKGRF                                                         01242000
+*        DMKTAP                                                         01243000
+*        DMKRSE                                                         01244000
+*                                                                       01245000
+*  TABLES/WORK AREAS                                                    01246000
+*                                                                       01247000
+*        ERRBLOK _ CONTAINS INFORMATION NEEDED TO UPDATE COUNTERS       01248000
+*                                                                       01249000
+*  OPERATION                                                            01250000
+*                                                                       01251000
+*                                                                       01252000
+*                                                                       01253000
+*                                                                       01254000
+*                                                                       01255000
+*******************************************************************     01256000
+         EJECT                                                          01257000
+DMKIOEST RELOC HANDLE                                          @VA03757 01258000
+         USING ERRBLOK,R6     SET UP ADDRESSABILITY FOR ERRBLOK@VA03757 01259000
+         ICM   R4,15,RDEVIOER GET IOERBLOK ADDRESS             @VA03757 01260000
+         BZ    COMEXIT        MUST HAVE IOERBLOK               @VA03757 01261000
+         TM    RDEVCTRS,X'FF' COUNTING SUSPENDED???            @VA03757 01262000
+         BO    COMEXIT        YES, EXIT                        @VA03757 01263000
+         BAL   R5,ERRBLD      GO BUILD THE ERRBLOK             @VA03757 01264000
+         LR    R6,R1          GET THE ADDRESS OF THE BLOCK     @VA03757 01265000
+         LR    R7,R0          GET THE SIZE IN DOUBLEWORDS      @VA03757 01266000
+         ICM   R5,15,SAVER1   GET PASSED REG 1                 @VA03757 01267000
+         BZ    SDRANAL        IF ZERO, NO PARM STRING PASSED   @VA03757 01268000
+         MVC   ERRPARM+4(16),0(R5) MOVE IN THE PARM STRING     @VA03757 01269000
+         SPACE                                                          01270000
+SDRANAL  EQU   *                                               @VA03757 01271000
+         BAL   R5,ANALRECD    ANALYZE THE ERROR RECORDING CYLS @V5088AA 01272000
+         B     FRETRECD       RELEASE ERROR BLOCK              @VA03757 01273000
+         B     QUESDR         UPDATE IN PROGRESS,  QUEUE IT    @VA03757 01274000
+***  NO UPDATE IN PROGRESS                                              01275000
+         LA    R4,IOFST       SET UP RETURN ADDR FOR CPEXBLOK  @VA03757 01276000
+         BAL   R5,STKCPEX     STACK CPEXBLOK OFF CPEXBLOK QUE  @VA03757 01277000
+         SPACE                                                          01278000
+IOFST    EQU   *                                               @VA03757 01279000
+         CALL  DMKIOFST       GO UPDATE SDR COUNTERS           @VA03757 01280000
+         SPACE                                                          01281000
+         GOTO  DMKDSPCH       GO TO DISPATCHER                 @VA03757 01282000
+         SPACE 2                                                        01283000
+QUESDR   EQU   *              QUEUE ERRBLOK OFF UPDATE QUEUE   @VA03757 01284000
+         BAL   R5,GETCPEX     GET SPACE FOR CPEXBLOK           @VA03757 01285000
+         LA    R3,DMKIOESQ    GET ADDRESS OF UPDATE QUEUE      @VA03757 01286000
+         LA    R5,COMEXIT     SET UP RETURN                    @VA03757 01287000
+         BAL   R4,QUECPEX     GO QUEUE IT                      @VA03757 01288000
+         DROP  R6                                              @VA03757 01289000
+         EJECT                                                          01290000
+*                                                                       01291000
+*        SUBROUTINES FOR BUILDING AND FORMATTING ERROR RECORDS.         01292000
+*                                                                       01293000
+         SPACE 2                                                        01294000
+ANALRECD EQU   *              ANALYSE THE OBR/MDR ERROR CYL.   @VA03358 01295000
+         CLI   DMKIOEES,X'FF' IS ERROR RECORDING AREA FULL?    @V5088AA 01296000
+         BER   R5             YES, RETURN TO IN LINE CODE      @VA03358 01297000
+ANINLINE EQU   *              CHECK FOR RECORDING IN PROGRESS  @VA03358 01298000
+         CLI   DMKIOEMX,X'00' IS ERROR REC. CYL. INITIALIZE    @VA03358 01299000
+         BER   R5             NO, RETURN TO IN LINE CODE       @VA03358 01300000
+         CLI   DMKIOERP,X'FF' IS RECORDING IN PROGRESS         @VA03358 01301000
+         BE    4(R5)          YES, RETURN TO IN LINE CODE      @VA03358 01302000
+         MVI   DMKIOERP,X'FF' SET RECORDING IN PROGRESS FLAG   @VA03358 01303000
+         B     8(R5)          GO CALL THE RECORDER             @VA03358 01304000
+         SPACE 2                                                        01305000
+STKCPEX  EQU   *              STACK THE CPEXBLOK OFF THE QUE   @VA03358 01306000
+         CHARGE SWITCH,ASYSVM SWITCH TIMING TO SYSTEM          @V407510 01307000
+         BAL   R5,GETCPEX     GET SPACE FOR CPEXBLOK           @VA03358 01308000
+         CHARGE SWITCH,SAVER11 SWITCH BACK TO USER             @V407510 01309000
+         CALL  DMKSTKCP       STACK THE CPEXBLOK FOR RETURN    @VA03358 01310000
+         BAL   R5,COMEXIT     GO RETURN TO CALLER              @VA03358 01311000
+         SPACE 2                                                        01312000
+         SPACE 2                                                        01313000
+FRETSDR  EQU   *              RELEASE STORAGE USED BY SDRBLOK  @VA03757 01314000
+         ICM   R9,15,RDEVCTRS IS THERE A SDRBLOK ??            @VA03757 01315000
+         BZR   R5             NO, RETURN                       @VA03757 01316000
+         SR    R1,R1          CLEAR WORK REG                   @VA03757 01317000
+         IC    R1,SDRLNGTH    GET LENGTH OF SDRWORK AREA       @VA03757 01318000
+         LA    R1,SDRBSIZE(,R1) ADD SDRBLOK BASE SIZE          @VA03757 01319000
+         A     R1,F7          ROUND UP TO NEXT DOUBLEWORD      @VA03757 01320000
+         SRL   R1,3           GET NUMBER OF DOUBLEWORDS        @VA03757 01321000
+         LR    R0,R1          SET UP FOR CALL                  @VA03757 01322000
+         LR    R1,R9          GET ADDRESS OF SDRBLOK           @VA03757 01323000
+         LA    R1,0(,R1)      CLEAR HI-ORDER BYTE              @VA03757 01324000
+         CALL  DMKFRET        RELEASE STORAGE USED BY SDRBLOK  @VA03757 01325000
+         XC    RDEVCTRS,RDEVCTRS CLEAR POINTER TO SDRBLOK      @VA03757 01326000
+         BR    R5             RETURN TO IN LINE CODE           @VA03757 01327000
+         SPACE                                                          01328000
+         EJECT                                                          01329000
+***  ROUTINES USED TO BUILD THE ERRBLOK TO PASS TO MODULE               01330000
+***  DMKIOF WHO WILL BUILD AND RECORD THE OBR/MDR RECORD                01331000
+         SPACE                                                          01332000
+***      BUILD ERRBLOK FOR OBR PROCESSING                               01333000
+         SPACE 2                                                        01334000
+         USING ERRBLOK,R6     SETUP ADDRESSABILITY FOR ERRBLOK @VA03757 01335000
+         USING SDRBLOK,R9     SETUP ADDRESSABILITY FOR SDRBLOK @VA03757 01336000
+ERRBLD   EQU   *              GET SPACE AND BUILD ERRBLOK      @VA03757 01337000
+         SPACE                                                          01338000
+         BAL   R3,SPACE       GO GET THE SPACE                 @VA03757 01339000
+         BAL   R3,OBRMDRCL    GO CLEAR THE ERRBLOK             @VA03757 01340000
+         MVC   ERRKEY(3),OBRKEY SET FOR OBR PROCESSING         @VA03757 01341000
+         BAL   R9,GETDATE     GET TIME AND DATE                @VA03757 01342000
+         ICM   R9,15,RDEVCTRS PICK UP SDRBLOK ADDRESS          @VA03757 01343000
+         BZ    BYPASS01       BRANCH IF NO SDRBLOK             @VA03757 01344000
+         MVC   ERRSDR,SDRFLAGS MOVE SDR FLAGS TO ERRBLOK       @VA03757 01345000
+         TM    SDRFLAGS,SDRSHRT SHORT OBR TO BE WRITTEN ??     @VA03757 01346000
+         BOR   R5             YES, RETURN TO IN LINE CODE      @VA03757 01347000
+         SPACE 2                                                        01348000
+BYPASS01 EQU   *              GET THE FAILING CCW              @VA03757 01349000
+         SPACE                                                          01350000
+         SR    R2,R2          CLEAR WORK REG                   @VA03757 01351000
+         ICM   R2,7,IOERCSW+1 GET FAILING CCW ADDRESS PLUS 8   @VA03757 01352000
+         S     R2,F8          GET FAILING CCW ADDRESS          @VA03757 01353000
+         LTR   R2,R2          IS THIS A VALID FAILING CCW ADDR @VA03757 01354000
+         BNP   BYPASS02       NO, FORGET ABOUT CCW             @VA03757 01355000
+         MVC   ERRCCW(8),0(R2) MOVE IN FAILING CCW             @VA03757 01356000
+         SPACE 2                                                        01357000
+BYPASS02 EQU   *              MOVE IN THE VOLID FROM RDEVBLOK  @VA03757 01358000
+         MVC   ERRVOLID(6),RDEVSER GET THE VOLID LABEL         @VA03757 01359000
+         SPACE 2                                                        01360000
+OBRIOB   EQU   *              MOVE IN THE IOBLOK               @VA03757 01361000
+         MVC   ERRIOB(64),IOBLOK MOVE IOBLOK TO ERRBLOK        @VA03757 01362000
+         SPACE 2                                                        01363000
+OBRIOER  EQU   *              MOVE IN IOERBLOK                 @VA03757 01364000
+         LH    R2,IOEREXT     GET SIZE OF EXTENTION            @VA07816 01365000
+         LA    R2,IOERSIZE(0,R2) ADD SIZE OF IOERBLOK          @VA03757 01366000
+         SLL   R2,3           CONVERT TO BYTES                 @VA03757 01367000
+         BCTR  R2,R0          SUBTRACT ONE                     @VA03757 01368000
+         EX    R2,MOVEIOER    GO MOVE IN THE IOERBLOK          @VA03757 01369000
+         CLC   RDEVTYPC(2),P3203 IS IT A 3203 PRINTER??        @V386298 01370000
+         BE    CLRREG         YES--GO CLEAR REGISTERS          @V386298 01371000
+         CLC   RDEVTYPC(2),P3211 IS THIS A 3211 (PRINTER)      @VA03757 01372000
+         BNER  R5             NO, RETURN TO IN LINE CODE       @VA03757 01373000
+CLRREG   EQU   *                                               @V386298 01374000
+         SR    R2,R2          CLEAR THE WORK REG               @VA03757 01375000
+         IC    R2,CORRCNT     GET THE CORRELATION COUNT        @VA03757 01376000
+         A     R2,F1          ADD ONE TO IT                    @VA03757 01377000
+         STC   R2,CORRCNT     SAVE NEW COUNT                   @VA03757 01378000
+         STC   R2,ERRCORR     MOVE UPDATED COUNT TO ERRBLOK    @VA03757 01379000
+         BR    R5             RETURN TO IN LINE CODE           @VA03757 01380000
+         SPACE                                                          01381000
+MOVEIOER MVC   ERRIOER(0),IOERBLOK MOVE IN IOERBLOK            @VA03757 01382000
+         SPACE 5                                                        01383000
+***                                                                     01384000
+***      BUILD ERRBLOK FOR MDR PROCESSING                               01385000
+         SPACE                                                          01386000
+MDRBLD   EQU   *              GET SPACE AND BUILD ERRBLOK      @VA03757 01387000
+         SPACE                                                          01388000
+         BAL   R3,GETSPACE    GO GET SPACE FOR THE ERRBLOK     @VA03757 01389000
+         USING ERRBLOK,R6     SETUP ADDRESSABILITY FOR ERRBLOK @VA03757 01390000
+         BAL   R3,OBRMDRCL    CLEAR ERRBLOK TO ZEROES          @VA03757 01391000
+         MVC   ERRKEY(3),MDRKEY MARK FOR MDR PROCESSING        @VA03757 01392000
+         LR    R7,R9          GET ADDR OF CONTASK FOR 3270/3705@VA03757 01393000
+         BAL   R9,GETDATE     GET DATE AND TIME RECORD WAS MADE@VA03757 01394000
+         LR    R9,R7          RESTORE CONTASK ADDRESS          @VA03757 01395000
+         CLI   RDEVTYPC,CLASURO  IS IT A 3800 ?                @V60B9BA 01396000
+         BE    CONTURO             XFER IF SO                  @V60B9BA 01397000
+         CLI   RDEVTYPC,CLASDASD IS THIS A DASD DEVICE CLASS   @VA03757 01398000
+         BNE   MDRCONTK       NO, MOVE 3705 DEPENDENT DATA     @VA03757 01399000
+CONTURO  MVC   ERRMIOB(64),IOBLOK MOVE IOBLOK INTO ERRBLOK     @V60B9BA 01400000
+         SPACE 2                                                        01401000
+MDRVIOER EQU   *              MOVE IN IOERBLOKS                @VA03757 01402000
+         LA    R3,ERRMIOER    GET ADDRESS INTO ERRBLOK         @VA03757 01403000
+         LR    R2,R4          GET ADDRESS OF IOERBLOK          @VA03757 01404000
+MDRMOVE  LA    R15,IOERSIZE   LENGTH OF IOERBLOK               @VA03757 01405000
+         AH    R15,IOEREXT-IOERBLOK(R2) ADD EXTENTION SIZE     @VA03757 01406000
+         SLL   R15,3          CONVERT TO BYTES                 @VA03757 01407000
+         BCTR  R15,R0         DECREMENT COUNT BY ONE           @VA03757 01408000
+         EX    R15,MDRIOER    GO MOVE IOERBLOK INTO ERRBLOK    @VA03757 01409000
+         CLI   RDEVTYPC,CLASURO    IS IT A 3800 ?              @V60B9BA 01410000
+         BER   R5                  YES, ERRBLOK BUILT          @V60B9BA 01411000
+         CLI   RDEVTYPE,TYP2305 2305 ????                      @VA03757 01412000
+         BER   R5             YES, ERRBLOK BUILT               @VA03757 01413000
+         LA    R3,1(R15,R3)   UPDATE ERRBLOK POINTER           @VA03757 01414000
+         ICM   R2,15,IOERPNT-IOERBLOK(R2) GET NEXT IOERBLOK    @VA03757 01415000
+         BNZ   MDRMOVE        IF ANOTHER IOERBLOK, GO MOVE IT  @VA03757 01416000
+         BR    R5             ALL DONE, RETURN TO IN LINE CODE @VA03757 01417000
+         SPACE                                                          01418000
+MDRIOER  MVC   0(0,R3),0(R2)  MOVE IOERBLOK TO ERRBLOK         @VA03757 01419000
+         SPACE 1                                                        01420000
+MDRCONTK EQU   *              MOVE DEPENDENT DATA FROM CONTASK @VA03757 01421000
+         USING CONCCW3,R9     SETUP ADRESSABILITY FOR CONTASK  @VA03757 01422000
+         SR    R2,R2          CLEAR WORK REG                   @VA03757 01423000
+         LH    R2,CONDCNT     GET BUFFER LENGTH                @VA03757 01424000
+         STH   R2,ERRCCNT     SAVE BUFFER LENGTH IN ERRBLOK    @VA03757 01425000
+         BCTR  R2,R0          SUBTRACT ONE - EXECUTE INST.     @VA03757 01426000
+         EX    R2,MOVCONT     MOVE BUFFER INTO MDR RECORD      @VA03757 01427000
+         BR    R5             RETURN TO IN LINE CODE           @VA03757 01428000
+         SPACE 1                                                        01429000
+MOVCONT  MVC   18(0,R6),CONDATA MOVE BUFFER INTO ERRBLOK       @VA03757 01430000
+         DROP  R9             DROP BASE REGISTER FOR CONTASK   @VA03757 01431000
+         SPACE 3                                                        01432000
+         USING SDRBLOK,R9     ADDRESSABILITY FOR SDRBLOK       @VA03757 01433000
+         SPACE                                                          01434000
+SPACE    EQU   *              GET STORAGE FOR ERRBLOK (OBR)    @VA03757 01435000
+         LA    R1,ERRHEADR+20 ERRBLOK HEADER SIZE + LENGTH FLD @VA03757 01436000
+         ICM   R9,15,RDEVCTRS GET ADDRESS OF SDRBLOK           @VA03757 01437000
+         BZ    BYPASS03       BR IF IT DOESNT EXIST            @VA03757 01438000
+         TM    SDRFLAGS,SDRSHRT CREATE SHORT OBR ??            @VA03757 01439000
+         BNO   BYPASS03       NO, THEN NEED EXTENSION          @VA07931 01440000
+         ICM   R0,15,SAVER1   IS THERE A PARMLIST?             @VA07931 01441000
+         BZ    CONVDWD        NO, THEN GET REGULAR SIZE BLOK   @VA07931 01442000
+         LA    R1,16(,R1)     YES, MAKE ROOM FOR PARMLIST      @VA07931 01443000
+         B     CONVDWD        GO GET IT                        @VA07931 01444000
+BYPASS03 EQU   *                                               @VA03757 01445000
+         LH    R1,IOEREXT     GET IOERBLOK EXT SIZE            @VA07816 01446000
+         LA    R1,ERRSIZE+1(0,R1) ADD SIZE OF ERRBLOK+ LENGTH  @VA03757 01447000
+         B     CALLFRE        GET STORAGE FOR ERRBLOK          @VA03757 01448000
+         SPACE 2                                                        01449000
+GETSPACE EQU   *              GET SPACE FOR ERRBLOK (MDR)      @VA03757 01450000
+         CLI   RDEVTYPC,CLASURO    IS IT A 3800 ?              @V60B9BA 01451000
+         BE    STGDASD             YES, GET SPACE FOR RECD     @V60B9BA 01452000
+         CLI   RDEVTYPC,CLASDASD IS THIS A DASD DEVICE CLASS   @VA03757 01453000
+         BE    STGDASD        YES, GET SPACE FOR DASD RECORD   @VA03757 01454000
+         LR    R9,R1          GET ADDRESS OF CONTASK           @VA03757 01455000
+         LA    R1,ERRHEADR+6  LENGTH OF HEADER & LENGTH FIELD  @VA03757 01456000
+         USING CONCCW3,R9     SETUP ADDRESSABILTY FOR CONTASK  @VA03757 01457000
+         AH    R1,CONDCNT     ADD BUFFER LENGTH TO HEADER      @VA03757 01458000
+         B     CONVDWD        GO CONVERT LENGTH TO DOUBLEWORDS @VA03757 01459000
+         DROP  R9             DROP CONTASK BASE REGISTER       @VA03757 01460000
+         SPACE 1                                                        01461000
+STGDASD  EQU   *              GET SPACE FOR DASD ERRBLOK       @VA03757 01462000
+         LR    R7,R4          GET CURRENT IOERBLOK POINTER     @VA03757 01463000
+         LA    R1,ERRMSIZE-IOERSIZE+1 ERRBLOK SIZE MINUS THE   @VA03757 01464000
+*                             IOERBLOK SIZE PLUS LENGTH FIELD           01465000
+DEPSTG   EQU   *              GET LENGTH OF DEPENDENT AREA     @VA03757 01466000
+         LA    R1,IOERSIZE(R1) NOW ADD IOERBLOK SIZE           @VA03757 01467000
+         AH    R1,IOEREXT-IOERBLOK(R7) ADD EXTENTION SIZE      @VA03757 01468000
+         CLI   RDEVTYPC,CLASURO    IS IT A 3800 ?              @V60B9BA 01469000
+         BE    CALLFRE             XFER IF SO                  @V60B9BA 01470000
+         CLI   RDEVTYPE,TYP2305 IS THIS A 2305  ???            @VA03757 01471000
+         BE    CALLFRE        YES, GO GET ERRBLOK              @VA03757 01472000
+         ICM   R7,15,IOERPNT-IOERBLOK(R7) GET NEXT IOERBLOK    @VA03757 01473000
+         BNZ   DEPSTG         THERE IS ANOTHER IOERBLOK        @VA03757 01474000
+         B     CALLFRE        NOW GO GET STORAGE FOR THE       @VA03757 01475000
+*                             ERRBLOK                                   01476000
+         SPACE                                                          01477000
+CONVDWD  EQU   *              CONVERT LENGTH TO DOUBLEWORDS    @VA03757 01478000
+         A     R1,F7          UPDATE BY ONE DOUBLEWORD         @VA03757 01479000
+         SRL   R1,3           GET NUMBER OF DOUBLEWORDS        @VA03757 01480000
+CALLFRE  EQU   *                                               @VA03757 01481000
+         LR    R0,R1          ...                              @VA03757 01482000
+         CALL  DMKFREE        GET STORAGE FOR ERRBLOK          @VA03757 01483000
+         BR    R3             RETURN TO IN LINE CODE           @VA03757 01484000
+         SPACE 2                                                        01485000
+         SPACE 2                                                        01486000
+OBRMDRCL EQU   *              CLEAR OBR/MDR RECORD AREA        @VA03358 01487000
+         LR    R7,R0          LENGTH IN DOUBLEWORDS OF RECORD  @VA03358 01488000
+         SLL   R7,3           GET ACTUAL LENGTH OF RECORD      @VA03358 01489000
+         S     R7,F4          SUBTRACT LENGTH FIELD FROM SIZE  @VA03358 01490000
+         ST    R7,0(,R1)      SAVE LENGTH OF RECORD IN RECORD  @VA03358 01491000
+         LA    R6,4(,R1)      GET ADDRESS OF RECORD BUILD AREA @VA03358 01492000
+         BCTR  R7,R0          SUBTRACT TWO BYTES FROM SIZE,    @VA03358 01493000
+         BCTR  R7,R0          BECAUSE OF EXECUTE INSTRUCTION   @VA03358 01494000
+         MVI   0(R6),X'00'    SET FIRST BYTE IN RECORD TO ZERO @VA03358 01495000
+         C     R7,F255        DOES COUNT EXCEEDS 255           @VA03358 01496000
+         BNH   *+8            NO, BYPASS SETTING COUNT TO 255  @VA03358 01497000
+         LA    R7,255         SET COUNT VALUE TO MAXIMUM       @VA03358 01498000
+         EX    R7,OBMDRCLR    CLEAR OBR/MDR RECORD AREA        @VA03358 01499000
+         BR    R3             RETURN TO IN LINE CODE           @VA03358 01500000
+         SPACE 1                                                        01501000
+OBMDRCLR MVC   1(0,R6),0(R6)  CLEAR OBR/MDR RECORD AREA        @VA03358 01502000
+         SPACE 2                                                        01503000
+FRETRECD EQU   *              RELEASE THE ERROR RECORD         @VA03358 01504000
+         LR    R1,R6          GET ADDRESS OF ERROR RECORD      @VA03358 01505000
+         LR    R0,R7          LENGTH OF RECORD IN DOUBLEWORDS  @VA03358 01506000
+         CALL  DMKFRET        RELEASE THE ERROR RECORD STORAGE @VA03358 01507000
+         LTR   R5,R5          IS THE FLAG REGISTER SET TO ZERO @VA03358 01508000
+         BZR   R4             YES, RETURN TO IN LINE CODE      @VA03358 01509000
+         BAL   R5,COMEXIT     RETURN TO CALLER                 @VA03358 01510000
+         SPACE 2                                                        01511000
+GETCPEX  EQU   *              GET SPACE FOR CPEXBLOK           @VA03358 01512000
+         LA    R0,CPEXSIZE    GET SIZE IN DOUBLEWORDS          @VA03358 01513000
+         CALL  DMKFREE        GET STORAGE FOR CPEXBLOK         @VA03358 01514000
+         USING CPEXBLOK,R1    SET UP ADDRESSABILITY FOR CPEXBLK@VA03358 01515000
+         STM   R0,R15,CPEXREGS SAVE ALL REGISTERS IN CPEXBLOK  @VA03358 01516000
+         ST    R4,CPEXADD     SET UP RETURN ADDR AFTER UNSTACK @VA03358 01517000
+         SLR   R4,R4          CLEAR REGISTER R4                @VA03358 01518000
+         ST    R4,CPEXFPNT    CLEAR POINTER TO NEXT CPEXBLOK   @VA03358 01519000
+         BR    R5             RETURN TO IN LINE CODE           @VA03358 01520000
+         DROP  R1             DROP CPEXBLOK BASE REGISTER      @VA03358 01521000
+         SPACE 2                                                        01522000
+QUECPEX  EQU   *              QUE CPEXBLOK OFF RECORDING QUE   @VA03358 01523000
+         LR    R4,R3          GET POINTER TO RECORDING QUE     @VA03358 01524000
+         ICM   R3,15,0(R3)    GET POINTER TO NEXT CPEXBLOK     @VA03358 01525000
+         BNZ   QUECPEX        YES, GET POINTER TO NEXT CPEXBLOK@VA03358 01526000
+         ST    R1,0(,R4)      QUE CPEXBLOK AT THE END OF CHAIN @VA03358 01527000
+         BR    R5             RETURN TO IN LINE CODE           @VA03358 01528000
+         SPACE 2                                                        01529000
+INTREC   EQU   *              HANDLE INTENSIVE RECORDING       @VA03358 01530000
+         TM    VMCLEVEL,VMCLASSF IS THIS A CLASS 'F' USER      @VA03358 01531000
+         BZR   R5             NO, RETURN TO IN LINE CODE       @VA03358 01532000
+         TM    IOBFLAG,IOBCP  WAS REQUEST INITIATED BY CP      @VA03358 01533000
+         BOR   R5             YES, RETURN TO IN LINE CODE      @VA03358 01534000
+         TM    RDEVSTAT,RDEVIRM IS INTENSIVE RECORDING ON      @VA03358 01535000
+         BZ    COMEXIT        NO, RETURN TO CALLER             @VA03358 01536000
+         L     R7,DMKIOEIR    ADDR OF INTENSIVE RECORDING BLOCK@VA03358 01537000
+         USING IRMBLOK,R7                                      @VA03358 01538000
+         CLC   IOBRADD(2),IRMRLADD REC. REQ. FOR DEV. ADDR     @VA03358 01539000
+         BNE   COMEXIT        NO, RETURN TO CALLER             @VA03358 01540000
+         SR    R3,R3          CLEAR REG 3                      @VA03358 01541000
+         IC    R3,IRMBYT1     PICK UP FIRST SENSE BYTE PARM    @VA03358 01542000
+         IC    R3,IOERDATA(R3) PICK UP PROPER SENSE BYTE       @VA03358 01543000
+         STC   R3,CHECKER     SAVE SENSE BYTE                  @VA03358 01544000
+         IC    R3,IRMBIT1     PICK UP FIRST SENSE BIT PARM     @VA03358 01545000
+         IC    R3,BITABL(R3)  PICK UP EQUIVALENT MASK          @VA03358 01546000
+         EX    R3,SNSTEST     STORE AND TEST ERROR BITS        @VA03358 01547000
+         BO    SNSERFND       YES, CHECK FOR 'AND' PARAMETER   @VA03358 01548000
+         TM    IRMFLG,IRMOR   NO - WAS THE 'OR' PARM SPECIFIED @VA03358 01549000
+         BZ    COMEXIT        NO, DON'T RECORD THIS ERROR      @VA03358 01550000
+         B     PARM2CHK       YES - CHECK THE SECOND PARM      @VA03358 01551000
+SNSERFND EQU   *              HANDLE CORRECT SENSE BYTE        @VA03358 01552000
+         TM    IRMFLG,IRMAND  WAS THE 'AND' PARM SPECIFIED ?   @VA03358 01553000
+         BZ    OCCURCHK       NO, CHECK THE USER LIMIT VALUE   @VA03358 01554000
+PARM2CHK EQU   *              CHECK THE SECOND PARMETER        @VA03358 01555000
+         IC    R3,IRMBYT2     PICK UP 2ND BYTE PARM            @VA03358 01556000
+         IC    R3,IOERDATA(R3) PICK UP SENSE BYTE              @VA03358 01557000
+         STC   R3,CHECKER     SAVE SENSE BYTE                  @VA03358 01558000
+         IC    R3,IRMBIT2     PICK UP 2ND SENSE BIT PARM       @VA03358 01559000
+         IC    R3,BITABL(R3)  PICK UP MASK FOR TEST            @VA03358 01560000
+         EX    R3,SNSTEST     IS THERE AN ERROR PRESENT        @VA03358 01561000
+         BNO   COMEXIT        NO, RETURN TO CALLER             @VA03358 01562000
+OCCURCHK EQU   *              CHECK THE USER'S LIMIT VALUE     @VA03358 01563000
+         LH    R5,IRMLMTCT    GET LIMIT COUNT                  @VA03358 01564000
+         LA    R5,1(,R5)      ADD 1 TO COUNT                   @VA03358 01565000
+         STH   R5,IRMLMTCT    PUT UPDATED COUNT BACK.          @VA03358 01566000
+         CLI   IRMMAXCT,X'00' IS THIS THE FIRST TIME?          @VA03816 01567000
+         BE    RECSTRT                                         @VA03816 01568000
+         CH    R5,IRMLMT      COMPARE CTR TO LIMIT SET BY USER @VA03358 01569000
+         BL    COMEXIT        IF LOW, EXIT                     @VA03816 01570000
+         SR    R3,R3          ZERO R3                          @VA03816 01571000
+         STH   R3,IRMLMTCT    CLEAR LIMIT COUNTER              @VA03358 01572000
+         IC    R5,IRMMAXCT    PICK UP TOTAL RECORDS RECORDED   @VA03358 01573000
+         LA    R5,1(,R5)      ADD 1                            @VA03358 01574000
+         STC   R5,IRMMAXCT    SAVE COUNT                       @VA03358 01575000
+         CLI   IRMMAXCT,10    HAVE WE RECORDED 10 ERRORS ?     @VA03358 01576000
+         BNE   OBRRECD        NO, CONTINUE RECORDING OBR RECORD@VA03358 01577000
+         SWITCH               SWITCH TO MAIN PROCESSOR         @V407510 01578000
+         NI    RDEVSTAT,255-RDEVIRM TURN INTENS. REC. OFF      @VA03816 01579000
+         LA    R0,IRMSIZE     GET SIZE OF IRMBLOK              @VA03816 01580000
+         LR    R1,R7          GET ADDRESS OF IRMBLOK           @VA03816 01581000
+         CALL  DMKFRET        FRET IRMBLOK                     @VA03816 01582000
+         SR    R1,R1                                           @VA03816 01583000
+         ST    R1,DMKIOEIR    ZERO IRMBLOK POINTER             @VA03816 01584000
+         BAL   R5,OBRRECD     GO FORMAT AND BUILD OBR RECORD   @VA03358 01585000
+         SPACE 1                                                        01586000
+RECSTRT  EQU   *                                               @VA03358 01587000
+         STC   R5,IRMMAXCT    SAVE IT                          @VA03358 01588000
+         BAL   R5,OBRRECD     GO FORMAT AND BUILD OBR RECORD   @VA03358 01589000
+         SPACE 1                                                        01590000
+SNSTEST  TM    CHECKER,X'00'  CHECK FOR ERROR PRESENT          @VA03358 01591000
+         SPACE 2                                                        01592000
+GETDATE  EQU   *              GET DATE AND TIME VALUE          @VA03358 01593000
+         STCK  OSDATE         STORE PRESENT TOD CLOCK          @VA03358 01594000
+         BC    12,CLOCKOK     IS CLOCK FUNCTIONING?            @VA04301 01595000
+         GOTO  DMKCVTAB       CLOCK DAMAGED...ABEND CVT001     @VA04301 01596000
+CLOCKOK  EQU   *                                               @VA04301 01597000
+         LM    R2,R3,OSDATE   GET THE CLOCK VALUE              @VA03358 01598000
+         SRDL  R2,12          SHIFT DOWN FOR ADJUST            @VA03358 01599000
+         L     R14,=A(DMKSYSTZ) ADDRESS OF GMT DIFFERENCE      @VA03358 01600000
+         L     R15,0(,R14)    GET GMT DIFFERENCE               @VA03358 01601000
+         LCR   R15,R15        MAKE VALUE POSITIVE              @VA03358 01602000
+         SR    R14,R14        CLEAR WORK REGISTER              @VA03358 01603000
+         M     R14,=F'1000000' CONVERT GMT DIFF. TO MICROSEC   @VA03358 01604000
+         SLR   R3,R15         ADJUST TIME VALUE                @VA03358 01605000
+         BC    11,*+8         ...                              @VA03358 01606000
+         SL    R2,F1          ...                              @VA03358 01607000
+         SLR   R2,R14         GET TIME VALUE                   @VA03358 01608000
+         SLDL  R2,12          SHIFT IT BACK                    @VA03358 01609000
+         STM   R2,R3,8(R6)    SAVE TOD CLOCK VALUE IN RECORD   @VA03358 01610000
+         BR    R9             RETURN TO IN LINE CODE           @VA03358 01611000
+         SPACE 2                                                        01612000
+FRETIOER EQU   *              RELEASE THE IOERBLOK             @VA03358 01613000
+         LTR   R10,R10        IS THERE AN IOBLOK POINTER       @VA03358 01614000
+         BZR   R5             NO, RETURN TO IN LINE CODE       @VA03358 01615000
+         TM    IOBFLAG,IOBCP  IS THIS A CP GENERATED REQUEST   @VA03358 01616000
+         BZR   R5             NO, RETURN TO IN LINE CODE       @VA03358 01617000
+         ICM   R4,15,IOBIOER  GET ADDRESS OF IOERBLOK          @VA03358 01618000
+         BZR   R5             NO PTR, RETURN TO IN LINE CODE   @VA03358 01619000
+FRETNXT  EQU   *              RELEASE IOERBLOK                 @VA03358 01620000
+         L     R3,IOERPNT     GET POINTER TO NEXT IOERBLOK     @VA03358 01621000
+         TM    IOERCSW+5,CCC+CDC+IFCC IS THIS CHANNEL ERROR    @VA03358 01622000
+         BZ    NOCHAN         NO, GO RELEASE IOERBLOK          @VA03358 01623000
+         L     R0,IOERCCRL    PICK UP SIZE OF CCH RECORD       @V508690 01624000
+         ICM   R1,15,IOERCCRA GET ADDR OF CCH RECORD           @V508690 01625000
+         BZ    NOCHAN         IF ZERO, BYPASS RELEASING STORAGE@VA03358 01626000
+         CALL  DMKFRET        FRET THE CCH RECORD              @VA03358 01627000
+NOCHAN   EQU   *                                               @VA03358 01628000
+         LR    R1,R4          GET ADDRESS OF IOERBLOK          @VA03358 01629000
+         LA    R0,IOERSIZE    FRET THE IOERBLOK                @VA03358 01630000
+         AH    R0,IOEREXT     ADD SIZE OF EXTENSION            @VA03358 01631000
+         CALL  DMKFRET        FRET THE IOERBLOK                @VA03358 01632000
+         LTR   R4,R3          POINT TO THE NEXT IOERBLOK       @VA03358 01633000
+         BNZ   FRETNXT        YES, GO FRET IOERBLOK            @VA03358 01634000
+         XC    IOBIOER(4),IOBIOER CLEAR IOERBLOK POINTER       @VA03358 01635000
+         BR    R5             RETURN TO IN LINE CODE           @VA03358 01636000
+         SPACE 2                                                        01637000
+FRETCON  EQU   *              RELEASE CONTASK BUFFER           @VA03358 01638000
+         LR    R1,R9          GET ADDRESS OF CONTASK           @VA03358 01639000
+         LH    R0,0(,R1)      SIZE IN DOUBLEWORDS OF CONTASK   @VA03358 01640000
+         CALL  DMKFRET        RELEASE BUFFER SPACE             @VA03358 01641000
+         BR    R5             RETURN TO IN LINE CODE           @VA03358 01642000
+         SPACE 2                                                        01643000
+NREXIT   EQU   *              RELEASE IOERBLOK FOR CP GENERATED@VA03358 01644000
+         BAL   R5,FRETIOER    RELEASE IOERBLOK                 @VA03358 01645000
+COMEXIT  EQU   *              RETURN TO CALLER                 @VA03358 01646000
+         EXIT                                                  @VA03358 01647000
+         EJECT                                                          01648000
+*        THE DCS MUST REMAIN IN THE ORDERS BELOW. DMKIOFIN DEPENDENTS   01649000
+*        ON THE CYLINDER, PAGE AND DEVICE TYPE FIELDS (CCPD) BEING      01650000
+*        CONTINUOUS IN STORAGE.                                         01651000
+         SPACE 1                                                        01652000
+         DS    0D                                              @VA03358 01653000
+OSDATE   DC    XL4'00000000',XL2'0006',PL2'1' USE FOR TOD CLK  @VA03358 01654000
+DMKIOEIQ DC    F'00'          REC. QUE CHAIN FOR OBR/MDR RECS. @VA03358 01655000
+DMKIOENQ DC    F'00'          REC. QUE CHAIN FOR ENVIR. RECORDS@VA03358 01656000
+DMKIOEMQ DC    F'00'          REC. QUE CHAIN FOR MCH RECORDS   @VA03358 01657000
+DMKIOECQ DC    F'00'          REC. QUE CHAIN FOR CCH RECORDS   @VA03358 01658000
+DMKIOERQ DC    F'00'          QUE CHAIN FOR ERASE REQUESTS     @VA03358 01659000
+DMKIOESQ DC    F'00'          QUEUE CHAIN FOR UPDATE REQUESTS  @VA03757 01660000
+DMKIOEVQ DC    F'00'          REC. QUE CHAIN FOR SVC76 RECORDS @VA03358 01661000
+DMKIOEIR DC    F'00'          PTR. TO INTENSIVE RECORDING BLOCK@VA03358 01662000
+DMKIOEEP DC    X'000000'      ERROR RECORDING CCP (CYL+PAGE)   @V5088AA 01663000
+DMKIOETY DC    X'00'          SYSRES DEV TYPE (USED FOR PAGING)@VA03358 01664000
+DMKIOEHS DC    X'00000000'      ADDR OF 1ST ERROR RECORD (CCPD)@V5088AA 01665000
+*                               OR PLACE WHERE IT SHOULD BE    @V5088AA 01666000
+*                               WRITTEN IF NONE IS THERE NOW   @V5088AA 01667000
+*                               (LOGREC HDRSTART VALUE)        @V5088AA 01668000
+DMKIOECT DC    X'0000'          NUMBER OF ERROR RECORDING CYLS @V5088AA 01669000
+DMKIOEFR DC    X'00'            INDICATION OF WHETHER FRAMES   @V5088AA 01670000
+*                               EXIST ON ERROR RECORDING CYLS           01671000
+DMKIOEMX DC    X'00'          NO. OF PAGES (MAX) ON A CYLINDER @VA03358 01672000
+DMKIOENI DC    X'00'          NO. OF PAGES (90% FULL) ON A CYL.@VA03358 01673000
+DMKIOERP DC    X'00'          RECORDING IN PROGRESS FLAG       @VA03358 01674000
+DMKIOEES DC    X'00'          RECORDING AREA FULL FLAG         @V5088AA 01675000
+CHECKER  DC    X'00'          USE FOR INTENSIVE RECORDING      @VA03358 01676000
+CORRCNT  DC    X'00'          CORRELATION NO. FOR 3211 RECORDS @VA03358 01677000
+*                             AND 3203 RECORDS                          01678000
+P3211    DC    X'1042'        3211 PRINTER                     @VA03358 01679000
+P3203    DC    X'1043'        3203 PRINTER                     @V386298 01680000
+OBRKEY   DC    X'306540'        OBR - CLASS/SYSTEM/REL. NUMBER @V5088AA 01681000
+MDRKEY   DC    X'916540'        MDR - CLASS/SYSTEM/REL. NUMBER @V5088AA 01682000
+BITABL   DC    X'8040201008040201' MASK TABLE FOR INTENSIVE REC@VA03358 01683000
+         SPACE 1                                                        01684000
+         EJECT                                                          01685000
+         LTORG                                                 @VA03358 01686000
+         EJECT                                                          01687000
+         COPY  OBRRECN                                         @VA03358 01688000
+         COPY  SDRBLOK                                         @VA03757 01689000
+         COPY  TNSREC                                          @VA03358 01690000
+         COPY  EQU                                             @VA03358 01691000
+         COPY  RBLOKS                                          @VA03358 01692000
+         COPY  SAVE                                            @VA03358 01693000
+         COPY  IOBLOKS                                         @VA03358 01694000
+         COPY  IOER                                            @VA03757 01695000
+         SPACE                                                          01696000
+         COPY  ERRBLOK                                         @VA03757 01697000
+         SPACE                                                          01698000
+         COPY  VMBLOK                                          @VA03358 01699000
+         COPY  DEVTYPES                                        @VA03358 01700000
+         PSA                                                   @VA03358 01701000
+         END                                                            01702000

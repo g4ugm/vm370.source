@@ -1,0 +1,550 @@
+STG      TITLE 'DMSSTG     (CMS)       VM/370 - RELEASE 6'              00001000
+         SPACE 2                                                        00003000
+*.                                                                      00004000
+*                                                                       00005000
+*                                                                       00006000
+*MODULE NAME -                                                          00007000
+*                                                                       00008000
+*        DMSSTG                                                         00009000
+*                                                                       00010000
+*FUNCTION -                                                             00011000
+*                                                                       00012000
+*       THE DMSSTG ROUTINE PROCESSES CMS CALLS TO DMSSTGST              00013000
+*       DMSSTGSB (STRINIT), DMSSTGAT, DMSSTGCL AND DMSSTGSV.            00014000
+*                                                                       00015000
+*ATTRIBUTES -                                                           00016000
+*                                                                       00017000
+*       NUCLEUS RESIDENT, RE-ENTRANT                                    00018000
+*                                                                       00019000
+*ENTRY POINTS -                                                         00020000
+*                                                                       00021000
+*       DMSSTGSB, DMSSTGST -- STRINIT                                   00022000
+*                                                                       00023000
+*       DMSSTGCL -- OS EXIT RESET ROUTINE                               00024000
+*                                                                       00025000
+*       DMSSTGAT -- DOS/VSAM SET PARTITION AND ANCHOR TABLE SIZE        00026000
+*                                                                       00027000
+*       DMSSTGSV -- SERVICE ROUTINE TO CHANGE NUCLEUS VARIABLES         00028000
+*                                                                       00029000
+*ENTRY CONDITIONS -                                                     00030000
+*                                                                       00031000
+*       DMSSTGSB, DMSSTGST ( STRINIT) -- BALR R14,R15                   00032000
+*                                                                       00033000
+*       DMSSTGCL -- SVC 203 FOLLOWED BY HALFWORD OF 12                  00034000
+*                                                                       00035000
+*       DMSSTGAT -- SVC 202                                             00036000
+*                                                                       00037000
+*       DMSSTGSV -- SVC 203 FOLLOWED BY X'010D' - TSOGET                00038000
+*       DMSSTGSV -- SVC 203 FOLLOWED BY X'020E' - RELPAGES              00039000
+*       DMSSTGSV -- SVC 203 FOLLOWED BY X'030F' - COMSWT                00040000
+*       DMSSTGSV -- SVC 203 FOLLOWED BY X'040F' - COMPSWT               00041000
+*                                                                       00042000
+*EXIT CONDITIONS -                                                      00043000
+*                                                                       00044000
+*       NORMAL -                                                        00045000
+*       THE SPECIFIED STORAGE IS ALLOCATED OR RELEASED, AND CONTROL     00046000
+*       RETURNS TO THE USER.                                            00047000
+*                                                                       00048000
+*       ERROR -                                                         00049000
+*       IF THE STORAGE CANNOT BE RELEASED,                              00050000
+*       THEN MESSAGE DMSSTG133S IS TYPED OUT AND                        00051000
+*       THE USER IS ABENDED.                                            00052000
+*                                                                       00053000
+*CALLS TO OTHER ROUTINES -                                              00054000
+*                                                                       00055000
+*       DMSSVT, DMSSAB, DMSFRE, DMSLGTA, DMSSLNAB                       00056000
+*                                                                       00057000
+*EXTERNAL REFERENCES -                                                  00058000
+*                                                                       00059000
+*       NUCON, SSAVE                                                    00060000
+*                                                                       00061000
+*TABLES / WORKAREAS -                                                   00062000
+*                                                                       00063000
+*       MACLIB DIRECTORY TABLES ARE FREED BY DMSSTGCL                   00064000
+*                                                                       00065000
+*REGISTER USAGE -                                                       00066000
+*                                                                       00067000
+*       R12 = BASE                                                      00068000
+*       R0 - R11 = SCRATCH AND WORK REGISTERS                           00069000
+*       R13 -  SYSTEM SAVE AREA                                         00070000
+*                                                                       00071000
+*OPERATION -                                                            00072000
+*                                                                       00073000
+*    IF  A CMS  ROUTINE  CALLS  THE STORAGE INITIALIZATION              00074000
+*    ROUTINE (STRINIT) IN DMSSTG, STRINIT                               00075000
+*    RESETS THE  FREE STORAGE EXTENTS AND  EFFECTIVELY FREES            00076000
+*    ANY  STORAGE THAT  WAS  PREVIOUSLY  GETMAINED.                     00077000
+*                                                                       00078000
+*    IF A CMS ROUTINE CALLS DMSSTGCL IN DMSSTG, DMSSTGCL                00079000
+*    ISSUES STAE, SPIE, TTIMER, AND STAX CANCEL MACROES                 00080000
+*    TO CANCEL ANY OUTSTANDING OS EXIT ROUTINES. IT ALSO                00081000
+*    CALLS DMSLGTA, DMSSLNAB, AND DMSFRET TO FREE ANY TXTLIB,           00082000
+*    MACLIB, OR LINK TABLES LEFT AROUND FROM PREVIOUS OS                00083000
+*    PROGRAMS. CONTROL IS THEN RETURNED TO THE USER.                    00084000
+*                                                                       00085000
+*    THE GETBLK  ROUTINE IN DMSSTG  SEARCHES THE  FREE CHAIN            00086000
+*    FOR A  BLOCK OF FREE STORAGE  LARGE ENOUGH TO  MEET THE            00087000
+*    CALLER'S NEEDS.   WHEN IT FINDS  ONE, IT  EITHER RESETS            00088000
+*    THE  BLOCK  LENGTH OR,  IF  ALL  THE BLOCK  IS  NEEDED,            00089000
+*    DELETES IT  AND RETURNS  CONTROL TO  THE CALLER.   IF A            00090000
+*    LARGE ENOUGH BLOCK  CANNOT BE FOUND                                00091000
+*    CONTROL IS RETURNED TO THE CALLER WITH AN ERROR CODE IN            00092000
+*    REGISTER 15.                                                       00093000
+*                                                                       00094000
+*    THE  FREEBLK  ROUTINE  IN DMSSTG  RETURNS  A  BLOCK  OF            00095000
+*    STORAGE TO THE FREE CHAIN. IF  THE ADDRESS PASSED IT IS            00096000
+*    BAD, THE FREEBLK ROUTINE ISSUES AN ABEND.  IF THE BLOCK            00097000
+*    IT IS FREEING IS CONTIGUOUS TO  ANY OTHER FREE BLOCK IN            00098000
+*    CORE, THE FREEBLK ROUTINE WILL  COMBINE THE TWO BLOCKS.            00099000
+*    UPON SUCCESSFUL  COMPLETION CONTROL IS RETURNED  TO THE            00100000
+*    CALLER.                                                            00101000
+*                                                                       00102000
+*      PREVIOUS STORAGE ALLOCATION REQUESTS MAINTAIN A                  00103000
+*       CHAIN OF POINTERS TO DISCONNECTED AREAS OF FREE CORE            00104000
+*       EACH LINK +00 IS FREPTR - POINTER TO NEXT LINK                  00105000
+*                                  ZERO IF LAST IN CHAIN                00106000
+*                 +04 IS FRELEN - LENGTH OF FREE AREA                   00107000
+*       FRELST POINTS TO THE FIRST LINK IN THE CHAIN                    00108000
+*              OF DISCONNECTED AREAS                                    00109000
+*       FSTFRE HOLDS THE ORIGINAL BEGINNING OF USER FREE STORAGE        00110000
+*       LENFRE HOLDS THE LENGTH OF THAT AREA                            00111000
+*                                                                       00112000
+*       NUCON LOCATION MAINHIGH HOLDS THE LOWER BOUND FOR EXTEND.       00113000
+*       NUCON LOCATION FREELOWE (LOWEXT) HOLDS THE UPPER BOUND FOR      00114000
+*             GETMAIN.                                                  00115000
+*                                                                       00116000
+*                                                                       00117000
+*                                                                       00118000
+*.                                                                      00119000
+         EJECT                                                          00120000
+DMSSTG   START X'00'              IN THE BEGINNING ...                  00121000
+         ENTRY DMSSTGSB,DMSSTGST                               @VA04199 00122000
+         ENTRY DMSSTGAT                                        @VA04199 00123000
+         ENTRY DMSSTGCL                                        @VA04199 00124000
+         ENTRY DMSSTGSV                                        @VA04199 00125000
+         USING NUCON,R0                                                 00126000
+         USING DMSSTG,R12                                               00127000
+         USING SSAVE,R13                                                00128000
+         EJECT                                                          00129000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 00130000
+*                                                                       00131000
+*              'STORAGE HANDLER INITIALIZATION'                         00132000
+*              * * * * * * * * * * * * * * * *                          00133000
+* BEFORE ISSUING ANY 'GETMAIN /FREEMAIN',AVAILABLE CORE SHOULD BE       00134000
+* FREED.( VIA A CALL TO 'STRINIT'. )                                    00135000
+*                                                                       00136000
+***IF THE ROUTINE CALLING 'STRINIT' IS NUCLEUS RESIDENT,                00137000
+*        L     15,ASTRINIT                                              00138000
+*        BALR  14,15                                                    00139000
+*                                                                       00140000
+***IF THE ROUTINE IS NOT NUCLEUS RESIDENT THE MACRO INSTRUCTION         00141000
+* 'CMSYSREF' SHOULD APPEAR, AND THE CALL COULD BE                       00142000
+*        L     15,ASTRINIT                                              00143000
+*        BALR  14,15                                                    00144000
+*                                                                       00145000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 00146000
+         SPACE 1                                                        00147000
+DMSSTGSB DS    0H                  CMS STORAGE INITIALIZATION           00148000
+         STM   R0,R15,BALRSAVE     SAVE THE CALLER'S REGISTERS          00149000
+         LR    R12,R15        SET BASE                                  00150000
+         SR    R0,R0          ZERO GETMAIN STORAGE POINTER              00151000
+         ST    R0,MAINLIST    ...                                       00152000
+         L     R1,LOCCNT      GET THE CURRENT LOCATION COUNTER          00153000
+         LA    R1,7(,R1)      ROUND UP TO NEXT DOUBLE WORD BOUNDARY     00154000
+         N     R1,MASKB       ...                                       00155000
+         C     R1,AUSRAREA    MUST BE >= START OF USER AREA    @VM03182 00156000
+         BNL   STRESET        OK, IF SO                        @VM03182 00157000
+         L     R1,AUSRAREA    ELSE, FORCE TO USER AREA START   @VM03182 00158000
+         SPACE 1                                                        00159000
+STRESET  ST    R1,MAINSTRT    INITIALIZE THE START AND         @VM03182 00160000
+         ST    R1,MAINHIGH    END OF MAIN STORAGE AREA                  00161000
+         L     R1,ABGCOM      POINT TO BGCOM AREA              @V305032 00162000
+         USING BGCOM,R1       REFERENCE SAME BRIEFLY           @V305032 00163000
+         TM    VSAMFLG1,VIPINIT    OS VSAM USER?               @V304669 00163100
+         BO    CLREOC              YES, FORGET ABOUT PPEND     @V304669 00163200
+         ST    R0,PPEND       (R0 IS STILL 0) CLEAR 'PPEND'    @V305032 00164000
+CLREOC   EQU   *                                               @V304669 00164100
+         ST    R0,EOCADR      AND 'EOCADR' IN COMM. REGIOM     @V305032 00165000
+         DROP  R1             THEN ...                         @V305032 00166000
+         LM    R0,R14,BALRSAVE     RESTORE THE CALLER'S REGISTERS       00167000
+         SR    R15,R15        ZERO THE RETURN CODE                      00168000
+         BR    R14            RETURN TO THE CALLER                      00169000
+*                                                                       00170000
+* THE FOLLOWING IS POINTED TO BY THE NUCON LOCATION 'ASTRINIT'          00171000
+*                                                                       00172000
+DMSSTGST DS    0H                                                       00173000
+         STRINIT TYPCALL=SVC                                            00174000
+         BR    R14            RETURN TO THE CALLER                      00175000
+         EJECT                                                          00176000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 00177000
+*                                                                       00178000
+*        DMSSTGAT - GET STORAGE AND SET UP ANCHOR-TABLE (FOR VSAM)      00179000
+*                                                                       00180000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 00181000
+         SPACE                                                          00182000
+         USING DMSSTGAT,R15                                    @V305665 00183000
+DMSSTGAT L     R12,=A(DMSSTG)     COMMON ADDRESABILITY         @V305665 00184000
+         DROP  R15            ...                              @V305032 00185000
+         CLM   R1,8,=X'0C'    CALLED AS A COMMAND ?            @V305032 00186000
+         BL    SMNAT01        NO - OK.                         @V305032 00187000
+         CLM   R1,8,=X'0E'    CHECK FURTHER ...                @V305032 00188000
+         BNH   SMNATINV       IF 0C TO 0E, CALL IT "INVALID"   @V305032 00189000
+* OK - DMSSTGAT CALLED AS A FUNCTION:                                   00190000
+SMNAT01  LH    R9,FRERESPG    GET # PAGES TO SAVE FOR CMS      @VA04199 00191000
+         SLL   R9,12          CONVERT PAGES TO BYTES           @VA04199 00192000
+         LR    R4,R9          PUT IT IN R4,                    @V305032 00193000
+         LR    R5,R4          AND IN R5 (NOTE R4=R5)           @V305032 00194000
+         TM    VSAMFLG1,VSAMRUN+VSAMSERV VSAM AND/OR AMSERV ?  @V305032 00195000
+         BNZ   SMNAT02        YES - WE'LL NEED AN ANCHOR TABLE @V305032 00196000
+         TM    DOSFLAGS,DOSVSAM "GOING TO BE" RUNNING VSAM ?   @V305032 00197000
+         BZ    SMNAT03        NO - NOT THIS TIME.              @V305032 00198000
+SMNAT02  LA    R5,ANCHSIZ(,R4) RESERVE SPACE FOR ANCHOR TABLE  @V305032 00199000
+SMNAT03  L     R3,FREELOWE    GET TOTAL AMOUNT OF SPACE        @V305032 00200000
+         S     R3,MAINHIGH    IN USER STORAGE                  @V305032 00201000
+         CR    R3,R5          BETTER BE BIG ENOUGH ...         @V305032 00202000
+         BNH   SMNATER        ERROR IF NOT.                    @V305032 00203000
+         SR    R3,R9          SUBTRACT THE MAGIC NUMBER        @V305032 00204000
+         SR    R9,R9          ZERO WORK REGISTER               @VA04299 00204200
+         ICM   R9,3,DOSKPART  GET DOS PARTITION SIZE           @VA04299 00204400
+         BZ    SMNAT04        IF NONE SPECIFIED, USE DEFAULT   @VA04299 00204600
+         SLL   R9,10          CONVERT TO BYTES                 @VA04299 00204800
+         CR    R3,R9          WILL USER'S SIZE FIT ?           @VA04299 00205000
+         BNH   SMNAT04        NO, USE DEFAULT..                @VA04299 00205200
+         LR    R3,R9          PREPARE TO USE USER'S SIZE       @VA04299 00205400
+SMNAT04  BAL   R10,GETBLK     GET SPECIFIED BLOCK OF STORAGE   @VA04299 00205600
+* NOTE:  UPON RETURN, R7 = ADDRESS OF THE BLOCK WE "WANTED" ...         00206000
+         EJECT                                                          00206100
+         CLR   R4,R5          (SEE ABOVE) - WAS IT VSAM ?      @V305032 00207000
+         BE    SMNAT06        NOPE - THAT'S SIMPLE, THEN.      @V305032 00208000
+         LR    R1,R3          VSAM:  SIZE OF AREA INTO R1,     @V305032 00209000
+         LH    R2,PCTVSAM     PERCENT TO RESERVE FOR VSAM      @V305032 00210000
+         MR    R0,R2          CALCULATE HOW MUCH ROOM TO LEAVE @V305032 00211000
+         D     R0,=F'100'     FOR GETVIS/FREEVIS USE           @V305032 00212000
+         LA    R0,7(,R1)      QUOTIENT INTO R0 ROUNDED TO      @V305032 00213000
+         N     R0,MASKB       MULTIPLE OF 8 BYTES              @V305032 00214000
+         LA    R1,0(R3,R7)    END OF WHOLE AREA INTO R1        @V305032 00215000
+         SR    R1,R0          MINUS SIZE TO GIVE BACK          @V305032 00216000
+         LR    R3,R0          AMOUNT TO GIVE BACK IN R3        @V305032 00217000
+         LR    R0,R1          REMEMBER ITS ADDRESS             @V305032 00218000
+         BAL   R10,FREBLK     GIVE BACK HIGH PART WE DON'T WANT@V305032 00219000
+         LA    R1,ANCHSIZ     SIZE OF ANCHOR TABLE INTO R1,    @V305032 00220000
+         SR    R0,R1          COMPUTE BEGIN. OF ANCHOR TABLE   @V305032 00221000
+         LR    R3,R0          SAVE ADDRESS FOR LATER  USE      @V305032 00222000
+         SR    R5,R5          CLEAR R5 (R4 IS IMMATERIAL)      @V305032 00223000
+         MVCL  R0,R4          CLEAR ENTIRE ANCHOR TABLE        @V305032 00224000
+         LA    R1,ANCHSIZ-4(,R3) POINT TO END OF ANCHOR TABLE  @V305032 00225000
+         USING ANCHSECT,R3    AND                              @V305032 00226000
+         ST    R1,ANCHENDA    STORE ENDING ADDRESS             @V305032 00227000
+         DROP  R3             ANCHOR TABLE ALL INITIALIZED;    @V305032 00228000
+         B     SMNAT07        NOW GO STORE ITS ADDRESS (-1).   @V305032 00229000
+         EJECT                                                          00230000
+* NOT VSAM - NO ANCHOR TABLE, BUT NEED TO SET UP "PPEND":               00231000
+SMNAT06  AR    R3,R7          COMPUTE END OF AREA OBTAINED     @V305032 00232000
+SMNAT07  BCTR  R3,0           MINUS ONE,                       @V305032 00233000
+         L     R15,ABGCOM     POINT TO BGCOM AREA              @V305032 00234000
+         USING BGCOM,R15      REFERENCE SAME BRIEFLY           @V305032 00235000
+         ST    R3,PPEND       AND STORE IN 'PPEND'             @V305032 00236000
+         L     R3,ALDRTBLS    GET BEGIN LOADER TABLES          @V305032 00237000
+         LA    R3,0(,R3)      CLEAR NUMBER TABLE ENTRIES       @V305001 00238000
+         ST    R3,EOCADR      AND STORE IN 'EOCADR' AS NEEDED  @V305032 00239000
+         CR    R4,R5          (SEE ABOVE) - WAS IT VSAM ?      @VM03158 00240000
+         BE    SMNAT08        NOPE - DON'T SET GETVIS FLAG     @VM03158 00241000
+         OI    OPTNBYTE,GETVIS     SHOW GETVIS INITIALIZED.    @VM03158 00242000
+         DROP  R15            THEN ...                         @V305032 00243000
+SMNAT08  L     R15,ASYSCOM    POINT TO SYSCOM AREA             @VM03158 00244000
+         USING SYSCOM,R15     REFERENCE SAME BRIEFLY           @V305001 00245000
+         L     R15,IJBBOX     POINT TO BOUNDARY BOX            @V305001 00246000
+         LA    R15,16(,R15)   AND BUMP TO PARTITION BOX        @V305001 00247000
+         ST    R3,12(,R15)    NOW SAVE PARTITION END IN BBOX   @V305001 00248000
+         DROP  R15            THEN ...                         @V305001 00249000
+         SR    R15,R15        CLEAR R15,                       @V305032 00250000
+         BR    R14            AND WE'RE BACK HOME.             @V305032 00251000
+         SPACE                                                          00252000
+SMNATER  LA    R15,1          ERROR 1 IF NOT ENOUGH SPACE      @V305032 00253000
+         BR    R14            EXIT (TOO BAD).                  @V305032 00254000
+         SPACE                                                          00255000
+SMNATINV LH    R15,=H'-3'     -3 MEANS "NO SUCH COMMAND"       @V305032 00256000
+         BR    R14            (NOT VALID AS A "COMMAND").      @V305032 00257000
+         EJECT                                                          00258000
+*                                                                       00259000
+*        THE FUNCTION OF DMSSTGCL IS TO INSURE THAT OS CONTROL          00260000
+*        BLOCK POINTERS ARE RESET BETWEEN PROGRAMS.                     00261000
+*                                                                       00262000
+         USING EXTSECT,R3                                               00263000
+         USING PGMSECT,R4                                               00264000
+         USING PDSSECT,R5                                               00265000
+         USING DMSSTGCL,R12       SET BASE REG                          00266000
+DMSSTGCL EQU   *                                               @V305665 00267000
+         LR    R12,R15            GET ADDRESS OF DMSSTGCL      @V305665 00268000
+         L     R13,CURRSAVE       GET ADDR OF SAVE AREA                 00269000
+*        CLEAR OUTSTANDING STAE REQUESTS                                00270000
+         LA    R0,2               GET NO. OF DOUBLE WORDS               00271000
+         L     R4,APGMSECT        GET ADDR OF PGMSECT                   00272000
+         LA    R3,SCBPTR          GET START OF STAE CHAIN               00273000
+         LR    R6,R14         SAVE R14 (USED BY DMSFRET CALLS) @VM03083 00274000
+STAELOOP L     R1,0(R3)           GET NEXT POINTER IN CHAIN             00275000
+         LTR   R1,R1              IS PTR ZERO                           00276000
+         BZ    CLRWORK            YES, THEN CLEAR STIMER EXIT           00277000
+         MVC   0(4,R3),0(R1)      UPDATE SCBPTR CHAIN                   00278000
+         DMSFRET DWORDS=(0),LOC=(1),TYPCALL=BALR CALL "FRET"   @VM03083 00279000
+         B     STAELOOP           GET NEXT BLOCK IN CHAIN               00280000
+CLRWORK  ST    R1,SCBWORK         CLEAR SCB WORK AREA                   00281000
+*        CLEAR OUTSTANDING STIMER REQUESTS                              00282000
+         L     R3,AEXTSECT        GET ADDR OF EXTSECT                   00283000
+         ST    R1,STIMEXIT        CLEAR STIMER EXIT                     00284000
+*        CLEAR OUTSTANDING SPIE REQUESTS                                00285000
+         ST    R1,PICADDR         CLEAR PICA ADDR                       00286000
+         NI    OLDPSW+4,X'F0'     CLEAR PROGRAM MASK                    00287000
+*        CLEAR OUTSTANDING STAX REQUESTS                                00288000
+STXCLR   L     R2,TAXEADDR        GET HIGHEST ELEMENT                   00289000
+         LTR   R1,R2              IS THERE ONE                          00290000
+         BZ    GETUSAVE           NO, GO GET SAVE AREA                  00291000
+         L     R3,8(R2)           GET PTR TO NEXT                       00292000
+         LA    R3,0(0,R3)     CLEAR HI BYTE                             00293000
+         ST    R3,TAXEADDR        MAKE NXT=1ST                          00294000
+         LA    R0,28          NUMBER OF DOUBLEWORDS            @VA05249 00295000
+         DMSFRET DWORDS=(0),LOC=(1),TYPCALL=BALR CALL "FRET"   @VM03083 00296000
+         B     STXCLR             GET NEXT ELEMENT                      00297000
+GETUSAVE L     R13,USAVEPTR       GET ADDR OF SAVE AREA                 00298000
+         LR    R14,R6         RESTORE R14 (USED BY DMSFRET)    @VM03083 00299000
+         STM   R12,R14,EGPR12     SAVE RETURN ADDR                      00300000
+         L     R15,=V(DMSLGTA)    GET ADDR OF TXTLIB FREE ROUTINE       00301000
+         BALR  R14,R15            FREE TXTLIB DIRECTORIES               00302000
+         L     R12,EGPR12         RESTORE ADDR OF BASE REG              00303000
+         MVI   OSSFLAGS,0         CLEAR COMPILER FLAG SWITCH            00304000
+         SR    R6,R6              SET INDEX REG AT ZERO                 00305000
+MACLOOP  L     R5,MACDIRC(R6)     GET NEXT DIRECTORY PTR                00306000
+         LA    R1,MACLIBL(R6)          SETUP GLOBAL NAME POINTR@V201122 00307000
+         AR    R1,R6                   SETUP GLOBAL NAME POINTR@V201122 00308000
+         CLI   0(R1),X'FF'             IS THIS THE LAST ENTRY  @V201122 00309000
+         BE    MACFREE                 YES, CLEAR POINTERS     @V201122 00310000
+         LA    R6,4(R6)                UP TO NEXT POINTER      @V201122 00311000
+         LTR   R1,R5                   IS THIS A PDS POINTER   @V201122 00312000
+         BNP   MACLOOP                 NO, GET NEXT POINTER    @V201122 00313000
+         LH    R7,CORESIZE        GET DIRECTORY SIZE                    00314000
+         LA    R0,27(R7)          ADD CONTROL WORDS                     00315000
+         SLL   R0,16              CLEAR FIRST HALF OF REG               00316000
+         SRL   R0,19              SET SIZE IN DOUBLE WORDS              00317000
+         DMSFRET DWORDS=(0),LOC=(1),TYPCALL=BALR                        00318000
+         B     MACLOOP            GET NEXT PDS PTR                      00319000
+MACFREE  XC    MACDIRC(32),MACDIRC CLEAR MACLIB PDS PTR'S               00320000
+         L     R1,ASTATEXT        GET ADDR OF SSTAT EXTENSION           00321000
+         XC    0(8,R1),0(R1)      CLEAR ADDR OF SSTAT EXTENSIONS        00322000
+         L     R1,LINKSTRT    GET FIRST CHAIN POINTER          @VA02596 00323000
+         LA    R0,15          GET NUMBER OF DOUBLEWORDS        @VA02596 00324000
+LINKFREE LTR   R1,R1          ARE THERE ANY OTHERS TO FREE?    @VA02596 00325000
+         BZ    GOAWAY         NO, GET OUT                      @VA02596 00326000
+         L     R7,0(R1)       GET NEXT CHAIN POINTER           @VA02596 00327000
+         DMSFRET DWORDS=(0),LOC=(1),TYPCALL=BALR               @VA02596 00328000
+         LR    R1,R7          GET NEXT POINTER                 @VA02596 00329000
+         B     LINKFREE       CONTINUE LOOP                    @VA02596 00330000
+GOAWAY   EQU   *                                               @V305665 00331000
+         NI    OSSFLAGS,255-DYLD-DYLIBO-DYMBRNM CLEAR FLAGS    @V305665 00332000
+         XC    LINKLAST(4),LINKLAST CLEAR LINK CHAIN ANCHOR    @V305665 00333000
+         XC    LINKSTRT(4),LINKSTRT CLEAR LOAD CHAIN ANCHOR    @V305665 00334000
+         L     R14,EGPR14         RESTORE RETURN ADDR                   00335000
+         SR    R15,R15                                                  00336000
+         BR    R14                RETURN TO CALLER                      00337000
+         USING DMSSTG,R12                                      @V305665 00338000
+         EJECT                                                          00339000
+DMSSTGSV EQU   *                  CHANGING NUCLEUS VARIABLES   @V305665 00340000
+         LR    R12,R15        SET UP ADDRESSIBILITY                     00341000
+         USING DMSSTGSV,R12                                    @V305665 00342000
+         SR    R15,R15        ASSUME THAT NO ERRORS WILL OCCUR          00343000
+         SR    R1,R1          PREPARE FOR CODE 203 CHECK                00344000
+         IC    R1,CODE203     INSERT FIRST BYTE FOR CHECK               00345000
+         CH    R1,=AL2(4)     IS IT GREATER THAN 4                      00346000
+         BH    ABENDSV        YES, THEN ABEND THE USER                  00347000
+         LTR   R1,R1          IS IT LESS THAN OR EQUAL TO 0             00348000
+         BNP   ABENDSV        YES, THEN ABEND THE USER                  00349000
+         AR    R1,R1          INCREMENT CODE FOR SUBSEQUENT BRANCH      00350000
+         AR    R1,R1          TO VALID DISPLACEMENT                     00351000
+         B     *+0(R1)        BRANCH TO APPROPRIATE ROUTINE             00352000
+         SPACE 1                                                        00353000
+         B     DMSSTGTS       1 - GET A(TSOCPPL)                        00354000
+         B     DMSSTGRP       2 - SET RELPAGES FLAG                     00355000
+         B     DMSSTGCN       3 - SET COMPSWT ON                        00356000
+         B     DMSSTGCF       4 - SET COMPSWT OFF                       00357000
+         SPACE 2                                                        00358000
+ABENDSV  EQU   *              ABEND USER FOR INVALID 203 CODE           00359000
+         DMSABN 0F1                                                     00360000
+         SPACE 2                                                        00361000
+DMSSTGTS EQU   *              GET A(TSOCPPL)                            00362000
+         L     R1,ATSOCPPL    SET REGISTER 1 TO A(TSOCPPL)              00363000
+         BR    R14            RETURN TO CALLER                          00364000
+         SPACE 2                                                        00365000
+DMSSTGRP EQU   *              SET THE RELPAGES FLAG                     00366000
+         OI    MISFLAGS,RELPAGES   SET THE RELPAGES FLAG                00367000
+         BR    R14            RETURN TO CALLER                          00368000
+         SPACE 2                                                        00369000
+DMSSTGCN EQU   *              SET COMPSWT ON                            00370000
+         OI    OSSFLAGS,COMPSWT    SET COMPSWT ON                       00371000
+         BR    R14            RETURN TO CALLER                          00372000
+         SPACE 2                                                        00373000
+DMSSTGCF EQU   *              SET COMPSWT OFF                           00374000
+         NI    OSSFLAGS,X'FF'-COMPSWT                                   00375000
+         BR    R14            RETURN TO CALLER                          00376000
+         USING DMSSTG,R12                                               00377000
+         EJECT                                                          00378000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 00379000
+*                                                                       00380000
+*        ALLOCATE A BLOCK OF STORAGE                                    00381000
+*                                                                       00382000
+*        ON ENTRY: R3 =  SIZE OF BLOCK DESIRED                          00383000
+*        ON EXIT:  R7 -> ALLOCATED BLOCK                                00384000
+*                                                                       00385000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 00386000
+         SPACE 1                                                        00387000
+GETBLK   LA    R7,MAINLIST    R7 -> V(FIRST FREE BLOCK)        @VA04199 00388000
+         SPACE 1                                                        00389000
+NEXTG    LR    R9,R7                                           @VA04199 00390000
+         ICM   R7,B'1111',FREPTR(R9)    R7 -> NEXT (OR 1ST) FB @VA04199 00391000
+         BZ    CKHIMAIN       IF NONE LEFT, TRY HIMAIN         @VA04199 00392000
+         C     R3,FRELEN(,R7) TEST SIZE OF FREE AREA           @VA04199 00393000
+         BH    NEXTG          IF NOT BIG ENOUGH GET NEXT BLOCK @VA04199 00394000
+         BE    DESBLK         IF WHOLE AREA USED, DESTROY BLOCK@VA04199 00395000
+         SPACE 1                                                        00396000
+*   REQUESTED LENGTH IS SHORTER THAN THIS BLOCK,                        00397000
+*   SO LEAVE LEFTOVER PART IN THE CHAIN:                                00398000
+         LR    R6,R7          ADDRESS OF BLOCK,                @VA04199 00399000
+         ALR   R6,R3          PLUS REQUESTED LENGTH,           @VA04199 00400000
+         ST    R6,FREPTR(,R9) EQUALS ADDRESS OF LEFTOVER       @VA04199 00401000
+         MVC   FREPTR(4,R6),FREPTR(R7)  SET LEFTOVER'S POINTER @VA04199 00402000
+         L     R8,FRELEN(,R7) OLD LENGTH OF THIS BLOCK,        @VA04199 00403000
+         SLR   R8,R3          MINUS REQUESTED LENGTH,          @VA04199 00404000
+         ST    R8,FRELEN(,R6) EQUALS NEW LENGTH OF LEFTOVER    @VA04199 00405000
+         BR    R10            RETURN                           @VA04199 00406000
+         SPACE 1                                                        00407000
+*   LENGTH OF THIS BLOCK = REQUESTED LENGTH,                            00408000
+*   SO REMOVE THE WHOLE BLOCK FROM THE CHAIN:                           00409000
+DESBLK   MVC   FREPTR(4,R9),FREPTR(R7)                         @VA04199 00410000
+         BR    R10            RETURN                           @VA04199 00411000
+         SPACE 1                                                        00412000
+CKHIMAIN L     R7,MAINHIGH    GET ADDRESS OF AVAILABLE STORAGE @VA04199 00413000
+         LH    R2,FRERESPG    GET # OF PAGES TO SAVE FOR CMS   @VA04199 00414000
+         SLL   R2,12          CONVERT IT TO # OF BYTES         @VA04199 00415000
+         L     R6,FREELOWE    HI END OF AVAILABLE FREE STORAGE @VA04199 00416000
+         SR    R6,R7          MINUS THE LOW END,               @VA04199 00417000
+         SR    R6,R2          MINUS AMOUNT TO SAVE FOR CMS,    @VA04199 00418000
+         CR    R6,R3          CAN BE USED; COMPARE IT WITH MIN @VA04199 00419000
+         BL    NOBLOCK        IF NOT ENOUGH, SET ERROR RETURN  @VA04199 00420000
+         LR    R6,R7          ADDRESS OF ALLOCATED BLOCK,      @VA04199 00421000
+         ALR   R6,R3          PLUS ITS LENGTH,                 @VA04199 00422000
+         ST    R6,MAINHIGH    IS MAINHIGH'S NEW VALUE          @VA04199 00423000
+         BR    R10            RETURN                           @VA04199 00424000
+         SPACE 1                                                        00425000
+NOBLOCK  MVI   EGPR15+3,QUATRE     INFORM USER VIA R15         @VA04199 00426000
+         BR    R10            RETURN                           @VA04199 00427000
+         EJECT                                                          00428000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 00429000
+*                                                                       00430000
+*        RETURN A FREED BLOCK ("FB") TO THE CHAIN OF                    00431000
+*        AVAILABLE FREE BLOCKS ("AFB")                                  00432000
+*                                                                       00433000
+*        ON ENTRY: R1 -> FREED BLOCK                                    00434000
+*                  R3 =  LENGTH OF FREED BLOCK                          00435000
+*                                                                       00436000
+* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * 00437000
+         SPACE 1                                                        00438000
+FREBLK   LA    R1,0(,R1)      CLEAR R1'S HIGH-ORDER BYTE       @VA04199 00439000
+         C     R1,MAINSTRT    IS V(FB) < START OF GETMAIN AREA?@VA04199 00440000
+         BL    SMNATER            ERROR IF SO                  @VA06270 00441100
+         LA    R8,MAINLIST    R8 -> V(FIRST AFB)               @VA04199 00442000
+         SPACE 1                                                        00443000
+NEXTF    LR    R9,R8                                           @VA04199 00444000
+         ICM   R8,B'1111',FREPTR(R9)    R8 -> NEXT (OR 1ST) AFB@VA04199 00445000
+         BZ    CKMAIN         NO MORE AFB'S - GO CHECK HIMAIN  @VA04199 00446000
+         CR    R8,R1          IS AFB > FB ?                    @VA04199 00447000
+         BH    FRABVE         YES, FB MUST BE INSERTED IN CHAIN@VA04199 00448000
+         LR    R6,R8                                           @VA04199 00449000
+         AL    R6,FRELEN(,R8) R6 -> END OF AFB                 @VA04199 00450000
+         CR    R1,R6          DOES FB OVERLAP THIS AFB?        @VA04199 00451000
+         BL    SMNATER            ERROR IF SO                  @VA06270 00452100
+         BH    NEXTF          NOWHERE NEAR - TRY AGAIN         @VA04199 00453000
+         SPACE 1                                                        00454000
+*   THE FB IS CONTIGUOUS WITH THE END OF THE AFB,                       00455000
+*   SO WE JUST MERGE THEM INTO ONE AFB:                                 00456000
+         L     R7,FRELEN(,R8) GET LENGTH OF AFB,               @VA04199 00457000
+         ALR   R7,R3          PLUS LENGTH OF FB                @VA04199 00458000
+         LR    R6,R7                                           @VA04199 00459000
+         ALR   R6,R8          R6 -> END OF MERGED BLOCK        @VA04199 00460000
+         ICM   R2,B'1111',FREPTR(R8)    IS THERE ANOTHER AFB?  @VA04199 00461000
+         BNZ   CKOVRLAP       YES - GO SEE IF FB OVERLAPS IT   @VA04199 00462000
+         C     R6,MAINHIGH    NO; DOES IT OVERLAP MAINHIGH?    @VA04199 00463000
+         BL    KPBLK          NO - IT'S WITHIN MAINHIGH        @VA04199 00464000
+         BH    SMNATER            ERROR IF YES                 @VA06270 00465100
+         ST    R8,MAINHIGH    JUST RESET MAINHIGH; THE FB      @VA04199*00466000
+                              WAS CONTIGUOUS TO IT             @VA04199 00467000
+         SR    15,15          THE LAST AFB IS NOW AT           @VA04199 00468000
+         ST    R15,FREPTR(,R9)     THE END OF THE CHAIN        @VA04199 00469000
+         BR    10             RETURN                           @VA04199 00470000
+         SPACE 1                                                        00471000
+CKOVRLAP CR    R6,R2          DOES FB OVERLAP THE NEXT AFB?    @VA04199 00472000
+         BH    SMNATER            ERROR IF SO                  @VA06270 00473100
+         BL    KPBLK          NO - THERE'S A GAP               @VA04199 00474000
+         SPACE 1                                                        00475000
+*   THE NEXT AFB IS CONTIGUOUS WITH THE END OF THE FB,                  00476000
+*   SO WE MERGE THAT IN, TOO:                                           00477000
+         MVC   FREPTR(4,R8),FREPTR(R2)                         @VA04199 00478000
+         AL    R7,FRELEN(,R2) ADD ITS LENGTH TO OUR TOTAL      @VA04199 00479000
+         SPACE 1                                                        00480000
+KPBLK    ST    R7,FRELEN(,R8) SET THE LENGTH OF THE NEW AFB    @VA04199 00481000
+         BR    10             RETURN                           @VA04199 00482000
+         EJECT                                                          00483000
+CKMAIN   LR    R7,R1                                           @VA04199 00484000
+         ALR   R7,R3          R7 -> END OF FB                  @VA04199 00485000
+         C     R7,MAINHIGH    DOES THE FB OVERLAP MAINHIGH?    @VA04199 00486000
+         BL    ADDBLK         NO - IT'S WITHIN MAINHIGH        @VA04199 00487000
+         BH    SMNATER            ERROR IF YES                 @VA06270 00488100
+         ST    R1,MAINHIGH    JUST RESET MAINHIGH; THE FB      @VA04199*00489000
+                              WAS CONTIGUOUS TO IT             @VA04199 00490000
+         BR    10             RETURN                           @VA04199 00491000
+         SPACE 1                                                        00492000
+*   THE FB MUST BE INSERTED BETWEEN TWO AFB'S IN THE CHAIN,             00493000
+*   OR POSSIBLY AT THE BEGINNING OF THE CHAIN:                          00494000
+FRABVE   LR    R6,R1                                           @VA04199 00495000
+         ALR   R6,R3          R6 -> END OF THE FB              @VA04199 00496000
+         CR    R6,R8          DOES THE FB OVERLAP THE NEXT AFB?@VA04199 00497000
+         BL    ADDBLK         NO - GO INSERT IT AS A NEW AFB   @VA04199 00498000
+         BH    SMNATER            ERROR IF YES                 @VA06270 00499100
+         SPACE 1                                                        00500000
+*   THE NEXT AFB IS CONTIGUOUS WITH THE END OF THE FB,                  00501000
+*   SO WE MERGE THEM TOGETHER:                                          00502000
+         ST    R1,FREPTR(,R9) LAST AFB -> THIS (NEW) AFB       @VA04199 00503000
+         AL    R3,FRELEN(,R8) TOTAL LENGTH = L'FB + L'AFB      @VA04199 00504000
+         ST    R3,FRELEN(,R1) SET THE PROPER LENGTH AND        @VA04199 00505000
+         MVC   FREPTR(4,R1),FREPTR(R8)  ADDRESS FOR NEW AFB    @VA04199 00506000
+         BR    10             RETURN                           @VA04199 00507000
+         SPACE 1                                                        00508000
+*   THE FB IS NOT CONTIGUOUS TO ANYTHING,                               00509000
+*   SO WE MAKE A NEW AFB OUT OF IT:                                     00510000
+ADDBLK   ST    R1,FREPTR(,R9) LAST AFB -> THIS NEW AFB         @VA04199 00511000
+         ST    R8,FREPTR(,R1) THIS NEW AFB -> NEXT AFB         @VA04199 00512000
+         ST    R3,FRELEN(,R1) WE MUSTN'T FORGET OUR SIZE       @VA04199 00513000
+         BR    10             RETURN                           @VA04199 00514000
+         EJECT                                                          00515000
+*   EACH BLOCK OF FREE STORAGE CONTAINS, IN ITS FIRST TWO               00530000
+*   WORDS, A POINTER TO THE NEXT FREE BLOCK IN THE CHAIN,               00531000
+*   AND ITS OWN LENGTH IN BYTES:                                        00532000
+FREPTR   EQU   0              DISPLACEMENT FOR THE POINTER     @VA04199 00533000
+FRELEN   EQU   4              DISPLACEMENT FOR THE LENGTH      @VA04199 00534000
+         SPACE 1                                                        00535000
+QUATRE   EQU   4              RET. CODE IF COND. GETMAIN FAILS @VA04199 00536000
+GETVIS   EQU   X'01'          GETVIS INITIALIZED FLAG          @VM03158 00537000
+         SPACE 1                                                        00538000
+         DS    0F                                                       00539000
+MASKB    DC    X'00FFFFF8'    MASK FOR ROUNDING TO A DOUBLEWORD@VA04199 00540000
+MAXBLK   DC    X'007FFFF0'    MAXIMUM POSSIBLE FREE BLOCK SIZE @VA04199 00541000
+         LTORG                                                          00637000
+         EJECT                                                          00638000
+         SVCSECT                                                        00639000
+         SVCSAVE                                                        00640000
+         NUCON                                                          00641000
+         BGCOM                                                 @V305032 00642000
+         SYSCOM                                                @V305001 00643000
+         ANCHTAB                                               @V305032 00644000
+         PGMSECT                                                        00645000
+         EXTSECT                                                        00646000
+         PDSSECT                                                        00647000
+         REGEQU                                                         00648000
+         END                                                            00649000

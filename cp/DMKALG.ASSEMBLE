@@ -1,0 +1,276 @@
+ALG      TITLE 'DMKALG     (CP)        VM/370 - RELEASE 6'              00001000
+         ISEQ  73,80               VALIDATE SEQUENCING OF SOURCE        00002000
+*.                                                                      00003000
+* MODULE NAME - DMKALG                                                  00004000
+*                                                                       00005000
+*                                                                       00006000
+* FUNCTION -                                                            00007000
+*                                                                       00008000
+*        PROCESS THE AUTOLOG COMMAND - A COMMAND WHICH CAUSES           00009000
+*        ONE USER TO BE LOGGED ON BY ANOTHER                            00010000
+*                                                                       00011000
+* COMMAND LINE FORMAT -                                                 00012000
+*                                                                       00013000
+*        +-----------+-------------------------------------------+      00014000
+*        |  AUTOLOG  |  USERID  PASSWORD   < FIRST VREAD DATA >  |      00015000
+*        +-----------+-------------------------------------------+      00016000
+*                                                                       00017000
+* ATTRIBUTES -                                                          00018000
+*                                                                       00019000
+*        REENTRANT, PAGEABLE, CALLED VIA SVC                            00020000
+*                                                                       00021000
+* ENTRY POINT -                                                         00022000
+*                                                                       00023000
+*        DMKALGON - AUTOLOG A USER                                      00024000
+*                                                                       00025000
+* ENTRY CONDITIONS -                                                    00026000
+*                                                                       00027000
+*        GPR  9 = ADDRESS OF COMMAND BUFFER                             00028000
+*        GPR 11 = ADDRESS OF INVOKER'S VMBLOK                           00029000
+*        GPR 12 = ADDRESS OF DMKALG                                     00030000
+*        GPR 13 = ADDRESS OF STANDARD SAVE AREA                         00031000
+*                                                                       00032000
+* EXIT CONDITIONS -                                                     00033000
+*                                                                       00034000
+*                                                                       00035000
+*        GPR  2 = 0 IF AUTOLOG WAS SUCCESSFUL                           00036000
+*        GPR  2 HOLDS ERROR-CODE (SEE ERROR MESSAGES) IF AUTOLOG FAILED 00037000
+         EJECT                                                          00038000
+*                                                                       00039000
+* OPERATION -                                                           00040000
+*                                                                       00041000
+*        THE FOLLOWING ROUTINE WILL ATTEMPT TO LOGON ANOTHER            00042000
+*        USER AND PLACE HIM IN DISCONNECTED STATE.  ANY DATA            00043000
+*        ON THE COMMAND LINE BEYOND THE PASSWORD WILL BE PASSED         00044000
+*        AS A COMMAND TO SATISFY THE FIRST VIRTUAL MACHINE              00045000
+*        CONSOLE READ.  GENERAL STEPS TAKEN IN THIS PROCESS             00046000
+*        INCLUDE THE FOLLOWING:                                         00047000
+*                                                                       00048000
+*        FROM DMKALG, CALL DMKBLD TO GET A NEW VMBLOK; THEN             00049000
+*        CALL DMKLOGB TO                                                00050000
+*        REQUEST THE USER BE LOGGED ON.  ANY LOG ERROR MESSAGES         00051000
+*        (AS OPPOSED TO LNK) RESULTING FROM THIS PROCESS WILL           00052000
+*        BE SENT TO THE USER WHO ISSUED THE AUTOLOG COMMAND.            00053000
+*        ALL OTHER ERROR MESSAGES WILL BE SENT TO THE NEW               00054000
+*        USER.                                                          00055000
+*                                                                       00056000
+*        ON RETURN FROM DMKLOGB, DMKALG WILL CHECK FOR ERRORS.          00057000
+*        IF AN ERROR RESULTED, DMKUSO WILL BE CALLED TO GET             00058000
+*        RID OF THE ILL FATED AUTOLOGGED USER.  IF THE ERROR            00059000
+*        WAS DUE TO A BAD PASSWORD, CONTROL IS PASSED TO THE            00060000
+*        PASSWORD COUNT ROUTINE IN COMMON CODE.  THIS COMMON            00061000
+*        CODE KEYS OFF OF THE AUTOLOG BIT AND THE VMVIRCF BIT.          00062000
+*        THE AUTOLOG BIT IS SET BY DMKALG, DMKLOGB AND                  00063000
+*        DMKLOGOP. THE VMVIRCF BIT WILL NEVER BE SEEN HERE              00064000
+*        FOR AN AUTOLOGGED USER; IT MAY BE ON FOR THE COMMAND           00065000
+*        ISSUING USER.                                                  00066000
+*                                                                       00067000
+*        IF NO ERROR OCCURRED, PROCEED TO HANDLE THE FIRST              00068000
+*        COMMAND BUFFER, TWIDDLE BITS TO LET THE NEW USER RUN,          00069000
+*        CALL DMKSCHDL FOR THE SAME REASON AND, NOW THAT IT             00070000
+*        WORKED OK, RESET THE BAD PASSWORD COUNT.                       00071000
+*                                                                       00072000
+*        NOTE - SAVEWRK1: AUTOLOG+PSWRDCK = AUTOLOG COMMAND             00073000
+*                         AUTOLOG ONLY    = CPI SYS OP LOGON            00074000
+*                                                                       00075000
+* RESPONSES -                                                           00076000
+*                                                                       00077000
+*        AUTO LOGON *** USERID   USERS = NNN                            00078000
+*                                                                       00079000
+* ERROR MESSAGES - SEE LOGON COMMAND ALSO                               00080000
+*                                                                       00081000
+*        DMKALG115 - INVALID, EXCESSIVE INCORRECT PASSWORDS             00082000
+*.                                                                      00083000
+         EJECT                                                          00084000
+DMKALG   CSECT                                                          00085000
+         DC    CL8'DMKALG'    PAGEABLE MODULE IDENTIFIER                00086000
+*        ENTRY DMKALGON       AUTOLOG A USER                            00087000
+         EXTRN DMKBLDVM                                                 00088000
+         EXTRN DMKLOGB                                                  00089000
+         EXTRN DMKSCNVD                                                 00090000
+         EXTRN DMKSCHDL                                                 00091000
+         EXTRN DMKSTKCP                                                 00092000
+         EXTRN DMKERMSG                                                 00093000
+         EXTRN DMKCVTBH                                                 00094000
+         EXTRN DMKSCNVN                                                 00095000
+         EXTRN DMKSYSJR                                        @V60BBBB 00095500
+         SPACE 1                                                        00096000
+         USING PSA,R0         FOR ALL ENTRIES                           00097000
+         USING VMBLOK,R11                                               00098000
+         USING DMKALG,R12                                               00099000
+         USING SAVEAREA,R13                                             00100000
+         SPACE 2                                                        00101000
+         COPY  OPTIONS                                                  00102000
+         EJECT                                                          00103000
+DMKALGON RELOC                                                 @VM03066 00104000
+         ST    R11,SAVEWRK8   SAVE CMD VMBLOK FOR ERRORS       @VM03066 00105000
+         LR    R10,R11        IN R10 TOO, FOR DMKLOGB          @VM03066 00106000
+         MVI   SAVEWRK1,AUTOLOG+PSWRDCK AUTOLOG CMD PARMS      @VM03066 00107000
+         SPACE                                                          00108000
+         L     R4,=A(DMKSYSJR) GET ADDRESS OF JSPCBLOK         @V60BBBB 00108100
+         USING JPSCBLOK,R4    TELL ASSEMBLER                   @V60BBBB 00108200
+         TM    LOGONJRL,L'LOGONJRL AUTOLOG JOURNALING?         @V60BBBB 00108300
+         BZ    LOGA0          BR IF NOT                        @V60BBBB 00108400
+         CLC   VMPSWDCA,JPSLOGDS LIMIT REACHED?                @V60BBBB 00108500
+         BL    LOGA1          BR IF NOT                        @V60BBBB 00108600
+         B     ERROR115       TOO MANY- SEND ERROR MESSAGE     @V60BBBB 00108700
+LOGA0    TM    VMOSTAT,VMVIRCF ISSUED FROM VIRT MACHINE?       @VM03198 00109000
+         BZ    LOGA1          NOPE, CONTINUE...                @VM03198 00110000
+         IC    R14,VMPSWDCT   YUP, GET THE CURRENT PSWD COUNT  @VM03198 00111000
+         N     R14,F240       ISOLATE THE HI DIGIT OF THE BYTE @VM03198 00112000
+         LA    R15,LOGLIMIT*16 GET COMPARAND                   @VM03198 00113000
+         CR    R14,R15        WELL?....                        @VM03198 00114000
+         BH    ERROR115       TOO MANY BAD GUESSES, SORRY.     @VM03198 00115000
+         SPACE                                                          00116000
+LOGA1    L     R8,=C'AUTO'    INDICATE AUTOLOG TO DMKBLD       @VM03198 00117000
+         CALL  DMKBLDVM       BUILD NEW VMBLOK                 @V305535 00118000
+         OI    VMOSTAT,VMDISC FLAG NEW VMBLOK DISCONNECTED     @V305535 00119000
+         SR    R0,R0          CLEAR PSUEDO READ PARAMETER      @V305535 00120000
+         SR    R1,R1          . .                              @V305535 00121000
+         CALL  DMKLOGB        ATTEMPT AUTOLOG                  @V305535 00122000
+         B     ALGERR         UNSUCCESFUL                      @V305535 00123000
+         LTR   R2,R2          SUCCESFUL?                       @V305535 00124000
+         BNZ   ALGERR         NO                               @V305535 00125000
+         LH    R8,VMVTERM     DISPLACEMENT OF VIRT. CONS       @V305535 00126000
+         LTR   R8,R8          DO WE HAVE A VIRT CONS?          @VA07613 00126300
+         BM    NOCONS         NO, SKIP HIM                     @VA07613 00126600
+         AL    R8,VMDVSTRT    FORM ABSOLUTE ADDRESS OF CONS.   @V305535 00127000
+         CALL  DMKSCNVD       GET ALL VIRTUAL I/O BLOKS        @V305535 00128000
+         USING VDEVBLOK,R8                                     @V305535 00129000
+         OI    VDEVCFLG,VDEVAUCR FLAG FOR FIRST AUTO READ      @V305535 00130000
+         LA    R0,BUFSIZE     GET A FULL BUFFER                @V305535 00131000
+         CALL  DMKFREE                                         @V305535 00132000
+         L     R9,SAVER9      ADDRESS OF INPUT BUFFER          @V305535 00133000
+         LM    R2,R3,BUFNXT-BUFFER(R9) GET NEXT & LENGTH FLDS  @VM03066 00134000
+         SLR   R0,R0          ZIP FOR STORE                    @VM03066 00135000
+         ST    R0,BUFCNT-BUFFER(R9) GET NO MORE FROM THIS BUFFR@VM03066 00136000
+         CLI   0(R2),C' '     IS NEXT CHAR A BLANK?            @VM03066 00137000
+         BE    LOGA3          YES, SKIP                        @VM03066 00138000
+         LTR   R3,R3          IS THERE ANY DATA LEFT?          @VM03066 00139000
+         BP    LOGA4          YES, GO MOVE IT.                 @VM03066 00140000
+LOGA2    SLR   R3,R3          MAKE SURE COUNT IS 0 THEN.       @VM03066 00141000
+         B     LOGA5          AND PROCEED WITH NULL BUFFER     @VM03066 00142000
+         SPACE                                                          00143000
+LOGA3    S     R3,F1          REMOVE BLANK AFTER CMD           @VM03066 00144000
+         BNP   LOGA2          NONE OR ONE, NO DATA TO PASS, BR.@VM03066 00145000
+         LA    R2,1(R2)       BUMP PAST THE BLANK              @VM03066 00146000
+LOGA4    BCTR  R3,0           DECREMENT FOR EXECUTE            @VM03066 00147000
+         EX    R3,MOVEREAD    MOVE REMAINING DATA FOR 1ST VREAD@VM03066 00148000
+         LA    R3,1(R3)       R3 BACK TO USER DATA COUNT       @VM03066 00149000
+LOGA5    ST    R1,BUFNXT-BUFFER(R1) NEXT BYTE = 1ST BYTE       @VM03066 00150000
+         ST    R3,BUFCNT-BUFFER(R1) SAVE REMAINING LENGTH      @VM03066 00151000
+         L     R7,VDEVCON     ADDRESS OF VCONCTL BLOCK         @VM03066 00152000
+         USING VCONCTL,R7     ADDRESS THE BLOCK                @VM03066 00153000
+         ST    R1,VCONRBUF    FILL IN READ BUFFER ADDRESS      @VM03066 00154000
+         MVI   VCONRBSZ,BUFSIZE FILL IN BUFFER SIZE            @VM03066 00155000
+         STC   R3,VCONRCNT+1  FILL IN READ DATA COUNT          @VM03066 00156000
+         DROP  R7,R8                                           @V305535 00157000
+NOCONS   EQU   *                                               @VA07613 00157500
+         NI    VMRSTAT,255-VMCFWAIT CLEAR                      @V305535 00158000
+         NI    VMOSTAT,255-VMCF-VMSLEEP CLEAR                  @V305535 00159000
+         CALL  DMKSCHDL       INFORM SCHEDULAR OF NEW VMBLOK   @V305535 00160000
+         SPACE 1                                                        00161000
+LOGEXTA  DS    0H                                              @V408246 00162000
+         L     R1,SAVER11     NO,SWITCH TIMERS AND LOCKS                00163000
+         SWTCHVM                                                        00164000
+LOGEXIT  EQU   *                                                        00165000
+LOGEXITR EXIT                 REALLY EXIT.                              00166000
+         SPACE 1                                                        00167000
+MOVEREAD MVC   0(*-*,R1),0(R2) MOVE FROM OLD BUFFER TO NEW     @VM03066 00168000
+*                                                                       00169000
+         EJECT                                                          00170000
+ALGERR   ST    R2,SAVER2      SAVE ERROR CODE FROM DMKLOGB     @VM03066 00171000
+         LA    R2,NOOPMSG     ANTICIPATE NO MSG TO OPERATOR    @VM03066 00172000
+         TM    SAVER2,OPMSG   LET USO BLAB TO OP ABOUT THIS?   @VM03066 00173000
+         MVI   SAVER2,X'00'   CLEAR OUT ANY FLAG FOR CALLER    @VM03066 00174000
+         BZ    *+6            NO, LEAVE PARM OF NOOPMSG        @VM03066 00175000
+         SLR   R2,R2          YES, PARM=0 MEANS TELL OP        @VM03066 00176000
+         OI    VMOSTAT,VMKILL MAKE SURE KILL FLAG UP           @V408246 00177000
+         LA    R0,CPEXSIZE    GET CPEXBLOK                     @V408246 00178000
+         CALL  DMKFREE                                         @V408246 00179000
+         USING CPEXBLOK,R1                                     @V408246 00180000
+         STM   R0,R15,CPEXR0  SAVE ALL REGS.                   @V408246 00181000
+         L     R0,ADSPCH      DISPATCH ENTRY                   @V408246 00182000
+         ST    R0,CPEXR12                                      @V408246 00183000
+         ST    R0,CPEXADD                                      @V408246 00184000
+         CALL  DMKSTKCP       STACK NEW BLOCK                  @V408246 00185000
+         DROP  R1                                              @V408246 00186000
+         LR    R1,R10         SWITCH TO VMBLOK IN R10                   00187000
+         SWTCHVM                                                        00188000
+ALGERRA  DS    0H                                              @V408246 00189000
+         BAL   R8,CLEARBUF    SET REMAINING BUFFER DATA = 0    @VM03066 00190000
+         CLI   SAVER2+3,50    BAD PASSWORD?                    @V305535 00191000
+         BNE   LOGEXIT        NOPE, ALL DONE.                  @VM03198 00192000
+         TM    LOGONJRL,L'LOGONJRL AUTOLOG JOURNALING?         @V60BBBB 00192100
+         BNO   ALGERRF        BR IF NOT                        @V60BBBB 00192200
+         IC    R14,VMPSWDCA   GET CURRENT COUNT OF INVALID     @V60BBBB 00192300
+*                             LINK + AUTOLOG PASSWORDS         @V60BBBB 00192400
+         LA    R14,1(,R14)    BUMP IT BY ONE                   @V60BBBB 00192500
+         STC   R14,VMPSWDCA   STUFF IT                         @V60BBBB 00192600
+         B     LOGEXIT        DONE NOW                         @V60BBBB 00192700
+         SPACE 1                                                        00192800
+ALGERRF  DS    0H                                              @V60BBBB 00192900
+         TM    VMOSTAT,VMVIRCF YES, CMD ISSUED FROM VIRT MACHIN@VM03198 00193000
+         BZ    LOGEXIT        NOPE, FROM CP, THATS OK; DONE.   @VM03198 00194000
+         IC    R14,VMPSWDCT   GET THE CURRENT COUNT            @VM03198 00195000
+         LA    R14,16(R14)    AUTOLOG PASSWORD CT +1 (HI DIGIT)@VM03198 00196000
+         STC   R14,VMPSWDCT   AND RE-SAVE                      @VM03198 00197000
+         B     LOGEXIT        DONE NOW.                        @VM03198 00198000
+         SPACE                                                          00199000
+CLEARBUF L     R9,SAVER9      GET ORIGINAL COMMAND BUFFER      @VM03066 00200000
+         SLR   R7,R7          CLEAR OUT REMAINING DATA COUNT   @VM03066 00201000
+         ST    R7,BUFCNT-BUFFER(R9) AND SAVE                   @VM03066 00202000
+         BR    R8             RETURN TO CALLER                 @VM03066 00203000
+         SPACE                                                          00204000
+         EJECT                                                          00205000
+* ERROR RETURNS:                                                        00206000
+*                                                                       00207000
+ERROR115 LA    R0,7           '$INVALD; INVALD PSWDCT EXCEEDED'@VM03198 00208000
+         LA    R1,VMCOMND     R0 = LENGTH, R1 = A(C'AUTOLOG')  @VM03198 00209000
+         LA    R2,115         R2 = ERROR MSG NUMBER            @VM03198 00210000
+ERRJOIN3 ST    R2,SAVER2      RETURN ERROR CODE TO OUR CALLER           00211000
+ERRJOIN4 ICM   R0,B'1110',DMKALG+3 'ALG' IDENTIFIER INTO R0,            00212000
+         ICM   R2,B'1000',HEX80    SIGNAL - RETURN TO LOGON PLEASE      00213000
+         CALL  DMKERMSG       SEND ERROR MESSAGE               @V305535 00214000
+         B     LOGEXIT                                                  00215000
+         EJECT                                                          00216000
+CHARI    DC    C'I'                                            @V4075A0 00217000
+HEX80    DC    X'80'                                           @V4075A0 00218000
+         SPACE 2                                                        00219000
+         LTORG                                                          00220000
+         SPACE 2                                                        00221000
+LOGLIMIT EQU   3     LIMIT OF HOW MANY "WRONG PASSWORDS" WE'LL TOLERATE 00222000
+         EJECT                                                          00223000
+         PSA                                                            00224000
+         COPY  SAVE                                                     00225000
+* FLAG-BITS USED IN SAVEWRK1:                                           00226000
+*                                                                       00227000
+AUTOLOG  EQU   X'80'          AUTOLOG CMD OR CPI SYS OP LOGON  @VM03066 00228000
+PSWRDOK  EQU   X'40'          PASSWORD OK - DON'T CALL DMKEPSWD         00229000
+NOIPL    EQU   X'20'          NO AUTOMATIC IPL WANTED                   00230000
+NONFATAL EQU   X'10'          ERROR(S) NONFATAL - GO READ NEXT UDEVBLOK 00231000
+RECON    EQU   X'08'          RECONNECT PERFORMED                       00232000
+R9FRE    EQU   X'04'          R9 IN USE AS FREE-STORAGE BUFFER          00233000
+EXECF    EQU   X'02'          RECONNECTED W/ VMCF STILL ON     @VM03066 00234000
+PSWRDCK  EQU   X'01'          AUTOLOG CMD - PASSWORD REQUIRED  @VM03066 00235000
+         SPACE                                                          00236000
+* PARAMETER BITS PASSED TO DMKUSOFF                                     00237000
+*                                                                       00238000
+NOOPMSG  EQU   X'01'          DONT SEND LOGOFF MSG TO SYS OP   @VM03066 00239000
+         SPACE                                                          00240000
+* PARAMETER BITS PASSED FROM DMKLOG BACK TO DMKLOGA                     00241000
+*                                                                       00242000
+OPMSG    EQU   X'80'          LET USOFF SEND LOGOFF MSG TO OP  @VM03066 00243000
+* MISCELLANEOUS EQUATES                                                 00244000
+CON512   EQU   512            512 DOUBLEWORDS                  @V3E7466 00245000
+CON131   EQU   131            DMKLOG131E MESSAGE NUMBER        @V3E7466 00246000
+CON95    EQU   95             DMKLOG095E                       @V3E7466 00247000
+LENGTH5  EQU   5              DATA LENGTH MSG 131E             @V3E7466 00248000
+         EJECT                                                          00249000
+         COPY  EQU                                                      00250000
+         COPY  VMBLOK                                                   00251000
+         COPY  VBLOKS                                                   00252000
+         COPY  IOBLOKS                                                  00253000
+         COPY  CONBUF                                          @V305535 00254000
+         JPSCBLOK ,                                            @V60BBBB 00254500
+         END   DMKALG                                                   00255000
